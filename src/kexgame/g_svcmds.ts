@@ -25,14 +25,12 @@
 // g_cmds.ts's client-facing messages).
 //
 // ============================================================================
-// EXTERNAL DEPENDENCIES NOT YET PORTED (throwing stubs, cited)
+// EndDMLevel -- REAL import (was a throwing stub)
 // ============================================================================
-//   - `EndDMLevel()` -> g_main.cpp:521. No `src/kexgame/g_main.ts` exists in
-//     this port line yet (confirmed by directory listing -- every other
-//     g_*.c/.cpp basename in this track has a same-named .ts sibling except
-//     g_main.cpp). Reached only by `SVCmd_NextMap_f` (the KEX-only "sv
-//     nextmap" console command) -- a local, unexported, cited throwing stub
-//     stands in until a future g_main.ts unit lands.
+//   - `EndDMLevel()` -> g_main.cpp:521, now landed in src/kexgame/g_main.ts.
+//     Previously a local, unexported, cited throwing stub ("not yet ported
+//     (pending g_main.ts, see g_main.cpp:521)") stood in here; swapped for
+//     the real, imported implementation now that g_main.ts exists.
 //
 // ============================================================================
 // DEVIATIONS
@@ -77,6 +75,7 @@ import { Q_strcasecmp } from "../shared/q_shared";
 import { PrintTypeT } from "../kexapi/game";
 import type { EdictT } from "./g_local";
 import { gi } from "./g_main_globals";
+import { EndDMLevel } from "./g_main";
 
 // ---------------------------------------------------------------------------
 // `gi.LocClient_Print` placement-mismatch local helper -- see file header
@@ -242,14 +241,6 @@ export function SVCmd_ListIP_f(): void {
     const b3 = (c >>> 24) & 0xff;
     giClientPrint(null, PrintTypeT.PRINT_HIGH, `${b0}.${b1}.${b2}.${b3}\n`);
   }
-}
-
-// ---------------------------------------------------------------------------
-// unported cross-deps (throwing stubs) -- see file header
-// ---------------------------------------------------------------------------
-
-function EndDMLevel(): void {
-  throw new Error("EndDMLevel: not yet ported (pending g_main.ts, see g_main.cpp:521)");
 }
 
 /** [Paril-KEX] g_svcmds.cpp:224-228: `void SVCmd_NextMap_f()`. */

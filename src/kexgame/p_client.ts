@@ -1301,8 +1301,13 @@ export function InitClientPersistant(ent: EdictT, client: GClientT): void {
   client.pers.spawned = true;
 }
 
-/** Fresh `client_persistant_t` -- mirrors C's `memset(&client->pers, 0, sizeof(client->pers))`. */
-function defaultClientPersistant(): ClientPersistantT {
+/** Fresh `client_persistant_t` -- mirrors C's `memset(&client->pers, 0, sizeof(client->pers))`.
+ * Exported (originally file-local) so g_main.ts's ExitLevel can build the
+ * same "wipe players back to default stuff" reset g_main.cpp performs
+ * (`game.clients[i].pers = game.clients[i].resp.coop_respawn = {};`)
+ * without a second, divergence-prone copy of this shape -- same rationale
+ * as `defaultGClient`'s export, see g_main.ts's own header. */
+export function defaultClientPersistant(): ClientPersistantT {
   return {
     userinfo: "",
     social_id: "",
@@ -1423,8 +1428,12 @@ function defaultKexPlayerState(): KexPlayerStateT {
 /** Fresh `gclient_t` -- mirrors C's `memset(client, 0, sizeof(*client))`
  * (PutClientInServer's "clear everything but the persistant data" step).
  * `pers`/`resp` are overwritten by the caller immediately after; defaulted
- * here too so this factory alone always yields a fully-valid `GClientT`. */
-function defaultGClient(): GClientT {
+ * here too so this factory alone always yields a fully-valid `GClientT`.
+ * Exported (originally file-local) so g_main.ts's InitGame can populate
+ * `game.clients` with real, interface-satisfying objects the same way C's
+ * `TagMalloc`'d, zeroed `gclient_t` array does -- no second, divergence-prone
+ * copy of this shape. */
+export function defaultGClient(): GClientT {
   return {
     ps: defaultKexPlayerState(),
     ping: 0,
