@@ -150,32 +150,45 @@
 //   PORTING.md's "#if 0 blocks are dropped silently".
 //
 // ============================================================================
+// CROSS-DEPENDENCIES -- M_CheckGround/M_CatagorizePosition/M_WorldEffects
+// NOW REAL IMPORTS from src/kexgame/g_monster.ts (stub swap)
+// ============================================================================
+// Previously three local throwing stubs (see git history): M_CheckGround
+// (g_monster.cpp:140), M_CatagorizePosition (g_monster.cpp:190),
+// M_WorldEffects (g_monster.cpp:235). src/kexgame/g_monster.ts has now
+// landed with real implementations of all three, so this file imports them
+// directly. M_CatagorizePosition's out-param question the old stub's own
+// comment flagged ("this stub's signature drops the two out-params in favor
+// of mutating self directly once implemented") is now settled: g_monster.ts
+// mutates `self.waterlevel`/`self.watertype` in place and takes just
+// `(self, in_point)` -- exactly what this file's three call sites below
+// already pass (`M_CatagorizePosition(ent, ent.s.origin)`), so NONE of this
+// file's own call sites needed to change.
+//
+// This creates a real, sanctioned import cycle: this file now imports
+// M_CheckGround/M_CatagorizePosition/M_WorldEffects from g_monster.ts, while
+// g_monster.ts imports G_GetClipMask from THIS file (for M_droptofloor and
+// G_FixStuckObject). Exactly the same shape as the already-sanctioned
+// g_utils.ts<->g_phys.ts cycle documented above: every cross-module symbol
+// on both sides is a hoisted `export function` declaration, never a
+// top-level `const` evaluated at module-init time. Verified end-to-end by
+// `bunx tsc --noEmit` and `bun test` importing both files together.
+//
+// ============================================================================
 // CROSS-DEPENDENCIES NOT YET PORTED
 // ============================================================================
-// Four functions this file calls are defined in other, not-yet-ported C++
-// files (grepped quake2-rerelease-dll/rerelease/*.cpp for each symbol's real
-// definition, not just its g_local.h declaration):
-//   - M_CheckGround(ent, mask)            -> g_monster.cpp:140 (future src/kexgame/g_monster.ts)
-//   - M_CatagorizePosition(self, point)   -> g_monster.cpp:190 (future src/kexgame/g_monster.ts)
-//     (mutates self.waterlevel/self.watertype in place -- every real call
-//     site in this file passes `ent->s.origin`/`ent->waterlevel`/
-//     `ent->watertype`, i.e. the entity's OWN fields, as the by-reference
-//     out-params, so this stub's signature drops the two out-params in favor
-//     of mutating `self` directly once implemented -- a placement/signature
-//     note for whoever ports g_monster.ts, not a behavior change.)
-//   - M_WorldEffects(ent)                 -> g_monster.cpp:235 (future src/kexgame/g_monster.ts)
-//   - SV_Physics_NewToss(ent)             -> rerelease/rogue/g_rogue_phys.cpp (future src/rogue/, PORTING.md's rogue/->src/rogue/ mapping)
+// One function this file calls is still defined in an other, not-yet-ported
+// C++ file:
+//   - SV_Physics_NewToss(ent) -> rerelease/rogue/g_rogue_phys.cpp (future src/rogue/, PORTING.md's rogue/->src/rogue/ mapping)
 //     (forward-declared in g_phys.cpp:26 as `// PGM`, but its actual body
 //     lives in the ROGUE mission-pack's own physics file, out of scope for
 //     this base-game unit; only reachable via MOVETYPE_NEWTOSS.)
-// None of these exist yet in src/kexgame/ or src/rogue/. Per PORTING.md's "a
-// function you cannot port faithfully is a reported deviation, not a TODO",
-// each is a local, unexported stub that throws, naming itself and the file
-// that owns the real implementation. Reached only by SVF_MONSTER entities
-// going through SV_Physics_Toss/SV_Physics_Step, and by MOVETYPE_NEWTOSS --
-// none of which this unit's own test suite exercises (its fixtures use
-// plain non-monster toss/pusher/step entities). Replace each with a real
-// import once its owning file lands.
+// It does not exist yet in src/rogue/. Per PORTING.md's "a function you
+// cannot port faithfully is a reported deviation, not a TODO", it remains a
+// local, unexported stub that throws, naming itself and the file that owns
+// the real implementation. Reached only by MOVETYPE_NEWTOSS, which this
+// unit's own test suite does not exercise. Replace with a real import once
+// src/rogue/ lands.
 //
 // ============================================================================
 // FRAME_TIME_S -- not yet a real global either
@@ -261,6 +274,7 @@ import { YAW, clamp, crandom_open, irandom } from "./q_std";
 import { PM_StepSlideMove_Generic } from "./p_move";
 import type { PmTraceFn } from "./bg_local";
 import { G_TouchTriggers, G_TouchProjectiles } from "./g_utils";
+import { M_CheckGround, M_CatagorizePosition, M_WorldEffects } from "./g_monster";
 import type { CvarT } from "../shared/q_shared";
 
 // ---------------------------------------------------------------------------
@@ -1148,18 +1162,6 @@ export function G_RunEntity(ent: EdictT): void {
 // ---------------------------------------------------------------------------
 // CROSS-DEPENDENCIES NOT YET PORTED -- see file header
 // ---------------------------------------------------------------------------
-
-function M_CheckGround(ent: EdictT, _mask: ContentsT): void {
-  throw new Error(`M_CheckGround: not yet ported (pending g_monster.ts, see g_monster.cpp:140) -- called against ${ent.classname ?? "?"}`);
-}
-
-function M_CatagorizePosition(self: EdictT, _in_point: Vec3): void {
-  throw new Error(`M_CatagorizePosition: not yet ported (pending g_monster.ts, see g_monster.cpp:190) -- called against ${self.classname ?? "?"}`);
-}
-
-function M_WorldEffects(ent: EdictT): void {
-  throw new Error(`M_WorldEffects: not yet ported (pending g_monster.ts, see g_monster.cpp:235) -- called against ${ent.classname ?? "?"}`);
-}
 
 function SV_Physics_NewToss(ent: EdictT): void {
   throw new Error(

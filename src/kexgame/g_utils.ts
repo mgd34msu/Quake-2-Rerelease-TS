@@ -62,7 +62,6 @@
 // grepping quake2-rerelease-dll/rerelease/*.cpp for each symbol's real
 // definition, not just its g_local.h declaration):
 //   - T_Damage            -> g_combat.cpp:527  (src/kexgame/g_combat.ts -- LANDED, real import)
-//   - G_MonsterKilled     -> g_monster.cpp:613 (future src/kexgame/g_monster.ts)
 //   - G_Impact            -> g_phys.cpp:122    (src/kexgame/g_phys.ts -- LANDED, real import)
 //   - G_GetClipMask       -> g_phys.cpp:30     (src/kexgame/g_phys.ts -- LANDED, real import)
 //   - G_ShouldPlayersCollide -> p_client.cpp:2996 (future src/kexgame/p_client.ts)
@@ -151,6 +150,7 @@ import { RegisterThink } from "./g_save_registry";
 import { gi, globals, g_edicts, game, level, defaultEdict } from "./g_main_globals";
 import { G_Impact, G_GetClipMask } from "./g_phys";
 import { T_Damage } from "./g_combat";
+import { G_MonsterKilled } from "./g_monster";
 import { GTIME_ZERO, Gtime_add, Gtime_from_ms, Gtime_from_sec, Gtime_nonzero, Gtime_subtract } from "./gtime";
 import { SpawnFlags_has } from "./spawnflags";
 import { AngleVectors, vec3_equals, vec3_length, vec3_origin } from "./q_vec3";
@@ -160,9 +160,7 @@ import { irandom } from "./q_std";
 // EXTERNAL DEPENDENCIES NOT YET PORTED (see file header)
 // ---------------------------------------------------------------------------
 
-function G_MonsterKilled(self: EdictT): void {
-  throw new Error(`G_MonsterKilled: not yet ported (pending g_monster.ts, see g_monster.cpp:613) -- called against ${self.classname ?? "?"}`);
-}
+
 
 // G_Impact/G_GetClipMask: formerly local throwing stubs here (see this
 // file's own header, "EXTERNAL DEPENDENCIES NOT YET PORTED"), now real
