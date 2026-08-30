@@ -17,7 +17,7 @@ ThreeWave CTF, The Reckoning, Ground Zero) inherited from
 (~103k lines of C++) is ported and coverage-audited, running at its
 native 40Hz over the re-release wire protocol against retail game
 data, alongside the four classic games (baseq2, The Reckoning, Ground
-Zero, ThreeWave CTF) preserved bug-for-bug from Quake-2-TS. This repo
+Zero, ThreeWave CTF) exactly as they shipped in 1997. This repo
 is scoped to Quake 2; the broader multi-game unification continues as
 a separate project seeded from this source.
 
