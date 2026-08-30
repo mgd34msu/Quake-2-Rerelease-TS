@@ -20,6 +20,7 @@ import {
   MAX_MAP_TEXINFO,
   MAX_MAP_AREAS,
   MAX_MAP_AREAPORTALS,
+  MAX_MAP_PORTAL_BYTES,
   MAX_MAP_PLANES,
   MAX_MAP_NODES,
   MAX_MAP_BRUSHSIDES,
@@ -1511,6 +1512,60 @@ CM_WritePortalState).
 export function CM_ReadPortalState(data: Uint8Array): void {
   for (let i = 0; i < MAX_MAP_AREAPORTALS; i++) {
     portalopen[i] = i < data.length && data[i] !== 0;
+  }
+  FloodAreaConnections();
+}
+
+/*
+===================
+CM_WritePortalBits
+
+q2repro's SSV2/SAV2 savegame container's portal encoding (common/cmodel.c
+CM_WritePortalBits): one bit per portal (not one byte, like the legacy
+CM_WritePortalState/CM_ReadPortalState pair above -- both encodings coexist
+here because the legacy fixed-width .sv2 container and the kex SAV2
+container use different on-disk layouts, matching q2repro's own file since
+it kept the old byte-per-portal CM_WritePortalState alongside the new
+bit-packed CM_WritePortalBits rather than replacing it). `numareaportals`
+mirrors q2repro's `cm->cache->numportals` ("largest portal number used plus
+one" -- bsp.h:285); both are bounded by cm->cache->numportals in the exact
+same CM_SetAreaPortalState bounds check above.
+
+Adaptation: the C signature takes `(const cm_t *cm, byte *buffer)` and
+returns the byte count written into a caller-owned buffer; this port has no
+separate cm_t handle for the currently-loaded map (portalopen/numareaportals
+are this module's own globals, like CM_WritePortalState above), so it
+returns a freshly-sized Uint8Array instead.
+===================
+*/
+export function CM_WritePortalBits(): Uint8Array {
+  const numportals = Math.min(numareaportals, MAX_MAP_PORTAL_BYTES << 3);
+  const bytes = (numportals + 7) >> 3;
+  const out = new Uint8Array(bytes);
+  for (let i = 0; i < numportals; i++) {
+    if (portalopen[i]) out[i >> 3] |= 1 << (i & 7);
+  }
+  return out;
+}
+
+/*
+===================
+CM_SetPortalStates
+
+Reads CM_WritePortalBits' bit-packed encoding back and recalculates area
+connections (common/cmodel.c CM_SetPortalStates). Portals beyond the
+buffer's bit count default to OPEN (`true`), matching the C loop's second
+`for (; i < cm->cache->numportals; i++) cm->portalopen[i] = true;` tail.
+===================
+*/
+export function CM_SetPortalStates(data: Uint8Array): void {
+  const numportals = Math.min(numareaportals, data.length << 3);
+  let i = 0;
+  for (; i < numportals; i++) {
+    portalopen[i] = !!(data[i >> 3] & (1 << (i & 7)));
+  }
+  for (; i < numareaportals; i++) {
+    portalopen[i] = true;
   }
   FloodAreaConnections();
 }

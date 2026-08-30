@@ -32,6 +32,7 @@ import {
   CS_ITEMS,
   CS_PLAYERSKINS,
   CS_GENERAL,
+  CS_STATUSBAR,
   MAX_CONFIGSTRINGS,
 } from "./q_shared";
 
@@ -187,3 +188,25 @@ export const CS_REMAP_RERELEASE: CsRemapT = {
 
   configstring_size: CS_MAX_STRING_LENGTH_WIDE,
 };
+
+/*
+===================
+Com_ConfigstringSize
+
+q2repro's inc/common/utils.h:107-118 -- "Some mods actually exploit
+CS_STATUSBAR to take space up to CS_AIRACCEL": the CS_STATUSBAR and
+CS_GENERAL blocks each span several configstring slots, and a handful of
+mods rely on being able to write a string longer than one slot's
+`configstring_size` that spills into the following slots of the same block.
+Used by the SSV2/SAV2 kex savegame container's per-configstring length bound
+check (src/server/sv_ccmds.ts's read_level_file-equivalent), matching
+q2repro's own `Com_ConfigstringSize(&svs.csr, index)` call there.
+===================
+*/
+export function Com_ConfigstringSize(csr: CsRemapT, cs: number): number {
+  if (cs >= CS_STATUSBAR && cs < csr.airaccel) return csr.configstring_size * (csr.airaccel - cs);
+
+  if (cs >= csr.general && cs < csr.end) return csr.configstring_size * (csr.end - cs);
+
+  return csr.configstring_size;
+}

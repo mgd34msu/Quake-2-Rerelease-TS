@@ -158,6 +158,16 @@ export function MSG_WriteFloat(sb: SizeBuf, f: number): void {
   sb.view.setFloat32(offset, f, true);
 }
 
+// common/msg.c's MSG_WriteLong64/MSG_ReadLong64 (WL64/RL64: 8 bytes,
+// little-endian, signed) -- used by the SSV2 savegame container's
+// `MSG_WriteLong64(time(NULL))` comment-field timestamp. `bigint` (not
+// `number`) so a full 64-bit round trip never loses precision the way
+// `Number` would past 2^53.
+export function MSG_WriteLong64(sb: SizeBuf, c: bigint): void {
+  const offset = SZ_GetSpace(sb, 8);
+  sb.view.setBigInt64(offset, c, true);
+}
+
 export function MSG_WriteString(sb: SizeBuf, s: string | null): void {
   if (s === null) {
     SZ_Write(sb, new Uint8Array([0]), 1);
@@ -449,6 +459,20 @@ export function MSG_ReadFloat(msgRead: SizeBuf): number {
   msgRead.readcount += 4;
 
   return f;
+}
+
+// See MSG_WriteLong64's header comment for why this is `bigint`, not `number`.
+export function MSG_ReadLong64(msgRead: SizeBuf): bigint {
+  let c: bigint;
+
+  if (msgRead.readcount + 8 > msgRead.cursize) {
+    c = -1n;
+  } else {
+    c = msgRead.view.getBigInt64(msgRead.readcount, true);
+  }
+  msgRead.readcount += 8;
+
+  return c;
 }
 
 export function MSG_ReadString(msgRead: SizeBuf): string {

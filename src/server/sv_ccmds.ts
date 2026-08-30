@@ -16,20 +16,37 @@
 // blocking reason `save`/`load` cannot complete end-to-end yet, not a
 // file-I/O gap.
 
-import { Com_sprintf, MAX_OSPATH, MAX_TOKEN_CHARS, MAX_QPATH, CS_NAME, STAT_HEALTH, STAT_FRAGS, PRINT_HIGH, PRINT_CHAT, CVAR_LATCH, PlayerStateT, BigShort, MAX_CONFIGSTRINGS } from "../shared/q_shared";
-import { SysError, NetadrT, NetsrcT, PORT_MASTER, SvcOpsT, PROTOCOL_VERSION } from "../qcommon/qcommon";
-import { Com_Printf, Com_DPrintf, Info_Print, dedicated } from "../qcommon/common";
+import { Com_sprintf, MAX_OSPATH, MAX_TOKEN_CHARS, MAX_QPATH, CS_NAME, STAT_HEALTH, STAT_FRAGS, PRINT_HIGH, PRINT_CHAT, CVAR_LATCH, CVAR_SERVERINFO, PlayerStateT, BigShort, MAX_CONFIGSTRINGS } from "../shared/q_shared";
+import { SysError, NetadrT, NetsrcT, PORT_MASTER, SvcOpsT, PROTOCOL_VERSION, ERR_DROP } from "../qcommon/qcommon";
+import { Com_Printf, Com_DPrintf, Com_Error, Info_Print, dedicated } from "../qcommon/common";
 import { Cvar_Set, Cvar_VariableValue, Cvar_VariableString, Cvar_ForceSet, Cvar_Serverinfo, cvar_vars } from "../qcommon/cvar";
 import { Cmd_Argc, Cmd_Argv, Cmd_Args, Cmd_AddCommand } from "../qcommon/cmd";
 import { FS_Gamedir, FS_CreatePath, FS_FOpenFile, FS_FCloseFile, FS_Read, FS_ReadRaw, FS_ListFiles, FS_LoadFile, FS_WriteFile, FS_RemoveFile, FS_ReadRawFile, FS_FOpenFileWrite, FS_Write } from "../qcommon/files";
-import { SizeBuf, SZ_Init, MSG_WriteByte, MSG_WriteShort, MSG_WriteLong, MSG_WriteString } from "../qcommon/sizebuf";
-import { CM_WritePortalState, CM_ReadPortalState } from "../qcommon/cmodel";
+import {
+  SizeBuf,
+  SZ_Init,
+  SZ_Write,
+  MSG_WriteByte,
+  MSG_WriteShort,
+  MSG_WriteLong,
+  MSG_WriteLong64,
+  MSG_WriteString,
+  MSG_BeginReading,
+  MSG_ReadByte,
+  MSG_ReadShort,
+  MSG_ReadLong,
+  MSG_ReadLong64,
+  MSG_ReadString,
+  MSG_ReadData,
+} from "../qcommon/sizebuf";
+import { CM_WritePortalState, CM_ReadPortalState, CM_WritePortalBits, CM_SetPortalStates } from "../qcommon/cmodel";
 import { MAX_MAP_AREAPORTALS } from "../qcommon/qfiles";
+import { Com_ConfigstringSize } from "../shared/cs_remap";
 import { Netchan_OutOfBandPrint } from "../qcommon/net_chan";
 import { NET_StringToAdr, NET_AdrToString, NET_Config } from "../platform/net_udp";
 import type { GameExports } from "../game/game";
 import { sv, svs, master_adr, MAX_MASTERS, ServerStateT, ClientStateT, ClientT, maxclients, svClientHolder, svPlayerHolder } from "./server";
-import { geHolder } from "./sv_game";
+import { geHolder, currentGameFamily } from "./sv_game";
 import { SV_DropClient, SV_Shutdown } from "./sv_main";
 import { SV_BroadcastPrintf, SV_ClientPrintf } from "./sv_send";
 import { SV_Map, SV_InitGame } from "./sv_init";
@@ -286,6 +303,344 @@ function encodeConfigstringsBlock(): Uint8Array {
   return buf;
 }
 
+// ============================================================================
+// SSV2/SAV2 -- the kex-family savegame container (q2repro's save.c).
+// ============================================================================
+// The legacy family above (SV_WriteLevelFile/SV_ReadLevelFile/
+// SV_WriteServerFile/SV_ReadServerFile) keeps vanilla q2's fixed-width
+// server.ssv/.sv2 layout byte-for-byte -- untouched by this section, gated
+// behind currentGameFamily() at each of those four functions' own top (see
+// each one's family-check guard below). This section is the kex-family
+// alternative: q2repro's own variable-length, MSG_Write*-framed container
+// (src/server/save.c, read closely for this port -- write_server_file:47-105,
+// write_level_file:107-171, read_server_file:400-482, read_level_file:
+// 484-548), engine-owned metadata (comment/mapcmd/configstrings/portal
+// state) wrapping the game module's WriteGameJson/WriteLevelJson string,
+// matching q2repro's actual "engine owns the container, the game returns
+// strings" split (as opposed to the legacy fixed-width format, where the
+// game module also gets a raw filename via WriteGame/WriteLevel and does its
+// own file I/O).
+//
+// Architectural difference from save.c preserved deliberately: q2repro's
+// read_server_file itself builds a mapcmd_t, calls SV_ParseMapCmd +
+// Com_AbortFunc + SV_Shutdown + SV_SpawnServer inline, i.e. the C engine's
+// read_server_file IS the map-transition trigger. This port's load flow
+// already factors that differently for the legacy family (SV_ReadServerFile
+// only parses the header/cvars/mapcmd and calls SV_InitGame; SV_Loadgame_f
+// is the one that follows up with SV_Map(false, svs.mapcmd, true), which
+// internally reaches SV_SpawnServer -> SV_CheckForSavegame ->
+// SV_ReadLevelFile) -- the kex read functions below reuse that exact same
+// split rather than reimplementing save.c's inline SV_ParseMapCmd/
+// SV_SpawnServer sequence a second time. Equally, save.c's
+// have_enhanced_savegames() gate (aborts the load if the loaded game module
+// can't do enhanced saves) has no work to do here: these functions only run
+// when currentGameFamily() === "kex", and the kex game module
+// unconditionally implements WriteGameJson/ReadGameJson/WriteLevelJson/
+// ReadLevelJson (src/kexgame/g_save.ts) -- there is no "loaded a legacy game
+// under the kex family" state this engine can reach.
+
+// MakeLittleLong('S','S','V','2')/('S','A','V','2') (save.c:22-23) -- see
+// qfiles.ts's IDBSPHEADER for the same little-endian four-char-code pattern.
+const SAVE_MAGIC1 = ("2".charCodeAt(0) << 24) | ("V".charCodeAt(0) << 16) | ("S".charCodeAt(0) << 8) | "S".charCodeAt(0);
+const SAVE_MAGIC2 = ("2".charCodeAt(0) << 24) | ("V".charCodeAt(0) << 16) | ("A".charCodeAt(0) << 8) | "S".charCodeAt(0);
+const SAVE_VERSION = 1;
+
+// save.c's savetype_t (save.c:33-37).
+const SAVE_MANUAL = 0;
+const SAVE_LEVEL_START = 1;
+// SAVE_AUTOSAVE = 2 -- save.c's remaster "autosave" ccmd has no equivalent
+// registered command in this port (SV_InitOperatorCommands only wires up
+// "save"/"load", matching this file's pre-existing "gamemap"/"map"/
+// "savegame"/"loadgame" vanilla ccmd set, not save.c's newer save/autosave/
+// load trio) -- dead branch here, not reachable from any call site.
+
+// Wraps a Uint8Array whole-file read in a SizeBuf positioned for MSG_Read*
+// (mirrors save.c's read_binary_file: `SZ_InitRead(&msg_read,
+// msg_read_buffer, len)`). This port has no separate "read-mode" SizeBuf
+// constructor (SZ_Init always resets cursize to 0 for writing); setting
+// `cursize` directly afterward is the same idiom test/protocol_frame_
+// envelope.test.ts's loadIntoNetMessage helper uses for the net_message
+// singleton, applied here to a fresh, per-call SizeBuf instead.
+function loadForReading(raw: Uint8Array): SizeBuf {
+  const buf = new SizeBuf();
+  SZ_Init(buf, raw, raw.length);
+  buf.cursize = raw.length;
+  MSG_BeginReading(buf);
+  return buf;
+}
+
+/*
+==============
+SV_WriteServerFileKex
+
+save.c's write_server_file (save.c:47-105), minus the ge->WriteGameJson/
+FS_WriteFile split already owned by SV_WriteServerFile's caller chain here
+(see this section's header comment) -- the game.ssv write below still goes
+through GameExports.WriteGame exactly like the legacy path, since kex.ts's
+binding already shrinks that call to a pure "write this JSON string to this
+filename" seam (see that file's own header comment).
+==============
+*/
+function SV_WriteServerFileKex(autosave: boolean): void {
+  Com_DPrintf("SV_WriteServerFileKex(%s)\n", autosave ? "true" : "false");
+
+  const buf = new SizeBuf();
+  const scratch = new Uint8Array(0x40000);
+  SZ_Init(buf, scratch, scratch.length);
+  buf.allowoverflow = true;
+
+  MSG_WriteLong(buf, SAVE_MAGIC1);
+  MSG_WriteLong(buf, SAVE_VERSION);
+
+  // write the comment field
+  MSG_WriteLong64(buf, BigInt(Math.floor(Date.now() / 1000)));
+  MSG_WriteByte(buf, autosave ? SAVE_LEVEL_START : SAVE_MANUAL);
+  MSG_WriteString(buf, sv.configstrings[CS_NAME]);
+
+  // write the mapcmd
+  MSG_WriteString(buf, svs.mapcmd);
+
+  // write all CVAR_LATCH cvars -- these will be things like coop, skill,
+  // deathmatch, etc -- also write all CVAR_SERVERINFO vars -- they mainly
+  // serve to provide some troubleshooting info. save.c also excludes
+  // CVAR_PRIVATE cvars here; this port's cvar flag set (q_shared.ts) has no
+  // CVAR_PRIVATE bit at all (never ported -- see report), so no cvar stored
+  // in cvar_vars can ever carry it and that exclusion would be unreachable
+  // dead code if written out.
+  let latchedCount = 0;
+  for (const v of cvar_vars.values()) {
+    if (!(v.flags & (CVAR_LATCH | CVAR_SERVERINFO))) continue;
+    MSG_WriteString(buf, v.name);
+    MSG_WriteString(buf, v.string);
+    latchedCount++;
+  }
+  MSG_WriteString(buf, null);
+
+  // check for overflow
+  if (buf.overflowed) {
+    Com_Printf("SV_WriteServerFileKex: overflow\n");
+    return;
+  }
+
+  const name = `${FS_Gamedir()}/save/current/server.ssv`;
+  FS_WriteFile(name, buf.data.subarray(0, buf.cursize));
+  Com_DPrintf("SV_WriteServerFileKex: wrote mapcmd=\"%s\" %i cvar(s)\n", svs.mapcmd, latchedCount);
+
+  // write game state -- engine owns the file (save.c:92-102's
+  // `ge->WriteGameJson(...)` + `FS_WriteFile("save/.../game.ssv", ...)`
+  // split), via GameExports's optional WriteGameJson (see that interface's
+  // doc comment) rather than the filename-based WriteGame the legacy family
+  // still uses below.
+  const ge = requireGe();
+  const json = ge.WriteGameJson ? ge.WriteGameJson(autosave) : null;
+  if (json === null) {
+    Com_Printf("Couldn't write game state.\n");
+    return;
+  }
+  FS_WriteFile(`${FS_Gamedir()}/save/current/game.ssv`, json);
+}
+
+/*
+==============
+SV_ReadServerFileKex
+
+save.c's read_server_file (save.c:400-482), scoped down to the
+header/cvar/mapcmd parse + SV_InitGame() this port's load flow expects from
+SV_ReadServerFile (see this section's header comment for why the
+SV_ParseMapCmd/SV_SpawnServer half of the C function isn't reimplemented
+here -- SV_Loadgame_f's existing `await SV_Map(false, svs.mapcmd, true)`
+call already does that job for both families).
+==============
+*/
+async function SV_ReadServerFileKex(): Promise<void> {
+  Com_DPrintf("SV_ReadServerFileKex()\n");
+
+  const name = "save/current/server.ssv";
+  const raw = FS_LoadFile(name);
+  if (raw === null) {
+    Com_Printf("Couldn't read %s\n", `${FS_Gamedir()}/${name}`);
+    return;
+  }
+
+  const buf = loadForReading(raw);
+
+  if (MSG_ReadLong(buf) !== SAVE_MAGIC1) {
+    Com_Printf("SV_ReadServerFileKex: not a savegame\n");
+    return;
+  }
+  if (MSG_ReadLong(buf) !== SAVE_VERSION) {
+    Com_Printf("SV_ReadServerFileKex: bad save version\n");
+    return;
+  }
+
+  // read the comment field
+  MSG_ReadLong64(buf); // timestamp -- SV_GetSaveInfo's concern, not this path
+  MSG_ReadByte(buf); // savetype -- LOAD_LEVEL_START vs LOAD_NORMAL frame-count
+  // tuning (save.c's SV_CheckForSavegame); this port's SV_CheckForSavegame
+  // (sv_init.ts) does not yet make that distinction for either family -- see
+  // report.
+  MSG_ReadString(buf); // comment field's CS_NAME string, discarded (matches
+  // C's `MSG_ReadString(NULL, 0)`)
+
+  // read the mapcmd
+  const mapcmd = MSG_ReadString(buf);
+
+  // read all CVAR_LATCH cvars -- only restore ones that either don't exist
+  // yet or are themselves flagged CVAR_LATCH (save.c:455-459's comment: "we
+  // store cvars with either CVAR_LATCH or CVAR_SERVERINFO, but only restore
+  // those with CVAR_LATCH"). This port has no Cvar_UserSet; Cvar_ForceSet is
+  // the same substitute the legacy SV_ReadServerFile above already uses.
+  for (;;) {
+    const cvarName = MSG_ReadString(buf);
+    if (!cvarName.length) break;
+    const cvarValue = MSG_ReadString(buf);
+
+    const existing = cvar_vars.get(cvarName);
+    if (!existing || existing.flags & CVAR_LATCH) {
+      Com_DPrintf("Set %s = %s\n", cvarName, cvarValue);
+      Cvar_ForceSet(cvarName, cvarValue);
+    }
+  }
+
+  // start a new game fresh with new cvars
+  await SV_InitGame();
+  svs.mapcmd = mapcmd;
+
+  // read game state -- engine owns the file (save.c:470-474's
+  // `FS_LoadFile(...); ge->ReadGameJson(buf);` split), via GameExports's
+  // optional ReadGameJson rather than the filename-based ReadGame the
+  // legacy family still uses below.
+  const gameName = `${FS_Gamedir()}/save/current/game.ssv`;
+  const gameRaw = FS_LoadFile(`save/current/game.ssv`);
+  if (gameRaw === null) {
+    Com_Error(ERR_DROP, "Couldn't read %s", gameName);
+  }
+  const ge = requireGe();
+  if (ge.ReadGameJson) ge.ReadGameJson(new TextDecoder().decode(gameRaw));
+}
+
+/*
+==============
+SV_WriteLevelFileKex
+
+save.c's write_level_file (save.c:107-171), minus its `transition` parameter
+(no caller on this dispatch path signals level-transition-vs-full-save any
+more than the legacy WriteLevel/kex.ts binding already documents -- see
+kex.ts's WriteLevel adapter comment) and minus its streamed-write buffering
+(`if (msg_write.cursize > msg_write.maxsize / 2) { FS_Write(...); SZ_Clear
+(...); }`, a memory-footprint optimization for very large configstring
+dumps with no on-disk-byte-layout consequence -- this port builds the whole
+message in one scratch buffer and writes it in a single FS_WriteFile call).
+==============
+*/
+function SV_WriteLevelFileKex(): void {
+  Com_DPrintf("SV_WriteLevelFileKex()\n");
+
+  const buf = new SizeBuf();
+  const scratch = new Uint8Array(0x100000);
+  SZ_Init(buf, scratch, scratch.length);
+  buf.allowoverflow = true;
+
+  MSG_WriteLong(buf, SAVE_MAGIC2);
+  MSG_WriteLong(buf, SAVE_VERSION);
+
+  // write configstrings
+  let i = 0;
+  for (; i < svs.csr.end; i++) {
+    const s = sv.configstrings[i];
+    if (!s.length) continue;
+
+    MSG_WriteShort(buf, i);
+    MSG_WriteString(buf, s);
+  }
+  MSG_WriteShort(buf, i); // i === svs.csr.end here -- the loop's terminator
+
+  const portalBits = CM_WritePortalBits();
+  MSG_WriteByte(buf, portalBits.length);
+  SZ_Write(buf, portalBits, portalBits.length);
+
+  if (buf.overflowed) {
+    Com_Printf("SV_WriteLevelFileKex: overflow\n");
+    return;
+  }
+
+  const name = `${FS_Gamedir()}/save/current/${sv.name}.sv2`;
+  FS_WriteFile(name, buf.data.subarray(0, buf.cursize));
+
+  // write game level -- engine owns the file (save.c:156-166), via
+  // GameExports's optional WriteLevelJson. No "transition" signal is
+  // available at this shared call site (SV_WriteLevelFile has none either
+  // -- matches kex.ts's own pre-existing WriteLevel adapter default); full
+  // save (`transition: false`) is the safe default, same as that adapter.
+  const savename = `${FS_Gamedir()}/save/current/${sv.name}.sav`;
+  const ge = requireGe();
+  const json = ge.WriteLevelJson ? ge.WriteLevelJson(false) : null;
+  if (json === null) {
+    Com_Printf("Couldn't write level file.\n");
+    return;
+  }
+  FS_WriteFile(savename, json);
+}
+
+/*
+==============
+SV_ReadLevelFileKex
+
+save.c's read_level_file (save.c:484-548). SV_ClearWorld() (save.c:530) is
+not repeated here: sv_init.ts's SV_CheckForSavegame already calls it once,
+immediately before invoking SV_ReadLevelFile, for both families alike.
+==============
+*/
+function SV_ReadLevelFileKex(): void {
+  Com_DPrintf("SV_ReadLevelFileKex()\n");
+
+  const name = `save/current/${sv.name}.sv2`;
+  const raw = FS_LoadFile(name);
+  if (raw === null) {
+    Com_Printf("Failed to open %s\n", `${FS_Gamedir()}/${name}`);
+    return;
+  }
+
+  const buf = loadForReading(raw);
+
+  if (MSG_ReadLong(buf) !== SAVE_MAGIC2) {
+    Com_Printf("SV_ReadLevelFileKex: not a savegame\n");
+    return;
+  }
+  if (MSG_ReadLong(buf) !== SAVE_VERSION) {
+    Com_Printf("SV_ReadLevelFileKex: bad save version\n");
+    return;
+  }
+
+  // read all configstrings
+  for (;;) {
+    const index = MSG_ReadShort(buf);
+    if (index === svs.csr.end) break;
+
+    if (index < 0 || index >= svs.csr.end) Com_Error(ERR_DROP, "Bad savegame configstring index");
+
+    const maxlen = Com_ConfigstringSize(svs.csr, index);
+    const s = MSG_ReadString(buf);
+    if (s.length >= maxlen) Com_Error(ERR_DROP, "Savegame configstring too long");
+    sv.configstrings[index] = s;
+  }
+
+  const len = MSG_ReadByte(buf);
+  const portalData = new Uint8Array(len);
+  MSG_ReadData(buf, portalData, len);
+  CM_SetPortalStates(portalData);
+
+  // read game level -- engine owns the file (save.c:538-546), via
+  // GameExports's optional ReadLevelJson.
+  const savename = `${FS_Gamedir()}/save/current/${sv.name}.sav`;
+  const levelRaw = FS_LoadFile(`save/current/${sv.name}.sav`);
+  if (levelRaw === null) {
+    Com_Error(ERR_DROP, "Couldn't read %s", savename);
+  }
+  const ge = requireGe();
+  if (ge.ReadLevelJson) ge.ReadLevelJson(new TextDecoder().decode(levelRaw));
+}
+
 /*
 ==============
 SV_WriteLevelFile
@@ -293,6 +648,11 @@ SV_WriteLevelFile
 ==============
 */
 function SV_WriteLevelFile(): void {
+  if (currentGameFamily() === "kex") {
+    SV_WriteLevelFileKex();
+    return;
+  }
+
   Com_DPrintf("SV_WriteLevelFile()\n");
 
   const name = `${FS_Gamedir()}/save/current/${sv.name}.sv2`;
@@ -314,6 +674,11 @@ SV_ReadLevelFile
 ==============
 */
 function SV_ReadLevelFile(): void {
+  if (currentGameFamily() === "kex") {
+    SV_ReadLevelFileKex();
+    return;
+  }
+
   Com_DPrintf("SV_ReadLevelFile()\n");
 
   const name = `save/current/${sv.name}.sv2`;
@@ -359,6 +724,11 @@ SV_WriteServerFile
 ==============
 */
 function SV_WriteServerFile(autosave: boolean): void {
+  if (currentGameFamily() === "kex") {
+    SV_WriteServerFileKex(autosave);
+    return;
+  }
+
   Com_DPrintf("SV_WriteServerFile(%s)\n", autosave ? "true" : "false");
 
   const name = `${FS_Gamedir()}/save/current/server.ssv`;
@@ -413,6 +783,11 @@ SV_ReadServerFile
 ==============
 */
 async function SV_ReadServerFile(): Promise<void> {
+  if (currentGameFamily() === "kex") {
+    await SV_ReadServerFileKex();
+    return;
+  }
+
   Com_DPrintf("SV_ReadServerFile()\n");
 
   const name = "save/current/server.ssv";
@@ -876,14 +1251,42 @@ function SV_ServerRecord_f(): void {
   // to make sure the protocol is right, and to set the gamedir
   //
   // send the serverdata
-  MSG_WriteByte(buf, SvcOpsT.svc_serverdata);
-  MSG_WriteLong(buf, PROTOCOL_VERSION);
-  MSG_WriteLong(buf, svs.spawncount);
-  MSG_WriteByte(buf, 2); // demos are always attract loops
-  MSG_WriteString(buf, Cvar_VariableString("gamedir"));
-  MSG_WriteShort(buf, -1);
-  // send full levelname
-  MSG_WriteString(buf, sv.configstrings[CS_NAME]);
+  if (currentGameFamily() === "kex") {
+    // Route through svs.codec so the demo's signon carries the SAME
+    // protocol number (1038) and handshake shape as the per-frame
+    // svc_packetentities fix below (SV_RecordDemoMessage) -- a demo signon
+    // literally hardcoded to PROTOCOL_VERSION (34) followed by 1038-shaped
+    // entity deltas would be unparseable by either codec. `attractloop:
+    // true` writes byte `1` here instead of the legacy branch's literal
+    // `2`; this port's own client-side read (vanilla.ts/q2repro.ts's
+    // readServerData: `MSG_ReadByte(...) !== 0`) already collapses any
+    // nonzero byte to `true`, so this is not an observable-behavior change
+    // for anything that reads demos through this codebase's own codecs --
+    // only a real byte-value difference from the original engine's literal
+    // `2`, which is why it is gated to the kex family and not applied to
+    // the legacy branch below.
+    svs.codec.writeServerData(buf, {
+      servercount: svs.spawncount,
+      attractloop: true, // demos are always attract loops
+      gamedir: Cvar_VariableString("gamedir"),
+      clientnum: -1,
+      levelname: sv.configstrings[CS_NAME],
+      serverState: sv.state,
+    });
+  } else {
+    // legacy family: byte-identical to the original vanilla dm2 signon,
+    // including the literal `2` (not a boolean-derived 0/1) -- see the kex
+    // branch's comment for why that literal can't be reproduced through
+    // svs.codec.writeServerData's `attractloop: boolean` parameter.
+    MSG_WriteByte(buf, SvcOpsT.svc_serverdata);
+    MSG_WriteLong(buf, PROTOCOL_VERSION);
+    MSG_WriteLong(buf, svs.spawncount);
+    MSG_WriteByte(buf, 2); // demos are always attract loops
+    MSG_WriteString(buf, Cvar_VariableString("gamedir"));
+    MSG_WriteShort(buf, -1);
+    // send full levelname
+    MSG_WriteString(buf, sv.configstrings[CS_NAME]);
+  }
 
   // Loop bound is "how many configstring slots the current game family has"
   // (svs.csr.end), not a protocol-34 wire-encoding limit -- MSG_WriteShort
@@ -994,3 +1397,12 @@ export { SV_ReadLevelFile };
 // (mirrored in this file's original pending-stub header) singles it out
 // alongside SV_ReadLevelFile as the two symbols other modules reach for.
 export { SV_Status_f };
+
+// Test-only exports (no server.h equivalent -- these are engine-internal
+// functions/constants server.h never declared for outside callers). Exposed
+// purely so test/savegame_container.test.ts can exercise the SSV2/SAV2
+// container's family dispatch (SV_WriteServerFile/SV_ReadServerFile/
+// SV_WriteLevelFile) and hand-verify its on-disk header layout (SAVE_MAGIC1/
+// SAVE_MAGIC2/SAVE_VERSION) without reaching through Cmd_AddCommand's
+// registered "save"/"load" ccmd handlers.
+export { SV_WriteServerFile, SV_ReadServerFile, SV_WriteLevelFile, SAVE_MAGIC1, SAVE_MAGIC2, SAVE_VERSION, SAVE_MANUAL, SAVE_LEVEL_START };

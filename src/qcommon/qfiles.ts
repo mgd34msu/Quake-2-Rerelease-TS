@@ -37,6 +37,11 @@ export const MAX_MAP_TEXINFO = 8192;
 
 export const MAX_MAP_AREAS = 256;
 export const MAX_MAP_AREAPORTALS = 1024;
+// q2repro inc/common/cmodel.h:25 -- bit-packed portal-state buffer size used
+// by CM_WritePortalBits/CM_SetPortalStates (the SSV2/SAV2 kex savegame
+// container's on-disk portal encoding, one bit per portal instead of the
+// legacy one-byte-per-portal CM_WritePortalState/CM_ReadPortalState layout).
+export const MAX_MAP_PORTAL_BYTES = 128;
 export const MAX_MAP_PLANES = 65536;
 export const MAX_MAP_NODES = 65536;
 export const MAX_MAP_BRUSHSIDES = 65536;

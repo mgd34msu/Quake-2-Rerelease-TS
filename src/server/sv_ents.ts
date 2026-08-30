@@ -348,11 +348,24 @@ export function SV_RecordDemoMessage(): void {
   const buf_data = new Uint8Array(32768);
   SZ_Init(buf, buf_data, buf_data.length);
 
-  // write a frame message that doesn't contain a player_state_t
+  // write a frame message that doesn't contain a player_state_t. The leading
+  // svc_frame opcode + bare framenum long is this merge-format's OWN framing
+  // (matching vanilla's sv_ents.c byte-for-byte -- this was never a live
+  // per-client svc_frame envelope in the first place: it carries no
+  // lastframe/surpressCount/areabits/playerstate, none of which
+  // svs.codec.writeFrame's 1038 envelope can omit, so it stays a literal
+  // MSG_WriteByte/MSG_WriteLong pair here rather than routing through
+  // writeFrame), unlike the packetentities opening bracket right after it,
+  // which genuinely does vary per protocol (vanilla's leading
+  // svc_packetentities opcode byte vs 1038's no-opcode "entities follow
+  // directly" shape -- codec.ts's writePacketEntitiesBegin doc comment) and
+  // was hardcoded to the vanilla byte here even under the kex family/1038
+  // codec, unlike the writeDeltaEntity/writePacketEntitiesEnd calls below,
+  // which already went through svs.codec correctly.
   MSG_WriteByte(buf, SvcOpsT.svc_frame);
   MSG_WriteLong(buf, sv.framenum);
 
-  MSG_WriteByte(buf, SvcOpsT.svc_packetentities);
+  svs.codec.writePacketEntitiesBegin(buf);
 
   const ge = geHolder.ge;
   if (ge) {

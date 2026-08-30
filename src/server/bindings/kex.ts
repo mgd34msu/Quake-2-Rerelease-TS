@@ -965,7 +965,14 @@ export function adaptKexGameExports(kexGe: KexGameExports): GameExports {
   // nav.ts's own header ("A NEW SEAM NOT IN THE C SOURCE").
   Nav_SetEdictSource(() => kexGe.edicts);
 
-  return {
+  // `const` (not a bare `return {...}`) so WriteGame/ReadGame/WriteLevel/
+  // ReadLevel below can delegate to this object's own WriteGameJson/
+  // ReadGameJson/WriteLevelJson/ReadLevelJson methods (defined further down
+  // in the same literal) via closure, instead of duplicating the
+  // kexGe-calling logic a second time -- safe because those delegating
+  // methods are only ever invoked later, once `ge` has finished
+  // initializing, never during the literal's own construction.
+  const ge: GameExports = {
     // A deliberate, documented lie: the real kex module reports 2023
     // internally (checked once inside kexgame's own GetGameAPI, never
     // exposed past this file); this adapter reports the legacy constant so
@@ -986,29 +993,55 @@ export function adaptKexGameExports(kexGe: KexGameExports): GameExports {
       syncAllEdictsFields(kexGe);
     },
 
-    WriteGame: (filename, autosave) => {
+    // Pure string seam (GameExports's optional WriteGameJson/ReadGameJson/
+    // WriteLevelJson/ReadLevelJson -- see that interface's doc comment):
+    // no filesystem access at all, just kexGe's own JSON-producing/
+    // -consuming calls plus the out_size box kexapi/game.ts's C-ABI-shaped
+    // WriteGameJson/WriteLevelJson signature requires (this binding's job,
+    // same as everywhere else in this file, is purely to bridge that shape
+    // -- callers of the GameExports-level method never see the box).
+    // sv_ccmds.ts's SV_WriteServerFileKex/SV_ReadServerFileKex/
+    // SV_WriteLevelFileKex/SV_ReadLevelFileKex (the SSV2/SAV2 container)
+    // call these directly and own the FS_WriteFile/FS_LoadFile themselves,
+    // matching save.c's actual "engine owns files" split. WriteGame/
+    // ReadGame/WriteLevel/ReadLevel below are now thin filename<->string
+    // wrappers built on top of these instead of separately calling kexGe.
+    WriteGameJson: (autosave) => {
       const outSize: [number] = [0];
-      const json = kexGe.WriteGameJson(autosave, outSize);
+      return kexGe.WriteGameJson(autosave, outSize);
+    },
+    ReadGameJson: (json) => {
+      kexGe.ReadGameJson(json);
+      syncAllEdictsFields(kexGe);
+    },
+    WriteLevelJson: (transition) => {
+      const outSize: [number] = [0];
+      return kexGe.WriteLevelJson(transition, outSize);
+    },
+    ReadLevelJson: (json) => {
+      kexGe.ReadLevelJson(json);
+      syncAllEdictsFields(kexGe);
+    },
+
+    WriteGame: (filename, autosave) => {
+      const json = ge.WriteGameJson ? ge.WriteGameJson(autosave) : null;
       FS_WriteFile(filename, json ?? "");
     },
     ReadGame: (filename) => {
       const buf = FS_ReadRawFile(filename);
       if (buf === null) throw new Error(`LoadKexGame.ReadGame: couldn't open ${filename}`);
-      kexGe.ReadGameJson(new TextDecoder().decode(buf));
-      syncAllEdictsFields(kexGe);
+      if (ge.ReadGameJson) ge.ReadGameJson(new TextDecoder().decode(buf));
     },
     WriteLevel: (filename) => {
-      const outSize: [number] = [0];
       // No "transition" signal available at this call site -- full save is
       // the safe default. See file header.
-      const json = kexGe.WriteLevelJson(false, outSize);
+      const json = ge.WriteLevelJson ? ge.WriteLevelJson(false) : null;
       FS_WriteFile(filename, json ?? "");
     },
     ReadLevel: (filename) => {
       const buf = FS_ReadRawFile(filename);
       if (buf === null) throw new Error(`LoadKexGame.ReadLevel: couldn't open ${filename}`);
-      kexGe.ReadLevelJson(new TextDecoder().decode(buf));
-      syncAllEdictsFields(kexGe);
+      if (ge.ReadLevelJson) ge.ReadLevelJson(new TextDecoder().decode(buf));
     },
 
     ClientConnect: (ent, userinfo) => {
@@ -1046,6 +1079,7 @@ export function adaptKexGameExports(kexGe: KexGameExports): GameExports {
       kexGe.max_edicts = v;
     },
   };
+  return ge;
 }
 
 /*

@@ -222,6 +222,29 @@ export interface GameExports {
   WriteLevel(filename: string): void;
   ReadLevel(filename: string): void;
 
+  // Optional kex-family-only string seam, alongside the filename-taking
+  // WriteGame/ReadGame/WriteLevel/ReadLevel above: q2repro's save.c actually
+  // owns the on-disk savegame CONTAINER itself (SSV2/SAV2 -- magic, version,
+  // engine metadata) and only ever hands the game module a JSON string to
+  // produce or consume (`ge->WriteGameJson(...)`/`ge->ReadGameJson(buf)`,
+  // save.c:94/473), unlike the filename-based WriteGame/ReadGame/WriteLevel/
+  // ReadLevel contract above, which assumes the game module owns its own
+  // file I/O end-to-end (true for the legacy v3 game modules, never true
+  // for kex). The kex binding (bindings/kex.ts) is the only implementer;
+  // legacy game modules leave these undefined, since legacy.ts's
+  // adaptPackGameExports has no JSON-string save format to expose. The
+  // engine's SSV2/SAV2 container writer/reader (sv_ccmds.ts's
+  // SV_WriteServerFileKex/SV_ReadServerFileKex/SV_WriteLevelFileKex/
+  // SV_ReadLevelFileKex) calls these directly and does its own
+  // FS_WriteFile/FS_LoadFile, matching save.c's actual "engine owns files"
+  // split -- see bindings/kex.ts's file header for how WriteGame/ReadGame/
+  // WriteLevel/ReadLevel above are now built on top of these instead of
+  // duplicating the kexGe call.
+  WriteGameJson?(autosave: boolean): string | null;
+  ReadGameJson?(json: string): void;
+  WriteLevelJson?(transition: boolean): string | null;
+  ReadLevelJson?(json: string): void;
+
   // C mutates `userinfo` in place (the game DLL can inject a "rejmsg" key on
   // rejection) and returns qboolean; JS strings are immutable, so the
   // mutated userinfo and the accept/reject flag are both returned instead.
