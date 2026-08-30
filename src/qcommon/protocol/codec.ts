@@ -115,6 +115,55 @@ export interface ServerDataParamsT {
   serverState: number; // ServerStateT numeric value (sv.state)
 }
 
+// Added for the 1038 (q2repro) frame envelope (.orch/phase5-design.md phase 5
+// follow-up unit -- q2repro.ts's file header "KNOWN GAP: frame envelope").
+// The entity DIFF LOOP (which entities changed, in what order) stays a
+// sv_ents.ts/cl_ents.ts concern (matching q2proto's own split: the codec's
+// vanilla_server_write_frame_entity_delta/q2repro_server_write_frame_entity_delta
+// take one already-decided entity at a time) -- `writeFrame` only owns the
+// envelope SHAPE around that loop (whether packetentities gets its own
+// opcode, where the playerstate delta's bytes live relative to areabits),
+// which genuinely differs between protocol 34 and 1038
+// (q2proto_proto_q2repro.c:2206-2242's combined svc_frame envelope vs
+// protocol 34's three independent svc_frame/svc_playerinfo/svc_packetentities
+// messages).
+export interface FrameWriteParamsT {
+  framenum: number;
+  // The frame number to delta from, or -1 if none (client has no usable
+  // baseline / hasn't ack'd a message in too long) -- matches
+  // SV_WriteFrameToClient's existing `lastframe` local exactly.
+  lastframe: number;
+  surpressCount: number;
+  areabits: Uint8Array;
+  areabytes: number;
+  // null when there is no delta source (mirrors `oldframe ? oldframe.ps :
+  // new PlayerStateT()` -- both codecs perform that substitution themselves
+  // so callers never have to allocate a throwaway PlayerStateT).
+  psFrom: PlayerStateT | null;
+  psTo: PlayerStateT;
+}
+
+// Result of reading a frame envelope's header + areabits (everything BEFORE
+// the playerstate delta). Split from the playerstate/entity reads because
+// the client must look up its own delta-source frame (`cl.frames[deltaframe
+// & UPDATE_MASK]`, plus validity checks against `cl.parse_entities`) BEFORE
+// either of those can proceed, and that lookup needs client-global state
+// (`cl`) this qcommon-layer module does not import.
+export interface FrameHeaderT {
+  serverframe: number;
+  // -1 (no delta) or an actual old serverframe number. For vanilla this is
+  // the raw wire long; for q2repro it is reconstructed from the 5-bit
+  // offset packed into the top bits of the encoded frame number
+  // (q2proto_proto_q2repro.c:2206-2216/751-767). Either way, callers apply
+  // the SAME existing `<= 0` validity check (CL_ParseFrame), since q2repro's
+  // reconstructed value is either -1 or a small positive frame number.
+  deltaframe: number;
+  // See vanilla.ts's readFrameHeader / q2repro.ts's readFrameHeader for what
+  // this holds per protocol (q2repro never transmits a true multi-drop
+  // count -- see q2repro.ts's frame-envelope comment for the citation).
+  surpressCount: number;
+}
+
 export interface ProtocolCodec {
   // Identifies the codec for logging/diagnostics; not itself part of the
   // wire format. "vanilla" for protocol 34 (this step); "q2repro"/1038 is
@@ -153,6 +202,25 @@ export interface ProtocolCodec {
   // fields + stat bits).
   writePlayerStateDelta(msg: SizeBuf, from: PlayerStateT, to: PlayerStateT): void;
 
+  // Writes the packetentities section's OPENING framing: vanilla's leading
+  // svc_packetentities opcode byte; q2repro's is a no-op (1038's entity
+  // deltas follow the playerstate delta directly, no opcode --
+  // q2proto_struct_svc.h:530-536's "pseudo-message" doc comment). The diff
+  // loop that decides which entities to send stays in sv_ents.ts
+  // (SV_EmitPacketEntities); this only brackets it.
+  writePacketEntitiesBegin(msg: SizeBuf): void;
+
+  // Writes one complete svc_frame envelope: protocol-varying header bytes
+  // (framenum/delta encoding, per-protocol frame-flags byte), areabits, and
+  // the playerstate delta -- then invokes `writeEntities` (supplied by
+  // sv_ents.ts, already carrying the from/to entity lists this qcommon
+  // module doesn't own) at the correct point in the byte stream for the
+  // active protocol. See q2repro.ts's writeFrame for the 1038 envelope shape
+  // and q2proto.c citation; vanilla.ts's writeFrame reproduces
+  // SV_WriteFrameToClient/SV_WritePlayerstateToClient's pre-existing bytes
+  // exactly (golden-byte-locked, see test/protocol_frame_envelope.test.ts).
+  writeFrame(msg: SizeBuf, params: FrameWriteParamsT, writeEntities: (msg: SizeBuf) => void): void;
+
   // ---- client -> server writes / server-side reads -----------------------
 
   // Writes one clc_move usercmd_t delta (bits byte + changed fields + msec +
@@ -180,4 +248,29 @@ export interface ProtocolCodec {
   // PM_FREEZE override, applied by the caller after this returns -- see
   // vanilla.ts's readPlayerStateDelta doc comment).
   readPlayerStateDelta(msg: SizeBuf, from: PlayerStateT, to: PlayerStateT): void;
+
+  // Reads an svc_frame envelope's header + areabits (net_message singleton;
+  // see asymmetry note above). Fills `areabits` in place and returns the
+  // frame numbering/suppress info; does NOT touch playerstate or entities
+  // (see FrameHeaderT's doc comment for why those are separate calls).
+  // `readSuppressByte` threads through CL_ParseFrame's pre-existing "BIG
+  // HACK to let old demos continue to work" (protocol 26 never had a
+  // suppress-count byte on the wire) -- q2repro ignores it, since 1038 never
+  // coexisted with protocol 26.
+  readFrameHeader(areabits: Uint8Array, readSuppressByte: boolean): FrameHeaderT;
+
+  // Reads the playerstate-delta portion of a frame envelope into `to`,
+  // delta'd from `from`. Vanilla: consumes+validates the svc_playerinfo
+  // opcode byte, then behaves exactly like readPlayerStateDelta. q2repro:
+  // no opcode (the extraflags byte was already consumed by the immediately
+  // preceding readFrameHeader call -- see q2repro.ts for how that value is
+  // threaded through). Caller is responsible for the same post-processing
+  // readPlayerStateDelta's doc comment describes (attractloop override).
+  readFramePlayerstate(from: PlayerStateT, to: PlayerStateT): void;
+
+  // Reads the packetentities section's opening framing: the mirror image of
+  // writePacketEntitiesBegin. Vanilla consumes+validates the svc_packetentities
+  // opcode byte (throwing Com_Error(ERR_DROP, ...) on mismatch, matching the
+  // check this replaces in CL_ParseFrame); q2repro is a no-op.
+  readPacketEntitiesBegin(): void;
 }

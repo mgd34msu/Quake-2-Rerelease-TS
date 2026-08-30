@@ -106,30 +106,28 @@
 // Q2P_ERR_BAD_DATA rather than silently dropping vertical movement input.
 //
 // ---------------------------------------------------------------------------
-// KNOWN GAP: frame envelope (svc_frame combining playerstate + packetentities)
+// RESOLVED: frame envelope (svc_frame combining playerstate + packetentities)
 // ---------------------------------------------------------------------------
 // q2repro_server_write_frame (q2repro.c:2206-2242) bundles ONE svc_frame
 // message containing the frame-number+delta-offset encoding, a
 // q2pro_frame_flags byte, a reserved extraflags byte (patched in after
 // q2repro_server_write_playerstate computes it), areabits, AND the
-// playerstate delta -- packetentities follow as separate
-// Q2P_SVC_FRAME_ENTITY_DELTA messages. This is structurally different from
+// playerstate delta -- packetentities follow directly (no opcode --
+// Q2P_SVC_FRAME_ENTITY_DELTA is a reader-side "pseudo-message",
+// q2proto_struct_svc.h:530-536). This was structurally different from
 // protocol 34's three independent svc_frame / svc_playerinfo /
-// svc_packetentities messages that this engine's sv_ents.ts
-// (SV_WriteFrameToClient) still emits regardless of which codec is active.
-// This task ports the FIELD-level encodings (entity delta, playerstate
-// delta, usercmd delta, spawnbaseline, serverdata) byte-correctly and wires
-// codec SELECTION server-side (sv_game.ts), but does NOT restructure
-// sv_ents.ts's frame-emission pipeline into 1038's combined envelope shape --
-// that is a materially larger change to the per-client frame-send loop, not
-// a codec-seam addition, and is out of this unit's scope. Concretely: with
-// Q2REPRO_CODEC selected, this engine emits 1038-correct entity-delta/
-// playerstate-delta/spawnbaseline/serverdata BYTES, but still frames them
-// inside protocol-34-shaped svc_frame/svc_playerinfo/svc_packetentities
-// message boundaries -- a real external q2repro client would not parse this
-// stream. Wire interop with real q2repro clients requires that follow-up
-// restructuring; this unit's contract (byte-correct codec primitives, golden
-// tests, server-side selection) is met independent of it.
+// svc_packetentities messages, which src/server/sv_ents.ts
+// (SV_WriteFrameToClient) used to emit regardless of which codec was active
+// -- this note originally deferred that restructuring as a follow-up unit.
+// That follow-up is this file's `writeFrame`/`readFrameHeader`/
+// `readFramePlayerstate`/`writePacketEntitiesBegin` ops (see codec.ts's
+// FrameWriteParamsT/FrameHeaderT doc comments): sv_ents.ts's
+// SV_WriteFrameToClient and src/client/cl_ents.ts's CL_ParseFrame now both
+// route through `svs.codec`/`cls.codec`, so selecting Q2REPRO_CODEC produces
+// (and consumes) a real 1038-shaped envelope, not protocol-34-shaped framing
+// around 1038-encoded fields. The entity DIFF LOOP itself (deciding which
+// entities changed) stays in sv_ents.ts/cl_ents.ts on both sides, matching
+// q2proto's own split (see codec.ts's FrameWriteParamsT comment).
 //
 // ---------------------------------------------------------------------------
 // DOCUMENTED SIMPLIFICATION: origin/velocity change detection
@@ -165,8 +163,8 @@
 // port's pmove precision budget, not a new precision loss introduced here.
 
 import type { SizeBuf } from "../sizebuf";
-import { MSG_WriteByte, MSG_WriteShort, MSG_WriteLong, MSG_WriteFloat, MSG_WriteString, MSG_WriteDeltaUsercmd } from "../sizebuf";
-import { MSG_ReadByte, MSG_ReadShort, MSG_ReadLong, MSG_ReadFloat, MSG_ReadDeltaUsercmd } from "../sizebuf";
+import { MSG_WriteByte, MSG_WriteShort, MSG_WriteLong, MSG_WriteFloat, MSG_WriteString, MSG_WriteDeltaUsercmd, SZ_Write } from "../sizebuf";
+import { MSG_ReadByte, MSG_ReadShort, MSG_ReadLong, MSG_ReadFloat, MSG_ReadDeltaUsercmd, MSG_ReadData } from "../sizebuf";
 import {
   U_ORIGIN1,
   U_ORIGIN2,
@@ -223,7 +221,7 @@ import {
 } from "../qcommon";
 import { net_message } from "../net_chan";
 import { EntityStateT, PlayerStateT, type UsercmdT, ANGLE2SHORT, SHORT2ANGLE, RF_BEAM } from "../../shared/q_shared";
-import type { ProtocolCodec, ServerDataParamsT } from "./codec";
+import type { ProtocolCodec, ServerDataParamsT, FrameWriteParamsT, FrameHeaderT } from "./codec";
 import { VANILLA_CODEC } from "./vanilla";
 
 // ---------------------------------------------------------------------------
@@ -621,11 +619,28 @@ function writeSpawnBaseline(msg: SizeBuf, base: EntityStateT): void {
   writeDeltaEntity(msg, NULL_ENTITY_STATE, base, true, true);
 }
 
-// q2repro_server_write_playerstate, q2repro.c:2006-2204. See this file's
-// header "KNOWN GAP: frame envelope" note for why this is emitted as a
-// self-contained svc_playerinfo-tagged message rather than embedded in a
-// combined svc_frame envelope.
-function writePlayerStateDelta(msg: SizeBuf, from: PlayerStateT, to: PlayerStateT): void {
+// Result of computing (but not yet writing) a q2repro playerstate delta.
+// Split out of writePlayerStateDelta so the frame envelope (writeFrame,
+// below) can place `extraflags` at 1038's real wire position -- right after
+// the frame's q2pro_frame_flags byte, BEFORE areabits
+// (q2proto_proto_q2repro.c:2206-2242's `q2protoio_write_reserve_raw`/patch
+// dance) -- while writeFlags()+writeBody() still land `flags` and the field
+// bytes at their normal position after areabits. writePlayerStateDelta
+// (the public, standalone-message op; unchanged wire format, still
+// golden-tested by test/protocol_q2repro.test.ts) is now a thin wrapper
+// around this that reproduces its original opcode+flags+extraflags+fields
+// order exactly.
+interface PlayerStateDeltaEncodedT {
+  flags: number;
+  extraflags: number;
+  writeFlags(msg: SizeBuf): void;
+  writeBody(msg: SizeBuf): void;
+}
+
+// q2repro_server_write_playerstate, q2repro.c:2006-2204 (the bit-computation
+// half, q2repro.c:2006-2065; the "write it" half is writeFlags/writeBody
+// below).
+function encodePlayerStateDelta(from: PlayerStateT, to: PlayerStateT): PlayerStateDeltaEncodedT {
   let flags = 0;
   let extraflags = 0;
 
@@ -746,81 +761,96 @@ function writePlayerStateDelta(msg: SizeBuf, from: PlayerStateT, to: PlayerState
   // q2proto gates it behind an opt-in servercontext feature this port
   // doesn't enable (q2proto_struct_svc.h:458).
 
-  //
-  // write it
-  //
+  return {
+    flags,
+    extraflags,
+    writeFlags(msg: SizeBuf): void {
+      MSG_WriteShort(msg, flags);
+    },
+    writeBody(msg: SizeBuf): void {
+      if (flags & PS_M_TYPE) MSG_WriteByte(msg, to.pmove.pm_type);
+      if (flags & PS_M_ORIGIN) {
+        MSG_WriteFloat(msg, toOriginF[0]);
+        MSG_WriteFloat(msg, toOriginF[1]);
+      }
+      if (extraflags & EPS_M_ORIGIN2) MSG_WriteFloat(msg, toOriginF[2]);
+      if (flags & PS_M_VELOCITY) {
+        MSG_WriteFloat(msg, toVelF[0]);
+        MSG_WriteFloat(msg, toVelF[1]);
+      }
+      if (extraflags & EPS_M_VELOCITY2) MSG_WriteFloat(msg, toVelF[2]);
+      if (flags & PS_M_TIME) MSG_WriteShort(msg, to.pmove.pm_time);
+      if (flags & PS_M_FLAGS) MSG_WriteShort(msg, to.pmove.pm_flags);
+      if (flags & PS_M_GRAVITY) MSG_WriteShort(msg, to.pmove.gravity);
+      if (flags & PS_M_DELTA_ANGLES) {
+        MSG_WriteShort(msg, to.pmove.delta_angles[0]);
+        MSG_WriteShort(msg, to.pmove.delta_angles[1]);
+        MSG_WriteShort(msg, to.pmove.delta_angles[2]);
+      }
+
+      if (flags & PS_VIEWOFFSET) {
+        MSG_WriteShort(msg, toViewoffset[0]);
+        MSG_WriteShort(msg, toViewoffset[1]);
+        MSG_WriteShort(msg, toViewoffset[2]);
+      }
+      if (flags & PS_VIEWANGLES) {
+        MSG_WriteShort(msg, toViewangleShort[0]);
+        MSG_WriteShort(msg, toViewangleShort[1]);
+      }
+      if (extraflags & EPS_VIEWANGLE2) MSG_WriteShort(msg, toViewangleShort[2]);
+
+      if (flags & PS_KICKANGLES) {
+        MSG_WriteShort(msg, toKick[0]);
+        MSG_WriteShort(msg, toKick[1]);
+        MSG_WriteShort(msg, toKick[2]);
+      }
+
+      if (flags & PS_WEAPONINDEX) {
+        const gunIndexAndSkin = (to.gunindex & 0xffff) | ((to.gunskin << Q2PRO_GUNINDEX_BITS) & 0xffff);
+        MSG_WriteShort(msg, gunIndexAndSkin);
+      }
+      if (flags & PS_WEAPONFRAME) MSG_WriteShort(msg, to.gunframe);
+      if (extraflags & EPS_GUNOFFSET) {
+        MSG_WriteShort(msg, toGunoffset[0]);
+        MSG_WriteShort(msg, toGunoffset[1]);
+        MSG_WriteShort(msg, toGunoffset[2]);
+      }
+      if (extraflags & EPS_GUNANGLES) {
+        MSG_WriteShort(msg, toGunangles[0]);
+        MSG_WriteShort(msg, toGunangles[1]);
+        MSG_WriteShort(msg, toGunangles[2]);
+      }
+
+      if (flags & PS_BLEND) {
+        MSG_WriteByte(msg, (blendBits & 0xf) | ((damageBlendBits & 0xf) << 4));
+        for (let i = 0; i < 4; i++) if (blendBits & (1 << i)) MSG_WriteByte(msg, byteColor(to.blend[i]));
+        for (let i = 0; i < 4; i++) if (damageBlendBits & (1 << i)) MSG_WriteByte(msg, byteColor(to.damage_blend[i]));
+      }
+      if (flags & PS_FOV) MSG_WriteByte(msg, to.fov);
+      if (flags & PS_RDFLAGS) MSG_WriteByte(msg, to.rdflags);
+
+      if (extraflags & EPS_STATS) {
+        MSG_WriteLong(msg, statbits); // low 32 bits (this port's 32-slot stats array)
+        MSG_WriteLong(msg, 0); // high 32 bits: always 0 -- see file header's 64-slot-stats gap note
+        for (let i = 0; i < to.stats.length; i++) if (statbits & (1 << i)) MSG_WriteShort(msg, to.stats[i]);
+      }
+
+      if (extraflags & EPS_GUNRATE) MSG_WriteByte(msg, to.gunrate);
+    },
+  };
+}
+
+// Public op (unchanged wire format from before the frame-envelope refactor --
+// still a self-contained svc_playerinfo-tagged message; golden-tested by
+// test/protocol_q2repro.test.ts). Reproduces the exact opcode/flags/
+// extraflags/fields order encodePlayerStateDelta's split now computes
+// separately.
+function writePlayerStateDelta(msg: SizeBuf, from: PlayerStateT, to: PlayerStateT): void {
+  const enc = encodePlayerStateDelta(from, to);
   MSG_WriteByte(msg, SvcOpsT.svc_playerinfo);
-  MSG_WriteShort(msg, flags);
-  MSG_WriteByte(msg, extraflags);
-
-  if (flags & PS_M_TYPE) MSG_WriteByte(msg, to.pmove.pm_type);
-  if (flags & PS_M_ORIGIN) {
-    MSG_WriteFloat(msg, toOriginF[0]);
-    MSG_WriteFloat(msg, toOriginF[1]);
-  }
-  if (extraflags & EPS_M_ORIGIN2) MSG_WriteFloat(msg, toOriginF[2]);
-  if (flags & PS_M_VELOCITY) {
-    MSG_WriteFloat(msg, toVelF[0]);
-    MSG_WriteFloat(msg, toVelF[1]);
-  }
-  if (extraflags & EPS_M_VELOCITY2) MSG_WriteFloat(msg, toVelF[2]);
-  if (flags & PS_M_TIME) MSG_WriteShort(msg, to.pmove.pm_time);
-  if (flags & PS_M_FLAGS) MSG_WriteShort(msg, to.pmove.pm_flags);
-  if (flags & PS_M_GRAVITY) MSG_WriteShort(msg, to.pmove.gravity);
-  if (flags & PS_M_DELTA_ANGLES) {
-    MSG_WriteShort(msg, to.pmove.delta_angles[0]);
-    MSG_WriteShort(msg, to.pmove.delta_angles[1]);
-    MSG_WriteShort(msg, to.pmove.delta_angles[2]);
-  }
-
-  if (flags & PS_VIEWOFFSET) {
-    MSG_WriteShort(msg, toViewoffset[0]);
-    MSG_WriteShort(msg, toViewoffset[1]);
-    MSG_WriteShort(msg, toViewoffset[2]);
-  }
-  if (flags & PS_VIEWANGLES) {
-    MSG_WriteShort(msg, toViewangleShort[0]);
-    MSG_WriteShort(msg, toViewangleShort[1]);
-  }
-  if (extraflags & EPS_VIEWANGLE2) MSG_WriteShort(msg, toViewangleShort[2]);
-
-  if (flags & PS_KICKANGLES) {
-    MSG_WriteShort(msg, toKick[0]);
-    MSG_WriteShort(msg, toKick[1]);
-    MSG_WriteShort(msg, toKick[2]);
-  }
-
-  if (flags & PS_WEAPONINDEX) {
-    const gunIndexAndSkin = (to.gunindex & 0xffff) | ((to.gunskin << Q2PRO_GUNINDEX_BITS) & 0xffff);
-    MSG_WriteShort(msg, gunIndexAndSkin);
-  }
-  if (flags & PS_WEAPONFRAME) MSG_WriteShort(msg, to.gunframe);
-  if (extraflags & EPS_GUNOFFSET) {
-    MSG_WriteShort(msg, toGunoffset[0]);
-    MSG_WriteShort(msg, toGunoffset[1]);
-    MSG_WriteShort(msg, toGunoffset[2]);
-  }
-  if (extraflags & EPS_GUNANGLES) {
-    MSG_WriteShort(msg, toGunangles[0]);
-    MSG_WriteShort(msg, toGunangles[1]);
-    MSG_WriteShort(msg, toGunangles[2]);
-  }
-
-  if (flags & PS_BLEND) {
-    MSG_WriteByte(msg, (blendBits & 0xf) | ((damageBlendBits & 0xf) << 4));
-    for (let i = 0; i < 4; i++) if (blendBits & (1 << i)) MSG_WriteByte(msg, byteColor(to.blend[i]));
-    for (let i = 0; i < 4; i++) if (damageBlendBits & (1 << i)) MSG_WriteByte(msg, byteColor(to.damage_blend[i]));
-  }
-  if (flags & PS_FOV) MSG_WriteByte(msg, to.fov);
-  if (flags & PS_RDFLAGS) MSG_WriteByte(msg, to.rdflags);
-
-  if (extraflags & EPS_STATS) {
-    MSG_WriteLong(msg, statbits); // low 32 bits (this port's 32-slot stats array)
-    MSG_WriteLong(msg, 0); // high 32 bits: always 0 -- see file header's 64-slot-stats gap note
-    for (let i = 0; i < to.stats.length; i++) if (statbits & (1 << i)) MSG_WriteShort(msg, to.stats[i]);
-  }
-
-  if (extraflags & EPS_GUNRATE) MSG_WriteByte(msg, to.gunrate);
+  enc.writeFlags(msg);
+  MSG_WriteByte(msg, enc.extraflags);
+  enc.writeBody(msg);
 }
 
 // ---------------------------------------------------------------------------
@@ -951,7 +981,12 @@ function readDeltaEntity(from: EntityStateT, to: EntityStateT, number: number, b
   if (bitsHasHi(bits, HI_SCALE)) to.scale = decodeScale(MSG_ReadByte(net_message));
 }
 
-function readPlayerStateDelta(msg: SizeBuf, from: PlayerStateT, to: PlayerStateT): void {
+// Mirror of encodePlayerStateDelta's write-side split: reads the field body
+// given an already-known `flags`/`extraflags` pair, WITHOUT reading them
+// from `msg` itself (their wire position differs between the standalone
+// svc_playerinfo message and the 1038 frame envelope -- see readFrame's
+// comment below for where the frame envelope reads them from instead).
+function readPlayerStateFields(msg: SizeBuf, from: PlayerStateT, to: PlayerStateT, flags: number, extraflags: number): void {
   to.pmove.pm_type = from.pmove.pm_type;
   to.pmove.origin.set(from.pmove.origin);
   to.pmove.velocity.set(from.pmove.velocity);
@@ -973,9 +1008,6 @@ function readPlayerStateDelta(msg: SizeBuf, from: PlayerStateT, to: PlayerStateT
   to.fov = from.fov;
   to.rdflags = from.rdflags;
   to.stats.set(from.stats);
-
-  const flags = MSG_ReadShort(msg);
-  const extraflags = MSG_ReadByte(msg);
 
   if (flags & PS_M_TYPE) to.pmove.pm_type = MSG_ReadByte(msg);
 
@@ -1074,6 +1106,133 @@ function readPlayerStateDelta(msg: SizeBuf, from: PlayerStateT, to: PlayerStateT
   if (extraflags & EPS_GUNRATE) to.gunrate = MSG_ReadByte(msg);
 }
 
+// Public op (unchanged wire format): reads flags(u16)+extraflags(u8) from
+// `msg` itself, then delegates to the shared field-reading body.
+function readPlayerStateDelta(msg: SizeBuf, from: PlayerStateT, to: PlayerStateT): void {
+  const flags = MSG_ReadShort(msg);
+  const extraflags = MSG_ReadByte(msg);
+  readPlayerStateFields(msg, from, to, flags, extraflags);
+}
+
+// ---------------------------------------------------------------------------
+// frame envelope (q2repro_server_write_frame / q2repro_client_read_frame,
+// q2proto_proto_q2repro.c:2206-2242 / :751-784). See this file's header
+// "KNOWN GAP: frame envelope" note -- this is that follow-up.
+// ---------------------------------------------------------------------------
+
+// q2proto_struct_svc.h:546's `q2pro_frame_flags` (masked to 0x0F on read,
+// q2repro.c:770) reuses q2pro's older FF_* frame-flags namespace
+// (qsrc/q2repro/inc/common/protocol.h:468-471 -- NOT the same bits as
+// Q2PRO_PF_* handshake flags in ServerDataParamsT/writeServerData). Real
+// q2repro (qsrc/q2repro/src/server/entities.c:394 `message.frame.q2pro_frame_flags
+// = client->frameflags`, set from send.c:81,881 `client->frameflags |=
+// FF_SUPPRESSED`) only ever sets FF_SUPPRESSED from this engine's
+// equivalent mechanism (client.surpressCount, a rate-drop counter). This
+// port has no client-drop/client-prediction-suppression state to map to
+// FF_CLIENTDROP(2)/FF_CLIENTPRED(4) (r1q2/q2pro extended-protocol features
+// this engine never implemented -- see codec.ts's "excluded" list), so
+// those bits are never set; FF_RESERVED(8) is, per its name, always 0.
+const FF_SUPPRESSED = 1 << 0;
+
+// q2repro's `suppress_count` struct field (q2proto_struct_svc.h:541) is
+// never actually read off the wire by q2repro_client_read_frame (q2repro.c:
+// 751-784 has no suppress_count read at all -- confirmed by grep) or written
+// by q2repro_server_write_frame (q2repro.c:2196-2242 never writes it
+// either), so this codec can only reconstruct the boolean fact "at least one
+// packet was suppressed" from FF_SUPPRESSED, not the real multi-drop count
+// vanilla's byte carries. cl_scrn.ts's only consumer (a debug netgraph loop,
+// `for (i = 0; i < cl.surpressCount; i++)`) is cosmetic, so collapsing to
+// 0-or-1 here is a safe, documented simplification.
+function encodeFrameFlags(surpressCount: number): number {
+  return surpressCount !== 0 ? FF_SUPPRESSED : 0;
+}
+function decodeFrameFlags(frameFlags: number): number {
+  return frameFlags & FF_SUPPRESSED ? 1 : 0;
+}
+
+function writePacketEntitiesBegin(_msg: SizeBuf): void {
+  // 1038 has no svc_packetentities opcode: entity deltas follow the
+  // playerstate delta directly (q2proto_struct_svc.h:530-536's
+  // Q2P_SVC_FRAME_ENTITY_DELTA "pseudo-message" doc comment -- there is no
+  // real per-message header on the wire, only a reader-side abstraction).
+}
+
+// q2repro_server_write_frame, q2repro.c:2206-2242.
+function writeFrame(msg: SizeBuf, params: FrameWriteParamsT, writeEntities: (msg: SizeBuf) => void): void {
+  MSG_WriteByte(msg, SvcOpsT.svc_frame);
+
+  // we don't need full 32bits for framenum - 27 gives enough for 155 days on
+  // the same map :) (q2repro.c:2199-2200's comment, preserved)
+  const deltaframe = params.lastframe;
+  const offset = deltaframe === -1 ? 31 : params.framenum - deltaframe; // 31: special case (q2repro.c:2210-2213)
+  const encodedFrame = (params.framenum & 0x07ffffff) | (offset << 27);
+  MSG_WriteLong(msg, encodedFrame);
+
+  MSG_WriteByte(msg, encodeFrameFlags(params.surpressCount));
+
+  // The reserved extraflags byte (q2repro.c:2219-2221's
+  // q2protoio_write_reserve_raw + later patch): this engine has no
+  // reserve/patch primitive, but since JS evaluation order is caller-
+  // controlled (unlike C writing sequentially into a fixed stream), the same
+  // byte VALUE is available immediately by computing the playerstate delta
+  // now and simply writing extraflags at its real wire position (right here,
+  // before areabits) instead of patching it in later. `enc.writeFlags`/
+  // `enc.writeBody` (called after areabits, matching q2repro.c's actual call
+  // site for q2repro_server_write_playerstate) land `flags`/the field bytes
+  // at their correct, later position.
+  const enc = encodePlayerStateDelta(params.psFrom ?? new PlayerStateT(), params.psTo);
+  MSG_WriteByte(msg, enc.extraflags);
+
+  // write areabits
+  MSG_WriteByte(msg, params.areabytes);
+  SZ_Write(msg, params.areabits, params.areabytes);
+
+  enc.writeFlags(msg);
+  enc.writeBody(msg);
+
+  // delta encode the entities (q2repro_server_write_frame_entity_delta,
+  // q2repro.c:2244-2260 -- no leading opcode, see writePacketEntitiesBegin)
+  writeEntities(msg);
+}
+
+// Carries q2repro's frame-embedded extraflags byte from readFrameHeader to
+// the immediately-following readFramePlayerstate call -- the read-side
+// mirror of writeFrame's "no reserve/patch primitive" note above, and a
+// faithful (if simpler) stand-in for q2proto's own context-carried state
+// machine (q2repro_client_read_frame hands off via
+// `context->client_read = q2repro_client_read_delta_entities`). Safe because
+// message parsing is synchronous and single-message-at-a-time (same
+// assumption net_message's own singleton already relies on).
+let pendingFrameExtraflags = 0;
+
+// q2repro_client_read_frame, q2repro.c:751-784 (the header/areabits half;
+// the playerstate half is readFramePlayerstate below).
+function readFrameHeader(areabits: Uint8Array, _readSuppressByte: boolean): FrameHeaderT {
+  const encodedFrame = MSG_ReadLong(net_message);
+  const offset = encodedFrame >>> 27; // top 5 bits, unsigned (q2repro.c:757-758)
+  const serverframe = encodedFrame & 0x07ffffff;
+  const deltaframe = offset === 31 ? -1 : serverframe - offset;
+
+  const frameFlags = MSG_ReadByte(net_message) & 0x0f;
+  pendingFrameExtraflags = MSG_ReadByte(net_message);
+
+  const len = MSG_ReadByte(net_message);
+  MSG_ReadData(net_message, areabits, len);
+
+  return { serverframe, deltaframe, surpressCount: decodeFrameFlags(frameFlags) };
+}
+
+// q2repro_client_read_frame's playerstate call (q2repro.c:780), using the
+// extraflags byte readFrameHeader already consumed.
+function readFramePlayerstate(from: PlayerStateT, to: PlayerStateT): void {
+  const flags = MSG_ReadShort(net_message);
+  readPlayerStateFields(net_message, from, to, flags, pendingFrameExtraflags);
+}
+
+function readPacketEntitiesBegin(): void {
+  // no opcode to consume -- see writePacketEntitiesBegin.
+}
+
 export const Q2REPRO_CODEC: ProtocolCodec = {
   name: "q2repro",
   writeServerData,
@@ -1082,9 +1241,14 @@ export const Q2REPRO_CODEC: ProtocolCodec = {
   writePacketEntitiesEnd,
   writeSpawnBaseline,
   writePlayerStateDelta,
+  writePacketEntitiesBegin,
+  writeFrame,
   writeDeltaUsercmd,
   readDeltaUsercmd,
   readEntityBits,
   readDeltaEntity,
+  readFrameHeader,
+  readFramePlayerstate,
+  readPacketEntitiesBegin,
   readPlayerStateDelta,
 };

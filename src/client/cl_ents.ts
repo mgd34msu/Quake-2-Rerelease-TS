@@ -59,13 +59,11 @@ import {
 } from "../shared/q_shared";
 import type { ModelS } from "./ref";
 import { EntityT } from "./ref";
-import { cl, cls, ConnstateT, cl_entities, cl_parse_entities, MAX_PARSE_ENTITIES, FrameT, clCvars, gun_frame, gun_model, MAX_CLIENTWEAPONMODELS, re, svc_strings } from "./client";
+import { cl, cls, ConnstateT, cl_entities, cl_parse_entities, MAX_PARSE_ENTITIES, FrameT, clCvars, gun_frame, gun_model, MAX_CLIENTWEAPONMODELS, re } from "./client";
 import { net_message } from "../qcommon/net_chan";
-import { MSG_ReadByte, MSG_ReadLong, MSG_ReadData } from "../qcommon/sizebuf";
-import { SvcOpsT, UPDATE_MASK, ERR_DROP, U_REMOVE } from "../qcommon/qcommon";
+import { UPDATE_MASK, ERR_DROP, U_REMOVE } from "../qcommon/qcommon";
 import { Com_Error, Com_Printf, Com_ServerState } from "../qcommon/common";
 import { sv, ServerStateT } from "../server/server";
-import { SHOWNET } from "./cl_parse";
 import {
   CL_RocketTrail,
   CL_DiminishingTrail,
@@ -380,7 +378,7 @@ function CL_ParsePlayerstate(oldframe: FrameT | null, newframe: FrameT): void {
     newframe.playerstate = target;
   }
 
-  cls.codec.readPlayerStateDelta(net_message, from, target);
+  cls.codec.readFramePlayerstate(from, target);
 
   if (cl.attractloop) target.pmove.pm_type = PmTypeT.PM_FREEZE; // demo playback
 }
@@ -413,13 +411,20 @@ export function CL_ParseFrame(): void {
   // convention for the identical reason).
   cl.frame = new FrameT();
 
-  cl.frame.serverframe = MSG_ReadLong(net_message);
-  cl.frame.deltaframe = MSG_ReadLong(net_message);
+  // Header + areabits: envelope shape (framenum/delta encoding, per-protocol
+  // frame-flags byte) is now owned by cls.codec (ARCHITECTURE.md "Protocol
+  // layer" / .orch/phase5-design.md phase 5 -- q2repro.ts's file header
+  // "RESOLVED: frame envelope" note). `readSuppressByte` threads through the
+  // pre-existing "BIG HACK to let old demos continue to work" (protocol 26
+  // never had a suppress-count byte on the wire).
+  const readSuppressByte = cls.serverProtocol !== 26;
+  const header = cls.codec.readFrameHeader(cl.frame.areabits, readSuppressByte);
+  cl.frame.serverframe = header.serverframe;
+  cl.frame.deltaframe = header.deltaframe;
   const frameTimeMs = CL_FrameTimeMs();
   cl.frame.servertime = cl.frame.serverframe * frameTimeMs;
 
-  // BIG HACK to let old demos continue to work
-  if (cls.serverProtocol !== 26) cl.surpressCount = MSG_ReadByte(net_message);
+  if (readSuppressByte) cl.surpressCount = header.surpressCount;
 
   if (clCvars.cl_shownet?.value === 3) Com_Printf("   frame:%i  delta:%i\n", cl.frame.serverframe, cl.frame.deltaframe);
 
@@ -453,20 +458,19 @@ export function CL_ParseFrame(): void {
   if (cl.time > cl.frame.servertime) cl.time = cl.frame.servertime;
   else if (cl.time < cl.frame.servertime - frameTimeMs) cl.time = cl.frame.servertime - frameTimeMs;
 
-  // read areabits
-  const len = MSG_ReadByte(net_message);
-  MSG_ReadData(net_message, cl.frame.areabits, len);
-
-  // read playerinfo
-  let cmd = MSG_ReadByte(net_message);
-  SHOWNET(svc_strings[cmd] ?? "");
-  if (cmd !== SvcOpsT.svc_playerinfo) Com_Error(ERR_DROP, "CL_ParseFrame: not playerinfo");
+  // read playerinfo (opcode boundary, if any, is cls.codec's concern -- see
+  // ProtocolCodec.readFramePlayerstate; vanilla still validates
+  // svc_playerinfo the way this used to inline). NOTE: the cl_shownet>=2
+  // per-submessage opcode print this used to do inline for svc_playerinfo/
+  // svc_packetentities is dropped now that the opcode read moved inside the
+  // codec seam (q2repro has no such opcode to print); cl_shownet>=3's
+  // per-entity delta/baseline/remove prints inside CL_ParsePacketEntities
+  // are unaffected.
   CL_ParsePlayerstate(old, cl.frame);
 
-  // read packet entities
-  cmd = MSG_ReadByte(net_message);
-  SHOWNET(svc_strings[cmd] ?? "");
-  if (cmd !== SvcOpsT.svc_packetentities) Com_Error(ERR_DROP, "CL_ParseFrame: not packetentities");
+  // read packet entities (opcode boundary, if any, is cls.codec's concern --
+  // see ProtocolCodec.readPacketEntitiesBegin)
+  cls.codec.readPacketEntitiesBegin();
   CL_ParsePacketEntities(old, cl.frame);
 
   // save the frame off in the backup array for later delta comparisons

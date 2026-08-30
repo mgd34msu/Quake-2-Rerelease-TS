@@ -72,8 +72,11 @@ import {
   MSG_ReadAngle16,
   MSG_ReadCoord,
   MSG_ReadPos,
+  MSG_ReadData,
+  SZ_Write,
 } from "../sizebuf";
 import { PROTOCOL_VERSION } from "../qcommon";
+import { Com_Error } from "../common";
 import {
   U_REMOVE,
   U_NUMBER16,
@@ -118,11 +121,12 @@ import {
   PS_WEAPONINDEX,
   PS_WEAPONFRAME,
   PS_RDFLAGS,
+  ERR_DROP,
 } from "../qcommon";
 import { net_message } from "../net_chan";
 import { EntityStateT, PlayerStateT, type UsercmdT, MAX_STATS } from "../../shared/q_shared";
 import { VectorCopy } from "../../shared/math";
-import type { ProtocolCodec, ServerDataParamsT } from "./codec";
+import type { ProtocolCodec, ServerDataParamsT, FrameWriteParamsT, FrameHeaderT } from "./codec";
 
 // Reused across writeSpawnBaseline calls (MSG_WriteDeltaEntity only ever
 // reads `from`'s fields, never writes them, so one shared zero-valued
@@ -170,6 +174,12 @@ function writeEntityRemove(msg: SizeBuf, oldnum: number): void {
 // `MSG_WriteShort(msg, 0)` after the diff loop).
 function writePacketEntitiesEnd(msg: SizeBuf): void {
   MSG_WriteShort(msg, 0);
+}
+
+// Extracted from src/server/sv_ents.ts's SV_EmitPacketEntities (the leading
+// `MSG_WriteByte(msg, SvcOpsT.svc_packetentities)` before the diff loop).
+function writePacketEntitiesBegin(msg: SizeBuf): void {
+  MSG_WriteByte(msg, SvcOpsT.svc_packetentities);
 }
 
 // Extracted from the two-line pattern duplicated in src/server/sv_user.ts's
@@ -322,6 +332,32 @@ function writePlayerStateDelta(msg: SizeBuf, from: PlayerStateT, to: PlayerState
   for (let i = 0; i < MAX_STATS; i++) if (ps.stats[i] !== ops.stats[i]) statbits |= 1 << i;
   MSG_WriteLong(msg, statbits);
   for (let i = 0; i < MAX_STATS; i++) if (statbits & (1 << i)) MSG_WriteShort(msg, ps.stats[i]);
+}
+
+// Extracted verbatim (byte-for-byte) from src/server/sv_ents.ts's
+// SV_WriteFrameToClient + its private SV_WritePlayerstateToClient helper
+// (the `ops = from ? from.ps : new PlayerStateT()` null-coalescing this
+// codec's writePlayerStateDelta op already performs on its `from` param, so
+// it's reproduced here identically via `params.psFrom ?? new
+// PlayerStateT()`). The entity diff loop (`writeEntities`, sv_ents.ts's
+// SV_EmitPacketEntities) is invoked at exactly the point
+// SV_WriteFrameToClient used to call it -- byte-identity gate:
+// test/protocol_frame_envelope.test.ts.
+function writeFrame(msg: SizeBuf, params: FrameWriteParamsT, writeEntities: (msg: SizeBuf) => void): void {
+  MSG_WriteByte(msg, SvcOpsT.svc_frame);
+  MSG_WriteLong(msg, params.framenum);
+  MSG_WriteLong(msg, params.lastframe); // what we are delta'ing from
+  MSG_WriteByte(msg, params.surpressCount); // rate dropped packets
+
+  // send over the areabits
+  MSG_WriteByte(msg, params.areabytes);
+  SZ_Write(msg, params.areabits, params.areabytes);
+
+  // delta encode the playerstate
+  writePlayerStateDelta(msg, params.psFrom ?? new PlayerStateT(), params.psTo);
+
+  // delta encode the entities
+  writeEntities(msg);
 }
 
 // ---------------------------------------------------------------------------
@@ -558,6 +594,44 @@ function readPlayerStateDelta(msg: SizeBuf, from: PlayerStateT, to: PlayerStateT
   for (let i = 0; i < MAX_STATS; i++) if (statbits & (1 << i)) target.stats[i] = MSG_ReadShort(msg);
 }
 
+// Extracted from src/client/cl_ents.ts's CL_ParseFrame: the framenum/delta/
+// surpresscount/areabits-reading prefix, BEFORE the (still-separate)
+// svc_playerinfo/svc_packetentities opcode checks -- see readFramePlayerstate
+// and readPacketEntitiesBegin below for those, and codec.ts's FrameHeaderT
+// doc comment for why the old-frame lookup itself stays in cl_ents.ts.
+function readFrameHeader(areabits: Uint8Array, readSuppressByte: boolean): FrameHeaderT {
+  const serverframe = MSG_ReadLong(net_message);
+  const deltaframe = MSG_ReadLong(net_message);
+
+  // BIG HACK to let old demos continue to work (cl_ents.ts's original
+  // comment, preserved at the call site's boolean instead of the literal
+  // `cls.serverProtocol !== 26` check, which this qcommon-layer module
+  // cannot see `cls` to perform itself).
+  let surpressCount = 0;
+  if (readSuppressByte) surpressCount = MSG_ReadByte(net_message);
+
+  const len = MSG_ReadByte(net_message);
+  MSG_ReadData(net_message, areabits, len);
+
+  return { serverframe, deltaframe, surpressCount };
+}
+
+// Extracted from src/client/cl_ents.ts's CL_ParseFrame (the
+// "read playerinfo" opcode check) + readPlayerStateDelta above (unchanged,
+// called through).
+function readFramePlayerstate(from: PlayerStateT, to: PlayerStateT): void {
+  const cmd = MSG_ReadByte(net_message);
+  if (cmd !== SvcOpsT.svc_playerinfo) Com_Error(ERR_DROP, "CL_ParseFrame: not playerinfo");
+  readPlayerStateDelta(net_message, from, to);
+}
+
+// Extracted from src/client/cl_ents.ts's CL_ParseFrame (the
+// "read packet entities" opcode check).
+function readPacketEntitiesBegin(): void {
+  const cmd = MSG_ReadByte(net_message);
+  if (cmd !== SvcOpsT.svc_packetentities) Com_Error(ERR_DROP, "CL_ParseFrame: not packetentities");
+}
+
 export const VANILLA_CODEC: ProtocolCodec = {
   name: "vanilla",
   writeServerData,
@@ -566,9 +640,14 @@ export const VANILLA_CODEC: ProtocolCodec = {
   writePacketEntitiesEnd,
   writeSpawnBaseline,
   writePlayerStateDelta,
+  writePacketEntitiesBegin,
+  writeFrame,
   writeDeltaUsercmd,
   readDeltaUsercmd,
   readEntityBits,
   readDeltaEntity,
   readPlayerStateDelta,
+  readFrameHeader,
+  readFramePlayerstate,
+  readPacketEntitiesBegin,
 };

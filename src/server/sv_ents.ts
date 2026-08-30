@@ -63,7 +63,7 @@ decided entity at a time; the caller does the old/new list diff).
 =============
 */
 function SV_EmitPacketEntities(from: ClientFrameT | null, to: ClientFrameT, msg: SizeBuf): void {
-  MSG_WriteByte(msg, SvcOpsT.svc_packetentities);
+  svs.codec.writePacketEntitiesBegin(msg);
 
   const from_num_entities = from ? from.num_entities : 0;
 
@@ -124,16 +124,6 @@ function SV_EmitPacketEntities(from: ClientFrameT | null, to: ClientFrameT, msg:
 }
 
 /*
-=============
-SV_WritePlayerstateToClient
-
-=============
-*/
-function SV_WritePlayerstateToClient(from: ClientFrameT | null, to: ClientFrameT, msg: SizeBuf): void {
-  svs.codec.writePlayerStateDelta(msg, from ? from.ps : new PlayerStateT(), to.ps);
-}
-
-/*
 ==================
 SV_WriteFrameToClient
 ==================
@@ -159,21 +149,26 @@ export function SV_WriteFrameToClient(client: ClientT, msg: SizeBuf): void {
     lastframe = client.lastframe;
   }
 
-  MSG_WriteByte(msg, SvcOpsT.svc_frame);
-  MSG_WriteLong(msg, sv.framenum);
-  MSG_WriteLong(msg, lastframe); // what we are delta'ing from
-  MSG_WriteByte(msg, client.surpressCount); // rate dropped packets
+  // Envelope shape (svc_frame opcode, framenum/delta encoding, areabits,
+  // playerstate delta, packetentities framing) is now owned by svs.codec
+  // (ARCHITECTURE.md "Protocol layer" / .orch/phase5-design.md phase 5 --
+  // q2repro.ts's file header "RESOLVED: frame envelope" note). The entity
+  // diff loop (SV_EmitPacketEntities) stays here since it needs svs/sv
+  // globals this qcommon-layer codec module doesn't import.
+  svs.codec.writeFrame(
+    msg,
+    {
+      framenum: sv.framenum,
+      lastframe,
+      surpressCount: client.surpressCount,
+      areabits: frame.areabits,
+      areabytes: frame.areabytes,
+      psFrom: oldframe ? oldframe.ps : null,
+      psTo: frame.ps,
+    },
+    (m) => SV_EmitPacketEntities(oldframe, frame, m),
+  );
   client.surpressCount = 0;
-
-  // send over the areabits
-  MSG_WriteByte(msg, frame.areabytes);
-  SZ_Write(msg, frame.areabits, frame.areabytes);
-
-  // delta encode the playerstate
-  SV_WritePlayerstateToClient(oldframe, frame, msg);
-
-  // delta encode the entities
-  SV_EmitPacketEntities(oldframe, frame, msg);
 }
 
 /*
