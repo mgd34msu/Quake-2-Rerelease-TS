@@ -12,8 +12,9 @@
 // are NOT ported -- this is a deliberately partial file, reported as a
 // follow-up rather than silently completed.
 
-import { MAX_INFO_STRING, PRINT_CHAT, PRINT_LOW } from "../shared/q_shared";
-import { type EdictT, g_edicts, game, gameCvars } from "./g_local";
+import { ATTN_NONE, MAX_INFO_STRING, PRINT_CHAT, PRINT_HIGH, PRINT_LOW } from "../shared/q_shared";
+import { blueflag, CHAN_CTF, type EdictT, FRAMETIME, g_edicts, game, gameCvars, gi, type GItemT, level, redflag } from "./g_local";
+import { SolidT } from "./game";
 import { G_FreeEdict } from "./g_utils";
 
 // lmctf60/g_ctffunc.h
@@ -152,6 +153,171 @@ this source snapshot, so there is nothing to preserve here, just citing
 the comment since it explains why this line looks unremarkable.
 =================
 */
+/*
+=================
+ctf_BSafePrint (lmctf60/g_ctffunc.c:1526)
+
+Broadcasts `buf` to every valid player via ctf_SafePrint (queueing half
+only, see that function's own doc comment) plus an unconditional
+gi.dprintf(buf) to the server console -- the C source's own commented-out
+`ctf_SafePrint(ent, ...)` loop-by-index (lines above the real
+ctf_findplayer loop below) is dead code, not reproduced, same rationale as
+ctf_findplayer's own dead G_Find comment.
+=================
+*/
+export function ctf_BSafePrint(print_priority: number, buf: string): void {
+  gi.dprintf(buf);
+
+  let ent = ctf_findplayer(null, null, CTF_TEAM_IGNORETEAM);
+  while (ent !== null) {
+    ctf_SafePrint(ent, print_priority, buf);
+    ent = ctf_findplayer(ent, null, CTF_TEAM_IGNORETEAM);
+  }
+}
+
+/*
+=================
+ctf_resetflagandplayer (lmctf60/g_ctffunc.c:334)
+
+NOT PORTED: resets a flag to its home position and (optionally) strips the
+flag from whichplayer's inventory/HUD state -- a substantial function
+(carrier bookkeeping, HUD updates, team broadcast) genuinely out of this
+unit's SCOPE (g_ctffunc.ts's own file header already documents "flag
+home/reset/spawn/touch" as NOT ported). Thrown with citation so
+ctf_flagwave's auto-return branch below fails loudly instead of silently
+no-opping when it's actually reached.
+=================
+*/
+function ctf_resetflagandplayer(whichflag: EdictT, whichplayer: EdictT | null): boolean {
+  throw new Error(
+    "ctf_resetflagandplayer (lmctf60/g_ctffunc.c:334) is not ported -- flag home/reset is out of this unit's SCOPE, see this file's header",
+  );
+}
+
+/*
+=================
+ctf_flagwave (lmctf60/g_ctffunc.c:605) -- flag animation think function.
+
+Cycles the flag's wave-animation frame every FRAMETIME while solid (dropped
+flags stop animating once picked back up and made SOLID_NOT by whatever
+picks them up), and auto-returns a flag that has sat dropped for 30+
+seconds with no valid carrier. The auto-return branch's actual reset
+(ctf_resetflagandplayer) is not ported -- see that function's own doc
+comment; ctf_flagwave still faithfully evaluates the guard condition and
+plays the correct team's return sound before hitting that throw, so a test
+asserting "an old dropped flag with no carrier tries to auto-return"
+observes the exact right behavior up to the documented gap.
+=================
+*/
+export function ctf_flagwave(ent: EdictT): void {
+  if (ent.solid !== SolidT.SOLID_NOT) {
+    ent.s.frame = 173 + (((ent.s.frame - 173) + 1) % 16);
+  }
+  ent.nextthink = level.time + FRAMETIME;
+
+  if (ent.droptime && level.time > ent.droptime + 30) {
+    if (!ctf_validateplayer(ent.owner, CTF_TEAM_ANYTEAM)) {
+      if (ent === redflag) {
+        gi.sound(ent, CHAN_CTF, gi.soundindex("ctf/r_returned.wav"), 0.8, ATTN_NONE, 0);
+      } else if (ent === blueflag) {
+        gi.sound(ent, CHAN_CTF, gi.soundindex("ctf/b_returned.wav"), 0.8, ATTN_NONE, 0);
+      }
+      ctf_resetflagandplayer(ent, null);
+    }
+  }
+}
+
+/*
+=================
+ctf_flagtouch (lmctf60/g_ctffunc.c:700) / ctf_playerdropflag
+(lmctf60/g_ctffunc.c:650)
+
+NOT PORTED: the flag capture/pickup/drop chain (team validation, carrier
+assignment, capture scoring, HUD/team broadcast). Both are substantial
+functions squarely in the "flag home/reset/spawn/touch" territory this
+file's header already documents as out of SCOPE. Thrown with citation --
+wired as the "flag" GItemT's pickup/use/drop callbacks in g_items.ts, so a
+flag entity spawns and animates correctly (via ctf_flagwave above) and only
+throws when something actually touches/uses/drops it, matching this unit's
+established "spawn succeeds, only the unreached behavior throws" pattern
+(see g_target.ts's use_target_blaster).
+=================
+*/
+export function ctf_flagtouch(ent: EdictT, other: EdictT): boolean {
+  throw new Error("ctf_flagtouch (lmctf60/g_ctffunc.c:700) is not ported -- flag capture chain is out of this unit's SCOPE");
+}
+
+export function ctf_playerdropflag(whichplayer: EdictT, item: GItemT): void {
+  throw new Error(
+    "ctf_playerdropflag (lmctf60/g_ctffunc.c:650) is not ported -- flag capture chain is out of this unit's SCOPE",
+  );
+}
+
+/*
+=================
+ctf_teamstring (lmctf60/g_ctffunc.c:144) -- byte-identical branching to the
+C source. C mutates `buf` in place via strcat; this port appends to and
+returns a new string instead (JS strings are immutable), matching
+PORTING.md's "mutate a char* in place -> return the new string" idiom.
+=================
+*/
+export function ctf_teamstring(buf: string, teamnum: number, teamnum_option: number): { text: string; ok: boolean } {
+  if (teamnum_option === CTF_TEAM_OPPOSING) {
+    if (teamnum === CTF_TEAM_RED) return { text: buf + "blue", ok: true };
+    if (teamnum === CTF_TEAM_BLUE) return { text: buf + "red", ok: true };
+    if (teamnum === CTF_TEAM_OBSERVER_RED) return { text: buf + "observer blue", ok: true };
+    if (teamnum === CTF_TEAM_OBSERVER_BLUE) return { text: buf + "observer red", ok: true };
+    if (teamnum === CTF_TEAM_OBSERVER) return { text: buf + "observer", ok: true };
+    return { text: buf + "unknown", ok: false };
+  }
+
+  if (teamnum === CTF_TEAM_RED) return { text: buf + "red", ok: true };
+  if (teamnum === CTF_TEAM_BLUE) return { text: buf + "blue", ok: true };
+  if (teamnum === CTF_TEAM_OBSERVER) return { text: buf + "observer", ok: true };
+  if (teamnum === CTF_TEAM_OBSERVER_RED) return { text: buf + "observer red", ok: true };
+  if (teamnum === CTF_TEAM_OBSERVER_BLUE) return { text: buf + "observer blue", ok: true };
+  if (teamnum === CTF_TEAM_UNDEFINED) return { text: buf + "undefined", ok: false };
+  return { text: buf + "unknown", ok: false };
+}
+
+/*
+=================
+ctf_SetEntTeamEx / ctf_SetEntTeam (lmctf60/g_ctffunc.c:1354/1362)
+
+Assigns ent.client.ctf.teamnum, clamping out-of-range values to
+CTF_TEAM_UNDEFINED exactly like the C source's bounds check
+(`whatteam >= CTF_TEAM_LIMIT || whatteam <= CTF_TEAM_MIN_LIMIT`), mirrors
+the team assignment into p_stats_player.info.teamnum if a stats record is
+attached, and broadcasts "X is now on the Y team." via ctf_BSafePrint.
+
+NOT reproduced: sl_LogPlayerTeamChange (StdLog -- unit B's
+gslog.ts/stdlog.ts, not this unit's SCOPE) and the commented-out
+score-penalty block (the C source itself has this entire branch commented
+out -- "Let them keep their score all the time" -- so nothing is dropped
+here that the original still runs).
+=================
+*/
+export function ctf_SetEntTeamEx(ent: EdictT, whatteam: number, nopenalty: number): void {
+  let team = whatteam;
+  if (team >= CTF_TEAM_LIMIT || team <= CTF_TEAM_MIN_LIMIT) team = CTF_TEAM_UNDEFINED;
+
+  if (ent.client === null) return;
+  ent.client.ctf.teamnum = team;
+
+  if (ent.client.p_stats_player !== null) {
+    ent.client.p_stats_player.info.teamnum = team;
+  }
+
+  if (!ent.inuse) return; // can't use ctf_validateplayer -- classname isn't "player" yet at this call site
+
+  const { text } = ctf_teamstring("", ent.client.ctf.teamnum, CTF_TEAM_MATCHING);
+  ctf_BSafePrint(PRINT_HIGH, `${ent.client.pers.netname} is now on the ${text} team.\n`);
+}
+
+export function ctf_SetEntTeam(ent: EdictT, whatteam: number): void {
+  ctf_SetEntTeamEx(ent, whatteam, 0);
+}
+
 export function ctf_hook_abort(ent: EdictT | null): void {
   if (ent === null || ent.client === null) return;
   const client = ent.client;

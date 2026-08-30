@@ -14,8 +14,8 @@
 // branches never execute and are dropped here, matching every other
 // monster-only branch this port drops (see g_local.ts's AI_* comment).
 
-import { type Vec3, vec3, VectorAdd, VectorCopy, VectorNormalize, VectorScale } from "../shared/math";
-import { ATTN_NORM, CHAN_ITEM, DF_NO_FRIENDLY_FIRE, MulticastT, Q_stricmp, TempEventT } from "../shared/q_shared";
+import { type Vec3, vec3, vec3_origin, VectorAdd, VectorCopy, VectorLength, VectorMA, VectorNormalize, VectorScale, VectorSubtract } from "../shared/math";
+import { ATTN_NORM, CHAN_ITEM, DF_NO_FRIENDLY_FIRE, MASK_SOLID, MulticastT, Q_stricmp, TempEventT } from "../shared/q_shared";
 import { OnSameTeam } from "./g_cmds";
 import { SVF_MONSTER } from "./game";
 import { ArmorIndex, GetItemByIndex, PowerArmorType } from "./g_items";
@@ -47,6 +47,12 @@ import {
 } from "./g_local";
 import { DamageRuneHook, RUNE_VAMP, ResistRuneHook } from "./g_runes";
 import { Match_InCountdown, matchstate, MatchStatesT } from "./g_tourney";
+// Mutual static import with g_utils.ts (which imports T_Damage from this
+// file) -- same precedent as src/ctf/g_combat.ts <-> src/ctf/g_utils.ts;
+// both sides only reference the other's binding inside function bodies, so
+// the ES module circular-import case (live bindings resolved at call time,
+// not at module-eval time) applies cleanly, no require() needed.
+import { findradius } from "./g_utils";
 
 /*
 =================
@@ -430,5 +436,119 @@ export function T_Damage(
     client.damage_blood += take;
     client.damage_knockback += knockback;
     VectorCopy(point, client.damage_from);
+  }
+}
+
+/*
+============
+CanDamage (lmctf60/g_combat.c) -- byte-identical to src/ctf/g_combat.ts's
+CanDamage (confirmed no diff in this region between quake-2/ctf/g_combat.c
+and lmctf60/g_combat.c). Completes this unit's SCOPE need: g_target.ts's
+target_explosion_explode/use_target_splash both call T_RadiusDamage, which
+depends on this.
+
+Returns true if the inflictor can directly damage the target. Used for
+explosions and melee attacks.
+============
+*/
+export function CanDamage(targ: EdictT, inflictor: EdictT): boolean {
+  const dest = vec3();
+
+  // bmodels need special checking because their origin is 0,0,0
+  if (targ.movetype === MovetypeT.MOVETYPE_PUSH) {
+    VectorAdd(targ.absmin, targ.absmax, dest);
+    VectorScale(dest, 0.5, dest);
+    const trace = gi.trace(inflictor.s.origin, vec3_origin, vec3_origin, dest, inflictor, MASK_SOLID);
+    if (trace.fraction === 1.0) return true;
+    if (trace.ent === targ) return true;
+    return false;
+  }
+
+  {
+    const trace = gi.trace(inflictor.s.origin, vec3_origin, vec3_origin, targ.s.origin, inflictor, MASK_SOLID);
+    if (trace.fraction === 1.0) return true;
+  }
+
+  VectorCopy(targ.s.origin, dest);
+  dest[0] += 15.0;
+  dest[1] += 15.0;
+  {
+    const trace = gi.trace(inflictor.s.origin, vec3_origin, vec3_origin, dest, inflictor, MASK_SOLID);
+    if (trace.fraction === 1.0) return true;
+  }
+
+  VectorCopy(targ.s.origin, dest);
+  dest[0] += 15.0;
+  dest[1] -= 15.0;
+  {
+    const trace = gi.trace(inflictor.s.origin, vec3_origin, vec3_origin, dest, inflictor, MASK_SOLID);
+    if (trace.fraction === 1.0) return true;
+  }
+
+  VectorCopy(targ.s.origin, dest);
+  dest[0] -= 15.0;
+  dest[1] += 15.0;
+  {
+    const trace = gi.trace(inflictor.s.origin, vec3_origin, vec3_origin, dest, inflictor, MASK_SOLID);
+    if (trace.fraction === 1.0) return true;
+  }
+
+  VectorCopy(targ.s.origin, dest);
+  dest[0] -= 15.0;
+  dest[1] -= 15.0;
+  {
+    const trace = gi.trace(inflictor.s.origin, vec3_origin, vec3_origin, dest, inflictor, MASK_SOLID);
+    if (trace.fraction === 1.0) return true;
+  }
+
+  return false;
+}
+
+/*
+============
+T_RadiusDamage (lmctf60/g_combat.c) -- byte-identical to
+src/ctf/g_combat.ts's T_RadiusDamage.
+============
+*/
+export function T_RadiusDamage(
+  inflictor: EdictT,
+  attacker: EdictT,
+  damage: number,
+  ignore: EdictT | null,
+  radius: number,
+  mod: number,
+): void {
+  const v = vec3();
+  const dir = vec3();
+
+  let ent: EdictT | null = null;
+  for (;;) {
+    ent = findradius(ent, inflictor.s.origin, radius);
+    if (ent === null) break;
+    if (ent === ignore) continue;
+    if (!ent.takedamage) continue;
+
+    VectorAdd(ent.mins, ent.maxs, v);
+    VectorMA(ent.s.origin, 0.5, v, v);
+    VectorSubtract(inflictor.s.origin, v, v);
+    let points = damage - 0.5 * VectorLength(v);
+    if (ent === attacker) points = points * 0.5;
+    if (points > 0) {
+      if (CanDamage(ent, inflictor)) {
+        VectorSubtract(ent.s.origin, inflictor.s.origin, dir);
+        T_Damage(
+          ent,
+          inflictor,
+          attacker,
+          dir,
+          inflictor.s.origin,
+          vec3_origin,
+          points | 0,
+          points | 0,
+          DAMAGE_RADIUS,
+          mod,
+        );
+      }
+    }
   }
 }

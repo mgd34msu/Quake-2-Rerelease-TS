@@ -44,6 +44,14 @@ export const svc_inventory = 5;
 // to stuff a console command into a client.
 export const svc_stufftext = 11;
 
+// lmctf60 declares this in its own forked copy of q_shared.h
+// (`#define CHAN_CTF 5 // LM_JORM -- CTF code`), not g_local.h -- kept here
+// instead of src/shared/q_shared.ts (the one cross-family shared module)
+// per this family's established pattern of keeping LM_CTF-only additions
+// local to g_local.ts rather than growing the shared header for one mod
+// family (see MOD_CTF_GRAPPLE above for the same treatment).
+export const CHAN_CTF = 5;
+
 //==================================================================
 
 // view pitching times

@@ -3,43 +3,43 @@
 // InitGame itself lives in g_save.c per this pack's file layout, same as
 // ctf's).
 //
-// STATUS: GetGameAPI, ShutdownGame, and a bounded InitGame are ported --
-// enough to construct a GameExports object and register the cvars/edict
-// array the offhand-hook priority feature's tests need (critically,
-// `ctfflags`). ClientCommand below is a minimal hand-written dispatcher
-// covering ONLY "hook"/"unhook" (lmctf60/g_cmds.c's real ClientCommand is a
-// ~90-branch Q_stricmp chain against argv(0), not ported here).
+// STATUS (this unit's second pass): GetGameAPI now wires every entry point
+// this unit built a real implementation for -- SpawnEntities (g_spawn.ts),
+// ClientConnect/ClientBegin/ClientUserinfoChanged/ClientDisconnect/
+// ClientThink (p_client.ts), WriteGame/ReadGame/WriteLevel/ReadLevel
+// (g_save.ts), ServerCommand (g_svcmds.ts), and a new RunFrame/EndDMLevel/
+// ExitLevel/CreateTargetChangeLevel/CheckDMRules/ClientEndServerFrames
+// group (ported below, same shape as src/ctf/g_main.ts's G_RunFrame family
+// with CTF-specific match/capture rules dropped -- see RunFrame's own doc
+// comment). ClientCommand remains the minimal "hook"/"unhook" dispatcher
+// from this unit's first pass (lmctf60/g_cmds.c's real ~90-branch
+// ClientCommand is g_cmds.ts's own SCOPE, not completed by this unit).
 //
-// NOT PORTED, and reported explicitly rather than silently stubbed:
-//   - G_RunFrame (the server frame loop: level.framenum/time advance,
-//     per-entity think dispatch, end-of-frame client processing) --
-//     RunFrame throws.
-//   - SpawnEntities (map entity-string parsing via g_spawn.c) -- throws.
-//   - ClientConnect/ClientBegin/ClientUserinfoChanged/ClientDisconnect/
-//     ClientThink (p_client.c, not touched by this unit) -- throw.
-//   - WriteGame/ReadGame/WriteLevel/ReadLevel (g_save.c save/load) -- throw.
-//   - ServerCommand (g_svcmds.c) -- throws.
-//   - InitGame's maplist.txt/motd.txt file I/O and StdLog/gslog
-//     initialization (lmctf60 g_save.c's InitGame reads
-//     `<gamedir>/<maplist_file>` and calls `ctf_SetLogName`/`sl_Logging`) --
-//     not reproduced; this port's InitGame registers cvars and allocates
-//     g_edicts/game.clients only.
+// STILL NOT PORTED, reported explicitly:
+//   - InitGame's maplist.txt/motd.txt/help.txt file I/O and StdLog/gslog
+//     initialization -- not reproduced; InitGame registers cvars and
+//     allocates g_edicts/game.clients only.
 //   - InitItems (g_items.c) -- g_items.ts's own InitItems() only
 //     re-asserts `game.num_items` against its already-built (partial)
-//     ITEMLIST; it does not precache models/sounds/images the way the C
-//     source's InitItems does (no precache pipeline exists in this unit).
-//
-// Because RunFrame/SpawnEntities/ClientConnect all throw, a server booted
-// through this GetGameAPI cannot reach "Server Initialization" the way a
-// real game boot does -- see this unit's final report for what a real
-// lmctf boot needs beyond this file.
+//     ITEMLIST; no precache pipeline exists in this unit.
+//   - RunFrame drops AI_SetSightClient and the groundentity-moved
+//     M_CheckGround re-check (both monster-only; no monster subsystem
+//     exists in this port, see g_phys.ts's own SV_Physics_Step citation)
+//     and CTFNextMap/CTFCheckRules/CTFInMatch (ctf/g_ctf.c-specific match
+//     logic with no LM_CTF equivalent ported -- g_tourney.ts's own file
+//     header already documents SpawnTourneyClock/StartMatch/Victory/
+//     Match_End as NOT ported by this unit, so a capture-limit or
+//     match-timer-driven level end cannot be reached through this
+//     RunFrame; only plain fraglimit/timelimit/DF_SAME_LEVEL/maplist
+//     rotation work, matching base game's non-CTF EndDMLevel).
 
-import { CVAR_ARCHIVE, CVAR_LATCH, CVAR_NOSET, CVAR_SERVERINFO, CVAR_USERINFO } from "../shared/q_shared";
+import { Com_sprintf, CVAR_ARCHIVE, CVAR_LATCH, CVAR_NOSET, CVAR_SERVERINFO, CVAR_USERINFO, PRINT_HIGH, Q_stricmp } from "../shared/q_shared";
 import { Cmd_Hook_f, Cmd_Unhook_f } from "./g_cmds";
 import { InitItems } from "./g_items";
 import { type Edict, GAME_API_VERSION, type GameExports, type GameImports } from "./game";
 import {
   EdictT,
+  FRAMETIME,
   GAMEVERSION,
   GClientT,
   SetGEdicts,
@@ -50,22 +50,35 @@ import {
   gameCvars,
   gi,
   globals,
+  level,
 } from "./g_local";
+import { G_Spawn } from "./g_utils";
+import { G_RunEntity } from "./g_phys";
+import { BeginIntermission } from "./p_hud";
+import {
+  ClientBegin,
+  ClientBeginServerFrame,
+  ClientConnect,
+  ClientDisconnect,
+  ClientThink,
+  ClientUserinfoChanged,
+} from "./p_client";
+import { ClientEndServerFrame } from "./p_view";
+import { ReadGame, ReadLevel, WriteGame, WriteLevel } from "./g_save";
+import { ServerCommand } from "./g_svcmds";
+import { SpawnEntities } from "./g_spawn";
 
 function cvarNum(c: ReturnType<typeof gi.cvar>): number {
   return c === null ? 0 : c.value;
+}
+function cvarStr(c: ReturnType<typeof gi.cvar>): string {
+  return c === null ? "" : c.string;
 }
 
 export function ShutdownGame(): void {
   gi.dprintf("==== ShutdownGame ====\n");
   // gi.FreeTags(TAG_LEVEL)/gi.FreeTags(TAG_GAME) dropped -- no tag-based
   // allocator on this side of the port, same as every other family.
-}
-
-function notPorted(name: string): () => never {
-  return () => {
-    throw new Error(`lmctf ${name}: not ported in this unit -- see g_main.ts's file header`);
-  };
 }
 
 /*
@@ -181,6 +194,183 @@ export function ClientCommand(ent: Edict): void {
 
 /*
 =================
+CreateTargetChangeLevel (lmctf60/g_main.c) -- byte-identical to
+src/ctf/g_main.ts's CreateTargetChangeLevel.
+=================
+*/
+export function CreateTargetChangeLevel(map: string): EdictT {
+  const ent = G_Spawn();
+  ent.classname = "target_changelevel";
+  level.nextmap = Com_sprintf("%s", map);
+  ent.map = level.nextmap;
+  return ent;
+}
+
+/*
+=================
+EndDMLevel (lmctf60/g_main.c) -- drops ctf's DF_SAME_LEVEL... no, keeps
+DF_SAME_LEVEL and maplist rotation (both generic, no CTF dependency); drops
+the `level.forcemap` branch entirely -- lmctf60's level_locals_t has no
+forcemap field at all (confirmed dropped vs ctf/g_local.h's `char
+forcemap[MAX_QPATH]`, see g_local.ts's LevelLocalsT comment), so that
+branch cannot exist in this port, not just "not ported".
+=================
+*/
+const DF_SAME_LEVEL = 0x00000020;
+export function EndDMLevel(): void {
+  if ((cvarNum(gameCvars.dmflags) & DF_SAME_LEVEL) !== 0) {
+    BeginIntermission(CreateTargetChangeLevel(level.mapname));
+    return;
+  }
+
+  const maplist = cvarStr(gameCvars.sv_maplist);
+  if (maplist.length > 0) {
+    const tokens = maplist.split(/[ ,\n\r]+/).filter((tok) => tok.length > 0);
+    for (let idx = 0; idx < tokens.length; idx++) {
+      const t = tokens[idx];
+      if (t !== undefined && Q_stricmp(t, level.mapname) === 0) {
+        const next = tokens[idx + 1];
+        if (next === undefined) {
+          const first = tokens[0];
+          BeginIntermission(CreateTargetChangeLevel(first ?? level.mapname));
+        } else {
+          BeginIntermission(CreateTargetChangeLevel(next));
+        }
+        return;
+      }
+    }
+  }
+
+  // stay on same level (no maplist entry matched, no forcemap, no
+  // DF_SAME_LEVEL flag -- same fallback base game's own EndDMLevel uses)
+  BeginIntermission(CreateTargetChangeLevel(level.mapname));
+}
+
+/*
+=================
+CheckDMRules (lmctf60/g_main.c) -- fraglimit/timelimit only, see file
+header for the dropped CTF capture-limit/match-timer branches.
+=================
+*/
+export function CheckDMRules(): void {
+  if (level.intermissiontime !== 0) return;
+  if (cvarNum(gameCvars.deathmatch) === 0) return;
+
+  const timelimit = cvarNum(gameCvars.timelimit);
+  if (timelimit !== 0 && level.time >= timelimit * 60) {
+    gi.bprintf(PRINT_HIGH, "Timelimit hit.\n");
+    EndDMLevel();
+    return;
+  }
+
+  const fraglimit = cvarNum(gameCvars.fraglimit);
+  if (fraglimit !== 0) {
+    const maxclients = cvarNum(gameCvars.maxclients);
+    for (let i = 0; i < maxclients; i++) {
+      const cl = game.clients[i];
+      const ent = g_edicts[i + 1];
+      if (cl === undefined || ent === undefined || !ent.inuse) continue;
+      if (cl.resp.score >= fraglimit) {
+        gi.bprintf(PRINT_HIGH, "Fraglimit hit.\n");
+        EndDMLevel();
+        return;
+      }
+    }
+  }
+}
+
+/*
+=================
+ClientEndServerFrames (lmctf60/g_main.c) -- byte-identical to
+src/ctf/g_main.ts's version, calling p_view.ts's (partial) ClientEndServerFrame.
+=================
+*/
+export function ClientEndServerFrames(): void {
+  const maxclients = cvarNum(gameCvars.maxclients);
+  for (let i = 0; i < maxclients; i++) {
+    const ent = g_edicts[1 + i];
+    if (ent === undefined || !ent.inuse || ent.client === null) continue;
+    ClientEndServerFrame(ent);
+  }
+}
+
+/*
+=================
+ExitLevel (lmctf60/g_main.c) -- drops CTFNextMap (ctf/g_ctf.c-specific,
+no LM_CTF equivalent ported), otherwise byte-identical to
+src/ctf/g_main.ts's ExitLevel.
+=================
+*/
+export function ExitLevel(): void {
+  level.exitintermission = 0;
+  level.intermissiontime = 0;
+
+  const command = Com_sprintf('gamemap "%s"\n', level.changemap ?? "");
+  gi.AddCommandString(command);
+  ClientEndServerFrames();
+
+  level.changemap = null;
+
+  const maxclients = cvarNum(gameCvars.maxclients);
+  for (let i = 0; i < maxclients; i++) {
+    const ent = g_edicts[1 + i];
+    if (ent === undefined || !ent.inuse) continue;
+    if (ent.client !== null && ent.health > ent.client.pers.max_health) {
+      ent.health = ent.client.pers.max_health;
+    }
+  }
+}
+
+/*
+=================
+RunFrame (lmctf60/g_main.c's G_RunFrame) -- see file header for the dropped
+AI_SetSightClient/M_CheckGround (monster-only, dead code in this port) and
+CTF-specific match rules.
+=================
+*/
+export function RunFrame(): void {
+  level.framenum++;
+  level.time = level.framenum * FRAMETIME;
+
+  if (level.exitintermission !== 0) {
+    ExitLevel();
+    return;
+  }
+
+  for (let i = 0; i < globals.num_edicts; i++) {
+    const ent = g_edicts[i];
+    if (ent === undefined || !ent.inuse) continue;
+
+    level.current_entity = ent;
+
+    ent.s.old_origin[0] = ent.s.origin[0];
+    ent.s.old_origin[1] = ent.s.origin[1];
+    ent.s.old_origin[2] = ent.s.origin[2];
+
+    if (ent.groundentity !== null && ent.groundentity.linkcount !== ent.groundentity_linkcount) {
+      ent.groundentity = null;
+      // M_CheckGround(ent) -- monster-only, not ported (see file header);
+      // SVF_MONSTER is never set by anything spawnable in this port, so
+      // this branch's real-game monster re-grounding call would never
+      // fire here regardless.
+    }
+
+    const maxclients = cvarNum(gameCvars.maxclients);
+    if (i > 0 && i <= maxclients) {
+      ClientBeginServerFrame(ent);
+      continue;
+    }
+
+    G_RunEntity(ent);
+  }
+
+  CheckDMRules();
+
+  ClientEndServerFrames();
+}
+
+/*
+=================
 GetGameAPI (lmctf60/g_main.c:156)
 =================
 */
@@ -191,23 +381,23 @@ export function GetGameAPI(imports: GameImports): GameExports {
     apiversion: GAME_API_VERSION,
     Init: InitGame,
     Shutdown: ShutdownGame,
-    SpawnEntities: notPorted("SpawnEntities"),
+    SpawnEntities,
 
-    WriteGame: notPorted("WriteGame"),
-    ReadGame: notPorted("ReadGame"),
-    WriteLevel: notPorted("WriteLevel"),
-    ReadLevel: notPorted("ReadLevel"),
+    WriteGame,
+    ReadGame,
+    WriteLevel,
+    ReadLevel,
 
-    ClientConnect: notPorted("ClientConnect"),
-    ClientBegin: notPorted("ClientBegin"),
-    ClientUserinfoChanged: notPorted("ClientUserinfoChanged"),
-    ClientDisconnect: notPorted("ClientDisconnect"),
+    ClientConnect,
+    ClientBegin,
+    ClientUserinfoChanged,
+    ClientDisconnect,
     ClientCommand,
-    ClientThink: notPorted("ClientThink"),
+    ClientThink,
 
-    RunFrame: notPorted("RunFrame"),
+    RunFrame,
 
-    ServerCommand: notPorted("ServerCommand"),
+    ServerCommand,
 
     edicts: [],
     num_edicts: 0,
