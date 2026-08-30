@@ -11,6 +11,8 @@ import { type Vec3, vec3 } from "../shared/math";
 import { MAX_MAP_AREAS } from "../qcommon/qfiles";
 import { type CsRemapT, CS_REMAP_OLD, CS_REMAP_RERELEASE } from "../shared/cs_remap";
 import type { Edict } from "../game/game";
+import type { ProtocolCodec } from "../qcommon/protocol/codec";
+import { VANILLA_CODEC } from "../qcommon/protocol/vanilla";
 
 // server_t.name/mapcmd, client_t.name/userinfo are fixed-size C char arrays
 // (MAX_QPATH, MAX_TOKEN_CHARS, 32, MAX_INFO_STRING); ported as plain strings
@@ -265,6 +267,19 @@ export class ServerStaticT {
   // arrives with the kex binding; nothing chooses cs_remap_rerelease yet.
   csr: CsRemapT = CS_REMAP_OLD;
 
+  // ARCHITECTURE.md "Protocol layer" / .orch/phase5-design.md step 1: the
+  // active wire-encoding codec (qcommon/protocol/codec.ts's ProtocolCodec),
+  // mirroring q2repro's per-connection q2proto_servercontext_t. Placed here
+  // rather than on ServerT for the same reason as `csr` immediately above --
+  // it is a "which format/family is active" selection, not per-level state,
+  // so it must survive SV_SpawnServer's per-level sv.clear(). SIMPLIFICATION:
+  // q2proto's context is genuinely per-client (a mixed-protocol server could
+  // serve some clients on 34 and others on 1038 at once); this port keeps a
+  // single server-wide codec because every connected client speaks the same
+  // hardcoded protocol today (nothing negotiates per-client yet). Revisit
+  // when the 1038 codec and its handshake negotiation land.
+  codec: ProtocolCodec = VANILLA_CODEC;
+
   mapcmd = ""; // ie: *intro.cin+base
 
   spawncount = 0; // incremented each server start
@@ -294,6 +309,7 @@ export class ServerStaticT {
     // than zeroing avoids a transient all-zero CsRemapT (which would make
     // every csr.end/csr.models/etc bound momentarily wrong).
     this.csr = CS_REMAP_OLD;
+    this.codec = VANILLA_CODEC;
     this.mapcmd = "";
     this.spawncount = 0;
     this.clients = [];

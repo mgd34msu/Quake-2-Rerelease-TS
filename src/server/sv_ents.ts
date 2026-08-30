@@ -5,43 +5,9 @@
 
 import { FS_Write } from "../qcommon/files";
 import { type Vec3, vec3, VectorSubtract, VectorLength } from "../shared/math";
-import { EntityStateT, PlayerStateT, MAX_STATS, RF_BEAM } from "../shared/q_shared";
-import {
-  SizeBuf,
-  SZ_Init,
-  SZ_Write,
-  SZ_Clear,
-  MSG_WriteByte,
-  MSG_WriteShort,
-  MSG_WriteLong,
-  MSG_WriteChar,
-  MSG_WriteAngle16,
-  MSG_WriteDeltaEntity,
-} from "../qcommon/sizebuf";
-import {
-  SvcOpsT,
-  U_REMOVE,
-  U_NUMBER16,
-  U_MOREBITS1,
-  UPDATE_MASK,
-  UPDATE_BACKUP,
-  ERR_FATAL,
-  PS_M_TYPE,
-  PS_M_ORIGIN,
-  PS_M_VELOCITY,
-  PS_M_TIME,
-  PS_M_FLAGS,
-  PS_M_GRAVITY,
-  PS_M_DELTA_ANGLES,
-  PS_VIEWOFFSET,
-  PS_VIEWANGLES,
-  PS_KICKANGLES,
-  PS_BLEND,
-  PS_FOV,
-  PS_WEAPONINDEX,
-  PS_WEAPONFRAME,
-  PS_RDFLAGS,
-} from "../qcommon/qcommon";
+import { EntityStateT, PlayerStateT, RF_BEAM } from "../shared/q_shared";
+import { SizeBuf, SZ_Init, SZ_Write, SZ_Clear, MSG_WriteByte, MSG_WriteLong } from "../qcommon/sizebuf";
+import { SvcOpsT, UPDATE_MASK, UPDATE_BACKUP, ERR_FATAL } from "../qcommon/qcommon";
 import { MAX_MAP_LEAFS } from "../qcommon/qfiles";
 import {
   CM_BoxLeafnums,
@@ -87,7 +53,13 @@ function hasPlayerState(client: unknown): client is EdictClientPs {
 =============
 SV_EmitPacketEntities
 
-Writes a delta update of an entity_state_t list to the message.
+Writes a delta update of an entity_state_t list to the message. The per-
+entity wire encoding (delta bits, remove marker, terminator) is owned by
+svs.codec (ARCHITECTURE.md "Protocol layer" / .orch/phase5-design.md step 1)
+so a future 1038 codec can format these bytes differently; the diff loop
+itself (which entities changed) stays here, matching q2proto's own split
+(the codec's vanilla_server_write_frame_entity_delta takes one already-
+decided entity at a time; the caller does the old/new list diff).
 =============
 */
 function SV_EmitPacketEntities(from: ClientFrameT | null, to: ClientFrameT, msg: SizeBuf): void {
@@ -124,7 +96,7 @@ function SV_EmitPacketEntities(from: ClientFrameT | null, to: ClientFrameT, msg:
       // and prevents warping
       if (oldent && newent) {
         const mc = maxclients ? maxclients.value : 0;
-        MSG_WriteDeltaEntity(oldent, newent, msg, false, newent.number <= mc);
+        svs.codec.writeDeltaEntity(msg, oldent, newent, false, newent.number <= mc);
       }
       oldindex++;
       newindex++;
@@ -134,7 +106,7 @@ function SV_EmitPacketEntities(from: ClientFrameT | null, to: ClientFrameT, msg:
     if (newnum < oldnum) {
       // this is a new entity, send it from the baseline
       if (newent) {
-        MSG_WriteDeltaEntity(sv.baselines[newnum], newent, msg, true, true);
+        svs.codec.writeDeltaEntity(msg, sv.baselines[newnum], newent, true, true);
       }
       newindex++;
       continue;
@@ -142,21 +114,13 @@ function SV_EmitPacketEntities(from: ClientFrameT | null, to: ClientFrameT, msg:
 
     if (newnum > oldnum) {
       // the old entity isn't present in the new message
-      let bits = U_REMOVE;
-      if (oldnum >= 256) bits |= U_NUMBER16 | U_MOREBITS1;
-
-      MSG_WriteByte(msg, bits & 255);
-      if (bits & 0x0000ff00) MSG_WriteByte(msg, (bits >> 8) & 255);
-
-      if (bits & U_NUMBER16) MSG_WriteShort(msg, oldnum);
-      else MSG_WriteByte(msg, oldnum);
-
+      svs.codec.writeEntityRemove(msg, oldnum);
       oldindex++;
       continue;
     }
   }
 
-  MSG_WriteShort(msg, 0); // end of packetentities
+  svs.codec.writePacketEntitiesEnd(msg); // end of packetentities
 }
 
 /*
@@ -166,148 +130,7 @@ SV_WritePlayerstateToClient
 =============
 */
 function SV_WritePlayerstateToClient(from: ClientFrameT | null, to: ClientFrameT, msg: SizeBuf): void {
-  const ps = to.ps;
-  const ops = from ? from.ps : new PlayerStateT();
-
-  //
-  // determine what needs to be sent
-  //
-  let pflags = 0;
-
-  if (ps.pmove.pm_type !== ops.pmove.pm_type) pflags |= PS_M_TYPE;
-
-  if (ps.pmove.origin[0] !== ops.pmove.origin[0] || ps.pmove.origin[1] !== ops.pmove.origin[1] || ps.pmove.origin[2] !== ops.pmove.origin[2])
-    pflags |= PS_M_ORIGIN;
-
-  if (
-    ps.pmove.velocity[0] !== ops.pmove.velocity[0] ||
-    ps.pmove.velocity[1] !== ops.pmove.velocity[1] ||
-    ps.pmove.velocity[2] !== ops.pmove.velocity[2]
-  )
-    pflags |= PS_M_VELOCITY;
-
-  if (ps.pmove.pm_time !== ops.pmove.pm_time) pflags |= PS_M_TIME;
-
-  if (ps.pmove.pm_flags !== ops.pmove.pm_flags) pflags |= PS_M_FLAGS;
-
-  if (ps.pmove.gravity !== ops.pmove.gravity) pflags |= PS_M_GRAVITY;
-
-  if (
-    ps.pmove.delta_angles[0] !== ops.pmove.delta_angles[0] ||
-    ps.pmove.delta_angles[1] !== ops.pmove.delta_angles[1] ||
-    ps.pmove.delta_angles[2] !== ops.pmove.delta_angles[2]
-  )
-    pflags |= PS_M_DELTA_ANGLES;
-
-  if (ps.viewoffset[0] !== ops.viewoffset[0] || ps.viewoffset[1] !== ops.viewoffset[1] || ps.viewoffset[2] !== ops.viewoffset[2])
-    pflags |= PS_VIEWOFFSET;
-
-  if (ps.viewangles[0] !== ops.viewangles[0] || ps.viewangles[1] !== ops.viewangles[1] || ps.viewangles[2] !== ops.viewangles[2])
-    pflags |= PS_VIEWANGLES;
-
-  if (ps.kick_angles[0] !== ops.kick_angles[0] || ps.kick_angles[1] !== ops.kick_angles[1] || ps.kick_angles[2] !== ops.kick_angles[2])
-    pflags |= PS_KICKANGLES;
-
-  if (
-    ps.blend[0] !== ops.blend[0] ||
-    ps.blend[1] !== ops.blend[1] ||
-    ps.blend[2] !== ops.blend[2] ||
-    ps.blend[3] !== ops.blend[3]
-  )
-    pflags |= PS_BLEND;
-
-  if (ps.fov !== ops.fov) pflags |= PS_FOV;
-
-  if (ps.rdflags !== ops.rdflags) pflags |= PS_RDFLAGS;
-
-  if (ps.gunframe !== ops.gunframe) pflags |= PS_WEAPONFRAME;
-
-  pflags |= PS_WEAPONINDEX;
-
-  //
-  // write it
-  //
-  MSG_WriteByte(msg, SvcOpsT.svc_playerinfo);
-  MSG_WriteShort(msg, pflags);
-
-  //
-  // write the pmove_state_t
-  //
-  if (pflags & PS_M_TYPE) MSG_WriteByte(msg, ps.pmove.pm_type);
-
-  if (pflags & PS_M_ORIGIN) {
-    MSG_WriteShort(msg, ps.pmove.origin[0]);
-    MSG_WriteShort(msg, ps.pmove.origin[1]);
-    MSG_WriteShort(msg, ps.pmove.origin[2]);
-  }
-
-  if (pflags & PS_M_VELOCITY) {
-    MSG_WriteShort(msg, ps.pmove.velocity[0]);
-    MSG_WriteShort(msg, ps.pmove.velocity[1]);
-    MSG_WriteShort(msg, ps.pmove.velocity[2]);
-  }
-
-  if (pflags & PS_M_TIME) MSG_WriteByte(msg, ps.pmove.pm_time);
-
-  if (pflags & PS_M_FLAGS) MSG_WriteByte(msg, ps.pmove.pm_flags);
-
-  if (pflags & PS_M_GRAVITY) MSG_WriteShort(msg, ps.pmove.gravity);
-
-  if (pflags & PS_M_DELTA_ANGLES) {
-    MSG_WriteShort(msg, ps.pmove.delta_angles[0]);
-    MSG_WriteShort(msg, ps.pmove.delta_angles[1]);
-    MSG_WriteShort(msg, ps.pmove.delta_angles[2]);
-  }
-
-  //
-  // write the rest of the player_state_t
-  //
-  if (pflags & PS_VIEWOFFSET) {
-    MSG_WriteChar(msg, ps.viewoffset[0] * 4);
-    MSG_WriteChar(msg, ps.viewoffset[1] * 4);
-    MSG_WriteChar(msg, ps.viewoffset[2] * 4);
-  }
-
-  if (pflags & PS_VIEWANGLES) {
-    MSG_WriteAngle16(msg, ps.viewangles[0]);
-    MSG_WriteAngle16(msg, ps.viewangles[1]);
-    MSG_WriteAngle16(msg, ps.viewangles[2]);
-  }
-
-  if (pflags & PS_KICKANGLES) {
-    MSG_WriteChar(msg, ps.kick_angles[0] * 4);
-    MSG_WriteChar(msg, ps.kick_angles[1] * 4);
-    MSG_WriteChar(msg, ps.kick_angles[2] * 4);
-  }
-
-  if (pflags & PS_WEAPONINDEX) {
-    MSG_WriteByte(msg, ps.gunindex);
-  }
-
-  if (pflags & PS_WEAPONFRAME) {
-    MSG_WriteByte(msg, ps.gunframe);
-    MSG_WriteChar(msg, ps.gunoffset[0] * 4);
-    MSG_WriteChar(msg, ps.gunoffset[1] * 4);
-    MSG_WriteChar(msg, ps.gunoffset[2] * 4);
-    MSG_WriteChar(msg, ps.gunangles[0] * 4);
-    MSG_WriteChar(msg, ps.gunangles[1] * 4);
-    MSG_WriteChar(msg, ps.gunangles[2] * 4);
-  }
-
-  if (pflags & PS_BLEND) {
-    MSG_WriteByte(msg, ps.blend[0] * 255);
-    MSG_WriteByte(msg, ps.blend[1] * 255);
-    MSG_WriteByte(msg, ps.blend[2] * 255);
-    MSG_WriteByte(msg, ps.blend[3] * 255);
-  }
-  if (pflags & PS_FOV) MSG_WriteByte(msg, ps.fov);
-  if (pflags & PS_RDFLAGS) MSG_WriteByte(msg, ps.rdflags);
-
-  // send stats
-  let statbits = 0;
-  for (let i = 0; i < MAX_STATS; i++) if (ps.stats[i] !== ops.stats[i]) statbits |= 1 << i;
-  MSG_WriteLong(msg, statbits);
-  for (let i = 0; i < MAX_STATS; i++) if (statbits & (1 << i)) MSG_WriteShort(msg, ps.stats[i]);
+  svs.codec.writePlayerStateDelta(msg, from ? from.ps : new PlayerStateT(), to.ps);
 }
 
 /*
@@ -542,12 +365,12 @@ export function SV_RecordDemoMessage(): void {
       const ent = ge.edicts[e];
       // ignore ents without visible models unless they have an effect
       if (ent.inuse && ent.s.number && (ent.s.modelindex || ent.s.effects || ent.s.sound || ent.s.event) && !(ent.svflags & SVF_NOCLIENT)) {
-        MSG_WriteDeltaEntity(nostate, ent.s, buf, false, true);
+        svs.codec.writeDeltaEntity(buf, nostate, ent.s, false, true);
       }
     }
   }
 
-  MSG_WriteShort(buf, 0); // end of packetentities
+  svs.codec.writePacketEntitiesEnd(buf); // end of packetentities
 
   // now add the accumulated multicast information
   SZ_Write(buf, svs.demo_multicast.data, svs.demo_multicast.cursize);

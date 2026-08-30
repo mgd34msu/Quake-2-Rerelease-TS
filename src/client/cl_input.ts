@@ -24,7 +24,7 @@ import { Cmd_Argv, Cmd_AddCommand } from "../qcommon/cmd";
 import { Cvar_Get, Cvar_Userinfo, userinfo_modified, SetUserinfoModified } from "../qcommon/cvar";
 import { Com_Printf, COM_BlockSequenceCRCByte } from "../qcommon/common";
 import { Netchan_Transmit } from "../qcommon/net_chan";
-import { SizeBuf, SZ_Init, MSG_WriteByte, MSG_WriteLong, MSG_WriteString, MSG_WriteDeltaUsercmd } from "../qcommon/sizebuf";
+import { SizeBuf, SZ_Init, MSG_WriteByte, MSG_WriteLong, MSG_WriteString } from "../qcommon/sizebuf";
 import { ClcOpsT } from "../qcommon/qcommon";
 import { Sys_SendKeyEvents, sys_frame_time } from "../platform/sys";
 import { IN_Commands, IN_Frame, IN_Init, IN_Move, IN_Shutdown } from "../platform/sdl";
@@ -551,16 +551,16 @@ export function CL_SendCmd(): void {
   i = (cls.netchan.outgoing_sequence - 2) & (backup - 1);
   let oldcmd = cl.cmds[i];
   const nullcmd = new UsercmdT();
-  MSG_WriteDeltaUsercmd(buf, nullcmd, oldcmd);
+  cls.codec.writeDeltaUsercmd(buf, nullcmd, oldcmd);
 
   i = (cls.netchan.outgoing_sequence - 1) & (backup - 1);
   cmd = cl.cmds[i];
-  MSG_WriteDeltaUsercmd(buf, oldcmd, cmd);
+  cls.codec.writeDeltaUsercmd(buf, oldcmd, cmd);
   oldcmd = cmd;
 
   i = cls.netchan.outgoing_sequence & (backup - 1);
   cmd = cl.cmds[i];
-  MSG_WriteDeltaUsercmd(buf, oldcmd, cmd);
+  cls.codec.writeDeltaUsercmd(buf, oldcmd, cmd);
 
   // calculate a checksum over the move commands
   buf.data[checksumIndex] = COM_BlockSequenceCRCByte(buf.data.subarray(checksumIndex + 1, buf.cursize), buf.cursize - checksumIndex - 1, cls.netchan.outgoing_sequence);

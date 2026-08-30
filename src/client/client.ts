@@ -53,6 +53,8 @@ import { UPDATE_BACKUP } from "../qcommon/qcommon";
 import { NetchanT } from "../qcommon/net_chan";
 import { type ModelS, type ImageS, type RefExports, RefdefT, MAX_DLIGHTS } from "./ref";
 import type { SfxT } from "./snd_loc";
+import type { ProtocolCodec } from "../qcommon/protocol/codec";
+import { VANILLA_CODEC } from "../qcommon/protocol/vanilla";
 
 //=============================================================================
 
@@ -287,6 +289,13 @@ export class ClStaticT {
   netchan: NetchanT = new NetchanT();
   serverProtocol = 0; // in case we are doing some kind of version hack
 
+  // ARCHITECTURE.md "Protocol layer" / .orch/phase5-design.md step 1: the
+  // active wire-encoding codec (qcommon/protocol/codec.ts's ProtocolCodec).
+  // Lives on ClStaticT (survives level changes, like serverProtocol just
+  // above) rather than ClStateT, mirroring server.ts's svs.codec placement
+  // and the same server-wide-not-per-client simplification documented there.
+  codec: ProtocolCodec = VANILLA_CODEC;
+
   challenge = 0; // from the server to use for connecting
 
   download: number | null = null; // FILE* -- file transfer from server
@@ -316,6 +325,7 @@ export class ClStaticT {
     this.quakePort = 0;
     this.netchan = new NetchanT();
     this.serverProtocol = 0;
+    this.codec = VANILLA_CODEC;
     this.challenge = 0;
     this.download = null;
     this.downloadtempname = "";

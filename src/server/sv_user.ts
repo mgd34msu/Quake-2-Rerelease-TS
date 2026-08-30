@@ -7,13 +7,13 @@
 // comment for the rationale) instead of bare reassignable globals.
 
 import { Com_sprintf } from "../shared/q_shared";
-import { UsercmdT, MAX_INFO_STRING, MAX_EDICTS, EntityStateT, CS_NAME } from "../shared/q_shared";
+import { UsercmdT, MAX_INFO_STRING, MAX_EDICTS, CS_NAME } from "../shared/q_shared";
 import { SysError, ClcOpsT, SvcOpsT, PROTOCOL_VERSION, MAX_MSGLEN, ERR_DROP, UPDATE_MASK } from "../qcommon/qcommon";
 import { Com_Printf, Com_DPrintf, Com_Error, COM_BlockSequenceCRCByte, Info_Print } from "../qcommon/common";
 import { Cmd_TokenizeString, Cmd_Argv, Cmd_Argc, Cbuf_AddText, Cbuf_InsertFromDefer } from "../qcommon/cmd";
 import { Cvar_VariableString, Cvar_Set, Cvar_VariableValue, Cvar_Serverinfo } from "../qcommon/cvar";
 import { FS_FOpenFile, FS_FreeFile, FS_LoadFile, file_from_pak } from "../qcommon/files";
-import { MSG_WriteByte, MSG_WriteLong, MSG_WriteShort, MSG_WriteString, MSG_ReadByte, MSG_ReadLong, MSG_ReadString, MSG_ReadDeltaUsercmd, MSG_WriteDeltaEntity, SZ_Write } from "../qcommon/sizebuf";
+import { MSG_WriteByte, MSG_WriteLong, MSG_WriteShort, MSG_WriteString, MSG_ReadByte, MSG_ReadLong, MSG_ReadString, SZ_Write } from "../qcommon/sizebuf";
 import type { GameExports } from "../game/game";
 import {
   sv,
@@ -196,14 +196,11 @@ export function SV_Baselines_f(): void {
 
   let start = atoi(Cmd_Argv(2));
 
-  const nullstate = new EntityStateT();
-
   // write a packet full of data
   while (cl.netchan.message.cursize < MAX_MSGLEN / 2 && start < MAX_EDICTS) {
     const base = sv.baselines[start];
     if (base.modelindex || base.sound || base.effects) {
-      MSG_WriteByte(cl.netchan.message, SvcOpsT.svc_spawnbaseline);
-      MSG_WriteDeltaEntity(nullstate, base, cl.netchan.message, true, true);
+      svs.codec.writeSpawnBaseline(cl.netchan.message, base);
     }
     start++;
   }
@@ -553,9 +550,9 @@ export function SV_ExecuteClientMessage(cl: ClientT): void {
         const oldest = new UsercmdT();
         const oldcmd = new UsercmdT();
         const newcmd = new UsercmdT();
-        MSG_ReadDeltaUsercmd(net_message, nullcmd, oldest);
-        MSG_ReadDeltaUsercmd(net_message, oldest, oldcmd);
-        MSG_ReadDeltaUsercmd(net_message, oldcmd, newcmd);
+        svs.codec.readDeltaUsercmd(net_message, nullcmd, oldest);
+        svs.codec.readDeltaUsercmd(net_message, oldest, oldcmd);
+        svs.codec.readDeltaUsercmd(net_message, oldcmd, newcmd);
 
         if (cl.state !== ClientStateT.cs_spawned) {
           cl.lastframe = -1;

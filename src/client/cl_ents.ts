@@ -7,7 +7,6 @@ import {
   PlayerStateT,
   PmTypeT,
   MAX_EDICTS,
-  MAX_STATS,
   PMF_NO_PREDICTION,
   VIDREF_GL,
   EntityEventT,
@@ -62,54 +61,8 @@ import type { ModelS } from "./ref";
 import { EntityT } from "./ref";
 import { cl, cls, ConnstateT, cl_entities, cl_parse_entities, MAX_PARSE_ENTITIES, FrameT, clCvars, gun_frame, gun_model, MAX_CLIENTWEAPONMODELS, re, svc_strings } from "./client";
 import { net_message } from "../qcommon/net_chan";
-import { MSG_ReadByte, MSG_ReadShort, MSG_ReadLong, MSG_ReadChar, MSG_ReadCoord, MSG_ReadAngle, MSG_ReadAngle16, MSG_ReadPos, MSG_ReadData } from "../qcommon/sizebuf";
-import {
-  SvcOpsT,
-  UPDATE_MASK,
-  ERR_DROP,
-  U_MOREBITS1,
-  U_MOREBITS2,
-  U_MOREBITS3,
-  U_NUMBER16,
-  U_MODEL,
-  U_MODEL2,
-  U_MODEL3,
-  U_MODEL4,
-  U_FRAME8,
-  U_FRAME16,
-  U_SKIN8,
-  U_SKIN16,
-  U_EFFECTS8,
-  U_EFFECTS16,
-  U_RENDERFX8,
-  U_RENDERFX16,
-  U_ORIGIN1,
-  U_ORIGIN2,
-  U_ORIGIN3,
-  U_ANGLE1,
-  U_ANGLE2,
-  U_ANGLE3,
-  U_OLDORIGIN,
-  U_SOUND,
-  U_EVENT,
-  U_SOLID,
-  U_REMOVE,
-  PS_M_TYPE,
-  PS_M_ORIGIN,
-  PS_M_VELOCITY,
-  PS_M_TIME,
-  PS_M_FLAGS,
-  PS_M_GRAVITY,
-  PS_M_DELTA_ANGLES,
-  PS_VIEWOFFSET,
-  PS_VIEWANGLES,
-  PS_KICKANGLES,
-  PS_BLEND,
-  PS_FOV,
-  PS_WEAPONINDEX,
-  PS_WEAPONFRAME,
-  PS_RDFLAGS,
-} from "../qcommon/qcommon";
+import { MSG_ReadByte, MSG_ReadLong, MSG_ReadData } from "../qcommon/sizebuf";
+import { SvcOpsT, UPDATE_MASK, ERR_DROP, U_REMOVE } from "../qcommon/qcommon";
 import { Com_Error, Com_Printf } from "../qcommon/common";
 import { SHOWNET } from "./cl_parse";
 import {
@@ -159,33 +112,19 @@ export function setClModPowerscreen(v: ModelS | null): void {
 CL_ParseEntityBits
 
 Returns the entity number and the header bits
+
+ARCHITECTURE.md "Protocol layer" / .orch/phase5-design.md step 1: the wire
+decoding this function used to do directly now lives in
+qcommon/protocol/vanilla.ts's readEntityBits (extracted verbatim, including
+the bit-count profiling counter, which moved there too since nothing outside
+this function ever read it). This wrapper is kept, unchanged in signature, so
+the existing direct callers/imports (this file's CL_ParsePacketEntities,
+cl_parse.ts's CL_ParseBaseline, and test/cl_parse.test.ts) keep working while
+actually routing through cls.codec.
 =================
 */
-const bitcounts = new Int32Array(32); // just for protocol profiling
-
 export function CL_ParseEntityBits(): { number: number; bits: number } {
-  let total = MSG_ReadByte(net_message);
-  if (total & U_MOREBITS1) {
-    const b = MSG_ReadByte(net_message);
-    total |= b << 8;
-  }
-  if (total & U_MOREBITS2) {
-    const b = MSG_ReadByte(net_message);
-    total |= b << 16;
-  }
-  if (total & U_MOREBITS3) {
-    const b = MSG_ReadByte(net_message);
-    total |= b << 24;
-  }
-
-  // count the bits for net profiling
-  for (let i = 0; i < 32; i++) if (total & (1 << i)) bitcounts[i]++;
-
-  let number: number;
-  if (total & U_NUMBER16) number = MSG_ReadShort(net_message);
-  else number = MSG_ReadByte(net_message);
-
-  return { number, bits: total >>> 0 };
+  return cls.codec.readEntityBits();
 }
 
 // struct-copy helper (PORTING.md: "struct copies need explicit clone
@@ -214,53 +153,19 @@ function copyEntityState(dst: EntityStateT, src: EntityStateT): void {
 CL_ParseDelta
 
 Can go from either a baseline or a previous packet_entity
+
+ARCHITECTURE.md "Protocol layer" / .orch/phase5-design.md step 1: the field-
+body decoding this function used to do directly now lives in
+qcommon/protocol/vanilla.ts's readDeltaEntity (extracted verbatim, including
+its own private copy of the copyEntityState struct-copy helper -- see that
+file's header comment). This wrapper is kept, unchanged in signature, so the
+existing direct callers/imports (this file's CL_DeltaEntity, cl_parse.ts's
+CL_ParseBaseline, and test/cl_parse.test.ts) keep working while actually
+routing through cls.codec.
 ==================
 */
 export function CL_ParseDelta(from: EntityStateT, to: EntityStateT, number: number, bits: number): void {
-  // set everything to the state we are delta'ing from
-  copyEntityState(to, from);
-
-  VectorCopy(from.origin, to.old_origin);
-  to.number = number;
-
-  if (bits & U_MODEL) to.modelindex = MSG_ReadByte(net_message);
-  if (bits & U_MODEL2) to.modelindex2 = MSG_ReadByte(net_message);
-  if (bits & U_MODEL3) to.modelindex3 = MSG_ReadByte(net_message);
-  if (bits & U_MODEL4) to.modelindex4 = MSG_ReadByte(net_message);
-
-  if (bits & U_FRAME8) to.frame = MSG_ReadByte(net_message);
-  if (bits & U_FRAME16) to.frame = MSG_ReadShort(net_message);
-
-  if (bits & U_SKIN8 && bits & U_SKIN16)
-    // used for laser colors
-    to.skinnum = MSG_ReadLong(net_message);
-  else if (bits & U_SKIN8) to.skinnum = MSG_ReadByte(net_message);
-  else if (bits & U_SKIN16) to.skinnum = MSG_ReadShort(net_message);
-
-  if ((bits & (U_EFFECTS8 | U_EFFECTS16)) === (U_EFFECTS8 | U_EFFECTS16)) to.effects = MSG_ReadLong(net_message);
-  else if (bits & U_EFFECTS8) to.effects = MSG_ReadByte(net_message);
-  else if (bits & U_EFFECTS16) to.effects = MSG_ReadShort(net_message);
-
-  if ((bits & (U_RENDERFX8 | U_RENDERFX16)) === (U_RENDERFX8 | U_RENDERFX16)) to.renderfx = MSG_ReadLong(net_message);
-  else if (bits & U_RENDERFX8) to.renderfx = MSG_ReadByte(net_message);
-  else if (bits & U_RENDERFX16) to.renderfx = MSG_ReadShort(net_message);
-
-  if (bits & U_ORIGIN1) to.origin[0] = MSG_ReadCoord(net_message);
-  if (bits & U_ORIGIN2) to.origin[1] = MSG_ReadCoord(net_message);
-  if (bits & U_ORIGIN3) to.origin[2] = MSG_ReadCoord(net_message);
-
-  if (bits & U_ANGLE1) to.angles[0] = MSG_ReadAngle(net_message);
-  if (bits & U_ANGLE2) to.angles[1] = MSG_ReadAngle(net_message);
-  if (bits & U_ANGLE3) to.angles[2] = MSG_ReadAngle(net_message);
-
-  if (bits & U_OLDORIGIN) MSG_ReadPos(net_message, to.old_origin);
-
-  if (bits & U_SOUND) to.sound = MSG_ReadByte(net_message);
-
-  if (bits & U_EVENT) to.event = MSG_ReadByte(net_message);
-  else to.event = 0;
-
-  if (bits & U_SOLID) to.solid = MSG_ReadShort(net_message);
+  cls.codec.readDeltaEntity(from, to, number, bits);
 }
 
 // C's abs() takes an int; passing float origin deltas to it implicitly
@@ -417,128 +322,33 @@ function CL_ParsePacketEntities(oldframe: FrameT | null, newframe: FrameT): void
   }
 }
 
-// struct-copy helper for player_state_t (mirrors sv_ents.ts's
-// clonePlayerState, but copies into an existing destination rather than
-// allocating a new one).
-function copyPlayerState(dst: PlayerStateT, src: PlayerStateT): void {
-  dst.pmove.pm_type = src.pmove.pm_type;
-  dst.pmove.origin.set(src.pmove.origin);
-  dst.pmove.velocity.set(src.pmove.velocity);
-  dst.pmove.pm_flags = src.pmove.pm_flags;
-  dst.pmove.pm_time = src.pmove.pm_time;
-  dst.pmove.gravity = src.pmove.gravity;
-  dst.pmove.delta_angles.set(src.pmove.delta_angles);
-  VectorCopy(src.viewangles, dst.viewangles);
-  VectorCopy(src.viewoffset, dst.viewoffset);
-  VectorCopy(src.kick_angles, dst.kick_angles);
-  VectorCopy(src.gunangles, dst.gunangles);
-  VectorCopy(src.gunoffset, dst.gunoffset);
-  dst.gunindex = src.gunindex;
-  dst.gunframe = src.gunframe;
-  dst.blend.set(src.blend);
-  dst.fov = src.fov;
-  dst.rdflags = src.rdflags;
-  dst.stats.set(src.stats);
-}
-
 /*
 ===================
 CL_ParsePlayerstate
+
+ARCHITECTURE.md "Protocol layer" / .orch/phase5-design.md step 1: the wire-
+field decoding this function used to do directly (plus the "copy forward
+from the old frame's playerstate" struct-copy step) now lives in
+qcommon/protocol/vanilla.ts's readPlayerStateDelta. The `cl.attractloop`
+demo-playback override stays here rather than moving into the codec, since it
+is not wire decoding and depends on this module's `cl` singleton, which the
+codec module does not import -- see vanilla.ts's header comment for why this
+is behavior-preserving.
 ===================
 */
 function CL_ParsePlayerstate(oldframe: FrameT | null, newframe: FrameT): void {
-  // clear to old value before delta parsing
   let target: PlayerStateT;
+  const from = oldframe ? oldframe.playerstate : new PlayerStateT();
   if (oldframe) {
     target = newframe.playerstate;
-    copyPlayerState(target, oldframe.playerstate);
   } else {
     target = new PlayerStateT();
     newframe.playerstate = target;
   }
 
-  const flags = MSG_ReadShort(net_message);
-
-  //
-  // parse the pmove_state_t
-  //
-  if (flags & PS_M_TYPE) target.pmove.pm_type = MSG_ReadByte(net_message);
-
-  if (flags & PS_M_ORIGIN) {
-    target.pmove.origin[0] = MSG_ReadShort(net_message);
-    target.pmove.origin[1] = MSG_ReadShort(net_message);
-    target.pmove.origin[2] = MSG_ReadShort(net_message);
-  }
-
-  if (flags & PS_M_VELOCITY) {
-    target.pmove.velocity[0] = MSG_ReadShort(net_message);
-    target.pmove.velocity[1] = MSG_ReadShort(net_message);
-    target.pmove.velocity[2] = MSG_ReadShort(net_message);
-  }
-
-  if (flags & PS_M_TIME) target.pmove.pm_time = MSG_ReadByte(net_message);
-
-  if (flags & PS_M_FLAGS) target.pmove.pm_flags = MSG_ReadByte(net_message);
-
-  if (flags & PS_M_GRAVITY) target.pmove.gravity = MSG_ReadShort(net_message);
-
-  if (flags & PS_M_DELTA_ANGLES) {
-    target.pmove.delta_angles[0] = MSG_ReadShort(net_message);
-    target.pmove.delta_angles[1] = MSG_ReadShort(net_message);
-    target.pmove.delta_angles[2] = MSG_ReadShort(net_message);
-  }
+  cls.codec.readPlayerStateDelta(net_message, from, target);
 
   if (cl.attractloop) target.pmove.pm_type = PmTypeT.PM_FREEZE; // demo playback
-
-  //
-  // parse the rest of the player_state_t
-  //
-  if (flags & PS_VIEWOFFSET) {
-    target.viewoffset[0] = MSG_ReadChar(net_message) * 0.25;
-    target.viewoffset[1] = MSG_ReadChar(net_message) * 0.25;
-    target.viewoffset[2] = MSG_ReadChar(net_message) * 0.25;
-  }
-
-  if (flags & PS_VIEWANGLES) {
-    target.viewangles[0] = MSG_ReadAngle16(net_message);
-    target.viewangles[1] = MSG_ReadAngle16(net_message);
-    target.viewangles[2] = MSG_ReadAngle16(net_message);
-  }
-
-  if (flags & PS_KICKANGLES) {
-    target.kick_angles[0] = MSG_ReadChar(net_message) * 0.25;
-    target.kick_angles[1] = MSG_ReadChar(net_message) * 0.25;
-    target.kick_angles[2] = MSG_ReadChar(net_message) * 0.25;
-  }
-
-  if (flags & PS_WEAPONINDEX) {
-    target.gunindex = MSG_ReadByte(net_message);
-  }
-
-  if (flags & PS_WEAPONFRAME) {
-    target.gunframe = MSG_ReadByte(net_message);
-    target.gunoffset[0] = MSG_ReadChar(net_message) * 0.25;
-    target.gunoffset[1] = MSG_ReadChar(net_message) * 0.25;
-    target.gunoffset[2] = MSG_ReadChar(net_message) * 0.25;
-    target.gunangles[0] = MSG_ReadChar(net_message) * 0.25;
-    target.gunangles[1] = MSG_ReadChar(net_message) * 0.25;
-    target.gunangles[2] = MSG_ReadChar(net_message) * 0.25;
-  }
-
-  if (flags & PS_BLEND) {
-    target.blend[0] = MSG_ReadByte(net_message) / 255.0;
-    target.blend[1] = MSG_ReadByte(net_message) / 255.0;
-    target.blend[2] = MSG_ReadByte(net_message) / 255.0;
-    target.blend[3] = MSG_ReadByte(net_message) / 255.0;
-  }
-
-  if (flags & PS_FOV) target.fov = MSG_ReadByte(net_message);
-
-  if (flags & PS_RDFLAGS) target.rdflags = MSG_ReadByte(net_message);
-
-  // parse stats
-  const statbits = MSG_ReadLong(net_message);
-  for (let i = 0; i < MAX_STATS; i++) if (statbits & (1 << i)) target.stats[i] = MSG_ReadShort(net_message);
 }
 
 /*

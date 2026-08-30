@@ -56,7 +56,7 @@ import { Com_Printf, Com_DPrintf, Com_Error, Com_Quit, Com_ServerState, Info_Pri
 import { NetadrT, NetadrtypeT, NetsrcT, ComError, ERR_DROP, SvcOpsT, ClcOpsT, PROTOCOL_VERSION, PORT_SERVER, MAX_MSGLEN } from "../qcommon/qcommon";
 import { NET_StringToAdr, NET_AdrToString, NET_CompareAdr, NET_IsLocalAddress, NET_SendPacket, NET_GetPacket, NET_Config } from "../platform/net_udp";
 import { Netchan_OutOfBandPrint, Netchan_Setup, Netchan_Transmit, Netchan_Process, net_from, net_message } from "../qcommon/net_chan";
-import { SizeBuf, SZ_Init, SZ_Clear, SZ_Print, MSG_WriteByte, MSG_WriteChar, MSG_WriteShort, MSG_WriteLong, MSG_WriteString, MSG_ReadString, MSG_ReadStringLine, MSG_BeginReading, MSG_ReadLong, MSG_WriteDeltaEntity } from "../qcommon/sizebuf";
+import { SizeBuf, SZ_Init, SZ_Clear, SZ_Print, MSG_WriteByte, MSG_WriteChar, MSG_WriteShort, MSG_WriteLong, MSG_WriteString, MSG_ReadString, MSG_ReadStringLine, MSG_BeginReading, MSG_ReadLong } from "../qcommon/sizebuf";
 import { FS_Gamedir, FS_CreatePath, FS_FOpenFileWrite, FS_Write, FS_FCloseFile, FS_ExecAutoexec } from "../qcommon/files";
 import { CM_LoadMap } from "../qcommon/cmodel";
 import { SV_Shutdown } from "../server/sv_main";
@@ -81,7 +81,6 @@ import {
   CS_MAPCHECKSUM,
   CS_MAXCLIENTS,
   Q_stricmp,
-  EntityStateT,
   type CvarT,
 } from "../shared/q_shared";
 import { cl, cls, cl_entities, ConnstateT, CentityT, clCvars } from "./client";
@@ -282,15 +281,13 @@ export function CL_Record_f(): void {
   }
 
   // baselines
-  const nullstate = new EntityStateT();
   for (let i = 0; i < MAX_EDICTS; i++) {
     const ent = cl_entities[i].baseline;
     if (!ent.modelindex) continue;
 
     if (buf.cursize + 64 > buf.maxsize) flush();
 
-    MSG_WriteByte(buf, SvcOpsT.svc_spawnbaseline);
-    MSG_WriteDeltaEntity(nullstate, cl_entities[i].baseline, buf, true, true);
+    cls.codec.writeSpawnBaseline(buf, cl_entities[i].baseline);
   }
 
   MSG_WriteByte(buf, SvcOpsT.svc_stufftext);
