@@ -125,6 +125,7 @@ import {
   r_particletexture,
 } from "./gl_local";
 import { R_BeginRegistration, R_EndRegistration, R_RegisterModel, Mod_PointInLeaf, Mod_Init, Mod_FreeAll, Mod_Modellist_f, ModtypeT, ModelT, ParsedSp2T } from "./gl_model";
+import { GL_InitShaderPath, GL_ShutdownShaderPath, GL_UsingShaderPath } from "./gl_shader";
 import {
   R_RegisterSkin,
   GL_InitImages,
@@ -892,6 +893,12 @@ function R_Register(): void {
 
   glCvars.r_lightlevel = ri.Cvar_Get("r_lightlevel", "0", 0);
 
+  // task #25 (v1.1.0): q2repro src/refresh/main.c/shader.c's
+  // gl_shaders/gl_per_pixel_lighting, same names and same "1" default as
+  // q2repro's own GLSL backend (see gl_shader.ts's GL_InitShaderPath).
+  glCvars.gl_shaders = ri.Cvar_Get("gl_shaders", "1", 0);
+  glCvars.gl_per_pixel_lighting = ri.Cvar_Get("gl_per_pixel_lighting", "1", 0);
+
   glCvars.gl_nosubimage = ri.Cvar_Get("gl_nosubimage", "0", 0);
   // gl_allow_software: registered for its console side effect only -- the C
   // global it fills is never read anywhere in the ref_gl tree, and
@@ -1140,6 +1147,13 @@ export function R_Init(hInstance: unknown, wndProc: unknown): boolean {
   R_InitParticleTexture();
   Draw_InitLocal();
 
+  // task #25 (v1.1.0): try the GL2+ per-pixel-lighting shader path. Never
+  // fails R_Init either way -- GL_InitShaderPath falls back to
+  // fixed-function internally (see that function's header comment) and the
+  // fixed-function path above has already fully initialized regardless of
+  // its outcome.
+  GL_InitShaderPath();
+
   const err = qgl.qglGetError();
   if (err !== GL_NO_ERROR) {
     ri.Con_Printf(PRINT_ALL, `glGetError() = 0x${err.toString(16)}\n`);
@@ -1158,6 +1172,8 @@ export function R_Shutdown(): void {
   ri.Cmd_RemoveCommand("screenshot");
   ri.Cmd_RemoveCommand("imagelist");
   ri.Cmd_RemoveCommand("gl_strings");
+
+  GL_ShutdownShaderPath();
 
   Mod_FreeAll();
 
@@ -1392,6 +1408,8 @@ export function GetRefAPI(imp: RefImports): RefExports {
     EndRegistration: () => R_EndRegistration(),
 
     RenderFrame: (fd) => R_RenderFrame(fd),
+
+    SupportsPerPixelLighting: () => GL_UsingShaderPath(),
 
     DrawGetPicSize: (name: string) => Draw_GetPicSize(name),
     DrawPic: (x: number, y: number, name: string) => Draw_Pic(x, y, name),

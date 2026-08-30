@@ -448,6 +448,12 @@ describe("SV_WriteFrameToClient E2E with a fabricated client (svs.codec = Q2REPR
       svs.client_entities = Array.from({ length: 8 }, () => new EntityStateT());
 
       const client = new ClientT();
+      // v1.0.0 wire cluster (task board #23): SV_WriteFrameToClient now
+      // reads client.codec, not svs.codec (per-client codec negotiation) --
+      // svs.codec above is still set for anything that legitimately stays
+      // family-wide (demo recording), but this test's actual assertions
+      // depend on client.codec specifically.
+      client.codec = Q2REPRO_CODEC;
       // client.lastframe defaults to 0 (<=0 -> SV_WriteFrameToClient's
       // nodelta branch), matching a freshly connected client.
 
@@ -547,6 +553,11 @@ describe("SV_WriteFrameToClient E2E with a fabricated client (svs.codec = Q2REPR
       svs.client_entities = Array.from({ length: 4 }, () => new EntityStateT());
 
       const client = new ClientT();
+      // v1.0.0 wire cluster (task board #23): explicit even though it
+      // matches ClientT's own default -- see the sibling Q2REPRO_CODEC test
+      // above for why client.codec (not svs.codec) is what
+      // SV_WriteFrameToClient actually reads now.
+      client.codec = VANILLA_CODEC;
       sv.framenum = 1;
       const frame = client.frames[sv.framenum & UPDATE_MASK];
       frame.ps = new PlayerStateT();

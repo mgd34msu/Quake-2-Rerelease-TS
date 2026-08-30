@@ -50,6 +50,7 @@
 // unacknowledged reliable
 
 import { NetadrT, NetsrcT, MAX_MSGLEN, SysError } from "./qcommon";
+import { tryWrapZPacket } from "./protocol/zpacket";
 import { SizeBuf, SZ_Init, SZ_Write, MSG_WriteLong, MSG_WriteShort, MSG_BeginReading, MSG_ReadLong, MSG_ReadShort, stringToBytes } from "./sizebuf";
 import { Cvar_Get } from "./cvar";
 import { Com_Printf } from "./common";
@@ -111,6 +112,17 @@ export class NetchanT {
   // message is copied to this buffer when it is first transfered
   reliable_length = 0;
   reliable_buf: Uint8Array = new Uint8Array(MAX_MSGLEN - 16); // unacked reliable message
+
+  // v1.0.0 wire cluster (task board #23): true when this connection's
+  // negotiated protocol both understands svc_r1q2_zpacket and has it turned
+  // on (R1Q2: always; Q2PRO: only when the client's connect string set its
+  // zlib token -- see qcommon/protocol/zpacket.ts's header comment). Set by
+  // sv_main.ts's SVC_DirectConnect; read only by Netchan_Transmit below, and
+  // only on the server side (chan.sock === NetsrcT.NS_SERVER) -- this engine
+  // never compresses a client's OUTGOING (clc_*) reliable traffic, matching
+  // every protocol this port studied (svc_zpacket is a server-to-client
+  // opcode only).
+  compress = false;
 }
 
 export function Netchan_Init(): void {
@@ -211,8 +223,25 @@ export function Netchan_Transmit(chan: NetchanT, length: number, data: Uint8Arra
   const send_reliable = Netchan_NeedReliable(chan);
 
   if (!chan.reliable_length && chan.message.cursize) {
-    chan.reliable_buf.set(chan.message_buf.subarray(0, chan.message.cursize));
-    chan.reliable_length = chan.message.cursize;
+    // svc_zpacket wrap point (v1.0.0 wire cluster, task board #23) -- see
+    // qcommon/protocol/zpacket.ts's header comment for why THIS is the one
+    // choke point in this codebase's architecture that corresponds to
+    // q2proto's own per-write compression gating. Server-side only
+    // (svc_zpacket is a server-to-client opcode); `chan.compress` is only
+    // ever set true on a server-side NetchanT (sv_main.ts's
+    // SVC_DirectConnect), so the `chan.sock` check is redundant defense, not
+    // load-bearing, but kept explicit for the reader.
+    const wrapped =
+      chan.compress && chan.sock === NetsrcT.NS_SERVER
+        ? tryWrapZPacket(chan.message_buf, chan.message.cursize, chan.reliable_buf.length)
+        : null;
+    if (wrapped) {
+      chan.reliable_buf.set(wrapped);
+      chan.reliable_length = wrapped.length;
+    } else {
+      chan.reliable_buf.set(chan.message_buf.subarray(0, chan.message.cursize));
+      chan.reliable_length = chan.message.cursize;
+    }
     chan.message.cursize = 0;
     chan.reliable_sequence ^= 1;
   }

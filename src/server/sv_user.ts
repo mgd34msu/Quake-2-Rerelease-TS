@@ -103,15 +103,35 @@ export function SV_New_f(): void {
   else playernum = svs.clients.indexOf(cl); // sv_client - svs.clients
 
   // send the serverdata (ARCHITECTURE.md "Protocol layer" / .orch/phase5-design.md:
-  // routed through svs.codec so the 1038 codec's handshake shape can differ --
-  // see codec.ts's writeServerData doc comment).
-  svs.codec.writeServerData(cl.netchan.message, {
+  // routed through cl.codec so the 1038/R1Q2/Q2PRO codecs' handshake shapes
+  // can differ -- see codec.ts's writeServerData doc comment). cl.codec, not
+  // svs.codec: v1.0.0 wire cluster (task board #23) negotiates protocol
+  // 34/35/36 per client for the legacy family -- see server.ts's
+  // ClientT.codec doc comment.
+  //
+  // r1q2StrafejumpHack/q2proStrafejumpHack/q2proQwMode/q2proWaterjumpHack are
+  // always advertised disabled: this port implements none of the
+  // corresponding pmove behavior changes, and FIDELITY RAZOR (.orch/
+  // preferences.md rule 17) means observable behavior must match what a real
+  // client is told, not just what the wire field COULD say -- advertising
+  // "on" here would make a real R1Q2/Q2PRO client apply client-side movement
+  // prediction this server's game/pmove code never performs, causing
+  // mispredicts. cl.protocolMinorVersion is set by sv_main.ts's
+  // SVC_DirectConnect once it parses the connect string's protocol-specific
+  // tail tokens.
+  cl.codec.writeServerData(cl.netchan.message, {
     servercount: svs.spawncount,
     attractloop: sv.attractloop,
     gamedir,
     clientnum: playernum,
     levelname: sv.configstrings[CS_NAME],
     serverState: sv.state,
+    r1q2Version: cl.protocolMinorVersion,
+    r1q2StrafejumpHack: false,
+    q2proVersion: cl.protocolMinorVersion,
+    q2proStrafejumpHack: false,
+    q2proQwMode: false,
+    q2proWaterjumpHack: false,
   });
 
   //
@@ -201,7 +221,7 @@ export function SV_Baselines_f(): void {
   while (cl.netchan.message.cursize < MAX_MSGLEN / 2 && start < MAX_EDICTS) {
     const base = sv.baselines[start];
     if (base.modelindex || base.sound || base.effects) {
-      svs.codec.writeSpawnBaseline(cl.netchan.message, base);
+      cl.codec.writeSpawnBaseline(cl.netchan.message, base);
     }
     start++;
   }
@@ -551,9 +571,9 @@ export function SV_ExecuteClientMessage(cl: ClientT): void {
         const oldest = new UsercmdT();
         const oldcmd = new UsercmdT();
         const newcmd = new UsercmdT();
-        svs.codec.readDeltaUsercmd(net_message, nullcmd, oldest);
-        svs.codec.readDeltaUsercmd(net_message, oldest, oldcmd);
-        svs.codec.readDeltaUsercmd(net_message, oldcmd, newcmd);
+        cl.codec.readDeltaUsercmd(net_message, nullcmd, oldest);
+        cl.codec.readDeltaUsercmd(net_message, oldest, oldcmd);
+        cl.codec.readDeltaUsercmd(net_message, oldcmd, newcmd);
 
         if (cl.state !== ClientStateT.cs_spawned) {
           cl.lastframe = -1;

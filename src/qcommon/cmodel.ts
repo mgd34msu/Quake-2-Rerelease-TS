@@ -640,6 +640,25 @@ export function CM_EntityString(): string {
   return map_entitystring;
 }
 
+/*
+================
+CM_NumTexinfo / CM_TexinfoName
+
+Additive accessors for cl_main.ts's CL_RequestNextDownload texture-download
+phase (vanilla cl_main.c reads `extern int numtexinfo; extern mapsurface_t
+map_surfaces[];` from qcommon/cmodel.c directly -- not possible here since
+both are module-private). Read-only views onto the same data CM_LoadMap
+already populates; no new state, no change to existing behavior.
+================
+*/
+export function CM_NumTexinfo(): number {
+  return numtexinfo;
+}
+
+export function CM_TexinfoName(i: number): string {
+  return map_surfaces[i]?.rname ?? "";
+}
+
 export function CM_LeafContents(leafnum: number): number {
   if (leafnum < 0 || leafnum >= numleafs) Com_Error(ERR_DROP, "CM_LeafContents: bad number");
   return map_leafs[leafnum].contents;

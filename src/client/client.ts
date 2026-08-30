@@ -51,7 +51,7 @@ import { type ModelS, type ImageS, type RefExports, RefdefT, MAX_DLIGHTS } from 
 import type { SfxT } from "./snd_loc";
 import type { ProtocolCodec } from "../qcommon/protocol/codec";
 import { VANILLA_CODEC } from "../qcommon/protocol/vanilla";
-import { type CsRemapT, CS_REMAP_OLD, CS_REMAP_RERELEASE, MAX_MODELS_WIDE, MAX_SOUNDS_WIDE, MAX_IMAGES_WIDE } from "../shared/cs_remap";
+import { type CsRemapT, CS_REMAP_OLD, CS_REMAP_RERELEASE, MAX_MODELS_WIDE, MAX_SOUNDS_WIDE, MAX_IMAGES_WIDE, MAX_SHADOW_LIGHTS_WIDE } from "../shared/cs_remap";
 
 //=============================================================================
 
@@ -64,6 +64,34 @@ export class FrameT {
   playerstate: PlayerStateT = new PlayerStateT();
   num_entities = 0;
   parse_entities = 0; // non-masked index into cl_parse_entities array
+}
+
+// q2repro src/client/client.h's cl_shadow_light_t -- one CS_SHADOWLIGHTS-fed
+// light definition, task #25 (v1.1.0). Placed in client.ts (not ref.ts)
+// matching q2repro's own placement (client.h, not ref.h): this is
+// client-side scene state re-evaluated every frame in CL_AddShadowLights
+// (cl_fx.ts) against the entity it's attached to, before being handed to
+// V_AddLightEx (cl_view.ts) which turns it into an r_dlights entry the
+// renderer actually consumes. No `lighttype` field: like the original,
+// coneangle===0 means point, non-zero means spot (see
+// CL_ParseShadowLightConfigstring's `isCone` handling in cl_fx.ts).
+export class ShadowLightT {
+  origin: Vec3 = vec3();
+  radius = 0;
+  resolution = 0;
+  intensity = 0;
+  fade_start = 0;
+  fade_end = 0;
+  lightstyle = -1;
+  coneangle = 0; // spot if non-zero
+  conedirection: Vec3 = vec3();
+  color: Vec3 = vec3(1, 1, 1); // unpacked 0..1; alpha/skinnum sign bit not modeled, unused downstream
+}
+
+// client_state_t.shadowdefs[MAX_SHADOW_LIGHTS] (client.h)
+export class ShadowLightDefT {
+  number = 0; // owning entity's s.number; 0 = unset slot
+  light: ShadowLightT = new ShadowLightT();
 }
 
 export class CentityT {
@@ -193,6 +221,12 @@ export class ClStateT {
   clientinfo: ClientinfoT[] = Array.from({ length: MAX_CLIENTS }, () => new ClientinfoT());
   baseclientinfo: ClientinfoT = new ClientinfoT();
 
+  // client_state_t.shadowdefs[MAX_SHADOW_LIGHTS] -- task #25 (v1.1.0).
+  // Sized at the wide family's limit for the same reason `configstrings`
+  // above is (a client that reconnects under a different family must never
+  // carry over an undersized array).
+  shadowdefs: ShadowLightDefT[] = Array.from({ length: MAX_SHADOW_LIGHTS_WIDE }, () => new ShadowLightDefT());
+
   // mirrors `memset(&cl, 0, sizeof(client_state_t))` (CL_ClearState)
   clear(): void {
     this.timeoutcount = 0;
@@ -237,6 +271,7 @@ export class ClStateT {
     this.model_clip = new Array(MAX_MODELS_WIDE).fill(null);
     this.sound_precache = new Array(MAX_SOUNDS_WIDE).fill(null);
     this.image_precache = new Array(MAX_IMAGES_WIDE).fill(null);
+    this.shadowdefs = Array.from({ length: MAX_SHADOW_LIGHTS_WIDE }, () => new ShadowLightDefT());
     this.clientinfo = Array.from({ length: MAX_CLIENTS }, () => new ClientinfoT());
     this.baseclientinfo = new ClientinfoT();
   }
@@ -406,6 +441,18 @@ export const clCvars: {
   cl_paused: CvarT | null;
   cl_timedemo: CvarT | null;
   cl_vwep: CvarT | null;
+  // v1.0.0 wire cluster (task board #23): which protocol number
+  // CL_SendConnectPacket requests. Defaults to PROTOCOL_VERSION (34) --
+  // matches every existing user's current connect behavior byte-for-byte
+  // (the protocol-34 golden suite's "untouched-green" requirement extends to
+  // DEFAULT runtime behavior, not just the test suite); set to 35 or 36 to
+  // join an R1Q2- or Q2PRO-only community server. Mirrors real Q2PRO
+  // clients' own user-facing "protocol" cvar for the identical purpose.
+  cl_protocol: CvarT | null;
+
+  // q2repro src/client/effects.c: `cl_shadowlights = Cvar_Get("cl_shadowlights",
+  // "1", 0);` -- task #25 (v1.1.0), gates CL_AddShadowLights (cl_fx.ts).
+  cl_shadowlights: CvarT | null;
 } = {
   cl_stereo_separation: null,
   cl_stereo: null,
@@ -440,6 +487,8 @@ export const clCvars: {
   cl_paused: null,
   cl_timedemo: null,
   cl_vwep: null,
+  cl_protocol: null,
+  cl_shadowlights: null,
 };
 
 export class CdlightT {

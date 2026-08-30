@@ -32,6 +32,58 @@ export const PROTOCOL_VERSION = 34;
 // writes onto the wire.
 export const PROTOCOL_VERSION_RERELEASE = 1038;
 
+// R1Q2 protocol family (protocol 35) and Q2PRO protocol family (protocol 36)
+// -- v1.0.0 wire cluster (task board #23), Mike's ruling: our server accepts
+// classic community clients and our client joins classic community servers.
+// Minor-version ladders per q2proto_internal_protocol.h (q2proto, the
+// reference library these two codecs -- src/qcommon/protocol/r1q2.ts and
+// q2pro.ts -- are ported from).
+export const PROTOCOL_VERSION_R1Q2 = 35;
+export const PROTOCOL_VERSION_R1Q2_MINIMUM = 1903;
+// clc_move gains optional 1-byte forward/angle1 fields (BUTTON_UCMD_DBLFORWARD
+// / BUTTON_UCMD_DBL_ANGLE1) at this minor version and above.
+export const PROTOCOL_VERSION_R1Q2_UCMD = 1904;
+// U_SOLID widens from a u16 cmodel-index short to a u32 packed bbox at this
+// minor version and above (q2proto_proto_r1q2.c's `has_solid32` feature).
+export const PROTOCOL_VERSION_R1Q2_LONG_SOLID = 1905;
+export const PROTOCOL_VERSION_R1Q2_CURRENT = 1905;
+
+export const PROTOCOL_VERSION_Q2PRO = 36;
+export const PROTOCOL_VERSION_Q2PRO_MINIMUM = 1015;
+// This port implements Q2PRO's "plain" (non-extended, game_api == VANILLA)
+// wire tier only -- see q2pro.ts's file header for the documented scope cut
+// (no U_ANGLE16/U_MODEL16/U_MOREFX/U_ALPHA/U_SCALE entity-delta extensions,
+// no EPS_CLIENTNUM/PS_MOREBITS/PLAYERFOG playerstate extensions, no
+// svc_q2pro_gamestate/configstringstream/baselinestream bulk-transfer
+// opcodes, no PROTOCOL_VERSION_Q2PRO_EXTENDED_LIMITS-and-up q2pro_flags word).
+// Negotiated client versions are clamped to this ceiling; the server always
+// advertises game_api == VANILLA in serverdata, which is how a real Q2PRO
+// client is told to fall back to the plain wire format regardless of its own
+// maximum supported version.
+export const PROTOCOL_VERSION_Q2PRO_SERVER_STATE = 1019;
+export const PROTOCOL_VERSION_Q2PRO_CURRENT = PROTOCOL_VERSION_Q2PRO_SERVER_STATE;
+
+// Shared player_state_t "extraflags" byte (EPS_*) introduced by R1Q2 and
+// inherited unchanged by Q2PRO (q2proto_internal_protocol.h) -- travels
+// through the frame envelope's opcode high bits + suppress_count's high
+// nibble, NOT as its own MSG_WriteByte call (see r1q2.ts/q2pro.ts writeFrame
+// for the exact packing/unpacking).
+export const EPS_GUNOFFSET = 1 << 0;
+export const EPS_GUNANGLES = 1 << 1;
+export const EPS_M_VELOCITY2 = 1 << 2;
+export const EPS_M_ORIGIN2 = 1 << 3;
+export const EPS_VIEWANGLE2 = 1 << 4;
+export const EPS_STATS = 1 << 5;
+
+// svc_r1q2_zpacket -- shared opcode value used identically by both R1Q2 and
+// Q2PRO (q2proto_internal_maybe_zpacket.c); numerically the same slot KEX
+// uses for its own unrelated svc_splitclient opcode (both families start
+// their private opcode range at svc_frame+1 == 21; only one family's codec is
+// ever active per connection, so the numeric overlap is safe -- same pattern
+// already established for svc_sound/svc_temp_entity's cls.codec branches in
+// cl_parse.ts).
+export const SVC_ZPACKET = 21;
+
 export const PORT_MASTER = 27900;
 export const PORT_CLIENT = 27901;
 export const PORT_SERVER = 27910;

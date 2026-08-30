@@ -22,6 +22,7 @@ import {
   CM_HeadnodeVisible,
 } from "../qcommon/cmodel";
 import { type ClientT, type ClientFrameT, sv, svs, maxclients } from "./server";
+import type { ProtocolCodec } from "../qcommon/protocol/codec";
 import { geHolder } from "./sv_game";
 import { SVF_NOCLIENT } from "../game/game";
 import { Com_DPrintf, Com_Error } from "../qcommon/common";
@@ -54,16 +55,19 @@ function hasPlayerState(client: unknown): client is EdictClientPs {
 SV_EmitPacketEntities
 
 Writes a delta update of an entity_state_t list to the message. The per-
-entity wire encoding (delta bits, remove marker, terminator) is owned by
-svs.codec (ARCHITECTURE.md "Protocol layer" / .orch/phase5-design.md step 1)
-so a future 1038 codec can format these bytes differently; the diff loop
-itself (which entities changed) stays here, matching q2proto's own split
-(the codec's vanilla_server_write_frame_entity_delta takes one already-
-decided entity at a time; the caller does the old/new list diff).
+entity wire encoding (delta bits, remove marker, terminator) is owned by the
+`codec` param (ARCHITECTURE.md "Protocol layer" / .orch/phase5-design.md
+step 1; v1.0.0 wire cluster task board #23 made this the caller's
+client.codec instead of a fixed svs.codec, since legacy-family connections
+now negotiate protocol 34/35/36 per client) so each codec can format these
+bytes differently; the diff loop itself (which entities changed) stays here,
+matching q2proto's own split (the codec's
+vanilla_server_write_frame_entity_delta takes one already-decided entity at
+a time; the caller does the old/new list diff).
 =============
 */
-function SV_EmitPacketEntities(from: ClientFrameT | null, to: ClientFrameT, msg: SizeBuf): void {
-  svs.codec.writePacketEntitiesBegin(msg);
+function SV_EmitPacketEntities(from: ClientFrameT | null, to: ClientFrameT, msg: SizeBuf, codec: ProtocolCodec): void {
+  codec.writePacketEntitiesBegin(msg);
 
   const from_num_entities = from ? from.num_entities : 0;
 
@@ -96,7 +100,7 @@ function SV_EmitPacketEntities(from: ClientFrameT | null, to: ClientFrameT, msg:
       // and prevents warping
       if (oldent && newent) {
         const mc = maxclients ? maxclients.value : 0;
-        svs.codec.writeDeltaEntity(msg, oldent, newent, false, newent.number <= mc);
+        codec.writeDeltaEntity(msg, oldent, newent, false, newent.number <= mc);
       }
       oldindex++;
       newindex++;
@@ -106,7 +110,7 @@ function SV_EmitPacketEntities(from: ClientFrameT | null, to: ClientFrameT, msg:
     if (newnum < oldnum) {
       // this is a new entity, send it from the baseline
       if (newent) {
-        svs.codec.writeDeltaEntity(msg, sv.baselines[newnum], newent, true, true);
+        codec.writeDeltaEntity(msg, sv.baselines[newnum], newent, true, true);
       }
       newindex++;
       continue;
@@ -114,13 +118,13 @@ function SV_EmitPacketEntities(from: ClientFrameT | null, to: ClientFrameT, msg:
 
     if (newnum > oldnum) {
       // the old entity isn't present in the new message
-      svs.codec.writeEntityRemove(msg, oldnum);
+      codec.writeEntityRemove(msg, oldnum);
       oldindex++;
       continue;
     }
   }
 
-  svs.codec.writePacketEntitiesEnd(msg); // end of packetentities
+  codec.writePacketEntitiesEnd(msg); // end of packetentities
 }
 
 /*
@@ -150,12 +154,15 @@ export function SV_WriteFrameToClient(client: ClientT, msg: SizeBuf): void {
   }
 
   // Envelope shape (svc_frame opcode, framenum/delta encoding, areabits,
-  // playerstate delta, packetentities framing) is now owned by svs.codec
+  // playerstate delta, packetentities framing) is owned by the codec
   // (ARCHITECTURE.md "Protocol layer" / .orch/phase5-design.md phase 5 --
-  // q2repro.ts's file header "RESOLVED: frame envelope" note). The entity
-  // diff loop (SV_EmitPacketEntities) stays here since it needs svs/sv
-  // globals this qcommon-layer codec module doesn't import.
-  svs.codec.writeFrame(
+  // q2repro.ts's file header "RESOLVED: frame envelope" note). client.codec,
+  // not svs.codec: v1.0.0 wire cluster (task board #23) made codec selection
+  // per-client for the legacy family (34/35/36 can now coexist on one
+  // server) -- see server.ts's ClientT.codec doc comment. The entity diff
+  // loop (SV_EmitPacketEntities) stays here since it needs svs/sv globals
+  // this qcommon-layer codec module doesn't import.
+  client.codec.writeFrame(
     msg,
     {
       framenum: sv.framenum,
@@ -166,7 +173,7 @@ export function SV_WriteFrameToClient(client: ClientT, msg: SizeBuf): void {
       psFrom: oldframe ? oldframe.ps : null,
       psTo: frame.ps,
     },
-    (m) => SV_EmitPacketEntities(oldframe, frame, m),
+    (m) => SV_EmitPacketEntities(oldframe, frame, m, client.codec),
   );
   client.surpressCount = 0;
 }

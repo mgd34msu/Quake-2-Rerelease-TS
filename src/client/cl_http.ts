@@ -27,7 +27,7 @@ import { Cvar_Get } from "../qcommon/cvar";
 import type { CvarT } from "../shared/q_shared";
 import { MAX_QPATH } from "../shared/q_shared";
 import { BASEDIRNAME } from "../qcommon/qcommon";
-import { FS_Gamedir, FS_CreatePath, FS_WriteFile, FS_ReadRawFile, FS_RemoveFile, FS_LoadFile, fs_gamedirvar } from "../qcommon/files";
+import { FS_Gamedir, FS_CreatePath, FS_WriteFile, FS_ReadRawFile, FS_RemoveFile, FS_LoadFile, FS_AddPak, fs_gamedirvar } from "../qcommon/files";
 import { allow_download } from "../server/sv_main";
 
 export type HttpDlType = "model" | "sound" | "skin" | "single" | "pak" | "list";
@@ -665,6 +665,14 @@ async function runEntry(entry: DlEntry): Promise<void> {
     if (data !== null) {
       FS_WriteFile(diskPath, data);
       FS_RemoveFile(tmpPath);
+
+      // "a pak file is very special..." (Q2PRO http.c process_downloads):
+      // mount it immediately so any other still-pending queue entry that
+      // turns out to live inside it (rescanQueue below) is satisfied
+      // without ever being individually fetched.
+      if (entry.type === "pak" && FS_AddPak(diskPath)) {
+        HTTP_RescanQueue();
+      }
     }
 
     Com_Printf("[HTTP] %s [%d bytes] [%d remaining file%s]\n", entry.path, bytes.length, queue.filter((q) => q.state !== "done").length, queue.filter((q) => q.state !== "done").length === 1 ? "" : "s");
@@ -706,6 +714,29 @@ pacing) has an obvious hook to grow into.
 */
 export function HTTP_RunDownloads(): void {
   pump();
+}
+
+/*
+===============
+HTTP_RescanQueue
+
+Q2PRO src/client/http.c rescan_queue(): "A pak file just downloaded, let's
+see if we can remove some stuff from the queue which is in the .pak."
+Any not-yet-dispatched queue entry whose path now resolves through
+FS_LoadFile (thanks to a newly mounted pak, from either the HTTP path
+above or cl_parse.ts's UDP-fallback .pak/.pkz completion) is resolved done
+without ever being fetched, so pump() doesn't waste a request on it.
+Exported (rather than kept file-private like the original static function)
+so cl_parse.ts's CL_ParseDownload can call it too.
+===============
+*/
+export function HTTP_RescanQueue(): void {
+  for (const entry of queue) {
+    if (entry.state === "pending" && entry.type !== "list" && FS_LoadFile(entry.path) !== null) {
+      entry.state = "done";
+      entry.resolve(true);
+    }
+  }
 }
 
 /*

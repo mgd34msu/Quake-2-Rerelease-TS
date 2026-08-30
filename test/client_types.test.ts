@@ -157,6 +157,7 @@ describe("ref.ts / vid.ts / screen.ts default structs", () => {
       SetSky: () => undefined,
       EndRegistration: () => undefined,
       RenderFrame: () => undefined,
+      SupportsPerPixelLighting: () => false,
       DrawGetPicSize: () => ({ w: 0, h: 0 }),
       DrawPic: () => undefined,
       DrawStretchPic: () => undefined,

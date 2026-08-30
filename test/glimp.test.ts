@@ -75,6 +75,31 @@ function makeFakeRi(overrides: Partial<RefImports> = {}): RefImports {
 
 const EXTENSION_SYMBOL_NAMES = ["glLockArraysEXT", "glUnlockArraysEXT", "glPointParameterfEXT", "glPointParameterfvEXT", "glColorTableEXT", "glMTexCoord2fSGIS", "glSelectTextureSGIS"];
 
+// task #25 (v1.1.0)'s GL2 program-object group (qgl.ts's resolveGLShaderAPI)
+// -- resolved the same way as the *_EXT/*_SGIS names above (getProcAddress
+// when supplied), so it shows up in the same `queried`/`resolved` sets.
+const SHADER_SYMBOL_NAMES = [
+  "glCreateShader",
+  "glShaderSource",
+  "glCompileShader",
+  "glGetShaderiv",
+  "glGetShaderInfoLog",
+  "glDeleteShader",
+  "glCreateProgram",
+  "glAttachShader",
+  "glLinkProgram",
+  "glGetProgramiv",
+  "glGetProgramInfoLog",
+  "glDeleteProgram",
+  "glUseProgram",
+  "glGetUniformLocation",
+  "glUniform1i",
+  "glUniform1f",
+  "glUniform3f",
+  "glUniform3fv",
+  "glUniform4f",
+];
+
 describe("src/ref_gl/qgl.ts -- loadQGLFromSystem's getProcAddress wiring", () => {
   test("queries every *_EXT/*_SGIS name through the resolver and falls back to a no-op when it comes back empty", () => {
     const queried: string[] = [];
@@ -85,7 +110,13 @@ describe("src/ref_gl/qgl.ts -- loadQGLFromSystem's getProcAddress wiring", () =>
 
     const qgl: QGL = loadQGLFromSystem(fakeGetProcAddress);
 
-    expect(queried.slice().sort()).toEqual(EXTENSION_SYMBOL_NAMES.slice().sort());
+    // resolveGLShaderAPI queries its group in a fixed order and bails on the
+    // first null (see that function's header comment: an all-or-nothing
+    // group gains nothing from probing the rest once one member is known
+    // absent) -- unlike the seven independent *_EXT/*_SGIS resolvers below,
+    // each of which always queries regardless of the others' results, so
+    // only "glCreateShader" (first in the group) appears here, not all 19.
+    expect(queried.slice().sort()).toEqual([...EXTENSION_SYMBOL_NAMES, "glCreateShader"].sort());
 
     // unresolved extensions are null, exactly the C's NULL function
     // pointers -- every engine call site checks before calling, and the
@@ -97,6 +128,14 @@ describe("src/ref_gl/qgl.ts -- loadQGLFromSystem's getProcAddress wiring", () =>
     expect(qgl.qglPointParameterfEXT).toBeNull();
     expect(qgl.qglPointParameterfvEXT).toBeNull();
     expect(qgl.qglColorTableEXT).toBeNull();
+
+    // the GL2 program-object group resolves (and falls back to null) as one
+    // all-or-nothing unit -- see qgl.ts's resolveGLShaderAPI header comment.
+    // A driver/context with none of these (this test's simulated case) means
+    // gl_shader.ts's GL_InitShaderPath falls back to fixed-function.
+    expect(qgl.qglCreateShader).toBeNull();
+    expect(qgl.qglUseProgram).toBeNull();
+    expect(qgl.qglGetUniformLocation).toBeNull();
   });
 
   test("a resolver that finds every extension is queried by name but its no-op fallback is never used", () => {
@@ -112,7 +151,7 @@ describe("src/ref_gl/qgl.ts -- loadQGLFromSystem's getProcAddress wiring", () =>
     };
 
     expect(() => loadQGLFromSystem(fakeGetProcAddress)).not.toThrow();
-    expect(resolved).toEqual(new Set(EXTENSION_SYMBOL_NAMES));
+    expect(resolved).toEqual(new Set([...EXTENSION_SYMBOL_NAMES, ...SHADER_SYMBOL_NAMES]));
   });
 
   test("with no resolver at all (gl_rmain.ts's own zero-arg call site), every QGL member still exists", () => {
@@ -127,7 +166,19 @@ describe("src/ref_gl/qgl.ts -- loadQGLFromSystem's getProcAddress wiring", () =>
     for (const name of core) {
       expect(typeof qgl[name]).toBe("function");
     }
-    const extensions: ReadonlyArray<keyof QGL> = ["qglLockArraysEXT", "qglUnlockArraysEXT", "qglPointParameterfEXT", "qglPointParameterfvEXT", "qglColorTableEXT", "qglMTexCoord2fSGIS", "qglSelectTextureSGIS"];
+    const extensions: ReadonlyArray<keyof QGL> = [
+      "qglLockArraysEXT",
+      "qglUnlockArraysEXT",
+      "qglPointParameterfEXT",
+      "qglPointParameterfvEXT",
+      "qglColorTableEXT",
+      "qglMTexCoord2fSGIS",
+      "qglSelectTextureSGIS",
+      "qglCreateShader",
+      "qglUseProgram",
+      "qglGetUniformLocation",
+      "qglUniform3f",
+    ];
     for (const name of extensions) {
       const member = qgl[name];
       expect(member === null || typeof member === "function").toBe(true);

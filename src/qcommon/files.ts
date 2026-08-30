@@ -739,6 +739,50 @@ export function FS_AddGameDirectory(dir: string): void {
 }
 
 /*
+================
+FS_AddPak
+
+Mounts a single pak file at the head of the search path (highest priority),
+without touching any other search path entry. This is the "pak just
+arrived mid-session" entry point cl_http.ts (a completed "pak"-type HTTP
+transfer) and cl_parse.ts (a completed UDP download whose filename ends in
+.pak/.pkz, the fallback path) call so the precache/download walk's next
+CL_CheckOrDownloadFile/FS_LoadFile call can see what the pak contains.
+
+Q2PRO's equivalent (src/client/http.c process_downloads' "a pak file is
+very special..." branch) calls CL_RestartFilesystem(total), which does a
+full FS_Restart -- tearing down and rebuilding every search path entry,
+plus the renderer and UI, since Q2PRO's FS_Restart also re-execs
+autoexec-style config state. This port has no runtime equivalent of that
+full teardown/rebuild wired up outside of startup (FS_InitFilesystem), and
+building one is out of scope for the download/precache walk -- the only
+thing the walk actually needs is for the new pak's contents to become
+visible to FS_LoadFile/FS_FOpenFile, so this mounts just that one pack
+instead of restarting the whole filesystem.
+
+Unlike FS_AddGameDirectory's startup-time pak loads, this pak came from the
+network and may be truncated or corrupt (a dropped connection, a server
+bug); FS_LoadPackFile Com_Errors (ERR_FATAL) on a bad header or an
+oversized directory, which is the right call for a pak the user placed on
+disk before startup but would crash a live client over a bad download.
+Caught here and turned into a declined mount instead.
+================
+*/
+export function FS_AddPak(diskPath: string): boolean {
+  let pak: PackT | null;
+  try {
+    pak = FS_LoadPackFile(diskPath);
+  } catch (err) {
+    Com_Printf("Couldn't add %s: %s\n", diskPath, err instanceof Error ? err.message : String(err));
+    return false;
+  }
+  if (!pak) return false;
+
+  fs_searchpaths = { kind: "pack", pack: pak, next: fs_searchpaths };
+  return true;
+}
+
+/*
 ============
 FS_Gamedir
 

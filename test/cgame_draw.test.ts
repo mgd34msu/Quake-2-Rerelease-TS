@@ -50,6 +50,7 @@ function makeFakeRe(): RefExports & {
     SetSky: () => undefined,
     EndRegistration: () => undefined,
     RenderFrame: () => undefined,
+    SupportsPerPixelLighting: () => false,
     DrawGetPicSize(_name: string) {
       return fake.drawGetPicSizeResult;
     },

@@ -23,7 +23,9 @@ import {
   setGunFrame,
   setGunModel,
   setNumClWeaponmodels,
+  type ShadowLightT,
 } from "./client";
+import { CL_AddShadowLights } from "./cl_fx";
 import { crosshair, crosshair_height, crosshair_pic, crosshair_width, scr_vrect, setCrosshair } from "./screen";
 import { entitycmpfnc, SCR_AddDirtyPoint, SCR_TouchPics, SCR_UpdateScreen } from "./cl_scrn";
 import { CL_AddEntities } from "./cl_ents";
@@ -125,6 +127,77 @@ export function V_AddLight(org: Vec3, intensity: number, r: number, g: number, b
   dl.color[0] = r;
   dl.color[1] = g;
   dl.color[2] = b;
+}
+
+function clamp01(x: number): number {
+  return x < 0 ? 0 : x > 1 ? 1 : x;
+}
+
+function smoothstep(edge0: number, edge1: number, x: number): number {
+  const t = clamp01((x - edge0) / (edge1 - edge0));
+  return t * t * (3 - 2 * t);
+}
+
+/*
+=====================
+fade_distance_to_light
+
+q2repro src/client/view.c's fade_distance_to_light -- CPU-side screen/
+distance fade for CS_SHADOWLIGHTS-fed lights only. Classic V_AddLight
+callers never set fade_start/fade_end (both default to 0), which this
+function's first early-out treats as "no fade, always fully lit" -- a
+no-op for every pre-existing V_AddLight call site.
+=====================
+*/
+export function fadeDistanceToLight(fadeStart: number, fadeEnd: number, lightOrigin: Vec3, viewOrigin: Vec3): number {
+  if (fadeStart <= 1 && fadeEnd <= 1) return 1;
+  if (fadeStart > fadeEnd) return 1;
+
+  const dx = lightOrigin[0] - viewOrigin[0];
+  const dy = lightOrigin[1] - viewOrigin[1];
+  const dz = lightOrigin[2] - viewOrigin[2];
+  const distToLight = Math.hypot(dx, dy, dz);
+  const fracToEnd = clamp01(distToLight / fadeEnd);
+  const minFragDist = fadeStart / fadeEnd;
+
+  if (minFragDist > 1) return 1;
+  if (minFragDist <= 0) return fracToEnd;
+
+  return 1 - smoothstep(minFragDist, 1, fracToEnd);
+}
+
+/*
+=====================
+V_AddLightEx
+
+q2repro src/client/view.c's V_AddLightEx -- the CS_SHADOWLIGHTS-fed
+counterpart to V_AddLight above, task #25 (v1.1.0). Populates the extra
+DlightT fields (lightScale, cone) the shader path (gl_shader.ts) reads;
+the fixed-function path never reads them, so this has no effect there.
+=====================
+*/
+export function V_AddLightEx(light: ShadowLightT): void {
+  if (r_numdlights >= MAX_DLIGHTS) return;
+
+  const fade = fadeDistanceToLight(light.fade_start, light.fade_end, light.origin, cl.refdef.vieworg);
+  if (fade <= 0) return;
+
+  const dl = r_dlights[r_numdlights++];
+  dl.origin.set(light.origin);
+  dl.intensity = light.radius;
+  dl.color[0] = light.color[0];
+  dl.color[1] = light.color[1];
+  dl.color[2] = light.color[2];
+
+  const styleScale = light.lightstyle === -1 ? 1 : r_lightstyles[light.lightstyle].white;
+  dl.lightScale = light.intensity * styleScale * fade;
+
+  if (light.coneangle) {
+    const rad = (light.coneangle * Math.PI) / 180;
+    dl.cone = { direction: vec3(light.conedirection[0], light.conedirection[1], light.conedirection[2]), cosHalfAngle: Math.cos(rad) };
+  } else {
+    dl.cone = null;
+  }
 }
 
 /*
@@ -448,6 +521,7 @@ export function V_RenderView(stereo_separation: number): void {
     // this also calls CL_CalcViewValues which loads
     // v_forward, etc.
     CL_AddEntities();
+    CL_AddShadowLights(); // task #25 (v1.1.0): CS_SHADOWLIGHTS-fed per-pixel lights
 
     if (cl_testparticles?.value) V_TestParticles();
     if (cl_testentities?.value) V_TestEntities();

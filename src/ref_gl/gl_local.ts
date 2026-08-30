@@ -252,6 +252,15 @@ export const glCvars: {
   // GL_LightGridPoint port in gl_light.ts's R_LightPoint.
   gl_lightgrid: CvarT | null;
 
+  // q2repro src/refresh/shader.c / main.c: `gl_shaders = Cvar_Get("gl_shaders",
+  // "1", CVAR_FILES);` / `gl_per_pixel_lighting = Cvar_Get("gl_per_pixel_lighting",
+  // "1", 0);` -- task #25's shader path (gl_shader.ts), same default as
+  // q2repro's own GLSL backend: on by default, graceful fallback to the
+  // fixed-function path if program compilation/linking fails on this
+  // context (see GL_InitShaderPath's header comment).
+  gl_shaders: CvarT | null;
+  gl_per_pixel_lighting: CvarT | null;
+
   vid_fullscreen: CvarT | null;
   vid_gamma: CvarT | null;
 
@@ -318,6 +327,9 @@ export const glCvars: {
   gl_lockpvs: null,
 
   gl_lightgrid: null,
+
+  gl_shaders: null,
+  gl_per_pixel_lighting: null,
 
   vid_fullscreen: null,
   vid_gamma: null,

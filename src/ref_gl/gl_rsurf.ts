@@ -101,6 +101,7 @@ import {
   type ImageT,
 } from "./gl_local";
 import { GL_Bind, GL_TexEnv, GL_EnableMultitexture, GL_SelectTexture, GL_MBind, qgl } from "./gl_image";
+import { GL_UsingShaderPath, GL_UseWorldSurfaceProgram, GL_RestoreFixedFunction } from "./gl_shader";
 import { EmitWaterPolys, R_AddSkySurface, R_ClearSkyBox, R_DrawSkyBox } from "./gl_warp";
 import { R_BuildLightMap, R_MarkLights, R_SetCacheState } from "./gl_light";
 import { R_CullBox, R_RotateForEntity } from "./gl_rmain";
@@ -282,6 +283,14 @@ export function R_BlendLightmaps(): void {
   if (glCvars.r_fullbright && glCvars.r_fullbright.value) return;
   if (!r_worldmodel || !r_worldmodel.lightdata) return;
 
+  // task #25 (v1.1.0): activate the per-pixel dynamic-light shader for this
+  // pass when available. Quake 2 world surfaces are planar, so each
+  // surface's plane normal (set via qglNormal3f at each DrawGLPolyChain
+  // call site below) is exact, not an approximation; no-op (false) when
+  // the shader path isn't active, leaving every draw call below byte-
+  // identical to the pre-existing fixed-function behavior.
+  const usingShader = GL_UsingShaderPath() && GL_UseWorldSurfaceProgram(r_newrefdef.dlights, r_newrefdef.num_dlights);
+
   // don't bother writing Z
   qgl.qglDepthMask(false);
 
@@ -321,7 +330,10 @@ export function R_BlendLightmaps(): void {
       GL_Bind(gl_state.lightmap_textures + i);
 
       for (let surf = gl_lms.lightmap_surfaces[i]; surf; surf = surf.lightmapchain) {
-        if (surf.polys) DrawGLPolyChain(surf.polys, 0, 0);
+        if (surf.polys) {
+          if (usingShader && surf.plane) qgl.qglNormal3f(surf.plane.normal[0], surf.plane.normal[1], surf.plane.normal[2]);
+          DrawGLPolyChain(surf.polys, 0, 0);
+        }
       }
     }
   }
@@ -356,6 +368,7 @@ export function R_BlendLightmaps(): void {
         let drawsurf = newdrawsurf;
         for (; drawsurf && drawsurf !== surf; drawsurf = drawsurf.lightmapchain) {
           if (drawsurf.polys) {
+            if (usingShader && drawsurf.plane) qgl.qglNormal3f(drawsurf.plane.normal[0], drawsurf.plane.normal[1], drawsurf.plane.normal[2]);
             DrawGLPolyChain(drawsurf.polys, (drawsurf.light_s - drawsurf.dlight_s) * (1.0 / 128.0), (drawsurf.light_t - drawsurf.dlight_t) * (1.0 / 128.0));
           }
         }
@@ -383,10 +396,13 @@ export function R_BlendLightmaps(): void {
 
     for (let surf = newdrawsurf; surf; surf = surf.lightmapchain) {
       if (surf.polys) {
+        if (usingShader && surf.plane) qgl.qglNormal3f(surf.plane.normal[0], surf.plane.normal[1], surf.plane.normal[2]);
         DrawGLPolyChain(surf.polys, (surf.light_s - surf.dlight_s) * (1.0 / 128.0), (surf.light_t - surf.dlight_t) * (1.0 / 128.0));
       }
     }
   }
+
+  if (usingShader) GL_RestoreFixedFunction();
 
   // restore state
   qgl.qglDisable(GL_BLEND);

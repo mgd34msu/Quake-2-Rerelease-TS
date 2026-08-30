@@ -1,6 +1,27 @@
 // sv_main.c
 
-import { NetsrcT, NetadrT, SysError, PROTOCOL_VERSION, VERSION, SvcOpsT, MAX_MSGLEN } from "../qcommon/qcommon";
+import {
+  NetsrcT,
+  NetadrT,
+  SysError,
+  PROTOCOL_VERSION,
+  PROTOCOL_VERSION_RERELEASE,
+  PROTOCOL_VERSION_R1Q2,
+  PROTOCOL_VERSION_R1Q2_MINIMUM,
+  PROTOCOL_VERSION_R1Q2_CURRENT,
+  PROTOCOL_VERSION_Q2PRO,
+  PROTOCOL_VERSION_Q2PRO_MINIMUM,
+  PROTOCOL_VERSION_Q2PRO_CURRENT,
+  VERSION,
+  SvcOpsT,
+  MAX_MSGLEN,
+} from "../qcommon/qcommon";
+import type { ProtocolCodec } from "../qcommon/protocol/codec";
+import { VANILLA_CODEC } from "../qcommon/protocol/vanilla";
+import { Q2REPRO_CODEC } from "../qcommon/protocol/q2repro";
+import { createR1Q2Codec } from "../qcommon/protocol/r1q2";
+import { createQ2ProCodec } from "../qcommon/protocol/q2pro";
+import { CS_REMAP_RERELEASE } from "../shared/cs_remap";
 import { Netchan_OutOfBandPrint, Netchan_Setup, Netchan_Process, Netchan_Transmit, net_message_buffer } from "../qcommon/net_chan";
 import { NET_CompareBaseAdr, NET_AdrToString, NET_IsLocalAddress, NET_GetPacket } from "../platform/net_udp";
 import { MSG_BeginReading, MSG_ReadLong, MSG_ReadShort, MSG_ReadStringLine, MSG_WriteByte, MSG_WriteString, SZ_Init, SZ_Clear } from "../qcommon/sizebuf";
@@ -305,8 +326,66 @@ export function SVC_DirectConnect(): void {
 
   Com_DPrintf("SVC_DirectConnect ()\n");
 
+  // v1.0.0 wire cluster (task board #23), Mike's ruling: our server accepts
+  // classic community clients. Family gate first (matches q2repro's own
+  // rejection -- svs.csr === CS_REMAP_RERELEASE, set once at game-library
+  // init by sv_game.ts's SV_InitGameProgs, means "kex family": only 1038 is
+  // ever accepted there, no per-client variance). The "legacy" family
+  // (svs.csr === CS_REMAP_OLD) now accepts 34, 35 (R1Q2), or 36 (Q2PRO) and
+  // negotiates per CLIENT (not per server, unlike svs.codec's own family-
+  // default role -- see server.ts's ClientT.codec doc comment), because a
+  // single legacy-family server can serve a mix of vanilla/R1Q2/Q2PRO clients
+  // at once.
   const version = atoi(Cmd_Argv(1));
-  if (version !== PROTOCOL_VERSION) {
+  const isKexFamily = svs.csr === CS_REMAP_RERELEASE;
+
+  let negotiatedCodec: ProtocolCodec;
+  let negotiatedMinorVersion = 0;
+  let negotiatedCompress = false;
+
+  if (isKexFamily) {
+    if (version !== PROTOCOL_VERSION_RERELEASE) {
+      Netchan_OutOfBandPrint(NetsrcT.NS_SERVER, adr, "print\nServer is version %4.2f.\n", VERSION);
+      Com_DPrintf("    rejected connect from version %i\n", version);
+      return;
+    }
+    negotiatedCodec = Q2REPRO_CODEC;
+  } else if (version === PROTOCOL_VERSION) {
+    negotiatedCodec = VANILLA_CODEC;
+  } else if (version === PROTOCOL_VERSION_R1Q2) {
+    // Connect-string tail (q2proto_r1q2_connect_tail): "<packet_length>
+    // <minor version>" after the four standard fields (Cmd_Argv(5)/(6)).
+    // packet_length is read-and-ignored -- this port's netchan
+    // (qcommon/net_chan.ts) never implements R1Q2's alternate fragmentation,
+    // only the classic/unfragmented framing every protocol here shares.
+    const rawVersion = Cmd_Argv(6);
+    let minor = rawVersion === "" ? PROTOCOL_VERSION_R1Q2_MINIMUM : atoi(rawVersion);
+    if (minor < PROTOCOL_VERSION_R1Q2_MINIMUM) minor = PROTOCOL_VERSION_R1Q2_MINIMUM;
+    if (minor > PROTOCOL_VERSION_R1Q2_CURRENT) minor = PROTOCOL_VERSION_R1Q2_CURRENT;
+    negotiatedCodec = createR1Q2Codec(minor);
+    negotiatedMinorVersion = minor;
+    // R1Q2 supports svc_r1q2_zpacket unconditionally (q2proto_proto_r1q2.c:39,
+    // `parsed_connect->has_zlib = true` -- not client-negotiated for this
+    // family, unlike Q2PRO below).
+    negotiatedCompress = true;
+  } else if (version === PROTOCOL_VERSION_Q2PRO) {
+    // Connect-string tail (q2proto_q2pro_connect_tail): "<packet_length>
+    // <netchan_type> <has_zlib> <minor version>" (Cmd_Argv(5)..(8)).
+    // netchan_type is read-and-ignored for the same reason packet_length is
+    // above (this port only ever runs the classic netchan framing --
+    // requesting NETCHAN_OLD is the honest ask, but this server does not
+    // actually branch on what the client requested here, matching the
+    // client-side symmetric scope cut documented in cl_main.ts's
+    // CL_SendConnectPacket).
+    const zlibRaw = Cmd_Argv(7);
+    negotiatedCompress = zlibRaw !== "" && atoi(zlibRaw) !== 0;
+    const rawVersion = Cmd_Argv(8);
+    let minor = rawVersion === "" ? PROTOCOL_VERSION_Q2PRO_MINIMUM : atoi(rawVersion);
+    if (minor < PROTOCOL_VERSION_Q2PRO_MINIMUM) minor = PROTOCOL_VERSION_Q2PRO_MINIMUM;
+    if (minor > PROTOCOL_VERSION_Q2PRO_CURRENT) minor = PROTOCOL_VERSION_Q2PRO_CURRENT;
+    negotiatedCodec = createQ2ProCodec(minor);
+    negotiatedMinorVersion = minor;
+  } else {
     Netchan_OutOfBandPrint(NetsrcT.NS_SERVER, adr, "print\nServer is version %4.2f.\n", VERSION);
     Com_DPrintf("    rejected connect from version %i\n", version);
     return;
@@ -386,6 +465,8 @@ export function SVC_DirectConnect(): void {
   // build a new connection -- accept the new client; this is the only place
   // a client_t is ever (re-)initialized
   newcl.clear();
+  newcl.codec = negotiatedCodec;
+  newcl.protocolMinorVersion = negotiatedMinorVersion;
   svClientHolder.sv_client = newcl;
   const edictnum = newclIndex + 1;
   const ge = requireGe();
@@ -421,6 +502,12 @@ export function SVC_DirectConnect(): void {
   }
 
   Netchan_Setup(NetsrcT.NS_SERVER, newcl.netchan, adr, qport);
+  // svc_zpacket eligibility for this connection (qcommon/protocol/
+  // zpacket.ts) -- set after Netchan_Setup since that call replaces
+  // newcl.netchan wholesale via Netchan_Setup's own chan mutation (not a
+  // fresh object), but newcl.clear() above DOES replace it with a fresh
+  // NetchanT (compress defaults false), so this must run after clear().
+  newcl.netchan.compress = negotiatedCompress;
 
   newcl.state = ClientStateT.cs_connected;
 

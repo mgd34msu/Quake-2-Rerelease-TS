@@ -76,6 +76,7 @@ function makeSpyRe(log: DrawCall[]): RefExports {
     SetSky: () => undefined,
     EndRegistration: () => undefined,
     RenderFrame: () => undefined,
+    SupportsPerPixelLighting: () => false,
     DrawGetPicSize: (_name: string) => ({ w: -1, h: -1 }),
     DrawPic(x: number, y: number, name: string) {
       log.push({ fn: "DrawPic", x, y, name });

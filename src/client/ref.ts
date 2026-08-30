@@ -84,7 +84,17 @@ export const ENTITY_FLAGS = 68;
 export class DlightT {
   origin: Vec3 = vec3();
   color: Vec3 = vec3();
-  intensity = 0;
+  intensity = 0; // doubles as radius, matching original id Software dlight_t
+
+  // Additive fields for task #25 (v1.1.0)'s CS_SHADOWLIGHTS-fed per-pixel
+  // lighting (gl_shader.ts) -- q2repro's dlight_t splits `radius` (range,
+  // this class's pre-existing `intensity` field above) from `intensity`
+  // (brightness multiplier) and adds an optional spot cone; every classic
+  // V_AddLight caller leaves these at their defaults (lightScale=1, no
+  // cone), so the fixed-function path -- which never reads them -- is
+  // unaffected either way.
+  lightScale = 1;
+  cone: { direction: Vec3; cosHalfAngle: number } | null = null;
 }
 
 export class ParticleT {
@@ -140,6 +150,18 @@ export interface RefExports {
   EndRegistration(): void;
 
   RenderFrame(fd: RefdefT): void;
+
+  // q2repro src/refresh/main.c's R_SupportsPerPixelLighting -- task #25
+  // (v1.1.0): true once the renderer's GL2+ shader path (gl_shader.ts)
+  // initialized successfully, gating cl_fx.ts's CL_AddShadowLights (a
+  // shadow light is otherwise pointless to evaluate: the fixed-function
+  // path has nothing that consumes its per-pixel fields). No ref_gl-side
+  // renderer existed when RefExports was first ported (this interface's
+  // own header note is stale on that point -- see gl_rmain.ts's real
+  // R_Init/R_Shutdown for the renderer that exists now), so every prior
+  // RefExports member already had no real implementer either; this one is
+  // new rather than retrofitted.
+  SupportsPerPixelLighting(): boolean;
 
   DrawGetPicSize(name: string): { w: number; h: number }; // will return 0 0 if not found
   DrawPic(x: number, y: number, name: string): void;

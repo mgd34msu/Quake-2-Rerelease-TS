@@ -113,6 +113,22 @@ export interface ServerDataParamsT {
   // q2repro (1038) only -- see q2repro.ts's writeServerData for the exact
   // wire shape and citations. Ignored by VANILLA_CODEC.
   serverState: number; // ServerStateT numeric value (sv.state)
+
+  // Added for the R1Q2 (35) and Q2PRO (36) codecs (v1.0.0 wire cluster, task
+  // board #23). Unlike serverState above, these are OPTIONAL rather than
+  // always-required-with-a-zero-default: r1q2.ts/q2pro.ts are two more
+  // codecs on top of an already-growing set (vanilla/q2repro/kexdemo), and
+  // forcing every call site to keep inventing zero/false literals for fields
+  // only two of five codecs ever read stops paying for itself. Read only by
+  // R1Q2_CODEC (r1q2Version/r1q2StrafejumpHack)/createR1Q2Codec and
+  // Q2PRO_CODEC (q2proVersion/q2proStrafejumpHack/q2proQwMode/
+  // q2proWaterjumpHack)/createQ2ProCodec; ignored by every other codec.
+  r1q2Version?: number; // negotiated minor version (1903-1905), echoed back verbatim
+  r1q2StrafejumpHack?: boolean;
+  q2proVersion?: number; // negotiated minor version (1015-1019 -- this port's ceiling, see qcommon.ts's PROTOCOL_VERSION_Q2PRO_CURRENT doc comment)
+  q2proStrafejumpHack?: boolean;
+  q2proQwMode?: boolean;
+  q2proWaterjumpHack?: boolean;
 }
 
 // Added for the 1038 (q2repro) frame envelope (.orch/phase5-design.md phase 5
@@ -181,6 +197,17 @@ export interface ServerDataReadResultT {
   clientnum: number;
   levelname: string;
   serverState: number;
+
+  // Mirrors ServerDataParamsT's own R1Q2/Q2PRO additions -- see that
+  // interface's doc comment for why these are optional rather than
+  // always-present-with-a-default. Set by R1Q2_CODEC/createR1Q2Codec's and
+  // Q2PRO_CODEC/createQ2ProCodec's readServerData only.
+  r1q2Version?: number;
+  r1q2StrafejumpHack?: boolean;
+  q2proVersion?: number;
+  q2proStrafejumpHack?: boolean;
+  q2proQwMode?: boolean;
+  q2proWaterjumpHack?: boolean;
 }
 
 export interface ProtocolCodec {

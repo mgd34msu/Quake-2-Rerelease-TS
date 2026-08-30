@@ -30,16 +30,29 @@
 //   `fireAndForget` wrapper, mirroring sv_ccmds.ts's `map`/`demomap`
 //   registration for SV_Map_f. CL_Init itself never calls NET_Config, so it
 //   stays synchronous.
-// - CL_RequestNextDownload's alias-model skin-scanning inner block (reading
-//   dmdl_t.num_skins/ofs_skins to probe each skin file) is omitted: qfiles.ts
-//   does not export dmdl_t/IDALIASHEADER/ALIAS_VERSION yet (out of this
-//   brief's SCOPE to add), and the block is unreachable in practice anyway
-//   -- allow_download defaults to "0" (sv_main.ts's SV_Init) so
-//   precache_check always jumps straight past the whole CS_MODELS phase,
-//   and even if allow_download were on, CL_CheckOrDownloadFile
-//   (cl_parse.ts) is itself still a pending stub that throws before any
-//   dmdl_t parsing would run. The phase-skeleton (precache_check state
-//   machine) is ported faithfully; only that one inner scan is stubbed out.
+// - CL_RequestNextDownload is now ported in full, including the alias-model
+//   skin-scanning inner block (dmdl_t.num_skins/ofs_skins, read via
+//   qfiles.ts's readMd2SkinNames -- see that function's doc comment for why
+//   the header reader lives there instead of duplicating ref_gl/ref_soft's
+//   private full-model parsers) and the CS_PLAYERSKINS-phase model/skin
+//   downloads. One deliberate addition beyond vanilla: q2repro's
+//   download.c check_player() sexed-sound downloads (files like
+//   "*pain100_1.wav" resolved to "players/<model>/pain100_1.wav" per
+//   player) are ported too -- vanilla cl_main.c never downloads these at
+//   all, but real interop against q2repro/Q2PRO servers expects them
+//   (fidelity razor, .orch/preferences.md rule 17: functional interop
+//   outranks literal vanilla-only preservation). See the function's own
+//   comments for exactly where this splices into the vanilla per-player
+//   case 0..4 fallthrough without disturbing its numbering.
+//   CL_RequestNextDownload's texture-download phase (CS_MODELS+MAX_MODELS+13
+//   -area, "textures/<name>.wal" for every BSP texinfo) also now runs, via
+//   two new additive accessors on cmodel.ts (CM_NumTexinfo/CM_TexinfoName)
+//   standing in for vanilla's `extern int numtexinfo; extern mapsurface_t
+//   map_surfaces[];`. The CS_MODELS model-registration loop deliberately
+//   does NOT special-case KEX's MODELINDEX_PLAYER gap (q2repro's `i !=
+//   MODELINDEX_PLAYER`) -- cl_view.ts's CL_PrepRefresh model loop, the only
+//   other place in this port that walks the same CS_MODELS array, already
+//   made that same vanilla-only choice, and this stays consistent with it.
 // - rcon_client_password/rcon_address/adr0-8/cl_timeout/cl_maxfps/
 //   info_password/info_spectator/name/skin/rate/fov/msg/hand/gender/
 //   gender_auto/precache_*/cheatvars are cl_main.c file-scope globals that
@@ -72,8 +85,9 @@ import {
 import { NET_StringToAdr, NET_AdrToString, NET_CompareAdr, NET_IsLocalAddress, NET_SendPacket, NET_GetPacket, NET_Config } from "../platform/net_udp";
 import { Netchan_OutOfBandPrint, Netchan_Setup, Netchan_Transmit, Netchan_Process, net_from, net_message } from "../qcommon/net_chan";
 import { SizeBuf, SZ_Init, SZ_Clear, SZ_Print, MSG_WriteByte, MSG_WriteChar, MSG_WriteShort, MSG_WriteLong, MSG_WriteString, MSG_ReadString, MSG_ReadStringLine, MSG_BeginReading, MSG_ReadLong } from "../qcommon/sizebuf";
-import { FS_Gamedir, FS_CreatePath, FS_FOpenFileWrite, FS_Write, FS_FCloseFile, FS_ExecAutoexec } from "../qcommon/files";
-import { CM_LoadMap } from "../qcommon/cmodel";
+import { FS_Gamedir, FS_CreatePath, FS_FOpenFileWrite, FS_Write, FS_FCloseFile, FS_ExecAutoexec, FS_LoadFile } from "../qcommon/files";
+import { CM_LoadMap, CM_NumTexinfo, CM_TexinfoName } from "../qcommon/cmodel";
+import { readMd2SkinNames } from "../qcommon/qfiles";
 import { SV_Shutdown } from "../server/sv_main";
 import { CG_SetActiveCgameKind } from "./cgame/host";
 import { allow_download, allow_download_players, allow_download_models, allow_download_sounds, allow_download_maps } from "../server/sv_main";
@@ -85,6 +99,7 @@ import {
   MAX_CLIENTS,
   MAX_EDICTS,
   CS_NAME,
+  CS_SKY,
   Q_stricmp,
   type CvarT,
 } from "../shared/q_shared";
@@ -95,7 +110,7 @@ import { CL_PredictMovement } from "./cl_pred";
 import { CL_RunDLights, CL_RunLightStyles, CL_ClearEffects } from "./cl_fx";
 import { CL_ClearTEnts } from "./cl_tent";
 import { S_StopAllSounds, S_Update, S_Init, S_Shutdown } from "./snd_dma";
-import { CL_RegisterSounds, CL_ParseClientinfo, CL_ParseServerMessage, CL_StartUdpDownload } from "./cl_parse";
+import { CL_RegisterSounds, CL_ParseClientinfo, CL_ParseServerMessage, CL_StartUdpDownload, CL_CheckOrDownloadFile } from "./cl_parse";
 import { HTTP_Init, HTTP_SetServer, HTTP_SetCallbacks, HTTP_CleanupDownloads, HTTP_RunDownloads } from "./cl_http";
 import { CL_PrepRefresh, V_Init } from "./cl_view";
 import { SCR_Init, SCR_UpdateScreen, SCR_BeginLoadingPlaque, SCR_EndLoadingPlaque, SCR_RunConsole } from "./cl_scrn";
@@ -1040,6 +1055,25 @@ export function CL_Snd_Restart_f(): void {
 let precache_check = 0; // for autodownload of precache items
 let precache_spawncount = 0;
 
+// CS_MODELS-phase inner state (vanilla cl_main.c's precache_model/
+// precache_model_skin globals). precache_model_skinnames holds the *parsed*
+// skin name list for the model currently being scanned instead of the raw
+// dmdl_t bytes + a live pointer into them -- this port has no Hunk memory to
+// keep the raw buffer pinned across suspended calls, and the download walk
+// only ever needs the skin filenames, never the model geometry. null means
+// "no model loaded/parsed for the current precache_check index yet", exactly
+// like vanilla's `if (!precache_model)` gate.
+let precache_model_skinnames: string[] | null = null;
+let precache_model_skin = 0;
+
+// CS_PLAYERSKINS-phase sexed-sound resume index (see the phase's own
+// comment below for why this needs a resumable cursor of its own).
+let precache_sexed_sounds: number[] = [];
+let precache_sexed_check = 0;
+
+// TEXTURE_CNT+1-phase resume index (vanilla cl_main.c's precache_tex).
+let precache_tex = 0;
+
 const PLAYER_MULT = 5;
 
 // ENV_CNT is map load, ENV_CNT+1 is first env map. These were originally
@@ -1056,6 +1090,30 @@ function textureCnt(): number {
 
 const env_suf = ["rt", "bk", "lf", "ft", "up", "dn"];
 
+// Isolates model/skin from a CS_PLAYERSKINS configstring ("name\model/skin"),
+// vanilla cl_main.c's own inline parse inside CL_RequestNextDownload's
+// player-skin loop (strchr('\\') for name, then strchr('/') or strchr('\\')
+// for model/skin). This is a second, independent copy of the same algorithm
+// cl_parse.ts's CL_LoadClientinfo already implements -- vanilla itself keeps
+// two separate copies (cl_main.c and cl_parse.c never shared this logic),
+// so this follows the original's own duplication rather than introducing a
+// new cross-file dependency for it.
+function parsePlayerSkinConfigstring(s: string): { model: string; skin: string } {
+  let rest = s;
+  const bs = rest.indexOf("\\");
+  if (bs !== -1) rest = rest.slice(bs + 1);
+
+  let model = rest;
+  let skin = "";
+  let slash = model.indexOf("/");
+  if (slash === -1) slash = model.indexOf("\\");
+  if (slash !== -1) {
+    skin = model.slice(slash + 1);
+    model = model.slice(0, slash);
+  }
+  return { model, skin };
+}
+
 export function CL_RequestNextDownload(): void {
   if (cls.state !== ConnstateT.ca_connected) return;
 
@@ -1068,30 +1126,158 @@ export function CL_RequestNextDownload(): void {
   if (precache_check === cls.csr.models) {
     // confirm map
     precache_check = cls.csr.models + 2; // 0 isn't used
-    // allow_download_maps' CL_CheckOrDownloadFile call is skipped along with
-    // the rest of the CS_MODELS phase below -- see file banner.
+    if (allow_download_maps && allow_download_maps.value) {
+      if (!CL_CheckOrDownloadFile(cl.configstrings[cls.csr.models + 1], "model")) return; // started a download
+    }
   }
   if (precache_check >= cls.csr.models && precache_check < cls.csr.models + cls.csr.max_models) {
-    // model + per-skin download scanning omitted (see file banner: needs
-    // dmdl_t, not ported, and unreachable while allow_download defaults
-    // off). Faithfully skip straight past this phase like the "models
-    // disabled" C path does.
+    if (allow_download_models && allow_download_models.value) {
+      while (precache_check < cls.csr.models + cls.csr.max_models && cl.configstrings[precache_check][0]) {
+        const name = cl.configstrings[precache_check];
+        if (name[0] === "*" || name[0] === "#") {
+          precache_check++;
+          continue;
+        }
+
+        if (precache_model_skin === 0) {
+          if (!CL_CheckOrDownloadFile(name, "model")) {
+            precache_model_skin = 1;
+            return; // started a download
+          }
+          precache_model_skin = 1;
+        }
+
+        // checking for skins in the model
+        if (precache_model_skinnames === null) {
+          const data = FS_LoadFile(name);
+          if (data === null) {
+            precache_model_skin = 0;
+            precache_check++;
+            continue; // couldn't load it
+          }
+          const names = readMd2SkinNames(data);
+          if (names === null) {
+            // not an alias model, or a bad/unsupported version
+            precache_model_skin = 0;
+            precache_check++;
+            continue;
+          }
+          precache_model_skinnames = names;
+        }
+
+        while (precache_model_skin - 1 < precache_model_skinnames.length) {
+          if (!CL_CheckOrDownloadFile(precache_model_skinnames[precache_model_skin - 1], "skin")) {
+            precache_model_skin++;
+            return; // started a download
+          }
+          precache_model_skin++;
+        }
+        precache_model_skinnames = null;
+        precache_model_skin = 0;
+        precache_check++;
+      }
+    }
     precache_check = cls.csr.sounds;
   }
   if (precache_check >= cls.csr.sounds && precache_check < cls.csr.sounds + cls.csr.max_sounds) {
     if (allow_download_sounds && allow_download_sounds.value) {
-      // per-sound download scanning uses CL_CheckOrDownloadFile, a pending
-      // stub (cl_parse.ts) that always throws -- unreachable while
-      // allow_download_sounds defaults off; skipped here too.
+      if (precache_check === cls.csr.sounds) precache_check++; // zero is blank
+      while (precache_check < cls.csr.sounds + cls.csr.max_sounds && cl.configstrings[precache_check][0]) {
+        if (cl.configstrings[precache_check][0] === "*") {
+          precache_check++;
+          continue;
+        }
+        const fn = `sound/${cl.configstrings[precache_check]}`;
+        precache_check++;
+        if (!CL_CheckOrDownloadFile(fn, "sound")) return; // started a download
+      }
     }
     precache_check = cls.csr.images;
   }
   if (precache_check >= cls.csr.images && precache_check < cls.csr.images + cls.csr.max_images) {
+    if (precache_check === cls.csr.images) precache_check++; // zero is blank
+    while (precache_check < cls.csr.images + cls.csr.max_images && cl.configstrings[precache_check][0]) {
+      const fn = `pics/${cl.configstrings[precache_check]}.pcx`;
+      precache_check++;
+      if (!CL_CheckOrDownloadFile(fn, "single")) return; // started a download
+    }
     precache_check = cls.csr.playerskins;
   }
   // skins are special, since a player has three things to download:
   // model, weapon model and skin
   if (precache_check >= cls.csr.playerskins && precache_check < cls.csr.playerskins + MAX_CLIENTS * PLAYER_MULT) {
+    if (allow_download_players && allow_download_players.value) {
+      while (precache_check < cls.csr.playerskins + MAX_CLIENTS * PLAYER_MULT) {
+        const i = Math.floor((precache_check - cls.csr.playerskins) / PLAYER_MULT);
+        let n = (precache_check - cls.csr.playerskins) % PLAYER_MULT;
+
+        const csEntry = cl.configstrings[cls.csr.playerskins + i];
+        if (!csEntry[0]) {
+          precache_check = cls.csr.playerskins + (i + 1) * PLAYER_MULT;
+          continue;
+        }
+
+        const { model, skin } = parsePlayerSkinConfigstring(csEntry);
+        const base = cls.csr.playerskins + i * PLAYER_MULT;
+
+        if (n === 0) {
+          // model
+          if (!CL_CheckOrDownloadFile(`players/${model}/tris.md2`, "model")) {
+            precache_check = base + 1;
+            return; // started a download
+          }
+          n++;
+        }
+        if (n === 1) {
+          // weapon model
+          if (!CL_CheckOrDownloadFile(`players/${model}/weapon.md2`, "model")) {
+            precache_check = base + 2;
+            return; // started a download
+          }
+          n++;
+        }
+        if (n === 2) {
+          // weapon skin
+          if (!CL_CheckOrDownloadFile(`players/${model}/weapon.pcx`, "skin")) {
+            precache_check = base + 3;
+            return; // started a download
+          }
+          n++;
+        }
+        if (n === 3) {
+          // skin
+          if (!CL_CheckOrDownloadFile(`players/${model}/${skin}.pcx`, "skin")) {
+            precache_check = base + 4;
+            return; // started a download
+          }
+          n++;
+        }
+        // n === 4: skin_i, then (deviation from vanilla -- see file banner)
+        // q2repro download.c check_player()'s sexed-sound downloads for
+        // this player's model. Recomputing precache_sexed_sounds on every
+        // pass through this phase is idempotent (configstrings don't
+        // change mid-precache) and keeps this block self-contained rather
+        // than needing its own separate "have I scanned yet" state.
+        if (!CL_CheckOrDownloadFile(`players/${model}/${skin}_i.pcx`, "skin")) {
+          precache_check = base + 4;
+          return; // started a download
+        }
+        precache_sexed_sounds = [];
+        for (let s = 1; s < cls.csr.max_sounds; s++) {
+          if (cl.configstrings[cls.csr.sounds + s][0] === "*") precache_sexed_sounds.push(s);
+        }
+        while (precache_sexed_check < precache_sexed_sounds.length) {
+          const soundName = cl.configstrings[cls.csr.sounds + precache_sexed_sounds[precache_sexed_check]];
+          if (!CL_CheckOrDownloadFile(`players/${model}/${soundName.slice(1)}`, "sound")) {
+            precache_check = base + 4;
+            return; // started a download
+          }
+          precache_sexed_check++;
+        }
+        precache_sexed_check = 0;
+        precache_check = base + PLAYER_MULT;
+      }
+    }
     // precache phase completed
     precache_check = ENV_CNT;
   }
@@ -1108,20 +1294,34 @@ export function CL_RequestNextDownload(): void {
   }
 
   if (precache_check > ENV_CNT && precache_check < TEXTURE_CNT) {
-    if (!(allow_download && allow_download.value && allow_download_maps && allow_download_maps.value)) {
-      precache_check = TEXTURE_CNT;
+    if (allow_download && allow_download.value && allow_download_maps && allow_download_maps.value) {
+      while (precache_check < TEXTURE_CNT) {
+        const n = precache_check - ENV_CNT - 1;
+        precache_check++;
+        const sky = cl.configstrings[CS_SKY];
+        const suf = env_suf[Math.floor(n / 2)];
+        const fn = n & 1 ? `env/${sky}${suf}.pcx` : `env/${sky}${suf}.tga`;
+        if (!CL_CheckOrDownloadFile(fn, "single")) return; // started a download
+      }
     }
-    // env-map download scanning (CL_CheckOrDownloadFile) omitted -- same
-    // pending-stub/default-off reasoning as above.
+    precache_check = TEXTURE_CNT;
   }
 
   if (precache_check === TEXTURE_CNT) {
     precache_check = TEXTURE_CNT + 1;
+    precache_tex = 0;
   }
 
-  // texture download scanning omitted -- same reasoning (also needs
-  // cmodel.ts's private numtexinfo/map_surfaces, not exported).
+  // confirm existance of textures, download any that don't exist
   if (precache_check === TEXTURE_CNT + 1) {
+    if (allow_download && allow_download.value && allow_download_maps && allow_download_maps.value) {
+      const numtexinfo = CM_NumTexinfo();
+      while (precache_tex < numtexinfo) {
+        const fn = `textures/${CM_TexinfoName(precache_tex)}.wal`;
+        precache_tex++;
+        if (!CL_CheckOrDownloadFile(fn, "single")) return; // started a download
+      }
+    }
     precache_check = TEXTURE_CNT + 999;
   }
 
@@ -1153,6 +1353,9 @@ export function CL_Precache_f(): void {
 
   precache_check = cls.csr.models;
   precache_spawncount = atoi(Cmd_Argv(1));
+  precache_model_skinnames = null;
+  precache_model_skin = 0;
+  precache_sexed_check = 0;
 
   CL_RequestNextDownload();
 }
@@ -1200,6 +1403,7 @@ export function CL_InitLocal(): void {
   clCvars.cl_add_lights = Cvar_Get("cl_lights", "1", 0);
   clCvars.cl_add_particles = Cvar_Get("cl_particles", "1", 0);
   clCvars.cl_add_entities = Cvar_Get("cl_entities", "1", 0);
+  clCvars.cl_shadowlights = Cvar_Get("cl_shadowlights", "1", 0);
   clCvars.cl_gun = Cvar_Get("cl_gun", "1", 0);
   clCvars.cl_footsteps = Cvar_Get("cl_footsteps", "1", 0);
   clCvars.cl_noskins = Cvar_Get("cl_noskins", "0", 0);

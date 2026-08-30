@@ -360,3 +360,74 @@ export function readDarea(view: DataView, offset: number): DareaT {
 export function readUint16(view: DataView, offset: number): number {
   return view.getUint16(offset, true);
 }
+
+//=============================================================================
+// .MD2 (dmdl_t) -- minimal download-time header reader
+//
+// This file's banner says the .MD2 format was "deferred to the future
+// model/image-loading units". Two of those units exist now (ref_gl's
+// gl_model.ts and ref_soft's r_model.ts), but each parses the full dmdl_t
+// (geometry, frames, glcmds) for rendering and keeps its own private
+// IDALIASHEADER/ALIAS_VERSION/MAX_SKINNAME constants -- there is no shared,
+// importable home for just the header, and cl_main.ts's precache/download
+// walk (CL_RequestNextDownload) needs only ident/version/num_skins/
+// ofs_skins to discover a model's skin filenames, not a full model load.
+// Rather than duplicate a third private copy, or reach into a renderer
+// module from client download code (wrong layering: ref_gl/ref_soft depend
+// on the client, not the other way around), this is the minimal reader the
+// banner deferred, living where qfiles.h's other binary-format readers do.
+//
+// Bounds (MD2_MAX_SKINS/MD2_MAX_SKINNAME) mirror q2repro's inc/format/md2.h
+// sanity checks. Vanilla id software's dmdl_t has no such cap; q2repro added
+// one because, unlike a shipped asset, the file being parsed here is
+// whatever a server just told this client to download -- untrusted until
+// proven otherwise. A future refactor could point gl_model.ts/r_model.ts at
+// these same constants instead of their private copies; out of this
+// brief's SCOPE (their MAX_SKINNAME/IDALIASHEADER are unexported locals in
+// files this brief doesn't own).
+export const MD2_IDENT = ("2".charCodeAt(0) << 24) + ("P".charCodeAt(0) << 16) + ("D".charCodeAt(0) << 8) + "I".charCodeAt(0);
+export const MD2_VERSION = 8;
+export const MD2_MAX_SKINS = 32;
+export const MD2_MAX_SKINNAME = 64;
+
+// dmd2header_t field layout (q2repro inc/format/md2.h), all little-endian
+// uint32: ident(0) version(4) skinwidth(8) skinheight(12) framesize(16)
+// num_skins(20) num_xyz(24) num_st(28) num_tris(32) num_glcmds(36)
+// num_frames(40) ofs_skins(44) ofs_st(48) ofs_tris(52) ofs_frames(56)
+// ofs_glcmds(60) ofs_end(64) -- 68 bytes total.
+const MD2_HEADER_SIZE = 68;
+
+/*
+================
+readMd2SkinNames
+
+Returns the skin filenames embedded in a .MD2 file's header, or null if
+buffer isn't a valid, appropriately-versioned alias model (too short, bad
+ident, bad version, or a num_skins/ofs_skins pair that doesn't fit inside
+the buffer). Mirrors vanilla cl_main.c CL_RequestNextDownload's own inline
+check ("not an alias model" / "couldn't load it" -> skip and move on) and
+q2repro download.c's check_skins() MD2 branch, collapsed into one
+all-or-nothing call since the download walk only ever wants the full name
+list, never partial results.
+================
+*/
+export function readMd2SkinNames(buffer: Uint8Array): string[] | null {
+  if (buffer.length < MD2_HEADER_SIZE) return null;
+  const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+
+  if (view.getInt32(0, true) !== MD2_IDENT) return null;
+  if (view.getInt32(4, true) !== MD2_VERSION) return null;
+
+  const num_skins = view.getInt32(20, true);
+  const ofs_skins = view.getInt32(44, true);
+  if (num_skins < 0 || num_skins > MD2_MAX_SKINS) return null;
+
+  const end = ofs_skins + num_skins * MD2_MAX_SKINNAME;
+  if (ofs_skins < 0 || end < ofs_skins || end > buffer.length) return null;
+
+  const names: string[] = [];
+  for (let i = 0; i < num_skins; i++) {
+    names.push(readCString(view, ofs_skins + i * MD2_MAX_SKINNAME, MD2_MAX_SKINNAME));
+  }
+  return names;
+}

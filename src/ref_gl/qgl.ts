@@ -25,7 +25,7 @@ gap -- add one alongside GLimp_Shutdown when gl_rmain.ts's real R_Shutdown
 lands).
 */
 
-import { dlopen, FFIType, linkSymbols, type Library, type Pointer } from "bun:ffi";
+import { dlopen, FFIType, linkSymbols, ptr as ffiPtrOf, type Library, type Pointer } from "bun:ffi";
 
 // GL entry points that take `const GLfloat *` / `const GLuint *` / `const
 // GLvoid *` etc pass a small fixed-size C array in every call site this
@@ -35,7 +35,11 @@ import { dlopen, FFIType, linkSymbols, type Library, type Pointer } from "bun:ff
 // `FFIType.ptr` parameter, so QGL's pointer-taking members accept either,
 // matching this unit's brief ("pointers as `Pointer | TypedArray` where the
 // C passes arrays").
-export type GLArray = Float32Array | Uint8Array | Uint32Array | Int32Array | Uint16Array;
+// BigUint64Array joined the union for qglShaderSource's internal pointer-
+// to-pointer construction (see singleStringArray below) -- a real pointer
+// value doesn't fit in a plain Uint32Array on a 64-bit host, so the array
+// holding it must be 64-bit-element-typed.
+export type GLArray = Float32Array | Uint8Array | Uint32Array | Int32Array | Uint16Array | BigUint64Array;
 export type GLPointer = Pointer | GLArray | null;
 
 // The typed function-pointer table qgl_linux.c/qgl_win.c populate at
@@ -109,6 +113,8 @@ export interface QGL {
   qglTexParameterf(target: number, pname: number, param: number): void;
   qglTexSubImage2D(target: number, level: number, xoffset: number, yoffset: number, width: number, height: number, format: number, type: number, pixels: GLPointer): void;
   qglTranslatef(x: number, y: number, z: number): void;
+  qglNormal3f(nx: number, ny: number, nz: number): void;
+  qglNormal3fv(v: GLPointer): void;
   // C function pointer: NULL when the driver lacks the extension --
   // every caller must check, exactly like the C
   qglUnlockArraysEXT: (() => void) | null;
@@ -117,6 +123,51 @@ export interface QGL {
   qglVertex3fv(v: GLPointer): void;
   qglVertexPointer(size: number, type: number, stride: number, pointer: GLPointer): void;
   qglViewport(x: number, y: number, width: number, height: number): void;
+
+  // --- GL2.0 program objects (task #25, v1.1.0 shader path) ---------------
+  //
+  // Not part of the original id Software qgl.h -- ref_gl's classic renderer
+  // is GL1.1 fixed-function only and never linked a program object. Added
+  // for the new gl_shader.ts permutation-program loader (per-pixel dynamic
+  // lighting for CS_SHADOWLIGHTS-fed lights, layered over the existing
+  // lightmap/fixed-function path per q2repro's src/refresh/shader.c). No
+  // GL1.1 qgl.h entry point to mirror faithfully, so these members are
+  // ergonomic (string in/out) rather than raw-pointer C signatures, unlike
+  // every entry above -- documented deviation from this file's "mirror
+  // qgl.h exactly" rule for the pre-existing 59, justified by there being no
+  // original signature at all to mirror. Modeled on the real GL2 entry
+  // point names/semantics (create/shader/compile/link/use/delete +
+  // glGetShaderiv/glGetProgramiv status probes + uniform setters) so a
+  // reader who knows desktop GL recognizes every member immediately.
+  //
+  // All nullable and resolved together as one all-or-nothing group (see
+  // `resolveGLShaderAPI` below) -- unlike the seven single *_EXT/*_SGIS
+  // vendor extensions above (which can be present independently of each
+  // other), a context that exposes any GL2 program-object entry point
+  // exposes all of them, so there is no scenario where partial resolution
+  // is meaningful; gl_shader.ts's init treats "any member null" as "no
+  // shader path on this context" and falls back to fixed-function.
+  qglCreateShader: ((type: number) => number) | null;
+  qglShaderSource: ((shader: number, source: string) => void) | null;
+  qglCompileShader: ((shader: number) => void) | null;
+  qglGetShaderiv: ((shader: number, pname: number, params: GLPointer) => void) | null;
+  // Ergonomic deviation (see banner above): returns the log text directly
+  // instead of writing into a caller-supplied buffer + length-out pointer.
+  qglGetShaderInfoLog: ((shader: number) => string) | null;
+  qglDeleteShader: ((shader: number) => void) | null;
+  qglCreateProgram: (() => number) | null;
+  qglAttachShader: ((program: number, shader: number) => void) | null;
+  qglLinkProgram: ((program: number) => void) | null;
+  qglGetProgramiv: ((program: number, pname: number, params: GLPointer) => void) | null;
+  qglGetProgramInfoLog: ((program: number) => string) | null;
+  qglDeleteProgram: ((program: number) => void) | null;
+  qglUseProgram: ((program: number) => void) | null;
+  qglGetUniformLocation: ((program: number, name: string) => number) | null;
+  qglUniform1i: ((location: number, v0: number) => void) | null;
+  qglUniform1f: ((location: number, v0: number) => void) | null;
+  qglUniform3f: ((location: number, v0: number, v1: number, v2: number) => void) | null;
+  qglUniform3fv: ((location: number, count: number, value: GLPointer) => void) | null;
+  qglUniform4f: ((location: number, v0: number, v1: number, v2: number, v3: number) => void) | null;
 }
 
 export interface QGLCall {
@@ -322,6 +373,85 @@ export class QGLRecording implements QGL {
   qglViewport(x: number, y: number, width: number, height: number): void {
     this.record("qglViewport", [x, y, width, height]);
   }
+  qglNormal3f(nx: number, ny: number, nz: number): void {
+    this.record("qglNormal3f", [nx, ny, nz]);
+  }
+  qglNormal3fv(v: GLPointer): void {
+    this.record("qglNormal3fv", [v]);
+  }
+
+  // GL2 program objects: simulated success (fresh incrementing ids, empty
+  // logs, GL_TRUE-equivalent status) so gl_shader.ts's loader logic --
+  // permutation selection, uniform lookups, the call sequence a real driver
+  // would see -- is exercisable and assertable through `.calls` without a
+  // real context, matching this class's existing "test seam" role.
+  private nextShaderName = 1;
+
+  qglCreateShader = (type: number): number => {
+    this.record("qglCreateShader", [type]);
+    return this.nextShaderName++;
+  };
+  qglShaderSource = (shader: number, source: string): void => {
+    this.record("qglShaderSource", [shader, source]);
+  };
+  qglCompileShader = (shader: number): void => {
+    this.record("qglCompileShader", [shader]);
+  };
+  qglGetShaderiv = (shader: number, pname: number, params: GLPointer): void => {
+    this.record("qglGetShaderiv", [shader, pname, params]);
+    if (params instanceof Int32Array) params[0] = 1; // GL_TRUE
+  };
+  qglGetShaderInfoLog = (shader: number): string => {
+    this.record("qglGetShaderInfoLog", [shader]);
+    return "";
+  };
+  qglDeleteShader = (shader: number): void => {
+    this.record("qglDeleteShader", [shader]);
+  };
+  qglCreateProgram = (): number => {
+    this.record("qglCreateProgram", []);
+    return this.nextShaderName++;
+  };
+  qglAttachShader = (program: number, shader: number): void => {
+    this.record("qglAttachShader", [program, shader]);
+  };
+  qglLinkProgram = (program: number): void => {
+    this.record("qglLinkProgram", [program]);
+  };
+  qglGetProgramiv = (program: number, pname: number, params: GLPointer): void => {
+    this.record("qglGetProgramiv", [program, pname, params]);
+    if (params instanceof Int32Array) params[0] = 1; // GL_TRUE
+  };
+  qglGetProgramInfoLog = (program: number): string => {
+    this.record("qglGetProgramInfoLog", [program]);
+    return "";
+  };
+  qglDeleteProgram = (program: number): void => {
+    this.record("qglDeleteProgram", [program]);
+  };
+  qglUseProgram = (program: number): void => {
+    this.record("qglUseProgram", [program]);
+  };
+  private nextUniformLocation = 0;
+  qglGetUniformLocation = (program: number, name: string): number => {
+    this.record("qglGetUniformLocation", [program, name]);
+    return this.nextUniformLocation++;
+  };
+  qglUniform1i = (location: number, v0: number): void => {
+    this.record("qglUniform1i", [location, v0]);
+  };
+  qglUniform1f = (location: number, v0: number): void => {
+    this.record("qglUniform1f", [location, v0]);
+  };
+  qglUniform3f = (location: number, v0: number, v1: number, v2: number): void => {
+    this.record("qglUniform3f", [location, v0, v1, v2]);
+  };
+  qglUniform3fv = (location: number, count: number, value: GLPointer): void => {
+    this.record("qglUniform3fv", [location, count, value]);
+  };
+  qglUniform4f = (location: number, v0: number, v1: number, v2: number, v3: number): void => {
+    this.record("qglUniform4f", [location, v0, v1, v2, v3]);
+  };
 }
 
 // linux/qgl_linux.c's QGL_Init() dlopen()s `gl_driver`'s value (cvar,
@@ -412,6 +542,8 @@ const glSymbols = {
   glTexParameterf: { args: [u32, u32, f32], returns: voidType },
   glTexSubImage2D: { args: [u32, i32, i32, i32, i32, i32, u32, u32, ptr], returns: voidType },
   glTranslatef: { args: [f32, f32, f32], returns: voidType },
+  glNormal3f: { args: [f32, f32, f32], returns: voidType },
+  glNormal3fv: { args: [ptr], returns: voidType },
   glVertex2f: { args: [f32, f32], returns: voidType },
   glVertex3f: { args: [f32, f32, f32], returns: voidType },
   glVertex3fv: { args: [ptr], returns: voidType },
@@ -532,6 +664,165 @@ function resolveGlSelectTextureSGIS(libraryPath: string, getProcAddress: GLGetPr
   }
 }
 
+// --- GL2.0 program objects (task #25, v1.1.0 shader path) -----------------
+//
+// Raw symbol table for the per-symbol dlopen() fallback path (no
+// getProcAddress supplied), same "whole call fails if even one member is
+// missing" contract as the core `glSymbols` table above -- appropriate here
+// because a context that has any GL2 program-object entry point has all of
+// them (see the QGL interface's banner comment on `qglCreateShader` for why
+// this is resolved as one all-or-nothing group rather than seven
+// independent per-symbol resolvers like the *_EXT/*_SGIS extensions).
+const glShaderSymbols = {
+  glCreateShader: { args: [u32], returns: u32 },
+  glShaderSource: { args: [u32, i32, ptr, ptr], returns: voidType },
+  glCompileShader: { args: [u32], returns: voidType },
+  glGetShaderiv: { args: [u32, u32, ptr], returns: voidType },
+  glGetShaderInfoLog: { args: [u32, i32, ptr, ptr], returns: voidType },
+  glDeleteShader: { args: [u32], returns: voidType },
+  glCreateProgram: { args: [], returns: u32 },
+  glAttachShader: { args: [u32, u32], returns: voidType },
+  glLinkProgram: { args: [u32], returns: voidType },
+  glGetProgramiv: { args: [u32, u32, ptr], returns: voidType },
+  glGetProgramInfoLog: { args: [u32, i32, ptr, ptr], returns: voidType },
+  glDeleteProgram: { args: [u32], returns: voidType },
+  glUseProgram: { args: [u32], returns: voidType },
+  glGetUniformLocation: { args: [u32, ptr], returns: i32 },
+  glUniform1i: { args: [i32, i32], returns: voidType },
+  glUniform1f: { args: [i32, f32], returns: voidType },
+  glUniform3f: { args: [i32, f32, f32, f32], returns: voidType },
+  glUniform3fv: { args: [i32, i32, ptr], returns: voidType },
+  glUniform4f: { args: [i32, f32, f32, f32, f32], returns: voidType },
+} as const;
+
+// A resolved-but-still-raw-signature copy of `glShaderSymbols`' functions --
+// `name`/`source`/log arguments are still `GLPointer` here, exactly like
+// every core-1.1 pointer-taking member above; `loadQGLFromSystem` wraps
+// these into the ergonomic string-based QGL members (see that interface's
+// banner comment for why the wrapping happens at this layer and not below
+// it).
+interface GLShaderRawSymbols {
+  glCreateShader(type: number): number;
+  glShaderSource(shader: number, count: number, strings: GLPointer, lengths: GLPointer): void;
+  glCompileShader(shader: number): void;
+  glGetShaderiv(shader: number, pname: number, params: GLPointer): void;
+  glGetShaderInfoLog(shader: number, bufSize: number, length: GLPointer, infoLog: GLPointer): void;
+  glDeleteShader(shader: number): void;
+  glCreateProgram(): number;
+  glAttachShader(program: number, shader: number): void;
+  glLinkProgram(program: number): void;
+  glGetProgramiv(program: number, pname: number, params: GLPointer): void;
+  glGetProgramInfoLog(program: number, bufSize: number, length: GLPointer, infoLog: GLPointer): void;
+  glDeleteProgram(program: number): void;
+  glUseProgram(program: number): void;
+  glGetUniformLocation(program: number, name: GLPointer): number;
+  glUniform1i(location: number, v0: number): void;
+  glUniform1f(location: number, v0: number): void;
+  glUniform3f(location: number, v0: number, v1: number, v2: number): void;
+  glUniform3fv(location: number, count: number, value: GLPointer): void;
+  glUniform4f(location: number, v0: number, v1: number, v2: number, v3: number): void;
+}
+
+// Resolves every GL2 program-object entry point as one all-or-nothing
+// group. Written out symbol-by-symbol rather than through a loop building
+// the `linkSymbols` argument object, for the same reason the seven
+// `resolveGl*EXT` functions above are: a computed `{ [name]: sig }` object
+// can't be built without an `as` cast to widen the key, which PORTING.md's
+// no-`as`-except-`as const` rule forbids.
+function resolveGLShaderAPI(libraryPath: string, getProcAddress: GLGetProcAddressFn | undefined): GLShaderRawSymbols | null {
+  if (getProcAddress) {
+    const pCreateShader = getProcAddress("glCreateShader");
+    if (pCreateShader === null) return null;
+    const pShaderSource = getProcAddress("glShaderSource");
+    if (pShaderSource === null) return null;
+    const pCompileShader = getProcAddress("glCompileShader");
+    if (pCompileShader === null) return null;
+    const pGetShaderiv = getProcAddress("glGetShaderiv");
+    if (pGetShaderiv === null) return null;
+    const pGetShaderInfoLog = getProcAddress("glGetShaderInfoLog");
+    if (pGetShaderInfoLog === null) return null;
+    const pDeleteShader = getProcAddress("glDeleteShader");
+    if (pDeleteShader === null) return null;
+    const pCreateProgram = getProcAddress("glCreateProgram");
+    if (pCreateProgram === null) return null;
+    const pAttachShader = getProcAddress("glAttachShader");
+    if (pAttachShader === null) return null;
+    const pLinkProgram = getProcAddress("glLinkProgram");
+    if (pLinkProgram === null) return null;
+    const pGetProgramiv = getProcAddress("glGetProgramiv");
+    if (pGetProgramiv === null) return null;
+    const pGetProgramInfoLog = getProcAddress("glGetProgramInfoLog");
+    if (pGetProgramInfoLog === null) return null;
+    const pDeleteProgram = getProcAddress("glDeleteProgram");
+    if (pDeleteProgram === null) return null;
+    const pUseProgram = getProcAddress("glUseProgram");
+    if (pUseProgram === null) return null;
+    const pGetUniformLocation = getProcAddress("glGetUniformLocation");
+    if (pGetUniformLocation === null) return null;
+    const pUniform1i = getProcAddress("glUniform1i");
+    if (pUniform1i === null) return null;
+    const pUniform1f = getProcAddress("glUniform1f");
+    if (pUniform1f === null) return null;
+    const pUniform3f = getProcAddress("glUniform3f");
+    if (pUniform3f === null) return null;
+    const pUniform3fv = getProcAddress("glUniform3fv");
+    if (pUniform3fv === null) return null;
+    const pUniform4f = getProcAddress("glUniform4f");
+    if (pUniform4f === null) return null;
+
+    return linkSymbols({
+      glCreateShader: { args: [u32], returns: u32, ptr: pCreateShader },
+      glShaderSource: { args: [u32, i32, ptr, ptr], returns: voidType, ptr: pShaderSource },
+      glCompileShader: { args: [u32], returns: voidType, ptr: pCompileShader },
+      glGetShaderiv: { args: [u32, u32, ptr], returns: voidType, ptr: pGetShaderiv },
+      glGetShaderInfoLog: { args: [u32, i32, ptr, ptr], returns: voidType, ptr: pGetShaderInfoLog },
+      glDeleteShader: { args: [u32], returns: voidType, ptr: pDeleteShader },
+      glCreateProgram: { args: [], returns: u32, ptr: pCreateProgram },
+      glAttachShader: { args: [u32, u32], returns: voidType, ptr: pAttachShader },
+      glLinkProgram: { args: [u32], returns: voidType, ptr: pLinkProgram },
+      glGetProgramiv: { args: [u32, u32, ptr], returns: voidType, ptr: pGetProgramiv },
+      glGetProgramInfoLog: { args: [u32, i32, ptr, ptr], returns: voidType, ptr: pGetProgramInfoLog },
+      glDeleteProgram: { args: [u32], returns: voidType, ptr: pDeleteProgram },
+      glUseProgram: { args: [u32], returns: voidType, ptr: pUseProgram },
+      glGetUniformLocation: { args: [u32, ptr], returns: i32, ptr: pGetUniformLocation },
+      glUniform1i: { args: [i32, i32], returns: voidType, ptr: pUniform1i },
+      glUniform1f: { args: [i32, f32], returns: voidType, ptr: pUniform1f },
+      glUniform3f: { args: [i32, f32, f32, f32], returns: voidType, ptr: pUniform3f },
+      glUniform3fv: { args: [i32, i32, ptr], returns: voidType, ptr: pUniform3fv },
+      glUniform4f: { args: [i32, f32, f32, f32, f32], returns: voidType, ptr: pUniform4f },
+    }).symbols;
+  }
+  try {
+    return dlopen(libraryPath, glShaderSymbols).symbols;
+  } catch {
+    return null;
+  }
+}
+
+function cstrBuf(s: string): Uint8Array {
+  return new TextEncoder().encode(`${s}\0`);
+}
+
+// glShaderSource's real signature takes `const GLchar *const *string` -- a
+// pointer to an array of C-string pointers. gl_shader.ts only ever compiles
+// one concatenated source string per shader stage (matching q2repro's own
+// shader.c, which always calls `qglShaderSource(shader, 1, &data, &size)`),
+// so the array is always length 1: built here as a single 8-byte pointer
+// entry (this port targets 64-bit hosts only, same assumption every other
+// bare pointer value already threaded through this file makes).
+function singleStringArray(bytes: Uint8Array): BigUint64Array {
+  return new BigUint64Array([BigInt(ffiPtrOf(bytes))]);
+}
+
+function readInfoLog(raw: GLShaderRawSymbols, which: "shader" | "program", name: number): string {
+  const bufSize = 4096;
+  const infoLog = new Uint8Array(bufSize);
+  const length = new Int32Array(1);
+  if (which === "shader") raw.glGetShaderInfoLog(name, bufSize, length, infoLog);
+  else raw.glGetProgramInfoLog(name, bufSize, length, infoLog);
+  return new TextDecoder().decode(infoLog.subarray(0, length[0]));
+}
+
 // Binds QGL against the real system OpenGL library via bun:ffi's dlopen().
 //
 // This resolves every core GL 1.1 symbol with a plain dlsym() against the
@@ -585,6 +876,7 @@ export function loadQGLFromSystem(getProcAddress?: GLGetProcAddressFn): QGL {
   const glColorTableEXT = resolveGlColorTableEXT(libraryPath, getProcAddress);
   const glMTexCoord2fSGIS = resolveGlMTexCoord2fSGIS(libraryPath, getProcAddress);
   const glSelectTextureSGIS = resolveGlSelectTextureSGIS(libraryPath, getProcAddress);
+  const glShader = resolveGLShaderAPI(libraryPath, getProcAddress);
   return {
     qglAlphaFunc: (func, ref) => s.glAlphaFunc(func, ref),
     qglArrayElement: (i) => s.glArrayElement(i),
@@ -655,5 +947,32 @@ export function loadQGLFromSystem(getProcAddress?: GLGetProcAddressFn): QGL {
     qglVertex3fv: (v) => s.glVertex3fv(v),
     qglVertexPointer: (size, type, stride, pointer) => s.glVertexPointer(size, type, stride, pointer),
     qglViewport: (x, y, width, height) => s.glViewport(x, y, width, height),
+    qglNormal3f: (nx, ny, nz) => s.glNormal3f(nx, ny, nz),
+    qglNormal3fv: (v) => s.glNormal3fv(v),
+
+    qglCreateShader: glShader ? (type) => glShader.glCreateShader(type) : null,
+    qglShaderSource: glShader
+      ? (shader, source) => {
+          const bytes = cstrBuf(source);
+          glShader.glShaderSource(shader, 1, singleStringArray(bytes), null);
+        }
+      : null,
+    qglCompileShader: glShader ? (shader) => glShader.glCompileShader(shader) : null,
+    qglGetShaderiv: glShader ? (shader, pname, params) => glShader.glGetShaderiv(shader, pname, params) : null,
+    qglGetShaderInfoLog: glShader ? (shader) => readInfoLog(glShader, "shader", shader) : null,
+    qglDeleteShader: glShader ? (shader) => glShader.glDeleteShader(shader) : null,
+    qglCreateProgram: glShader ? () => glShader.glCreateProgram() : null,
+    qglAttachShader: glShader ? (program, shader) => glShader.glAttachShader(program, shader) : null,
+    qglLinkProgram: glShader ? (program) => glShader.glLinkProgram(program) : null,
+    qglGetProgramiv: glShader ? (program, pname, params) => glShader.glGetProgramiv(program, pname, params) : null,
+    qglGetProgramInfoLog: glShader ? (program) => readInfoLog(glShader, "program", program) : null,
+    qglDeleteProgram: glShader ? (program) => glShader.glDeleteProgram(program) : null,
+    qglUseProgram: glShader ? (program) => glShader.glUseProgram(program) : null,
+    qglGetUniformLocation: glShader ? (program, name) => glShader.glGetUniformLocation(program, cstrBuf(name)) : null,
+    qglUniform1i: glShader ? (location, v0) => glShader.glUniform1i(location, v0) : null,
+    qglUniform1f: glShader ? (location, v0) => glShader.glUniform1f(location, v0) : null,
+    qglUniform3f: glShader ? (location, v0, v1, v2) => glShader.glUniform3f(location, v0, v1, v2) : null,
+    qglUniform3fv: glShader ? (location, count, value) => glShader.glUniform3fv(location, count, value) : null,
+    qglUniform4f: glShader ? (location, v0, v1, v2, v3) => glShader.glUniform4f(location, v0, v1, v2, v3) : null,
   };
 }

@@ -3,13 +3,36 @@
 import { CDAudio_Play } from "../platform/cd_ogg";
 import { Sys_SendKeyEvents } from "../platform/sys";
 import { fixedLength } from "../shared/fixed";
-import { MSG_ReadByte, MSG_ReadShort, MSG_ReadLong, MSG_ReadString, MSG_ReadPos, MSG_WriteByte, MSG_WriteString } from "../qcommon/sizebuf";
+import {
+  MSG_ReadByte,
+  MSG_ReadShort,
+  MSG_ReadLong,
+  MSG_ReadString,
+  MSG_ReadPos,
+  MSG_WriteByte,
+  MSG_WriteString,
+} from "../qcommon/sizebuf";
 import { net_message } from "../qcommon/net_chan";
-import { SvcOpsT, ClcOpsT, PROTOCOL_VERSION, PROTOCOL_VERSION_RERELEASE, ERR_DROP, BASEDIRNAME } from "../qcommon/qcommon";
+import {
+  SvcOpsT,
+  ClcOpsT,
+  PROTOCOL_VERSION,
+  PROTOCOL_VERSION_RERELEASE,
+  PROTOCOL_VERSION_R1Q2,
+  PROTOCOL_VERSION_R1Q2_CURRENT,
+  PROTOCOL_VERSION_Q2PRO,
+  PROTOCOL_VERSION_Q2PRO_CURRENT,
+  SVC_ZPACKET,
+  ERR_DROP,
+  BASEDIRNAME,
+} from "../qcommon/qcommon";
 import { cl, cls, ConnstateT, svc_strings, clCvars, cl_entities, type ClientinfoT, num_cl_weaponmodels, cl_weaponmodels, re } from "./client";
 import type { ProtocolCodec } from "../qcommon/protocol/codec";
 import { VANILLA_CODEC } from "../qcommon/protocol/vanilla";
 import { Q2REPRO_CODEC } from "../qcommon/protocol/q2repro";
+import { createR1Q2Codec, setR1Q2FrameExtrabits } from "../qcommon/protocol/r1q2";
+import { createQ2ProCodec, noteQ2ProFrameOpcodeExtrabits } from "../qcommon/protocol/q2pro";
+import { readZPacketPayload } from "../qcommon/protocol/zpacket";
 import {
   KEX_DEMO_CODEC,
   PROTOCOL_KEX_DEMOS,
@@ -44,18 +67,18 @@ import {
 import { Com_Error, Com_Printf, Com_DPrintf, Com_ServerState } from "../qcommon/common";
 import { Cvar_Set } from "../qcommon/cvar";
 import { Cbuf_AddText, Cbuf_Execute, Cmd_Argc, Cmd_Argv } from "../qcommon/cmd";
-import { FS_LoadFile, FS_Gamedir, FS_CreatePath, FS_FOpenFileWrite, FS_Write, FS_FCloseFile, FS_ReadRawFile, FS_WriteFile, FS_RemoveFile, fs_gamedirvar } from "../qcommon/files";
+import { FS_LoadFile, FS_Gamedir, FS_CreatePath, FS_FOpenFileWrite, FS_Write, FS_FCloseFile, FS_ReadRawFile, FS_WriteFile, FS_RemoveFile, FS_AddPak, fs_gamedirvar } from "../qcommon/files";
 import { COM_StripExtension } from "../shared/math";
 import { CM_InlineModel } from "../qcommon/cmodel";
 import { CL_ClearState, CL_RequestNextDownload, CL_WriteDemoMessage } from "./cl_main";
-import { HTTP_QueueDownload, type HttpDlType } from "./cl_http";
+import { HTTP_QueueDownload, HTTP_RescanQueue, type HttpDlType } from "./cl_http";
 import { CG_SetActiveCgameKind } from "./cgame/host";
 import { SCR_PlayCinematic } from "./cl_cin";
 import { SCR_CenterPrint } from "./cl_scrn";
 import { con } from "./console";
 import { S_StartSound, S_StartLocalSound, S_BeginRegistration, S_RegisterSound, S_EndRegistration } from "./snd_dma";
 import { CL_RegisterTEntSounds, CL_ParseTEnt } from "./cl_tent";
-import { CL_ParseMuzzleFlash, CL_ParseMuzzleFlash2, CL_SetLightstyle } from "./cl_fx";
+import { CL_ParseMuzzleFlash, CL_ParseMuzzleFlash2, CL_SetLightstyle, CL_ParseShadowLightConfigstring } from "./cl_fx";
 import { CL_ParseInventory } from "./cl_inv";
 import { CL_ParseEntityBits, CL_ParseDelta, CL_ParseFrame } from "./cl_ents";
 
@@ -306,6 +329,18 @@ export function CL_ParseDownload(): void {
     } else {
       FS_WriteFile(newn, data);
       FS_RemoveFile(oldn);
+
+      // A .pak/.pkz can reach this path too: cl_http.ts's udpFallback
+      // callback routes a failed HTTP "pak"-type transfer through
+      // CL_StartUdpDownload just like every other download, and this function
+      // has no per-download "type" to switch on (unlike cl_http.ts's own
+      // completion handler) -- so detect it by extension instead. See
+      // files.ts's FS_AddPak doc comment for why this mounts just the one
+      // pack rather than a full Q2PRO-style CL_RestartFilesystem.
+      const lowerName = cls.downloadname.toLowerCase();
+      if (lowerName.endsWith(".pak") || lowerName.endsWith(".pkz")) {
+        if (FS_AddPak(newn)) HTTP_RescanQueue();
+      }
     }
 
     cls.download = null;
@@ -359,6 +394,22 @@ export function selectServerCodec(protocol: number): { codec: ProtocolCodec; csr
   if (protocol === PROTOCOL_VERSION_RERELEASE) {
     return { codec: Q2REPRO_CODEC, csr: CS_REMAP_RERELEASE };
   }
+  // v1.0.0 wire cluster (task board #23): R1Q2 (35) and Q2PRO (36) use the
+  // same legacy configstring layout as vanilla (CS_REMAP_OLD) -- only the
+  // kex family remaps configstrings. The codec returned here is PROVISIONAL:
+  // both wire formats vary by a negotiated minor version this function
+  // cannot see yet (it only has the raw protocol number, read before
+  // svc_serverdata's body). CL_ParseServerData refines `cls.codec` to the
+  // real per-connection instance immediately after reading that body's
+  // r1q2Version/q2proVersion field -- this default (at each codec's CURRENT
+  // ceiling) is only used to parse that one handshake message, whose shape
+  // does not itself vary by minor version.
+  if (protocol === PROTOCOL_VERSION_R1Q2) {
+    return { codec: createR1Q2Codec(PROTOCOL_VERSION_R1Q2_CURRENT), csr: CS_REMAP_OLD };
+  }
+  if (protocol === PROTOCOL_VERSION_Q2PRO) {
+    return { codec: createQ2ProCodec(PROTOCOL_VERSION_Q2PRO_CURRENT), csr: CS_REMAP_OLD };
+  }
   if (Com_ServerState() && PROTOCOL_VERSION === 34) {
     // no-op; see C source
     return { codec: VANILLA_CODEC, csr: CS_REMAP_OLD };
@@ -401,6 +452,19 @@ export function CL_ParseServerData(): void {
   CG_SetActiveCgameKind(csr === CS_REMAP_RERELEASE ? "kex" : "classic");
 
   const sd = codec.readServerData();
+
+  // Refine cls.codec to the negotiated minor version now that the handshake
+  // body is read (see selectServerCodec's doc comment above for why the
+  // codec picked off the protocol number alone is only provisional for
+  // these two families -- R1Q2's U_SOLID width and Q2PRO's serverdata echo
+  // both depend on this). Must happen before any further codec use (entity/
+  // frame reads), which only occur much later once the client has spawned.
+  if (i === PROTOCOL_VERSION_R1Q2) {
+    cls.codec = createR1Q2Codec(sd.r1q2Version ?? PROTOCOL_VERSION_R1Q2_CURRENT);
+  } else if (i === PROTOCOL_VERSION_Q2PRO) {
+    cls.codec = createQ2ProCodec(sd.q2proVersion ?? PROTOCOL_VERSION_Q2PRO_CURRENT);
+  }
+
   cl.servercount = sd.servercount;
   cl.attractloop = sd.attractloop;
 
@@ -628,6 +692,13 @@ export function CL_ParseConfigString(): void {
     if (cl.refresh_prepped) cl.image_precache[i - cls.csr.images] = re?.RegisterPic(cl.configstrings[i]) ?? null;
   } else if (i >= cls.csr.playerskins && i < cls.csr.playerskins + MAX_CLIENTS) {
     if (cl.refresh_prepped) CL_ParseClientinfo(i - cls.csr.playerskins);
+  } else if (cls.csr.shadowlights !== -1 && i >= cls.csr.shadowlights && i < cls.csr.shadowlights + cls.csr.max_shadowlights) {
+    // task #25 (v1.1.0) -- q2repro src/client/precache.c's CS_LoadShadowLight
+    // dispatch. cls.csr.shadowlights is -1 under the classic (OLD)
+    // configstring family (cs_remap.ts's CS_REMAP_OLD), which has no room
+    // for shadow lights at all -- guarded explicitly since -1 would
+    // otherwise satisfy `i >= -1` for every index.
+    CL_ParseShadowLightConfigstring(i - cls.csr.shadowlights, cl.configstrings[i]);
   }
 }
 
@@ -715,6 +786,31 @@ export function CL_ParseServerMessage(): void {
   if (clCvars.cl_shownet?.value === 1) Com_Printf("%i ", net_message.cursize);
   else if (clCvars.cl_shownet && clCvars.cl_shownet.value >= 2) Com_Printf("------------------\n");
 
+  CL_ParseServerMessageLoop();
+
+  // CL_AddNetgraph() -- cl_scrn.ts's pending stub; called unconditionally in
+  // the original after every parsed message. Left uncalled here: it is a
+  // pure debug-overlay bookkeeping function and would
+  // make every successful CL_ParseServerMessage call throw; reported gap for
+  // whoever lands cl_scrn.c for real.
+
+  //
+  // we don't know if it is ok to save a demo message until
+  // after we have parsed the frame
+  //
+  if (cls.demorecording && !cls.demowaiting) CL_WriteDemoMessage();
+}
+
+// v1.0.0 wire cluster (task board #23): factored out of CL_ParseServerMessage
+// so svc_r1q2_zpacket (opcode SVC_ZPACKET, shared numeric slot with KEX's
+// svc_splitclient below) can recursively re-enter the SAME per-command
+// dispatch against a decompressed sub-stream -- see CL_ParseZPacket. Mirrors
+// r1q2_client_read_zpacket's own C comment: "zpacket might contain multiple
+// packets, so try to read from inflated message repeatedly". The shownet
+// header print and demo-write trailer stay in CL_ParseServerMessage (they
+// must run exactly once per real received packet, not once per nested
+// zpacket payload).
+function CL_ParseServerMessageLoop(): void {
   //
   // parse the message
   //
@@ -724,11 +820,27 @@ export function CL_ParseServerMessage(): void {
       break;
     }
 
-    const cmd = MSG_ReadByte(net_message);
+    let cmd = MSG_ReadByte(net_message);
 
     if (cmd === -1) {
       SHOWNET("END OF MESSAGE");
       break;
+    }
+
+    // R1Q2/Q2PRO steal the top 3 bits of every opcode byte to smuggle part
+    // of the player_state_t "extraflags" value (EPS_*) alongside svc_frame's
+    // own opcode -- see r1q2.ts/q2pro.ts's file-header "INTEGRATION GAP"
+    // notes, which specify exactly this fix. A real peer only ever sets
+    // these bits when writing svc_frame's opcode byte (every other opcode's
+    // writer ORs in nothing), so this is a harmless no-op for every other
+    // command, and masking is a no-op for every OTHER codec (vanilla/
+    // q2repro/kexdemo never set these bits at all).
+    if (cls.codec.name === "r1q2") {
+      setR1Q2FrameExtrabits(cmd & 0xe0);
+      cmd &= 0x1f;
+    } else if (cls.codec.name === "q2pro") {
+      noteQ2ProFrameOpcodeExtrabits(cmd & 0xe0);
+      cmd &= 0x1f;
     }
 
     if (clCvars.cl_shownet && clCvars.cl_shownet.value >= 2) {
@@ -856,7 +968,12 @@ export function CL_ParseServerMessage(): void {
       // separate, larger gap this unit does not close -- see this file's
       // own report).
       case ServerCommandT.svc_splitclient:
-        readSplitclientKex();
+        // Numerically the same opcode slot as SVC_ZPACKET (both families
+        // start their own private opcode range at svc_frame+1 == 21) --
+        // only one family's codec is ever active per connection, so this
+        // branch is unambiguous. See qcommon.ts's SVC_ZPACKET doc comment.
+        if (cls.codec.name === "r1q2" || cls.codec.name === "q2pro") CL_ParseZPacket();
+        else readSplitclientKex();
         break;
 
       case ServerCommandT.svc_configblast:
@@ -906,16 +1023,48 @@ export function CL_ParseServerMessage(): void {
         break;
     }
   }
+}
 
-  // CL_AddNetgraph() -- cl_scrn.ts's pending stub; called unconditionally in
-  // the original after every parsed message. Left uncalled here: it is a
-  // pure debug-overlay bookkeeping function and would
-  // make every successful CL_ParseServerMessage call throw; reported gap for
-  // whoever lands cl_scrn.c for real.
+// svc_r1q2_zpacket / svc_q2pro's shared zpacket opcode (SVC_ZPACKET,
+// qcommon.ts) -- inflates the wrapped payload (qcommon/protocol/zpacket.ts)
+// and recursively re-runs CL_ParseServerMessageLoop against it, exactly
+// mirroring r1q2_client_read_zpacket's own "zpacket might contain multiple
+// packets, so try to read from inflated message repeatedly" comment: the
+// decompressed bytes become the dispatch loop's entire input until
+// exhausted (the loop's existing `cmd === -1` end-of-message sentinel fires
+// naturally once `net_message.readcount` reaches the inflated buffer's own
+// length), then the OUTER (still-compressed-container) message resumes
+// reading exactly where it left off. Mirrors kexdemo.ts's
+// readSpawnbaselineblastKex save/restore-net_message pattern for the
+// identical "temporarily repoint the singleton" need -- the `finally` here
+// additionally guarantees the singleton is restored even if a nested parse
+// error throws (Com_Error(ERR_DROP, ...) does not return), which
+// readSpawnbaselineblastKex's own (try-less) precedent does not need to
+// worry about since it never recurses into arbitrary opcode dispatch.
+function CL_ParseZPacket(): void {
+  const inflated = readZPacketPayload(net_message);
 
-  //
-  // we don't know if it is ok to save a demo message until
-  // after we have parsed the frame
-  //
-  if (cls.demorecording && !cls.demowaiting) CL_WriteDemoMessage();
+  const saved = {
+    data: net_message.data,
+    view: net_message.view,
+    cursize: net_message.cursize,
+    readcount: net_message.readcount,
+    maxsize: net_message.maxsize,
+  };
+
+  net_message.data = inflated;
+  net_message.view = new DataView(inflated.buffer, inflated.byteOffset, inflated.byteLength);
+  net_message.cursize = inflated.length;
+  net_message.readcount = 0;
+  net_message.maxsize = inflated.length;
+
+  try {
+    CL_ParseServerMessageLoop();
+  } finally {
+    net_message.data = saved.data;
+    net_message.view = saved.view;
+    net_message.cursize = saved.cursize;
+    net_message.readcount = saved.readcount;
+    net_message.maxsize = saved.maxsize;
+  }
 }

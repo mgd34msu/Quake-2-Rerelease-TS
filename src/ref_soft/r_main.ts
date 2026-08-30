@@ -1104,6 +1104,11 @@ export function GetRefAPI(imp: RefImports): RefExports {
 
     RenderFrame: (fd: RefdefT) => R_RenderFrame(fd),
 
+    // No GL2+ program-object path exists in the software renderer (task
+    // #25 is ref_gl-only per its brief) -- always false, matching a driver
+    // with no GL2 program objects at all.
+    SupportsPerPixelLighting: () => false,
+
     DrawGetPicSize: (name: string) => Draw_GetPicSize(name),
     DrawPic: (x: number, y: number, name: string) => Draw_Pic(x, y, name),
     DrawStretchPic: (x: number, y: number, w: number, h: number, name: string) => Draw_StretchPic(x, y, w, h, name),

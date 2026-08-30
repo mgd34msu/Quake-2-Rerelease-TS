@@ -204,6 +204,27 @@ export class ClientT {
 
   netchan: NetchanT = new NetchanT();
 
+  // Per-connection wire codec (v1.0.0 wire cluster, task board #23 -- the
+  // "revisit when ... handshake negotiation lands" this file's own
+  // ServerStaticT.codec doc comment (below) pointed at). SVC_DirectConnect
+  // negotiates protocol 34/35/36 per connecting client (a single "legacy"
+  // family server now genuinely mixes vanilla/R1Q2/Q2PRO clients at once);
+  // svs.codec stays the family DEFAULT (used for demo recording and to seed
+  // this field before negotiation completes), while every per-client write
+  // call site (sv_ents.ts/sv_user.ts/sv_ccmds.ts) reads THIS field instead.
+  // The kex family still never varies per client (svs.codec alone remains
+  // authoritative there -- protocol 1038 is the only value that family ever
+  // accepts, matching q2repro's own rejection of anything else), so this
+  // field is simply left at its svs.codec-mirroring default for kex clients.
+  codec: ProtocolCodec = VANILLA_CODEC;
+
+  // The negotiated R1Q2/Q2PRO minor version (1903-1905 or 1015-1019; 0 for
+  // every other codec, which never reads this) -- set once by
+  // sv_main.ts's SVC_DirectConnect alongside `codec` and echoed back to the
+  // client verbatim in SV_New_f's serverdata write (ServerDataParamsT's
+  // r1q2Version/q2proVersion fields).
+  protocolMinorVersion = 0;
+
   // mirrors `memset(newcl, 0, sizeof(client_t))` (SVC_DirectConnect's `temp`)
   clear(): void {
     this.state = ClientStateT.cs_free;
@@ -229,6 +250,8 @@ export class ClientT {
     this.lastconnect = 0;
     this.challenge = 0;
     this.netchan = new NetchanT();
+    this.codec = VANILLA_CODEC;
+    this.protocolMinorVersion = 0;
   }
 }
 
@@ -268,16 +291,23 @@ export class ServerStaticT {
   csr: CsRemapT = CS_REMAP_OLD;
 
   // ARCHITECTURE.md "Protocol layer" / .orch/phase5-design.md step 1: the
-  // active wire-encoding codec (qcommon/protocol/codec.ts's ProtocolCodec),
-  // mirroring q2repro's per-connection q2proto_servercontext_t. Placed here
-  // rather than on ServerT for the same reason as `csr` immediately above --
-  // it is a "which format/family is active" selection, not per-level state,
-  // so it must survive SV_SpawnServer's per-level sv.clear(). SIMPLIFICATION:
-  // q2proto's context is genuinely per-client (a mixed-protocol server could
-  // serve some clients on 34 and others on 1038 at once); this port keeps a
-  // single server-wide codec because every connected client speaks the same
-  // hardcoded protocol today (nothing negotiates per-client yet). Revisit
-  // when the 1038 codec and its handshake negotiation land.
+  // FAMILY-DEFAULT wire-encoding codec (qcommon/protocol/codec.ts's
+  // ProtocolCodec), mirroring q2repro's per-connection q2proto_servercontext_t
+  // for the kex family specifically. Placed here rather than on ServerT for
+  // the same reason as `csr` immediately above -- it is a "which format/
+  // family is active" selection, not per-level state, so it must survive
+  // SV_SpawnServer's per-level sv.clear(). Still genuinely server-wide (not
+  // per-client) for the kex family: q2repro's own SVC_DirectConnect rejects
+  // anything but protocol 1038 for that family, so there is never a
+  // negotiation question to answer per client there. As of the v1.0.0 wire
+  // cluster (task board #23, R1Q2/Q2PRO), the LEGACY family DOES mix
+  // per-client protocols (34/35/36) -- that per-client result lives on
+  // ClientT.codec (server.ts, above) instead, negotiated in
+  // sv_main.ts's SVC_DirectConnect; this field there is only the seed value a
+  // freshly `clear()`-ed ClientT starts from before negotiation runs, and
+  // remains svs.codec's original purpose (demo recording, SV_ServerCommand's
+  // demo-signon path -- see sv_ccmds.ts/sv_mvd.ts's own svs.codec citations)
+  // for call sites that are not about one specific client's own traffic.
   codec: ProtocolCodec = VANILLA_CODEC;
 
   mapcmd = ""; // ie: *intro.cin+base

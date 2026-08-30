@@ -265,6 +265,7 @@ function makeFakeRe(): RefExports & { registerPicCalls: string[] } {
     SetSky: () => undefined,
     EndRegistration: () => undefined,
     RenderFrame: () => undefined,
+    SupportsPerPixelLighting: () => false,
     DrawGetPicSize: () => ({ w: -1, h: -1 }),
     DrawPic: () => undefined,
     DrawStretchPic: () => undefined,

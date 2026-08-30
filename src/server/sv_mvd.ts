@@ -46,32 +46,58 @@
 //      claim PROTOCOL_VERSION_MVD_RERELEASE compatibility no code here
 //      actually implements (see qcommon/protocol/mvd.ts's header).
 
-import { SizeBuf, SZ_Init, SZ_Clear, MSG_WriteByte, MSG_WriteShort, MSG_WriteLong, MSG_WriteString } from "../qcommon/sizebuf";
+import { SizeBuf, SZ_Init, SZ_Clear, SZ_Write, MSG_WriteByte, MSG_WriteShort, MSG_WriteLong, MSG_WriteString } from "../qcommon/sizebuf";
 import { FS_CreatePath, FS_FOpenFileWrite, FS_Write, FS_FCloseFile } from "../qcommon/files";
 import { FS_Gamedir } from "../qcommon/files";
 import { Cmd_Argc, Cmd_Argv, Cmd_AddCommand } from "../qcommon/cmd";
 import { Com_Printf } from "../qcommon/common";
+import { Cvar_Get } from "../qcommon/cvar";
 import { VANILLA_CODEC } from "../qcommon/protocol/vanilla";
 import { CM_WritePortalBits } from "../qcommon/cmodel";
+import { SvcOpsT } from "../qcommon/qcommon";
 import {
   MVD_MAGIC,
   mvd_serverdata,
   mvd_frame,
+  mvd_unicast,
+  mvd_unicast_r,
+  mvd_multicast_all,
+  mvd_multicast_all_r,
+  mvd_sound,
+  mvd_print,
   PROTOCOL_VERSION_MVD,
   PROTOCOL_VERSION_MVD_DEFAULT,
+  PROTOCOL_VERSION_MVD_RERELEASE,
   CLIENTNUM_NONE,
   MSG_WriteDeltaMvdPlayerstate,
+  MSG_WriteDeltaMvdPlayerstateRerelease,
   MSG_WriteMvdPlayersEnd,
+  MSG_WriteMvdCmd,
 } from "../qcommon/protocol/mvd";
-import { EntityStateT, PlayerStateT, PmTypeT, PMF_NO_PREDICTION, MAX_EDICTS, MAX_CLIENTS } from "../shared/q_shared";
+import { EntityStateT, PlayerStateT, PmTypeT, PMF_NO_PREDICTION, MAX_EDICTS, MAX_CLIENTS, MulticastT, CHAN_NO_PHS_ADD, CHAN_RELIABLE, UsercmdT } from "../shared/q_shared";
 import { clonePlayerState, cloneEntityStateInto } from "../shared/state_copy";
-import { sv, svs, maxclients, ClientStateT, ServerStateT } from "./server";
+import { sv, svs, maxclients, ClientT, ClientStateT, ServerStateT } from "./server";
 import { geHolder, currentGameFamily } from "./sv_game";
 import { SVF_NOCLIENT, type Edict } from "../game/game";
 import { TCP_Listen, TCP_Accept, TCP_Read, TCP_Write, TCP_Close, TCP_IsClosed, TCP_StopListening } from "../platform/net_tcp";
-import { GtvServerOpT, GtvClientOpT, GTV_PROTOCOL_VERSION } from "../qcommon/protocol/mvd";
+import { GtvServerOpT, GtvClientOpT, GTV_PROTOCOL_VERSION, GTF_DEFLATE } from "../qcommon/protocol/mvd";
+// SND_* flag bits: defined in sv_send.ts (this module's own hook target),
+// re-imported here for SV_MvdStartSound's flags parameter. sv_send.ts
+// imports SV_MvdBroadcastPrint from this module already, so this is an
+// existing two-way module relationship, not a new cycle risk -- both sides
+// only touch the other's exports from inside function bodies, never at
+// module-init time.
+import { SND_VOLUME, SND_ATTENUATION, SND_OFFSET } from "./sv_send";
 
 const NULL_ENTITY_STATE = new EntityStateT();
+
+// Backing size for mvd.message/mvd.datagram (see MvdRecorderStateT below) and
+// for the combined per-frame stream buffer SV_MvdEndFrame builds from them --
+// generous relative to mvd.c's own MAX_MSGLEN-bound buffers since this port's
+// hooks have no per-call 2048-byte cap enforcement gap to worry about (see
+// SV_MvdMulticast/SV_MvdUnicast below, which DO enforce mvd.c's own
+// 2048-byte-per-call overflow guard on top of this).
+const MAX_MVD_MESSAGE_SIZE = 65536;
 
 // ---------------------------------------------------------------------------
 // recording / delta-compressor state
@@ -83,6 +109,15 @@ interface MvdRecorderStateT {
   players: Array<PlayerStateT | null>;
   entities: Array<EntityStateT | null>;
   numframes: number;
+  rerelease: boolean; // recording started under game=kex -- see mvdEnable()
+  // mvd.message / mvd.datagram (mvd.c's own names): reliable and unreliable
+  // out-of-band buffers the SV_Mvd{Multicast,Unicast,StartSound} hooks below
+  // accumulate into over the course of one server frame. Flushed together
+  // with the frame delta (emitFrameInto's output) by SV_MvdEndFrame, exactly
+  // once per frame, matching mvd.c:1000-1071's SV_MvdEndFrame ordering
+  // (message, then msg_write/the frame body, then datagram).
+  message: SizeBuf;
+  datagram: SizeBuf;
 }
 
 const mvd: MvdRecorderStateT = {
@@ -91,7 +126,139 @@ const mvd: MvdRecorderStateT = {
   players: new Array(MAX_CLIENTS).fill(null),
   entities: new Array(MAX_EDICTS).fill(null),
   numframes: 0,
+  rerelease: false,
+  message: new SizeBuf(),
+  datagram: new SizeBuf(),
 };
+SZ_Init(mvd.message, new Uint8Array(MAX_MVD_MESSAGE_SIZE), MAX_MVD_MESSAGE_SIZE);
+SZ_Init(mvd.datagram, new Uint8Array(MAX_MVD_MESSAGE_SIZE), MAX_MVD_MESSAGE_SIZE);
+
+// ---------------------------------------------------------------------------
+// dummy MVD client (mvd.c's "DUMMY MVD CLIENT" section) -- a fake, server-
+// side-only spectator client driven directly through the game module's
+// ClientConnect/ClientBegin/ClientThink/ClientDisconnect exports, exactly
+// like a real connecting client. Fixes the gap this file's header used to
+// document under scope note 1: without it, `playerIsActive`'s "always
+// capture dummy" special case has nothing to special-case, and any map with
+// zero real players (e.g. warm-up, or a GTV relay watching an empty server)
+// records/streams NOTHING -- no baseline, no frames, nothing for a GTV
+// client's PVS-dependent capture to observe at all.
+//
+// SCOPE: this ports dummy_create/dummy_spawn/dummy_run's CORE client-
+// lifecycle drive (connect, begin, per-frame think so the game module never
+// times it out) and player_is_active's special case. NOT ported: the
+// console-command forwarding path (dummy_forward_f/dummy_exec_string/
+// dummy_buffer's cbuf, mvd.c:141-268) that lets operators run
+// mvdstuff/scoreboard commands "through" the dummy, and sv_mvd_begincmd's
+// auto-exec-on-spawn hook -- both are real-networking/console conveniences,
+// not part of what makes the RECORDING itself complete, and this port's MVD
+// unit has no live spectator networking to forward those commands over
+// regardless (see client.ts's own header).
+interface MvdDummyStateT {
+  clientIndex: number | null;
+  edict: Edict | null;
+}
+
+const mvdDummy: MvdDummyStateT = { clientIndex: null, edict: null };
+
+function svMvdSpawnDummyCvar(): number {
+  const v = Cvar_Get("sv_mvd_spawn_dummy", "1", 0);
+  return v ? v.value : 0;
+}
+
+// Ported cvars for GTV hardening (item 5): password-gated auth and a bound
+// on the number of simultaneously connected GTV clients. See
+// handleGtvHello/SV_MvdRunGtv below for where these are consulted.
+function svMvdPasswordCvar(): string {
+  const v = Cvar_Get("sv_mvd_password", "", 0);
+  return v ? v.string : "";
+}
+
+function svMvdMaxClientsCvar(): number {
+  const v = Cvar_Get("sv_mvd_maxclients", "8", 0);
+  const n = v ? v.value : 8;
+  return Math.max(1, Math.min(MAX_CLIENTS, Math.trunc(n) || 8));
+}
+
+// mvd.c:2461's real default ("1" -- always attempt unless the game module
+// declines the connect). A dedicated free client slot is required, so this
+// harmlessly no-ops (matching dummy_create's own "no slot"/"rejected by
+// game" graceful-failure paths, mvd.c:400-409/905-909) on a full server or
+// against a game module that rejects the connect.
+function findFreeClientSlot(): number | null {
+  const maxc = maxclients ? maxclients.value : 0;
+  for (let i = 0; i < maxc; i++) {
+    const cl = svs.clients[i];
+    if (!cl || cl.state === ClientStateT.cs_free) return i;
+  }
+  return null;
+}
+
+const MVD_DUMMY_USERINFO = '\\name\\[MVDSPEC]\\skin\\male/grunt\\spectator\\1\\mvdspec\\1';
+
+// mvd.c:347-409 (dummy_create) + mvd.c:296-314 (dummy_spawn), collapsed into
+// one function since this port's GameExports.ClientConnect is synchronous
+// and has no separate "reject with rejmsg" side channel worth threading
+// through two steps.
+function dummyCreate(): void {
+  if (mvdDummy.clientIndex !== null) return; // already created
+  if (svMvdSpawnDummyCvar() <= 0) return;
+
+  const ge = geHolder.ge;
+  if (!ge) return;
+
+  const slot = findFreeClientSlot();
+  if (slot === null) {
+    Com_Printf("No slot for dummy MVD client\n");
+    return;
+  }
+
+  const edict = ge.edicts[slot + 1];
+  if (!edict) return;
+
+  const result = ge.ClientConnect(edict, MVD_DUMMY_USERINFO);
+  if (!result.allowed) {
+    Com_Printf("Dummy MVD client rejected by game\n");
+    return;
+  }
+
+  const cl = new ClientT();
+  cl.state = ClientStateT.cs_connected;
+  cl.edict = edict;
+  cl.name = "[MVDSPEC]";
+  cl.userinfo = result.userinfo;
+  svs.clients[slot] = cl;
+
+  ge.ClientBegin(edict);
+  cl.state = ClientStateT.cs_spawned;
+
+  mvdDummy.clientIndex = slot;
+  mvdDummy.edict = edict;
+}
+
+// mvd.c's dummy_run: called once per server frame (from SV_MvdEndFrame,
+// mirroring mvd.c:1016) so the game module never times the dummy out the way
+// it would a client that stopped sending commands.
+function dummyRun(): void {
+  if (mvdDummy.clientIndex === null || !mvdDummy.edict) return;
+  const ge = geHolder.ge;
+  if (!ge) return;
+  const cmd = new UsercmdT();
+  ge.ClientThink(mvdDummy.edict, cmd);
+}
+
+// mvd.c's mvd_disable's dummy teardown (mvc.c:2170-2172, `SV_RemoveClient`).
+function dummyDestroy(): void {
+  if (mvdDummy.clientIndex === null) return;
+  const ge = geHolder.ge;
+  const edict = mvdDummy.edict;
+  const slot = mvdDummy.clientIndex;
+  mvdDummy.clientIndex = null;
+  mvdDummy.edict = null;
+  if (ge && edict) ge.ClientDisconnect(edict);
+  const cl = svs.clients[slot];
+  if (cl) cl.state = ClientStateT.cs_free;
+}
 
 interface EdictClientPs {
   ps: PlayerStateT;
@@ -115,6 +282,12 @@ function playerIsActive(ent: Edict, num: number): boolean {
 
   const ps = ent.client.ps;
   if (!ps.fov) return false;
+
+  // mvd.c:517-519: always capture the dummy MVD client, bypassing the
+  // spectator/freeze/no-prediction exclusions below (the dummy is itself a
+  // spectator by construction -- see dummyCreate's userinfo).
+  if (mvdDummy.clientIndex !== null && num === mvdDummy.clientIndex) return true;
+
   if (ps.pmove.pm_type === PmTypeT.PM_SPECTATOR) return false;
   if (ps.pmove.pm_type === PmTypeT.PM_FREEZE) return false;
   if (ps.pmove.pm_flags & PMF_NO_PREDICTION) return false;
@@ -169,10 +342,10 @@ function buildGamestate(): void {
 function emitGamestateInto(msg: SizeBuf): void {
   MSG_WriteByte(msg, mvd_serverdata);
   MSG_WriteLong(msg, PROTOCOL_VERSION_MVD);
-  MSG_WriteShort(msg, PROTOCOL_VERSION_MVD_DEFAULT);
+  MSG_WriteShort(msg, mvd.rerelease ? PROTOCOL_VERSION_MVD_RERELEASE : PROTOCOL_VERSION_MVD_DEFAULT);
   MSG_WriteLong(msg, svs.spawncount);
   MSG_WriteString(msg, FS_Gamedir());
-  MSG_WriteShort(msg, -1); // no dummy client -- see file header
+  MSG_WriteShort(msg, mvdDummy.clientIndex !== null ? mvdDummy.clientIndex : -1);
 
   let i = 0;
   for (; i < svs.csr.end; i++) {
@@ -189,9 +362,10 @@ function emitGamestateInto(msg: SizeBuf): void {
   msg.cursize += portalbits.length;
 
   const n = activeClientCount();
+  const writePlayer = mvd.rerelease ? MSG_WriteDeltaMvdPlayerstateRerelease : MSG_WriteDeltaMvdPlayerstate;
   for (let c = 0; c < n; c++) {
     const ps = mvd.players[c] ?? new PlayerStateT();
-    MSG_WriteDeltaMvdPlayerstate(msg, null, ps, c, false);
+    writePlayer(msg, null, ps, c, false);
   }
   MSG_WriteMvdPlayersEnd(msg);
 
@@ -221,20 +395,21 @@ function emitFrameInto(msg: SizeBuf): void {
 
   const ge = geHolder.ge;
   const n = activeClientCount();
+  const writePlayer = mvd.rerelease ? MSG_WriteDeltaMvdPlayerstateRerelease : MSG_WriteDeltaMvdPlayerstate;
   for (let i = 0; i < n; i++) {
     const ent = ge ? ge.edicts[i + 1] : null;
     const wasActive = mvd.players[i] !== null;
 
     if (!ent || !playerIsActive(ent, i)) {
       if (wasActive) {
-        MSG_WriteDeltaMvdPlayerstate(msg, null, null, i, false);
+        writePlayer(msg, null, null, i, false);
         mvd.players[i] = null;
       }
       continue;
     }
 
     const newps = ent.client && hasPlayerState(ent.client) ? clonePlayerState(ent.client.ps) : new PlayerStateT();
-    MSG_WriteDeltaMvdPlayerstate(msg, mvd.players[i], newps, i, !wasActive);
+    writePlayer(msg, mvd.players[i], newps, i, !wasActive);
     mvd.players[i] = newps;
   }
   MSG_WriteMvdPlayersEnd(msg);
@@ -311,8 +486,15 @@ function recStart(handle: number): void {
 
 function mvdEnable(): boolean {
   if (!mvd.active) {
+    mvd.rerelease = currentGameFamily() === "kex";
     buildGamestate();
     mvd.active = true;
+    // mvd.c's mvd_enable(): create+spawn the dummy MVD client every time
+    // recording/streaming transitions from idle to active. Deliberately NOT
+    // gated on the dummy actually succeeding (mvd.c:897-899 aborts the whole
+    // enable on `dummy_create() < 0`; this port always keeps recording real
+    // player/entity state regardless -- see this file's header, scope note 1).
+    dummyCreate();
   }
   return true;
 }
@@ -320,6 +502,7 @@ function mvdEnable(): boolean {
 function mvdDisableIfIdle(): void {
   if (mvd.recording === null && gtvActiveClients().length === 0) {
     mvd.active = false;
+    dummyDestroy();
   }
 }
 
@@ -334,11 +517,6 @@ active entity will be recorded to `demos/<name>.mvd2`.
 export function SV_MvdRecord_f(): void {
   if (sv.state !== ServerStateT.ss_game) {
     Com_Printf("No server running.\n");
-    return;
-  }
-
-  if (currentGameFamily() === "kex") {
-    Com_Printf("MVD recording for the kex/rerelease game family is not implemented (legacy-family only -- see qcommon/protocol/mvd.ts).\n");
     return;
   }
 
