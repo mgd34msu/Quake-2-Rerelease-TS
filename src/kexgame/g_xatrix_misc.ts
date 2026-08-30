@@ -25,16 +25,16 @@
 // the one-line diff) so they can be imported here.
 //
 // ============================================================================
-// target_killplayers_use -- NOT ported (ROGUE mission-pack content, out of
-// scope)
+// target_killplayers_use -- now a real import (2026-08-30 stale-comment sweep)
 // ============================================================================
-// `misc_nuke`'s entire body is `ent->use = target_killplayers_use;`, but
+// `misc_nuke`'s entire body is `ent->use = target_killplayers_use;`.
 // `target_killplayers_use`'s only body anywhere in the source tree is
 // rogue/g_rogue_newtarg.cpp:216 -- ROGUE (Ground Zero's sibling ADD-ON, not
-// xatrix), genuinely out of THIS unit's scope, matching the exact same
-// "declared/forward-referenced here, defined in a different mission pack's
-// translation unit" shape as `blocked_checkjump`/`fire_flechette` elsewhere
-// in this port line. Kept as a local, unexported, cited throwing stub;
+// xatrix), matching the same "declared/forward-referenced here, defined in
+// a different mission pack's translation unit" shape as
+// `blocked_checkjump`/`fire_flechette` elsewhere in this port line.
+// rogue/g_rogue_newtarg.ts's own copy was real all along but unexported;
+// exported and imported for real here instead of kept as a local stub;
 // `SP_misc_nuke` itself is otherwise real (a one-line `use` assignment).
 
 import { vec3 } from "../shared/math";
@@ -47,6 +47,7 @@ import { vec3_sub, vec3_normalized } from "./q_vec3";
 import { monster_fire_rocket } from "./g_monster";
 import { func_train_find } from "./g_func";
 import { misc_viper_use, misc_strogg_ship_use } from "./g_misc";
+import { target_killplayers_use } from "./rogue/g_rogue_newtarg";
 import { SpawnFlags_has, SpawnFlags_or } from "./spawnflags";
 import { RegisterThink, RegisterUse } from "./g_save_registry";
 
@@ -190,9 +191,11 @@ export function SP_misc_amb4(ent: EdictT): void {
 // misc_nuke (g_xatrix_misc.cpp:136-143) -- see file header
 // ---------------------------------------------------------------------------
 
-function target_killplayers_use(self: EdictT, _other: EdictT | null, _activator: EdictT | null): void {
-  throw new Error(`target_killplayers_use: not yet ported (rogue mission pack, see rogue/g_rogue_newtarg.cpp:216) -- called against ${self.classname ?? "?"}`);
-}
+// target_killplayers_use: formerly a local throwing stub here (ROGUE
+// mission-pack content, genuinely out of this file's original scope) --
+// rogue/g_rogue_newtarg.ts's own copy has since been exported (it was
+// real all along, just unexported); imported for real above (2026-08-30
+// stale-comment sweep).
 
 /**
  * QUAKED misc_nuke (1 0 0) (-16 -16 -16) (16 16 16)

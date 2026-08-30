@@ -9,24 +9,25 @@ test/kexgame_p_view.test.ts's own GClientT builder
 (makeClient()/makeClientPersistant()/makeClientRespawn()/makePlayerState()).
 
 ============================================================================
-KNOWN LIMITATION -- g_weapon.ts's G_ShouldPlayersCollide stub is reached by
-EVERY player-fired shot, unlike g_weapon.ts's own test suite
+HISTORICAL -- g_weapon.ts's G_ShouldPlayersCollide used to be a hard,
+unconditional throwing stub, reached by EVERY player-fired shot
 ============================================================================
 g_weapon.ts's fire_lead/fire_blaster/fire_grenade/fire_grenade2/fire_rocket/
 fire_rail/fire_bfg all carry the identical guard
-`if (self.client !== null && !G_ShouldPlayersCollide(true)) ...` -- and
-g_weapon.ts's own local `G_ShouldPlayersCollide` unconditionally throws
-(pending p_client.ts). g_weapon.ts's own test suite dodges this by only
-ever using monster-shaped (`client: null`) shooters -- see that file's own
-header. p_weapon.ts's weapons are ALWAYS player-fired by construction
-(`requirePlayerClient` throws otherwise), so this file cannot dodge it the
-same way: every test that reaches a real fire_* call below wraps that exact
-call in `expect(() => ...).toThrow(/G_ShouldPlayersCollide/)` and asserts
-on the OBSERVABLE SIDE EFFECTS THAT HAPPEN BEFORE THE THROW (kick
-application, ammo/frame bookkeeping, gunframe transitions) -- all of which
-run before the fire_* call in every function under test here. This is a
-real, structural, cross-file gap (not a defect in this unit's own port);
-flagged prominently in this unit's own report.
+`if (self.client !== null && !G_ShouldPlayersCollide(true)) ...`.
+g_weapon.ts's own local `G_ShouldPlayersCollide` used to unconditionally
+throw (pending p_client.ts) -- fixed in the 2026-08-30 cleanup sweep by
+swapping it for a real, delegating import from p_client.ts (which had
+landed with a real, exported version some time before this file's own
+throw was noticed and fixed). Every fire_* call below that used to be
+wrapped in `expect(() => ...).toThrow(/G_ShouldPlayersCollide/)` (asserting
+only on the OBSERVABLE SIDE EFFECTS THAT HAPPEN BEFORE THE THROW -- kick
+application, ammo/frame bookkeeping, gunframe transitions) now calls the
+real fire_* function directly and completes normally; comments at each
+such call site note the change. g_weapon.ts's own test suite's
+monster-shaped (`client: null`) shooters were never affected by this bug
+either way (the guard's `self.client !== null` check short-circuited
+before ever reaching the stub for them).
 
 Scope (14 cases, each cited against
 ~/Projects/quake2-rerelease-dll/rerelease/p_weapon.cpp):
@@ -906,11 +907,13 @@ describe("Machinegun_Fire", () => {
     client.buttons = ButtonT.BUTTON_ATTACK;
     client.ps.gunframe = 4;
 
-    // See file header's "KNOWN LIMITATION" -- fire_bullet reaches
-    // g_weapon.ts's own G_ShouldPlayersCollide stub for a player shooter.
-    // Everything asserted below (gunframe toggle, kick bookkeeping) runs
-    // BEFORE that call in Machinegun_Fire's own body.
-    expect(() => Machinegun_Fire(ent)).toThrow(/G_ShouldPlayersCollide/);
+    // g_weapon.ts's own G_ShouldPlayersCollide is a real import as of the
+    // 2026-08-30 cleanup sweep (see file header's former "KNOWN LIMITATION"
+    // note, now historical) -- fire_bullet completes for real instead of
+    // throwing. Everything asserted below (gunframe toggle, kick
+    // bookkeeping) is set BEFORE that call in Machinegun_Fire's own body,
+    // same as before; the call itself is now a normal, non-throwing call.
+    Machinegun_Fire(ent);
 
     expect(client.ps.gunframe).toBe(5); // toggled from 4
     expect(client.kick.total).toEqual(Gtime_from_ms(200));
@@ -954,9 +957,11 @@ describe("Chaingun_Fire spin-up frame logic", () => {
     // branch has an explicit `return` -- the `>31` branch falls through to
     // the shared `if (gunframe<5||gunframe>21) return;` guard below it,
     // and 5 is inside that range, so this call proceeds all the way to
-    // fire_bullet (throws via the same "KNOWN LIMITATION" as every other
-    // real fire_* call in this file).
-    expect(() => Chaingun_Fire(ent)).toThrow(/G_ShouldPlayersCollide/);
+    // fire_bullet, which completes for real (g_weapon.ts's own
+    // G_ShouldPlayersCollide is a real import as of the 2026-08-30 cleanup
+    // sweep -- see file header's former "KNOWN LIMITATION" note, now
+    // historical).
+    Chaingun_Fire(ent);
     expect(client.ps.gunframe).toBe(5);
   });
 
@@ -992,9 +997,10 @@ describe("Chaingun_Fire spin-up frame logic", () => {
     client.ps.gunframe = 21;
 
     // The loop-back keeps gunframe in [5,21], which still reaches
-    // fire_bullet -- same "KNOWN LIMITATION" as Machinegun_Fire above. The
-    // gunframe===15 loop-back assignment happens before that call.
-    expect(() => Chaingun_Fire(ent)).toThrow(/G_ShouldPlayersCollide/);
+    // fire_bullet -- now a real, non-throwing call (see the `> 31` test
+    // above for the 2026-08-30 cleanup-sweep note). The gunframe===15
+    // loop-back assignment happens before that call.
+    Chaingun_Fire(ent);
     expect(client.ps.gunframe).toBe(15);
   });
 });
@@ -1089,7 +1095,8 @@ describe("NoAmmoWeaponChange priority order", () => {
 
 // ---------------------------------------------------------------------------
 // Weapon_HyperBlaster_Fire (via Weapon_HyperBlaster's Weapon_Repeating
-// dispatch) -- non-firing transitions only, see "KNOWN LIMITATION"
+// dispatch) -- non-firing transitions only, see file header's "HISTORICAL"
+// note
 // ---------------------------------------------------------------------------
 
 describe("Weapon_HyperBlaster frame transitions", () => {
@@ -1256,8 +1263,11 @@ describe("Weapon_Grenade hand-grenade timer hold logic", () => {
     expect(client.ps.gunframe).toBe(11);
   });
 
-  test("holding past GRENADE_TIMER enters the explode-in-hand branch (observable via the fire() call throwing)", () => {
-    const { edicts } = setupWorld(4);
+  test("holding past GRENADE_TIMER enters the explode-in-hand branch (observable via the real fire_grenade2 spawn)", () => {
+    // 8, not 4: fire_grenade2 now completes for real (see below) and
+    // spawns a live grenade projectile entity via G_Spawn, which needs a
+    // free edict slot beyond world (0) and the player (1).
+    const { edicts } = setupWorld(8);
     const ent = makePlayerEdict(edicts, 1);
     const client = ent.client!;
     ent.s.modelindex = MODELINDEX_PLAYER;
@@ -1272,15 +1282,27 @@ describe("Weapon_Grenade hand-grenade timer hold logic", () => {
     // Arm it first (first call with the timer not yet elapsed), then
     // advance time past GRENADE_TIMER (3000ms) + 200ms and call again --
     // the EXPLODE branch's `level.time >= grenade_time` becomes true,
-    // which calls weapon_grenade_fire -> fire_grenade2 -> the same
-    // G_ShouldPlayersCollide guard as every other real fire_* call in this
-    // file (see file header's "KNOWN LIMITATION").
+    // which calls weapon_grenade_fire -> fire_grenade2. g_weapon.ts's own
+    // G_ShouldPlayersCollide is a real import as of the 2026-08-30 cleanup
+    // sweep (see file header's former "KNOWN LIMITATION" note, now
+    // historical), so this completes for real instead of throwing.
     client.buttons = ButtonT.BUTTON_ATTACK;
     Weapon_Grenade(ent);
     expect(client.grenade_time).not.toEqual(GTIME_ZERO);
 
+    const inuseBefore = edicts.filter((e) => e.inuse).length;
+
     level.time = Gtime_add(client.grenade_time, Gtime_from_ms(1));
     client.ps.gunframe = 11; // Throw_Generic re-enters the hold branch
-    expect(() => Weapon_Grenade(ent)).toThrow(/G_ShouldPlayersCollide/);
+    Weapon_Grenade(ent);
+
+    // fire_grenade2 spawned at least one real entity (the grenade
+    // projectile itself, possibly plus explosion-effect entities for the
+    // explode-in-hand case) -- not asserting an exact count since this
+    // test's purpose is confirming the call completes for real, not
+    // re-verifying fire_grenade2's own entity-spawning behavior (covered
+    // by g_weapon.ts's own test suite).
+    const inuseAfter = edicts.filter((e) => e.inuse).length;
+    expect(inuseAfter).toBeGreaterThan(inuseBefore);
   });
 });

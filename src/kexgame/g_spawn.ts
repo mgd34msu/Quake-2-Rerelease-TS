@@ -246,19 +246,20 @@
 //   non-deathmatch spawn (the common single-player/coop case), so it is
 //   also ported as real, narrow logic rather than a stub: its actual body
 //   just checks whether any INUSE entity has classname "hint_path" and
-//   returns immediately if none exists. Since `hint_path`'s own SP_
-//   function (rogue/g_rogue_newai.cpp, unported) is a REGISTERED throwing
-//   stub in this file's own registry below, any map that spawns a
-//   `hint_path` entity already throws during `ED_CallSpawn`, before
-//   `InitHintPaths` could ever observe a successfully-spawned one --
-//   `InitHintPaths` therefore always takes its early-out branch in this
-//   port line, which is exactly what the real, narrow port below does
-//   (via `G_FindByString`, already exported from g_utils.ts).
-// - `PrecacheForRandomRespawn()` (rogue/g_rogue_newdm.cpp:141) stays a
-//   throwing stub: reached only when `deathmatch && g_dm_random_items`,
-//   and `g_dm_random_items` defaults to "0" (g_main.cpp:243) -- narrow and
-//   off by default, matching g_items.ts's own `DoRandomRespawn` stub
-//   precedent for the identical cvar guard.
+//   returns immediately if none exists. WAS provably unreachable beyond
+//   that early-out (hint_path's own SP_ function used to be a registered
+//   throwing stub) -- NO LONGER TRUE as of the 2026-08-30 stale-comment
+//   sweep: rogue/g_rogue_newai.ts has since landed a real, exported
+//   `SP_hint_path`, wired into this file's own registry for real, so a map
+//   CAN spawn a `hint_path` entity today. `InitHintPaths` itself does much
+//   more than this early-out in that case (hint-chain bookkeeping) and is
+//   NOT fully ported -- see this file's own `InitHintPaths` function for
+//   the KNOWN GAP note (a real feature port, out of this sweep's scope).
+// - `PrecacheForRandomRespawn()` (rogue/g_rogue_newdm.cpp:141): WAS a
+//   throwing stub (reached only when `deathmatch && g_dm_random_items`,
+//   which defaults to "0"). rogue/g_rogue_newdm.ts has since landed a
+//   real, exported version; swapped for a delegating import (2026-08-30
+//   stale-comment sweep) -- see that function's own site below.
 // - `DMGame` is a local, all-null `DmGameRt` default, exactly matching
 //   g_combat.ts's own established copy (that file's header: "T_Damage's own
 //   `if (deathmatch->integer && gamerules->integer)` guard keeps every
@@ -462,7 +463,7 @@ import { SP_monster_flyer, SP_monster_kamikaze } from "./m_flyer";
 import { SP_monster_hover } from "./m_hover";
 import { SP_monster_medic } from "./m_medic";
 import { SP_monster_floater } from "./m_float";
-import { SP_info_ctf_teleport_destination, SP_info_player_team1, SP_info_player_team2, SP_misc_ctf_banner, SP_misc_ctf_small_banner, SP_trigger_ctf_teleport } from "./ctf/g_ctf";
+import { SP_info_ctf_teleport_destination, SP_info_player_team1, SP_info_player_team2, SP_misc_ctf_banner, SP_misc_ctf_small_banner, SP_trigger_ctf_teleport, CTFPrecache as RealCTFPrecache } from "./ctf/g_ctf";
 import { SP_object_repair, SP_rotating_light } from "./g_xatrix_func";
 import { SP_misc_amb4, SP_misc_crashviper, SP_misc_nuke, SP_misc_transport, SP_misc_viper_missile } from "./g_xatrix_misc";
 import { SP_target_mal_laser } from "./g_xatrix_target";
@@ -481,6 +482,7 @@ import { SP_target_anger, SP_target_blacklight, SP_target_killplayers, SP_target
 import { SP_info_teleport_destination, SP_trigger_disguise, SP_trigger_teleport } from "./rogue/g_rogue_newtrig";
 import { SP_dm_dball_ball, SP_dm_dball_ball_start, SP_dm_dball_goal, SP_dm_dball_speed_change, SP_dm_dball_team1_start, SP_dm_dball_team2_start } from "./rogue/rogue_dm_ball";
 import { SP_dm_tag_token } from "./rogue/rogue_dm_tag";
+import { DoRandomRespawn as RealDoRandomRespawn, PrecacheForRandomRespawn as RealPrecacheForRandomRespawn } from "./rogue/g_rogue_newdm";
 import { SP_monster_boss2 } from "./m_boss2";
 import { SP_monster_boss3_stand } from "./m_boss3";
 import { SP_monster_jorg } from "./m_boss31";
@@ -1007,13 +1009,17 @@ function unported(spName: string, citation: string): (ent: EdictT) => void {
   };
 }
 
-/** g_items.ts already carries an identically-named, identically-cited
- *  local stub (unexported, so it cannot be imported here) for the same
- *  reason: DoRandomRespawn's real body lives in the ROGUE mission pack
- *  (rogue/g_rogue_newdm.cpp:126), out of this port line's scope. Reached
- *  only when `g_dm_random_items` is set (default off, g_main.cpp:243). */
+/** g_items.ts used to carry an identically-named, identically-cited local
+ *  throwing stub for the same reason (DoRandomRespawn's real body lives in
+ *  the ROGUE mission pack, rogue/g_rogue_newdm.cpp:126) -- that copy has
+ *  since been swapped for a real import from rogue/g_rogue_newdm.ts (see
+ *  g_items.ts's own "STUB SWAP" header note), but this file's separate
+ *  copy was not swapped at the same time. Fixed here too (2026-08-30
+ *  stale-comment sweep): real delegating import, same real function both
+ *  files now call. Reached only when `g_dm_random_items` is set (default
+ *  off, g_main.cpp:243). */
 function DoRandomRespawn(ent: EdictT): ItemIdT {
-  throw new Error(`DoRandomRespawn: not yet ported (pending g_rogue_newdm.ts, see rogue/g_rogue_newdm.cpp:126) -- classname "${ent.classname ?? "?"}"`);
+  return RealDoRandomRespawn(ent);
 }
 
 
@@ -1442,18 +1448,34 @@ function CTFSpawn(): void {
   // line -- see file header.
 }
 
+// KNOWN GAP (found during the 2026-08-30 stale-comment sweep, not fixed by
+// it): this comment used to claim `hint_path`'s own SP_ function was still
+// a registered throwing stub, making the early-out below provably
+// unreachable. That is no longer true -- rogue/g_rogue_newai.ts has since
+// landed a real, exported `SP_hint_path`, and this file's own `spawns`
+// registry (see the "hint_path" entry above) already wires it in for real,
+// so a map CAN successfully spawn `hint_path` entities today. The real
+// InitHintPaths() (rogue/g_rogue_newai.cpp:814-855) does substantially more
+// than this early-out once `found !== null`: it sets `hint_paths_present`,
+// then walks every hint_path entity building `hint_path_start`/chain-link
+// bookkeeping (`MAX_HINT_CHAINS` navigation chains) that this port line has
+// nowhere to store yet. Porting that is a real feature port (monster
+// navigation-hint chains), not a comment fix -- out of this sweep's scope;
+// left as a real correctness gap and reported to .orch/followups.md rather
+// than silently building on top of the now-incorrect old comment.
 function InitHintPaths(): void {
-  // see file header: `hint_path`'s own SP_ function is a registered
-  // throwing stub, so no entity can ever successfully carry this
-  // classname in this port line -- the real early-out always fires.
   const found = G_FindByString(null, "classname", "hint_path");
   if (found === null) return;
-  // unreachable given the above, but kept faithful to the real function's
-  // shape rather than collapsing to a bare early return.
+  // See the KNOWN GAP note above: this branch IS reachable now, and the
+  // real function does much more here than return -- not yet ported.
 }
 
+// PrecacheForRandomRespawn: formerly a local throwing stub here --
+// rogue/g_rogue_newdm.ts has since landed with a real, exported version;
+// swapped for a delegating import (2026-08-30 stale-comment sweep). Reached
+// only when `g_dm_random_items` is set (default off).
 function PrecacheForRandomRespawn(): void {
-  throw new Error("PrecacheForRandomRespawn: not yet ported -- see rogue/g_rogue_newdm.cpp:141 -- only reached when g_dm_random_items is set (default off)");
+  RealPrecacheForRandomRespawn();
 }
 
 /** g_local.h:3275 `extern dm_game_rt DMGame;` -- see file header. */
@@ -1697,8 +1719,12 @@ const CONFIG_COOP_RESPAWN_STRING = CONFIG_CTF_PLAYER_NAME_END + 1;
 const CONFIG_COOP_RESPAWN_STRING_END = CONFIG_COOP_RESPAWN_STRING + (COOP_RESPAWN_TOTAL - 1);
 const CONFIG_N64_PHYSICS = CONFIG_COOP_RESPAWN_STRING_END + 1;
 
+// CTFPrecache: formerly a local throwing stub here -- ctf/g_ctf.ts has
+// since landed with a real, exported version; swapped for a delegating
+// import (2026-08-30 stale-comment sweep). Reached only when
+// G_TeamplayEnabled() is true (default false).
 function CTFPrecache(): void {
-  throw new Error("CTFPrecache: not yet ported -- see ctf/g_ctf.cpp -- only reached when G_TeamplayEnabled() is true (default false)");
+  RealCTFPrecache();
 }
 
 function G_InitStatusbar(): void {

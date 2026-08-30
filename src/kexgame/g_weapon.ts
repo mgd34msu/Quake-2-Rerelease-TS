@@ -48,20 +48,10 @@
 // ============================================================================
 // CROSS-DEPENDENCIES NOT YET PORTED (throwing stubs, cited)
 // ============================================================================
-// - G_ShouldPlayersCollide -> p_client.cpp:2996 (future src/kexgame/
-//   p_client.ts). g_utils.ts already carries an identical local, UNEXPORTED
-//   throwing stub for this exact symbol (same citation) -- since it isn't
-//   exported there, this file gets its own local copy, per this port line's
-//   established "duplicate the tiny unexported helper, don't reach across
-//   files for it" convention (see g_utils.ts's own note on
-//   `G_ShouldPlayersCollide`/`G_MonsterKilled`). Reached by every fire_*
-//   function's `if (self->client && !G_ShouldPlayersCollide(true))
-//   clipmask &= ~CONTENTS_PLAYER;` guard -- i.e. only when a PLAYER (not a
-//   monster) fires a weapon. Every monster_fire_* call path in g_monster.ts
-//   passes a monster `self` (self.client === null), so this guard's `&&`
-//   short-circuits before ever reaching the stub; this unit's own test
-//   suite fires everything through monster-shaped `self` fixtures for
-//   exactly this reason and never trips it.
+// - G_ShouldPlayersCollide -> p_client.cpp:2996: WAS a local throwing stub
+//   here (g_utils.ts carried an identical one for the same reason); both
+//   have since been swapped for real imports from src/kexgame/p_client.ts,
+//   which has landed -- see the import site's own comment below.
 // - PlayerNoise -> p_weapon.cpp:149 (future src/kexgame/p_weapon.ts). Called
 //   only under `if (self->client)` / `if (ent->owner->client)` guards
 //   throughout this file (fire_lead's gun-puff branch, blaster_touch,
@@ -258,13 +248,20 @@ function requireOwner(ent: EdictT, context: string): EdictT {
   return ent.owner;
 }
 
-// ---------------------------------------------------------------------------
-// EXTERNAL DEPENDENCIES NOT YET PORTED (throwing stubs) -- see file header
-// ---------------------------------------------------------------------------
-
-function G_ShouldPlayersCollide(_weaponry: boolean): boolean {
-  throw new Error("G_ShouldPlayersCollide: not yet ported (pending p_client.ts, see p_client.cpp:2996)");
-}
+// G_ShouldPlayersCollide -- formerly a local throwing stub here (see file
+// header, "CROSS-DEPENDENCIES NOT YET PORTED"), now a real import.
+// src/kexgame/p_client.ts has landed with a real, exported
+// G_ShouldPlayersCollide (its genuine C++ home) -- g_utils.ts already made
+// this exact swap for its own former local stub (see that file's "STUB
+// SWAP" note); this is the second, independent duplicate the header
+// mentioned, swapped for real in the 2026-08-30 cleanup sweep. Every
+// fire_*/fire_lead call site's `if (self.client !== null &&
+// !G_ShouldPlayersCollide(true))` guard was previously an unconditional
+// throw whenever a real PLAYER fired a weapon (not just a coop-only edge
+// case) -- monster-fired shots never reached it (self.client === null
+// short-circuits), which is why this unit's own monster-shaped test
+// fixtures never tripped it.
+import { G_ShouldPlayersCollide } from "./p_client";
 
 import { PlayerNoise } from "./p_weapon";
 

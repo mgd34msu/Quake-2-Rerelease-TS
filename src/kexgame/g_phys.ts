@@ -175,20 +175,18 @@
 // `bunx tsc --noEmit` and `bun test` importing both files together.
 //
 // ============================================================================
-// CROSS-DEPENDENCIES NOT YET PORTED
+// CROSS-DEPENDENCIES -- now real (2026-08-30 stale-comment sweep)
 // ============================================================================
-// One function this file calls is still defined in an other, not-yet-ported
-// C++ file:
-//   - SV_Physics_NewToss(ent) -> rerelease/rogue/g_rogue_phys.cpp (future src/rogue/, PORTING.md's rogue/->src/rogue/ mapping)
+// One function this file calls used to be defined in an other, not-yet-
+// ported C++ file:
+//   - SV_Physics_NewToss(ent) -> rerelease/rogue/g_rogue_phys.cpp
 //     (forward-declared in g_phys.cpp:26 as `// PGM`, but its actual body
-//     lives in the ROGUE mission-pack's own physics file, out of scope for
-//     this base-game unit; only reachable via MOVETYPE_NEWTOSS.)
-// It does not exist yet in src/rogue/. Per PORTING.md's "a function you
-// cannot port faithfully is a reported deviation, not a TODO", it remains a
-// local, unexported stub that throws, naming itself and the file that owns
-// the real implementation. Reached only by MOVETYPE_NEWTOSS, which this
-// unit's own test suite does not exercise. Replace with a real import once
-// src/rogue/ lands.
+//     lives in the ROGUE mission-pack's own physics file; only reachable
+//     via MOVETYPE_NEWTOSS.)
+// src/kexgame/rogue/g_rogue_phys.ts has since landed with a real, exported
+// version and is now a delegating import (see the function's own site
+// below); nothing here still throws. Reached only by MOVETYPE_NEWTOSS,
+// which this unit's own test suite does not exercise.
 //
 // ============================================================================
 // FRAME_TIME_S -- not yet a real global either
@@ -276,6 +274,7 @@ import type { PmTraceFn } from "./bg_local";
 import { G_TouchTriggers, G_TouchProjectiles } from "./g_utils";
 import { M_CheckGround, M_CatagorizePositionSelf, M_WorldEffects } from "./g_monster";
 import type { CvarT } from "../shared/q_shared";
+import { SV_Physics_NewToss as RealSV_Physics_NewToss } from "./rogue/g_rogue_phys";
 
 // ---------------------------------------------------------------------------
 // small local helpers
@@ -1159,12 +1158,14 @@ export function G_RunEntity(ent: EdictT): void {
   if (ent.postthink) ent.postthink(ent);
 }
 
-// ---------------------------------------------------------------------------
-// CROSS-DEPENDENCIES NOT YET PORTED -- see file header
-// ---------------------------------------------------------------------------
-
+// SV_Physics_NewToss: formerly a local throwing stub here (rogue
+// mission-pack only, forward-declared but not defined in g_phys.cpp) --
+// src/kexgame/rogue/g_rogue_phys.ts has landed with a real, exported
+// version (which already imports several SV_* helpers back from THIS
+// file, a real, sanctioned cycle) -- swapped for a delegating import
+// (2026-08-30 stale-comment sweep: rogue/g_rogue_phys.ts's own header
+// already claimed this swap had happened, but it hadn't -- this file
+// still carried the throwing stub until now).
 function SV_Physics_NewToss(ent: EdictT): void {
-  throw new Error(
-    `SV_Physics_NewToss: not yet ported (rogue mission-pack only, see rerelease/rogue/g_rogue_phys.cpp; forward-declared but not defined in g_phys.cpp) -- called against ${ent.classname ?? "?"}`,
-  );
+  RealSV_Physics_NewToss(ent);
 }

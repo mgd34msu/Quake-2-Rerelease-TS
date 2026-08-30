@@ -249,8 +249,12 @@ export function SP_target_anger(self: EdictT): void {
 // target_killplayers
 // ***********************************
 
-/** rogue/g_rogue_newtarg.cpp:216-259 `USE(target_killplayers_use)`. */
-const target_killplayers_use: UseFn = RegisterUse("target_killplayers_use", (self: EdictT, _other: EdictT | null, _activator: EdictT | null): void => {
+/** rogue/g_rogue_newtarg.cpp:216-259 `USE(target_killplayers_use)`. Exported
+ *  (2026-08-30 stale-comment sweep): g_xatrix_misc.ts's `misc_nuke` entity
+ *  (`ent->use = target_killplayers_use;` in the real C++) used to carry a
+ *  local throwing stub citing this exact function, unable to import it
+ *  while it was unexported. */
+export const target_killplayers_use: UseFn = RegisterUse("target_killplayers_use", (self: EdictT, _other: EdictT | null, _activator: EdictT | null): void => {
   level.deadly_kill_box = true;
 
   // kill any visible monsters

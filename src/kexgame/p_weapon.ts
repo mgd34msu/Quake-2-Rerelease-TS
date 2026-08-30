@@ -82,12 +82,14 @@
 // GetItemByIndex / G_ShouldPlayersCollide -- REASSIGNABLE stubs, not plain
 // throws (deviation, cited)
 // ============================================================================
-// Every other unported cross-dependency in this file (Add_Ammo, SetRespawn,
-// Drop_Item -> g_items.cpp, still in flight; P_AssignClientSkinnum ->
-// p_client.cpp, per p_view.ts's own identical stub) is a plain function
-// that unconditionally throws, citing its future home -- this port line's
-// standard "throwing, unexported, cited stub" idiom (g_combat.ts's own
-// precedent, reused everywhere since).
+// Every other cross-dependency this file used to carry as a throwing stub
+// (Add_Ammo, SetRespawn, Drop_Item -> g_items.cpp; P_AssignClientSkinnum ->
+// p_client.cpp/p_view.ts) has since landed for real and is now a plain
+// import, used directly (Add_Ammo/SetRespawn/P_AssignClientSkinnum) or
+// through a thin delegating wrapper of the same name (Drop_Item, see its
+// own site below) -- this paragraph is otherwise stale as of the
+// 2026-08-30 stale-comment sweep; kept for the still-accurate
+// GetItemByIndex/G_ShouldPlayersCollide reassignable-stub explanation below.
 //
 // GetItemByIndex and G_ShouldPlayersCollide are the two exceptions:
 //   - NoAmmoWeaponChange's entire observable behavior IS its
@@ -143,11 +145,14 @@
 //   1-in-16 odds of falling through to advance).
 //
 // ============================================================================
-// STUB INVENTORY (throwing, cited; each guarded by a condition this unit's
-// own test suite avoids by construction)
+// STUB INVENTORY -- HISTORICAL (all of these have since landed for real;
+// kept for the reachability citations, updated 2026-08-30 stale-comment
+// sweep -- see each real call site for current status)
 // ============================================================================
-//   - GetItemByIndex (g_items.cpp:52) -- see "GetItemByIndex" section above;
-//     reassignable, defaults to throw.
+//   - GetItemByIndex (g_items.cpp:52) -- reassignable (see "GetItemByIndex"
+//     section above), but now DEFAULTS to the real itemlist lookup
+//     (`RealGetItemByIndex`, imported from g_items.ts) instead of a throw;
+//     `SetGetItemByIndex` remains as a test seam.
 //   - Add_Ammo (g_items.cpp:543) -- only reachable from the NOT-ported
 //     Pickup_Weapon; dead code in THIS file (kept only because it's
 //     textually declared in g_local.h and nothing here calls it -- actually
@@ -156,20 +161,17 @@
 //     Pickup_Weapon, not ported here; omitted, no stub needed.
 //   - Drop_Item (g_items.cpp:1042) -- reached by Drop_Weapon's real
 //     "already using it, only copy" guard passing (i.e. dropping actually
-//     proceeds). Drop_Weapon's own two early-return guards (deathmatch +
-//     weapons-stay; "can't drop last copy") are real and directly testable
-//     without ever reaching this stub.
-//   - G_ShouldPlayersCollide (p_client.cpp:2996) -- reassignable stub, see
-//     this file's own "GetItemByIndex / G_ShouldPlayersCollide" header
-//     section above. Reached unconditionally by every P_ProjectSource
-//     call; this unit's own test suite injects
-//     `SetGShouldPlayersCollide(() => true)` wherever it needs
-//     P_ProjectSource to actually return instead of throw.
-//   - P_AssignClientSkinnum (p_client.cpp:1741) -- local, unexported copy,
-//     per p_view.ts's own identical stub (same citation). Reached only by
-//     ChangeWeapon's `if (ent.s.modelindex === MODELINDEX_PLAYER)` guard;
-//     this unit's fixtures leave modelindex at its zero default so
-//     ChangeWeapon tests never trip it.
+//     proceeds). Now a real delegating import from g_items.ts (see its own
+//     site below).
+//   - G_ShouldPlayersCollide (p_client.cpp:2996) -- reassignable (see this
+//     file's own "GetItemByIndex / G_ShouldPlayersCollide" header section
+//     above), but now DEFAULTS to the real p_client.ts implementation
+//     (`RealG_ShouldPlayersCollide`) instead of a throw; reached
+//     unconditionally by every P_ProjectSource call, so this matters for
+//     every real weapon fire, not just a test-seam nicety.
+//   - P_AssignClientSkinnum (p_client.cpp:1741) -- now a real import from
+//     p_view.ts (its genuine C++ home), not a local copy. Reached only by
+//     ChangeWeapon's `if (ent.s.modelindex === MODELINDEX_PLAYER)` guard.
 //
 // ============================================================================
 // STUB SWAP (xatrix unit): Throw_Generic / is_quad / damage_multiplier /
@@ -270,7 +272,7 @@ import { G_Spawn } from "./g_utils";
 import { SpawnFlags_or, SpawnFlags_has } from "./spawnflags";
 import { fire_bfg, fire_blaster, fire_bullet, fire_disintegrator, fire_grenade, fire_grenade2, fire_rail, fire_rocket, fire_shotgun } from "./g_weapon";
 import { G_ShouldPlayersCollide as RealG_ShouldPlayersCollide, P_UseCoopInstancedItems } from "./p_client";
-import { GetItemByIndex as RealGetItemByIndex, Add_Ammo, SetRespawn, G_CheckAutoSwitch } from "./g_items";
+import { GetItemByIndex as RealGetItemByIndex, Add_Ammo, SetRespawn, G_CheckAutoSwitch, Drop_Item as RealDrop_Item } from "./g_items";
 
 // ---------------------------------------------------------------------------
 // small per-file helpers (see this port line's established convention for
@@ -326,8 +328,14 @@ function requireWeapon(client: GClientT): GitemT {
 // unported cross-deps (throwing stubs) -- see file header's "STUB INVENTORY"
 // ---------------------------------------------------------------------------
 
-function Drop_Item(_ent: EdictT, _item: GitemT): EdictT {
-  throw new Error("Drop_Item: not yet ported (pending g_items.ts, see g_items.cpp:1042)");
+// Drop_Item: formerly a local throwing stub here, reached by Drop_Weapon's
+// real "already using it, only copy" guard passing (see file header) --
+// src/kexgame/g_items.ts has since landed with a real, exported
+// `Drop_Item`; swapped for a delegating import (2026-08-30 stale-comment
+// sweep). Real import aliased above, alongside this file's other g_items.ts
+// imports.
+function Drop_Item(ent: EdictT, item: GitemT): EdictT {
+  return RealDrop_Item(ent, item);
 }
 
 /**

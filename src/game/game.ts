@@ -245,6 +245,13 @@ export interface GameExports {
   WriteLevelJson?(transition: boolean): string | null;
   ReadLevelJson?(json: string): void;
 
+  // [Paril-KEX] q2repro save.c's `if (!ge->CanSave()) return;` gate in
+  // SV_Savegame_f (src/kexapi/game.ts's `KexGameExports.CanSave()`, always
+  // present there). Same "kex-family-only, legacy leaves it undefined"
+  // shape as the four JSON members above -- sv_ccmds.ts's SV_Savegame_f
+  // checks `currentGameFamily() === "kex"` before calling it.
+  CanSave?(): boolean;
+
   // C mutates `userinfo` in place (the game DLL can inject a "rejmsg" key on
   // rejection) and returns qboolean; JS strings are immutable, so the
   // mutated userinfo and the accept/reject flag are both returned instead.

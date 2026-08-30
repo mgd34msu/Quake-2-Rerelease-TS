@@ -1545,9 +1545,22 @@ export const SvflagsT = {
 } as const;
 export type SvflagsT = number;
 
-// edict->solid values (defined in q_shared.h upstream, not in game.h itself
-// -- no existing TS port of q_shared.h's solid_t exists to reuse, so this is
-// a fresh definition local to this module).
+// edict->solid values. RECONCILED (2026-08-30 cleanup sweep, closing the
+// .orch/followups.md "kexapi/game.ts local SolidT" ledger item): this
+// module's header comment used to claim `solid_t` is "defined in q_shared.h
+// upstream, not in game.h itself" -- that premise is wrong for the real
+// rerelease source. `~/Projects/quake2-rerelease-dll/rerelease/game.h:1575`
+// declares `enum solid_t : uint8_t` directly in game.h, immediately next to
+// `svflags_t`/`layout_flags_t` -- the exact same relative position
+// `SolidT` already sits in below, right between `SvflagsT` and
+// `LayoutFlagsT` above/below. There is no separate q_shared.h in the
+// rerelease tree at all (unlike vanilla, which does split it out); this
+// enum's true home for the kex source IS game.h, i.e. THIS module, not a
+// missing external port. The four values (0-3, same names, same meanings)
+// also match vanilla Quake 2's own `solid_t` (src/game/game.ts and every
+// other legacy game module's byte-identical copy) exactly, so no
+// cross-family value mismatch exists either. Closed with evidence, not
+// reconciled by moving code -- this was already the correct location.
 export enum SolidT {
   SOLID_NOT, // no interaction with other objects
   SOLID_TRIGGER, // only touch when inside, after moving

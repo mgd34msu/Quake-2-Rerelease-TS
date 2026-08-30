@@ -136,12 +136,15 @@
 // stub here for a while: g_weapon.ts's own file header confirmed
 // `fire_flechette`'s real body is NOT in g_weapon.cpp at all (grepped the
 // whole 1,216-line file -- zero matches) -- it lives in the ROGUE mission
-// pack's rogue/g_rogue_newweap.cpp:41, same treatment as this file's own
-// `cleanupHealTarget` stub below. Now that rogue/g_rogue_newweap.ts has
-// landed with a real, exported `fire_flechette`, this file's local stub is
-// DELETED and replaced with `import { fire_flechette } from
-// "./rogue/g_rogue_newweap"` -- reached via this file's own already-real
-// `monster_fire_flechette` wrapper, unchanged.
+// pack's rogue/g_rogue_newweap.cpp:41, same treatment this file's own
+// `cleanupHealTarget` stub used to get (see the later "STUB SWAP:
+// cleanupHealTarget" section below -- also long since landed for real, not
+// still a stub, as of the 2026-08-30 stale-comment sweep). Now that
+// rogue/g_rogue_newweap.ts has landed with a real, exported
+// `fire_flechette`, this file's local stub is DELETED and replaced with
+// `import { fire_flechette } from "./rogue/g_rogue_newweap"` -- reached
+// via this file's own already-real `monster_fire_flechette` wrapper,
+// unchanged.
 //
 // ============================================================================
 // STUB SWAP: FindItemByClassname / Drop_Item -- now real imports from

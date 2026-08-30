@@ -439,6 +439,7 @@ function* active_players(): Generator<EdictT> {
 import { ChangeWeapon, Think_Weapon, NoAmmoWeaponChange } from "./p_weapon";
 import { PlayerTrail_Add } from "./p_trail";
 import { Bot_BeginFrame } from "./bots/bot_think";
+import { GetChaseTarget as RealGetChaseTarget, ChaseNext as RealChaseNext, UpdateChaseCam as RealUpdateChaseCam } from "./g_chase";
 import {
   FindItemByClassname as G_FindItemByClassname,
   GetItemByIndex as G_GetItemByIndex,
@@ -508,16 +509,21 @@ function Touch_Item(ent: EdictT, other: EdictT, tr: KexTraceT, otherTouchingSelf
 // src/kexgame/ctf/p_ctf_menu.ts has landed with real exports; see this
 // file's own header, "STUB SWAP" note above (imported below).
 
-function GetChaseTarget(_ent: EdictT): void {
-  throw new Error("GetChaseTarget: not yet ported (pending g_chase.ts, see g_chase.cpp:149)");
+// GetChaseTarget/ChaseNext/UpdateChaseCam: formerly local throwing stubs
+// here, reached by LIVE spectator/chase-cam call sites below (not a
+// provably-dead guard) -- src/kexgame/g_chase.ts has since landed with
+// real, exported versions of all three; swapped for delegating imports
+// (2026-08-30 stale-comment sweep).
+function GetChaseTarget(ent: EdictT): void {
+  RealGetChaseTarget(ent);
 }
 
-function ChaseNext(_ent: EdictT): void {
-  throw new Error("ChaseNext: not yet ported (pending g_chase.ts, see g_chase.cpp:99)");
+function ChaseNext(ent: EdictT): void {
+  RealChaseNext(ent);
 }
 
-function UpdateChaseCam(_ent: EdictT): void {
-  throw new Error("UpdateChaseCam: not yet ported (pending g_chase.ts, see g_chase.cpp:5)");
+function UpdateChaseCam(ent: EdictT): void {
+  RealUpdateChaseCam(ent);
 }
 
 // ---------------------------------------------------------------------------

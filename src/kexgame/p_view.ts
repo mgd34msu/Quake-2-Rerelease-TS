@@ -66,17 +66,40 @@
 //     body is empty, so this was always going to be a no-op once ported.
 //   - PMenu_Do_Update -> ctf/p_ctf_menu.cpp (future) -- reached only when
 //     `ent.client.menu !== null` (always null; no CTF menu spawn code exists).
-//   - G_ShouldPlayersCollide -> p_client.cpp:2996 (future src/kexgame/p_client.ts)
-//     -- same stub g_utils.ts already carries for the identical reason;
-//     duplicated here per that file's own "local, unexported stub" precedent
-//     (each file keeps its own copy rather than importing across modules).
-//     Reached only in coop with G_ShouldPlayersCollide(false) actually needed.
+//   - G_ShouldPlayersCollide -> p_client.cpp:2996: WAS a local throwing
+//     stub here (g_utils.ts/g_weapon.ts each carried an identical one for
+//     the same reason). src/kexgame/p_client.ts has since landed with a
+//     real, exported G_ShouldPlayersCollide; swapped for a real import
+//     in the 2026-08-30 cleanup sweep (g_utils.ts made this same swap
+//     earlier; g_weapon.ts's copy swapped in the same sweep this one did).
+//     Reached in `ClientEndServerFrame` under coop -- this stub was an
+//     unconditional throw in EVERY coop ClientBegin/end-of-frame, not just
+//     an edge case. This import closes a new, real, sanctioned cycle with
+//     p_client.ts (which already imports ClientEndServerFrame/
+//     G_TeamplayEnabled/P_AssignClientSkinnum/P_ForceFogTransition/
+//     PlayerNoise from THIS file) -- same shape/safety argument as this
+//     file's other documented cycles: `G_ShouldPlayersCollide` is only
+//     referenced inside a function body (`ClientEndServerFrame`), never at
+//     module-eval time.
 //   - P_ForceFogTransition's protocol body (p_client.cpp:1788-1910+): the
 //     function's own early-return guard (`client.fog === pers.wanted_fog &&
 //     client.heightfog === pers.wanted_heightfog`) is ported for real; only
-//     the svc_fog packet-writing tail (reached when they differ -- nothing in
-//     this port line's trigger_fog-equivalent code exists yet to make them
-//     differ) is a narrow stub.
+//     the svc_fog packet-writing tail (reached when they differ) is a
+//     narrow stub, `sendFogTransition` below. CORRECTION (2026-08-30
+//     stale-comment sweep): this used to say "nothing in this port line's
+//     trigger_fog-equivalent code exists yet to make them differ", making
+//     the stub provably unreachable -- that is no longer true.
+//     src/kexgame/g_trigger.ts has since landed a real, exported
+//     `trigger_fog_touch`/`SP_trigger_fog` that writes
+//     `client.pers.wanted_fog`/`.wanted_heightfog` for real, so any map
+//     with a `trigger_fog` volume can now make the guard's two sides
+//     differ and reach this stub in real gameplay. The stub itself (the
+//     svc_fog wire packet: a ~14-field optional bitmask write, `bits |=
+//     BIT_DENSITY/BIT_R/BIT_G/BIT_B/BIT_TIME/BIT_HEIGHTFOG_*`, each field
+//     conditionally present) is a real, nontrivial protocol-format port,
+//     not a comment fix -- left as a throwing stub and reported precisely
+//     in .orch/followups.md rather than silently left under the old,
+//     now-incorrect "unreachable" framing.
 //   - Compass_Update (g_items.cpp:1499-1541, this file's own porting-target
 //     for the ClientEndServerFrame call site) landed for real once
 //     g_local_types.ts's LevelLocalsT.poi_points got its real
@@ -101,14 +124,19 @@
 // `xyspeed`/`bobmove`/`bobcycle`/`bobcycle_run`/`bobfracsin` (p_view.cpp:12-16,
 // C file-scope globals shared with g_weapon.cpp): module-scope `let`s here,
 // per the `current_player`/`current_client` precedent this file already
-// needs for the same reason (C's other file-scope statics). g_target.ts
-// independently carries its OWN private `let xyspeed = 0;` stub (that
-// file's own header: "extern float xyspeed; (p_view.cpp) -- see file header",
-// pending this unit) -- the two are NOT the same binding (TS has no
-// cross-module `extern`), so g_target.ts's copy stays permanently zero even
-// after this landing. Reported as a follow-up: a future unit that touches
-// g_target.ts should either import `xyspeed`'s real value from here (this
-// file would need to export it) or accept the two-copy split permanently.
+// needs for the same reason (C's other file-scope statics).
+//
+// `xyspeed` specifically is ALSO written from g_target.ts's
+// `target_camera_dummy_think` (p_view.cpp's `extern float xyspeed;` is
+// visible to g_target.cpp too) right before that function calls this
+// file's own `G_SetClientFrame`, which reads `xyspeed` to decide the
+// stand/run animation transition. g_target.ts used to carry its own
+// private `let xyspeed = 0;` that could never be the same binding a plain
+// JS/TS import would give it (import bindings are read-only in the
+// importing module -- you cannot assign through them), so its write was a
+// no-op as far as this file's `G_SetClientFrame` could observe. Fixed in
+// the 2026-08-30 cleanup sweep via the exported `SetXyspeed` setter below;
+// g_target.ts now calls that instead of assigning to a local copy.
 
 import { type Vec3, vec3, VectorCopy } from "../shared/math";
 import {
@@ -152,7 +180,7 @@ import { gi, g_edicts, game, level } from "./g_main_globals";
 import { Compass_Update } from "./g_items";
 import { type GTime, Gtime_add, Gtime_from_hz, Gtime_from_ms, Gtime_milliseconds, Gtime_nonzero, Gtime_seconds, Gtime_subtract, GTIME_ZERO } from "./gtime";
 import { AngleVectors, vec3_add, vec3_dot, vec3_length, vec3_muls, vec3_normalized, vec3_sub } from "./q_vec3";
-import { PITCH, ROLL, YAW, brandom, clamp, crandom_open } from "./q_std";
+import { PITCH, ROLL, YAW, brandom, clamp, crandom_open, G_AddBlend } from "./q_std";
 import {
   FRAME_crpain1,
   FRAME_crpain4,
@@ -184,6 +212,7 @@ import { P_CurrentKickAngles, P_CurrentKickOrigin, PlayerNoise } from "./p_weapo
 import { CTF_GRAPPLE_STATE_FLY, CTF_GRAPPLE_STATE_HANG, CTF_GRAPPLE_STATE_PULL, CTFApplyRegeneration, CTFEffects, CTFSetPowerUpEffect } from "./ctf/g_ctf";
 import { PMenu_Do_Update } from "./ctf/p_ctf_menu";
 import { Bot_EndFrame } from "./bots/bot_think";
+import { G_ShouldPlayersCollide } from "./p_client";
 
 // ---------------------------------------------------------------------------
 // cvar-read helpers (see g_combat.ts's own precedent for this exact idiom)
@@ -230,6 +259,18 @@ let bobcycle = 0;
 let bobcycle_run = 0;
 let bobfracsin = 0;
 
+/**
+ * `extern float xyspeed;` (p_view.cpp) cross-module write access. g_target.ts's
+ * `target_camera_dummy_think` writes this exact global in the C source
+ * (via file-scope extern linkage) right before calling `G_SetClientFrame`,
+ * which reads it here. A bare exported `let` cannot be assigned through
+ * from another module (import bindings are read-only), so this setter is
+ * the wiring point -- see file header.
+ */
+export function SetXyspeed(value: number): void {
+  xyspeed = value;
+}
+
 // ---------------------------------------------------------------------------
 // unported cross-deps (narrow throwing stubs) -- see file header
 // ---------------------------------------------------------------------------
@@ -244,14 +285,18 @@ let bobfracsin = 0;
 // ClientEndServerFrame whenever a client has an open menu (e.g. after
 // CTFOpenJoinMenu/CTFAdmin) -- not gated behind ctf/teamplay cvars at all.
 
-/** Same stub g_utils.ts carries under this exact name; see that file's own
- *  "local, unexported stub" precedent and this file's header. */
-function G_ShouldPlayersCollide(_weaponry: boolean): boolean {
-  throw new Error("G_ShouldPlayersCollide: not yet ported (pending p_client.ts, see p_client.cpp:2996)");
-}
-
+// sendFogTransition -- the svc_fog wire-protocol write, p_client.cpp:
+// 1794-1910's packet-building tail. Genuinely unported (not a placement
+// mismatch): a ~14-field optional bitmask packet format
+// (BIT_DENSITY/BIT_R/BIT_G/BIT_B/BIT_TIME/BIT_HEIGHTFOG_* etc.), each
+// field conditionally written only when it differs from the client's
+// current fog state. NOW REACHABLE in real gameplay since
+// g_trigger.ts's trigger_fog landed for real (see this file's own header,
+// "P_ForceFogTransition's protocol body" -- corrected 2026-08-30
+// stale-comment sweep); tracked in .orch/followups.md as a real protocol
+// port for a dedicated unit, not fixed here.
 function sendFogTransition(_ent: EdictT, _instant: boolean): void {
-  throw new Error("P_ForceFogTransition (svc_fog write): not yet ported (pending p_client.ts, see p_client.cpp:1788-1910)");
+  throw new Error("P_ForceFogTransition (svc_fog write): not yet ported -- see p_client.cpp:1788-1910's packet-building tail; now reachable via g_trigger.ts's real trigger_fog, see file header");
 }
 
 // [Paril-KEX] player s.skinnum's encode additional data: game.h:1363-1373's
@@ -347,25 +392,11 @@ function G_PowerUpExpiring(time: GTime): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// G_AddBlend -- local copy (see p_move.ts's identical precedent/header note:
-// "a future unit that also needs it (p_view.ts) should move it to q_std.ts
-// and import from there instead of copying it again." This unit's file list
-// is fixed to p_view.ts/p_hud.ts/the test file only per its brief, so it
-// cannot edit q_std.ts either -- reported as a follow-up below.)
+// G_AddBlend -- now in q_std.ts (2026-08-30 cleanup sweep). Was a local copy
+// here, identical to p_move.ts's own local copy; consolidated per both
+// files' header notes ("move it to q_std.ts and import from there instead
+// of copying it again").
 // ---------------------------------------------------------------------------
-
-/** q_std.h:154-166: `void G_AddBlend(float r, float g, float b, float a, vec4_t &v_blend)`. */
-function G_AddBlend(r: number, g: number, b: number, a: number, v_blend: Vec4): void {
-  if (a <= 0) return;
-
-  const a2 = v_blend[3] + (1 - v_blend[3]) * a; // new total alpha
-  const a3 = v_blend[3] / a2; // fraction of color from old
-
-  v_blend[0] = v_blend[0] * a3 + r * (1 - a3);
-  v_blend[1] = v_blend[1] * a3 + g * (1 - a3);
-  v_blend[2] = v_blend[2] * a3 + b * (1 - a3);
-  v_blend[3] = a2;
-}
 
 // ---------------------------------------------------------------------------
 // activePlayers -- local copy (see g_ai.ts's identical `activePlayers()`

@@ -3,9 +3,12 @@
 //
 // g_statusbar.h (62 lines, 2023 Quake II re-release / "KEX" engine),
 // ~/Projects/quake2-rerelease-dll/rerelease/g_statusbar.h: `statusbar_t`, a
-// tiny fluent string builder over a `std::stringstream` used by p_hud's
-// `G_InitStatusbar()` (g_spawn.cpp:1281-1406, not yet ported) to build the
-// `CS_STATUSBAR` layout-language configstring. Method names are kept
+// tiny fluent string builder over a `std::stringstream` used by
+// `G_InitStatusbar()` (g_spawn.cpp:1281-1406) to build the `CS_STATUSBAR`
+// layout-language configstring -- G_InitStatusbar has since landed for
+// real in src/kexgame/g_spawn.ts, which imports `StatusbarT` from this
+// file (2026-08-30 stale-comment sweep: this note used to say "not yet
+// ported"). Method names are kept
 // EXACTLY as declared; every method's emitted text (including the trailing
 // space after every token, and the quoting rule for `string`/`string2`/
 // `loc_rstring`) is preserved verbatim -- HUD layout parsing on the client

@@ -103,17 +103,20 @@
 // itemlist, with a defensive throw if that invariant is ever violated.
 //
 // ============================================================================
-// STAT_HIT_MARKER -- dropped (UI-only, no ported stat-index table to write
-// into safely)
+// STAT_HIT_MARKER -- restored (2026-08-30 cleanup sweep)
 // ============================================================================
-// C: `attacker->client->ps.stats[STAT_HIT_MARKER] += take + psave + asave;`.
-// `STAT_HIT_MARKER` is declared in bg_local.h's `player_stat_t` enum, whose
-// own value depends on `NUM_AMMO_STATS`/`NUM_POWERUP_STATS` (compressed
-// bit-packed stat widths computed via other not-yet-ported bg_local.h
-// machinery) -- hand-guessing its numeric index would risk silently writing
-// to the wrong HUD stat slot. This stat only drives the hit-marker HUD
-// overlay (no gameplay effect), so it is dropped here with this note rather
-// than guessed at.
+// C (g_combat.cpp:717-719):
+//   if (targ != attacker && attacker->client && targ->health > 0 &&
+//       !((targ->svflags & SVF_DEADMONSTER) || (targ->flags & FL_NO_DAMAGE_EFFECTS)) &&
+//       mod.id != MOD_TARGET_LASER)
+//     attacker->client->ps.stats[STAT_HIT_MARKER] += take + psave + asave;
+// Previously dropped here because `STAT_HIT_MARKER`'s numeric index wasn't
+// ported anywhere yet and hand-guessing it risked writing the wrong HUD
+// stat slot. p_hud.ts has since landed the real `PlayerStatT` enum
+// (`STAT_HIT_MARKER = 50`), so the write is restored using that import
+// (real, sanctioned import cycle: p_hud.ts already imports
+// `ArmorIndex`/`PowerArmorType` from this file; `PlayerStatT` is only
+// referenced inside this function body, never at module-eval time).
 //
 // ============================================================================
 // CTFMatchSetup / DMGame -- concrete faithful values, not stubs (see their
@@ -178,6 +181,7 @@ import { visible, FoundTarget } from "./g_ai";
 import { cleanupHealTarget } from "./m_medic";
 import { MarkTeslaArea, TargetTesla } from "./rogue/g_rogue_newai";
 import { CTFApplyResistance, CTFApplyStrength, CTFCheckHurtCarrier, CTFMatchSetup } from "./ctf/g_ctf";
+import { PlayerStatT } from "./p_hud";
 
 // ---------------------------------------------------------------------------
 // cvar-read helpers (see g_utils.ts's own `coopEnabled()` precedent for the
@@ -716,12 +720,23 @@ export function CheckTeamDamage(targ: EdictT, attacker: EdictT): boolean {
 
 /**
  * g_local.h:3275 `extern dm_game_rt DMGame;` -- real assignment lives in
- * rogue/g_rogue_newdm.cpp:10 (the rogue deathmatch-rules extension, out of
- * scope). Modeled as a local, all-null default: T_Damage's own `if
- * (deathmatch->integer && gamerules->integer)` guard keeps every DMGame.*
- * read unreachable as long as `gamerules` sits at its registered default of
- * 0 (g_main.cpp:282) -- exactly a stock (non-rogue-ruleset) server's real
- * behavior.
+ * rogue/g_rogue_newdm.cpp:322-359's `InitGameRules()`. Modeled as a local,
+ * all-null default: T_Damage's own `if (deathmatch->integer &&
+ * gamerules->integer)` guard keeps every DMGame.* read unreachable as long
+ * as `gamerules` sits at its registered default of 0 (g_main.cpp:282) --
+ * exactly a stock (non-rogue-ruleset) server's real behavior.
+ *
+ * NOT "out of scope" anymore (2026-08-30 stale-comment sweep):
+ * rogue/g_rogue_newdm.ts has since landed a real, exported `InitGameRules`
+ * that populates ITS OWN local `DMGame` object -- a SEPARATE binding from
+ * this one. g_main.ts's own `InitGameRules` call site still uses a local
+ * throwing stub rather than that real function specifically BECAUSE wiring
+ * it in would populate a `DMGame` object this file never reads, silently
+ * no-op'ing every ChangeDamage/ChangeKnockback hook even with `gamerules`
+ * set -- see g_main.ts's own `InitGameRules` doc comment for the full
+ * finding. Unifying the two bindings (an exported setter here, matching
+ * p_view.ts's `SetXyspeed` precedent) is real, focused follow-up work,
+ * flagged in .orch/followups.md.
  */
 const DMGame: DmGameRt = {
   GameInit: null,
@@ -744,8 +759,8 @@ const DMGame: DmGameRt = {
 
 /**
  * g_combat.cpp:527-860: `void T_Damage(...)`. The core damage pipeline --
- * see the file header for the by-value `mod` clone, the dropped
- * STAT_HIT_MARKER write, and the CTFMatchSetup/DMGame notes.
+ * see the file header for the by-value `mod` clone, the STAT_HIT_MARKER
+ * write, and the CTFMatchSetup/DMGame notes.
  */
 export function T_Damage(
   targ: EdictT,
@@ -937,7 +952,17 @@ export function T_Damage(
   }
   // ROGUE
 
-  // [Paril-KEX] player hit markers -- dropped, see file header "STAT_HIT_MARKER"
+  // [Paril-KEX] player hit markers (g_combat.cpp:717-719)
+  if (
+    targ !== attacker &&
+    attacker.client !== null &&
+    targ.health > 0 &&
+    (targ.svflags & SvflagsT.SVF_DEADMONSTER) === 0 &&
+    (targ.flags & EntFlagsT.FL_NO_DAMAGE_EFFECTS) === 0n &&
+    mod.id !== ModIdT.MOD_TARGET_LASER
+  ) {
+    attacker.client.ps.stats[PlayerStatT.STAT_HIT_MARKER] += take + psave + asave;
+  }
 
   // do the damage
   if (take) {

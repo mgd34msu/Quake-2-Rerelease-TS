@@ -164,6 +164,7 @@ import { monsterFlashOffset } from "./m_flash";
 import { PredictAim } from "./m_supertank";
 import { SpawnGrow_Spawn } from "./m_medic";
 import { ThrowWidowGibSized, ThrowSmallStuff } from "./m_rogue_widow2";
+import { monster_fire_blaster2 as RealMonsterFireBlaster2 } from "./rogue/g_rogue_monster";
 import type { ThinkFn } from "./g_local_types";
 
 // ---------------------------------------------------------------------------
@@ -541,13 +542,14 @@ function mkMove(firstframe: number, lastframe: number, frame: MframeT[], endfunc
 }
 
 // ---------------------------------------------------------------------------
-// STUB: monster_fire_blaster2 -- rogue/g_local.h declares it, rogue/
-// g_rogue_newweap.cpp:1374 defines it. Owned by the concurrent rogue-
-// systems porting unit. See file header.
+// monster_fire_blaster2: formerly a local throwing stub here ("owned by
+// the concurrent rogue-systems porting unit") -- rogue/g_rogue_monster.ts
+// has since landed with a real, exported version; swapped for a
+// delegating import (2026-08-30 stale-comment sweep).
 // ---------------------------------------------------------------------------
 
-function monster_fire_blaster2(self: EdictT, _start: Vec3, _dir: Vec3, _damage: number, _speed: number, _flashtype: MonsterMuzzleflashIdT, _effect: EffectsT): void {
-  throw new Error(`monster_fire_blaster2: not yet ported (rogue mission pack, see rogue/g_rogue_monster.cpp:7 + rogue/g_rogue_newweap.cpp:1374) -- called against ${self.classname ?? "?"}`);
+function monster_fire_blaster2(self: EdictT, start: Vec3, dir: Vec3, damage: number, speed: number, flashtype: MonsterMuzzleflashIdT, effect: EffectsT): void {
+  RealMonsterFireBlaster2(self, start, dir, damage, speed, flashtype, effect);
 }
 
 // ---------------------------------------------------------------------------

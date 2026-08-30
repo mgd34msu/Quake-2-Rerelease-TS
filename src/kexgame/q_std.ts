@@ -25,14 +25,21 @@
 //   `#include`d by q_vec3.h). `PITCH`/`YAW`/`ROLL` are re-exported from
 //   `../shared/q_shared` rather than redeclared, since the numeric values
 //   (0/1/2) are identical to the legacy header's copy.
-// - `G_AddBlend`, `LerpAngle`, `anglemod` (q_std.h ~150-193) are NOT ported
-//   here: nothing in this foundation unit (gtime/spawnflags/vec3/random)
-//   calls them, and `src/shared/math.ts` already carries functionally
-//   equivalent legacy versions. They will be ported alongside whichever
-//   kex unit needs kex's own copy (p_view/p_hud screen-blend code), at
-//   which point the C++ source's minor implementation differences from the
-//   legacy version (anglemod here uses `fmod`; the legacy one uses a
-//   bit-truncation trick) can be checked against real call sites.
+// - `LerpAngle`, `anglemod` (q_std.h ~150-193) are NOT ported here: nothing
+//   in this foundation unit (gtime/spawnflags/vec3/random) calls them, and
+//   `src/shared/math.ts` already carries functionally equivalent legacy
+//   versions. They will be ported alongside whichever kex unit needs kex's
+//   own copy (p_view/p_hud screen-blend code), at which point the C++
+//   source's minor implementation differences from the legacy version
+//   (anglemod here uses `fmod`; the legacy one uses a bit-truncation trick)
+//   can be checked against real call sites.
+// - `G_AddBlend` WAS deferred here for the same reason, and got ported
+//   twice as a local, non-exported copy instead (p_move.ts's `PM_ScreenEffects`
+//   and p_view.ts's screen-blend code, each unit's file list being fixed to
+//   its own files per its brief). Consolidated here in the 2026-08-30 cleanup
+//   sweep per both files' own header notes ("a future unit that also needs
+//   it should move it to q_std.ts and import from there instead of copying
+//   it again"); both now import `G_AddBlend` from this module.
 // - `COM_ParseEx` / `COM_Parse` are declared in q_std.h but are not in the
 //   brief's enumerated scope; `src/shared/q_shared.ts` already has a
 //   `COM_Parse` ported from the original engine's token parser. The kex
@@ -49,6 +56,7 @@
 
 export type { Byte } from "../shared/q_shared";
 export { PITCH, YAW, ROLL } from "../shared/q_shared";
+import type { Vec4 } from "../kexapi/game";
 
 // ---------------------------------------------------------------------------
 // MATHLIB constants (q_std.h ~136-147)
@@ -68,6 +76,26 @@ export function RAD2DEG(x: number): number {
 /** q_std.h: `DEG2RAD(x) = x * PIf / 180.0f` */
 export function DEG2RAD(x: number): number {
   return (x * Q_PIf) / 180.0;
+}
+
+/**
+ * q_std.h:154-166: `void G_AddBlend(float r, float g, float b, float a,
+ * vec4_t &v_blend)` — additively composites a translucent color `(r,g,b,a)`
+ * onto the existing screen-blend accumulator `v_blend` (Porter-Duff "over"
+ * on premultiplied alpha, written back through the out-param). No-op when
+ * `a <= 0`. See p_move.ts's `PM_ScreenEffects` and p_view.ts's screen-blend
+ * code for the two call sites.
+ */
+export function G_AddBlend(r: number, g: number, b: number, a: number, v_blend: Vec4): void {
+  if (a <= 0) return;
+
+  const a2 = v_blend[3] + (1 - v_blend[3]) * a; // new total alpha
+  const a3 = v_blend[3] / a2; // fraction of color from old
+
+  v_blend[0] = v_blend[0] * a3 + r * (1 - a3);
+  v_blend[1] = v_blend[1] * a3 + g * (1 - a3);
+  v_blend[2] = v_blend[2] * a3 + b * (1 - a3);
+  v_blend[3] = a2;
 }
 
 // ---------------------------------------------------------------------------

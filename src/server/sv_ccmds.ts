@@ -476,9 +476,17 @@ async function SV_ReadServerFileKex(): Promise<void> {
   // read the comment field
   MSG_ReadLong64(buf); // timestamp -- SV_GetSaveInfo's concern, not this path
   MSG_ReadByte(buf); // savetype -- LOAD_LEVEL_START vs LOAD_NORMAL frame-count
-  // tuning (save.c's SV_CheckForSavegame); this port's SV_CheckForSavegame
-  // (sv_init.ts) does not yet make that distinction for either family -- see
-  // report.
+  // tuning (save.c's SV_CheckForSavegame). This port reaches the same
+  // distinction WITHOUT reading this byte back: sv_init.ts's
+  // SV_CheckForSavegame now branches on `sv.loadgame` (2026-08-30 cleanup
+  // sweep), which is already threaded through this exact call chain --
+  // SV_Loadgame_f's `SV_Map(false, svs.mapcmd, true)` below is the ONLY
+  // caller that ever passes `loadgame: true`, i.e. exactly the "explicit
+  // `load` command" case save.c's file-embedded byte also distinguishes
+  // (every other SV_Map caller -- changelevel/gamemap/demomap -- passes
+  // `false`, matching the natural level-transition LOAD_LEVEL_START case).
+  // The byte itself stays read-and-discarded here; it is genuinely
+  // redundant with the flag this port already carries, not an unported gap.
   MSG_ReadString(buf); // comment field's CS_NAME string, discarded (matches
   // C's `MSG_ReadString(NULL, 0)`)
 
@@ -1005,6 +1013,16 @@ function SV_Savegame_f(): void {
   if (Cvar_VariableValue("deathmatch")) {
     Com_Printf("Can't savegame in a deathmatch\n");
     return;
+  }
+
+  // q2repro save.c: `if (!ge->CanSave()) return;` -- kex-family-only gate
+  // (GameExports.CanSave? is undefined for every legacy game module).
+  // Silent per G_CanSave's own note (src/kexgame/g_save.ts): it returns the
+  // same boolean the C++ does but doesn't print its own player-facing
+  // message, so no Com_Printf here either.
+  if (currentGameFamily() === "kex") {
+    const ge = requireGe();
+    if (ge.CanSave && !ge.CanSave()) return;
   }
 
   if (Cmd_Argv(1) === "current") {

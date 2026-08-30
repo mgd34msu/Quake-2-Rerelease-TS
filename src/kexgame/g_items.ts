@@ -106,16 +106,19 @@
 //     reached by Pickup_Health/MegaHealth_think on every mega-health pickup.
 //   - Pickup_Nuke/Use_IR/Use_Double/Pickup_Doppleganger (all
 //     rogue/g_rogue_items.cpp): each is pure inventory/cvar/timer logic with
-//     no further cross-deps. Only their sibling Use_Nuke/Use_Doppleganger
-//     (which call fire_nuke/FindSpawnPoint+CheckGroundSpawnPoint+
-//     SpawnGrow_Spawn+fire_doppleganger -- genuinely complex spawning code)
-//     stay stubs.
+//     no further cross-deps. Their sibling Use_Nuke (which calls fire_nuke)
+//     is now a real delegating import too (rogue/g_rogue_newweap.ts landed);
+//     Use_Doppleganger (which also needs FindSpawnPoint+
+//     CheckGroundSpawnPoint+SpawnGrow_Spawn -- real in m_medic.ts, but
+//     under a materially different calling convention needing
+//     reconciliation, not a plain import) stays a stub.
 //   - Pickup_Sphere + Use_Defender/Use_Hunter/Use_Vengeance (all
 //     rogue/g_rogue_items.cpp): the owned_sphere guard + inventory decrement
-//     wrapper logic is ported for real; only the actual
+//     wrapper logic is ported for real; the actual
 //     Defender_Launch/Hunter_Launch/Vengeance_Launch calls
 //     (rogue/g_rogue_sphere.cpp:684/694/704, which spawn a whole new sphere
-//     entity) stay stubs.
+//     entity) are now real delegating imports too (rogue/g_rogue_sphere.ts
+//     landed).
 //   - SetTriggeredSpawn + Item_TriggeredSpawn (both
 //     rogue/g_rogue_items.cpp:217/191): SpawnItem calls SetTriggeredSpawn
 //     unconditionally for every SPAWNFLAG_ITEM_TRIGGER_SPAWN item, and both
@@ -138,23 +141,28 @@
 // first per-frame Think_Weapon call). Hoisted wrappers per this section's
 // existing TDZ convention, not plain re-exports -- same reasoning as
 // Pickup_Weapon's own comment just below.
-// STILL STUBBED (p_rogue_weapon.cpp/p_xatrix_weapon.cpp's own weapons,
-// neither file ported anywhere in this port line yet): Weapon_ChainFist,
-// Weapon_Disintegrator, Weapon_ETF_Rifle, Weapon_Heatbeam, Weapon_Tesla,
-// Weapon_ProxLauncher. Weapon_Ionripper/Weapon_Phalanx/Weapon_Trap ARE real
+// Weapon_ChainFist/Weapon_Disintegrator/Weapon_ETF_Rifle/Weapon_Heatbeam/
+// Weapon_Tesla/Weapon_ProxLauncher (p_rogue_weapon.cpp): WERE stubbed;
+// rogue/p_rogue_weapon.ts has since landed with real, exported versions of
+// all six -- swapped for delegating-wrapper imports (2026-08-30
+// stale-comment sweep), same shape as the baseq2 Weapon_Chaingun/etc.
+// wrappers above. Weapon_Ionripper/Weapon_Phalanx/Weapon_Trap ARE real
 // (imported from p_xatrix_weapon.ts, see below). CTFWeapon_Grapple
 // (ctf/g_ctf.cpp:1453) is real too (imported from ctf/g_ctf.ts, see below).
-// Rogue spawning/effects (genuinely complex; the WEAPONS and
-// FUNC/TRIG/TARG/SPAWN clusters' dependencies are not landed yet -- see
-// rogue/g_rogue_items.ts's own header for the current state): Use_Nuke and
-// Use_Doppleganger are THIS FILE'S local throwing stubs, cited below --
-// SEPARATE from rogue/g_rogue_items.ts's own real, exported copies (not
-// swapped in here; that file's header explains why and what the
-// coordinator needs to decide once their remaining deps land).
-// Use_Nuke (needs rogue/g_rogue_newweap.cpp:770 fire_nuke), Use_Doppleganger
-// (needs rogue/g_rogue_spawn.cpp FindSpawnPoint/CheckGroundSpawnPoint/
-// SpawnGrow_Spawn + rogue/g_rogue_newdm.cpp:242 fire_doppleganger),
-// Defender_Launch/Hunter_Launch/Vengeance_Launch (rogue/g_rogue_sphere.cpp).
+// Rogue spawning/effects: Use_Nuke and Defender_Launch/Hunter_Launch/
+// Vengeance_Launch WERE this file's own local throwing stubs -- their
+// dependency clusters (rogue/g_rogue_newweap.ts's `fire_nuke`,
+// rogue/g_rogue_sphere.ts's `Sphere_Spawn`/`Own_Sphere`) have since landed
+// for real, so all four are now delegating-wrapper imports from
+// rogue/g_rogue_items.ts's/rogue/g_rogue_sphere.ts's real, exported copies
+// (2026-08-30 stale-comment sweep). Use_Doppleganger remains a genuine
+// local throwing stub: it needs FindSpawnPoint/CheckGroundSpawnPoint/
+// SpawnGrow_Spawn (rogue/g_rogue_spawn.cpp:79/139/200). These are NOT
+// actually unported (m_medic.ts has real, cited versions of all three) but
+// use a materially different calling convention than this stub's callers
+// expect, so swapping them in is real reconciliation work, not a same-day
+// safe import -- see rogue/g_rogue_items.ts's
+// own header for the current state of that gap.
 // CTF (ctf/g_ctf.cpp, not ported anywhere yet): CTFPickup_Flag, CTFDrop_Flag,
 // CTFPickup_Tech, CTFDrop_Tech, CTFFlagSetup.
 // P_UseCoopInstancedItems (p_client.cpp:90, guarded by coop, default ON):
@@ -321,6 +329,17 @@ import {
   Weapon_Railgun as P_Weapon_Railgun,
   Weapon_BFG as P_Weapon_BFG,
 } from "./p_weapon";
+import {
+  Weapon_ChainFist as P_Weapon_ChainFist,
+  Weapon_Disintegrator as P_Weapon_Disintegrator,
+  Weapon_ETF_Rifle as P_Weapon_ETF_Rifle,
+  Weapon_Heatbeam as P_Weapon_Heatbeam,
+  Weapon_Tesla as P_Weapon_Tesla,
+  Weapon_ProxLauncher as P_Weapon_ProxLauncher,
+} from "./rogue/p_rogue_weapon";
+import { Use_Nuke as RogueUse_Nuke } from "./rogue/g_rogue_items";
+import { Defender_Launch as RogueDefender_Launch, Hunter_Launch as RogueHunter_Launch, Vengeance_Launch as RogueVengeance_Launch } from "./rogue/g_rogue_sphere";
+import { ChaseNext as RealChaseNext } from "./g_chase";
 import { GetUnicastKey } from "./g_weapon";
 import { P_SendLevelPOI, P_UseCoopInstancedItems } from "./p_client";
 import {
@@ -523,23 +542,28 @@ function Weapon_Railgun(ent: EdictT): void {
 function Weapon_BFG(ent: EdictT): void {
   P_Weapon_BFG(ent);
 }
-function Weapon_ChainFist(_ent: EdictT): void {
-  throw new Error("Weapon_ChainFist: not yet ported (pending p_rogue_weapon.ts, see rogue/p_rogue_weapon.cpp:148)");
+// Weapon_ChainFist/Weapon_Disintegrator/Weapon_ETF_Rifle/Weapon_Heatbeam/
+// Weapon_Tesla/Weapon_ProxLauncher: formerly local throwing stubs here --
+// src/kexgame/rogue/p_rogue_weapon.ts has landed with real, exported
+// versions of all six (2026-08-30 stale-comment sweep). Delegating wrappers,
+// same shape as Weapon_Chaingun/Weapon_HyperBlaster/etc. above.
+function Weapon_ChainFist(ent: EdictT): void {
+  P_Weapon_ChainFist(ent);
 }
-function Weapon_Disintegrator(_ent: EdictT): void {
-  throw new Error("Weapon_Disintegrator: not yet ported (pending p_rogue_weapon.ts, see rogue/p_rogue_weapon.cpp:250)");
+function Weapon_Disintegrator(ent: EdictT): void {
+  P_Weapon_Disintegrator(ent);
 }
-function Weapon_ETF_Rifle(_ent: EdictT): void {
-  throw new Error("Weapon_ETF_Rifle: not yet ported (pending p_rogue_weapon.ts, see rogue/p_rogue_weapon.cpp:345)");
+function Weapon_ETF_Rifle(ent: EdictT): void {
+  P_Weapon_ETF_Rifle(ent);
 }
-function Weapon_Heatbeam(_ent: EdictT): void {
-  throw new Error("Weapon_Heatbeam: not yet ported (pending p_rogue_weapon.ts, see rogue/p_rogue_weapon.cpp:441)");
+function Weapon_Heatbeam(ent: EdictT): void {
+  P_Weapon_Heatbeam(ent);
 }
-function Weapon_Tesla(_ent: EdictT): void {
-  throw new Error("Weapon_Tesla: not yet ported (pending p_rogue_weapon.ts, see rogue/p_rogue_weapon.cpp:53)");
+function Weapon_Tesla(ent: EdictT): void {
+  P_Weapon_Tesla(ent);
 }
-function Weapon_ProxLauncher(_ent: EdictT): void {
-  throw new Error("Weapon_ProxLauncher: not yet ported (pending p_rogue_weapon.ts, see rogue/p_rogue_weapon.cpp:28)");
+function Weapon_ProxLauncher(ent: EdictT): void {
+  P_Weapon_ProxLauncher(ent);
 }
 // Weapon_Ionripper / Weapon_Phalanx / Weapon_Trap: real imports from
 // p_xatrix_weapon.ts -- see file header "STUB SWAP (xatrix unit)".
@@ -551,24 +575,39 @@ function Weapon_ProxLauncher(_ent: EdictT): void {
 // "STUB INVENTORY"
 // ---------------------------------------------------------------------------
 
-function Use_Nuke(_ent: EdictT, _item: GitemT): void {
-  throw new Error(
-    "Use_Nuke: not yet ported (pending g_rogue_newweap.ts, see rogue/g_rogue_newweap.cpp:770's fire_nuke -- rogue/g_rogue_items.cpp:51's own body is otherwise trivial)",
-  );
+// Use_Nuke: formerly a local throwing stub here (needed fire_nuke,
+// rogue/g_rogue_newweap.cpp:770) -- rogue/g_rogue_items.ts has since landed
+// with a real, exported `Use_Nuke` (its genuine C++ home, built on that
+// file's own real `fire_nuke` import) -- delegating wrapper, real import
+// aliased above (2026-08-30 stale-comment sweep).
+function Use_Nuke(ent: EdictT, item: GitemT): void {
+  RogueUse_Nuke(ent, item);
 }
+// Use_Doppleganger: STILL a real local throwing stub -- needs
+// FindSpawnPoint/CheckGroundSpawnPoint/SpawnGrow_Spawn
+// (rogue/g_rogue_spawn.cpp:79/139/200). These are NOT actually unported
+// (m_medic.ts has real, cited versions of all three, verified 2026-08-30)
+// but use a materially different calling convention than this call site
+// needs (out-param+bool vs. direct-return, differing parameter lists) --
+// reconciling them is real work for a dedicated unit, not a same-session
+// safe swap. See rogue/g_rogue_items.ts's own "CORRECTION" note for detail.
 function Use_Doppleganger(_ent: EdictT, _item: GitemT): void {
   throw new Error(
-    "Use_Doppleganger: not yet ported (pending g_rogue_spawn.ts/g_rogue_newdm.ts -- needs FindSpawnPoint (rogue/g_rogue_spawn.cpp:79), CheckGroundSpawnPoint (rogue/g_rogue_spawn.cpp:139), SpawnGrow_Spawn (rogue/g_rogue_spawn.cpp:200), fire_doppleganger (rogue/g_rogue_newdm.cpp:242))",
+    "Use_Doppleganger: not yet ported (needs FindSpawnPoint (rogue/g_rogue_spawn.cpp:79)/CheckGroundSpawnPoint (rogue/g_rogue_spawn.cpp:139)/SpawnGrow_Spawn (rogue/g_rogue_spawn.cpp:200) reconciled against m_medic.ts's differently-shaped real versions; fire_doppleganger (rogue/g_rogue_newdm.cpp:242) is real)",
   );
 }
-function Defender_Launch(_self: EdictT): void {
-  throw new Error("Defender_Launch: not yet ported (pending g_rogue_sphere.ts, see rogue/g_rogue_sphere.cpp:684)");
+// Defender_Launch/Hunter_Launch/Vengeance_Launch: formerly local throwing
+// stubs here -- rogue/g_rogue_sphere.ts has since landed with real,
+// exported versions of all three; delegating wrappers, real imports
+// aliased above (2026-08-30 stale-comment sweep).
+function Defender_Launch(self: EdictT): void {
+  RogueDefender_Launch(self);
 }
-function Hunter_Launch(_self: EdictT): void {
-  throw new Error("Hunter_Launch: not yet ported (pending g_rogue_sphere.ts, see rogue/g_rogue_sphere.cpp:694)");
+function Hunter_Launch(self: EdictT): void {
+  RogueHunter_Launch(self);
 }
-function Vengeance_Launch(_self: EdictT): void {
-  throw new Error("Vengeance_Launch: not yet ported (pending g_rogue_sphere.ts, see rogue/g_rogue_sphere.cpp:704)");
+function Vengeance_Launch(self: EdictT): void {
+  RogueVengeance_Launch(self);
 }
 // Tag_PickupToken: formerly a local throwing stub here -- see file header
 // "Rogue misc" note. Hoisted wrapper, not a plain re-export -- see the
@@ -604,8 +643,16 @@ function DoRandomRespawn(ent: EdictT): ItemIdT {
 // (imported below from ctf/p_ctf_menu.ts). This is genuinely reachable now
 // (SelectNextItem/SelectPrevItem's menu=true branch, whenever the client has
 // an open menu), not just a formerly-unreachable-from-here guard.
-function ChaseNext(_ent: EdictT): void {
-  throw new Error("ChaseNext: not yet ported (pending p_hud.ts/g_chase.cpp) -- same unreachable-from-here guard as PMenu_Next above");
+// ChaseNext: formerly a local throwing stub here ("provably unreachable
+// from here" -- SelectNextItem always calls with menu=false, and this
+// branch is guarded by `if (menu && ...)`) -- src/kexgame/g_chase.ts has
+// since landed with a real, exported `ChaseNext`; swapped for a real
+// delegating import (2026-08-30 stale-comment sweep) even though the call
+// site here still never reaches it, matching this file's own
+// Defender_Launch/etc. precedent of preferring a real import once one
+// exists over a stub that happens to be provably dead code today.
+function ChaseNext(ent: EdictT): void {
+  RealChaseNext(ent);
 }
 
 // CTFMatchSetup: formerly pinned `return false` here (a full CTF match-flow

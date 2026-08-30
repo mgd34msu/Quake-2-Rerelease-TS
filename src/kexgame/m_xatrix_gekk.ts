@@ -114,6 +114,7 @@ import { PlayerNoise } from "./p_weapon";
 import { ThrowGibs, type GibDefT } from "./g_misc";
 import { st } from "./g_spawn";
 import { SpawnFlags_from, SpawnFlags_has, SpawnFlags_and, SpawnFlags_not, type SpawnFlags } from "./spawnflags";
+import { blocked_checkjump as RealBlockedCheckjump } from "./rogue/g_rogue_newai";
 
 function gEdict(index: number): EdictT {
   return g_edicts[index];
@@ -187,11 +188,13 @@ function move(firstframe: number, lastframe: number, frames: MframeT[], endfunc:
 }
 
 // ---------------------------------------------------------------------------
-// EXTERNAL DEPENDENCY NOT YET PORTED -- see file header
+// blocked_checkjump: formerly a local throwing stub here -- rogue/
+// g_rogue_newai.ts has since landed with a real, exported version; swapped
+// for a delegating import (2026-08-30 stale-comment sweep).
 // ---------------------------------------------------------------------------
 
-function blocked_checkjump(_self: EdictT, _dist: number): BlockedJumpResultT {
-  throw new Error("blocked_checkjump: not yet ported (rogue mission-pack content, see rogue/g_rogue_newai.cpp:123)");
+function blocked_checkjump(self: EdictT, dist: number): BlockedJumpResultT {
+  return RealBlockedCheckjump(self, dist);
 }
 
 /** `bool monster_jump_finished(edict_t*)` (rogue/g_rogue_newai.cpp:101-117)

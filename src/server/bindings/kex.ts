@@ -33,11 +33,15 @@
 // exposed past this file) -- a deliberate, documented lie at the adapter
 // boundary, matching legacy.ts's own `adaptPackGameExports` precedent of
 // bridging one concrete shape onto another the rest of the server expects.
-// `ClientChooseSlot`/`CanSave`/`server_flags`/`GetExtension`/`Bot_*`/
+// `ClientChooseSlot`/`server_flags`/`GetExtension`/`Bot_*`/
 // `Entity_IsVisibleToPlayer`/`GetShadowLightData` on the real `KexGameExports`
 // have no home on the legacy `GameExports` interface at all and are simply
 // not exposed through this adapter -- nothing on the legacy dispatch path
 // calls them, so this is a silent-but-harmless capability drop, not a bug.
+// `CanSave` USED to be on this list too, but sv_ccmds.ts's SV_Savegame_f
+// now calls it (family-dispatched, 2026-08-30 cleanup sweep) per q2repro's
+// save.c `if (!ge->CanSave()) return;` gate -- see `GameExports.CanSave?`
+// in game/game.ts and this file's own `CanSave` entry below.
 //
 // ============================================================================
 // THE EDICT BRIDGE -- one parallel array, kept in sync at two cadences
@@ -291,8 +295,9 @@
 // `WriteLevelJson(transition, ...)` does; callers on this dispatch path
 // (sv_ccmds.ts) never signal which one they mean either, so `transition:
 // false` (full save) is the safe, documented default, not a silent guess.
-// `CanSave()` has no home on the legacy `GameExports` interface at all (see
-// the "TRANSITIONAL BRIDGE" note above) and is simply not exposed.
+// `CanSave()` is exposed as an optional `GameExports` member (see the
+// "TRANSITIONAL BRIDGE" note above for the history) -- sv_ccmds.ts's
+// SV_Savegame_f calls it, family-dispatched.
 
 import { type Vec3, vec3, VectorCopy } from "../../shared/math";
 import {
@@ -1022,6 +1027,13 @@ export function adaptKexGameExports(kexGe: KexGameExports): GameExports {
       kexGe.ReadLevelJson(json);
       syncAllEdictsFields(kexGe);
     },
+
+    // [Paril-KEX] gate: sv_ccmds.ts's SV_Savegame_f calls this (family-
+    // dispatched, currentGameFamily() === "kex" only -- see this file's
+    // header, which used to document CanSave as deliberately unexposed
+    // since nothing called it yet; now something does). No filesystem/edict
+    // side effects, just a pure delegation.
+    CanSave: () => kexGe.CanSave(),
 
     WriteGame: (filename, autosave) => {
       const json = ge.WriteGameJson ? ge.WriteGameJson(autosave) : null;

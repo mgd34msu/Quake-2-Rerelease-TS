@@ -51,15 +51,14 @@
 //   perform it.
 //
 // ============================================================================
-// STUBS THIS FILE OWNS (throwing, cited to their real C++ home)
+// STUBS THIS FILE USED TO OWN
 // ============================================================================
-// `Sphere_Spawn` (rogue/rogue_sphere.cpp -- not ported anywhere in this port
-// line; no `g_rogue_sphere.ts` exists yet) is called by `doppleganger_die`'s
-// enemy-in-range branch to spawn a Hunter/Vengeance sphere. Left as a
-// throwing stub cited to its real file; `doppleganger_die` itself is real
-// (matches g_items.ts's own "small cross-file functions ported here for
-// real, deps that stay stubs" precedent for `Defender_Launch`/
-// `Hunter_Launch`/`Vengeance_Launch`).
+// `Sphere_Spawn` (rogue/g_rogue_sphere.cpp:583-647) is called by
+// `doppleganger_die`'s enemy-in-range branch to spawn a Hunter/Vengeance
+// sphere. WAS a throwing stub (no `g_rogue_sphere.ts` existed yet);
+// rogue/g_rogue_sphere.ts has since landed with a real, exported version --
+// swapped for a delegating import (2026-08-30 stale-comment sweep, see the
+// function's own site below for the null-invariant handling).
 //
 // ============================================================================
 // LOCAL COPIES (not shared, per this port line's established idiom)
@@ -116,6 +115,7 @@ import { BecomeExplosion1 } from "../g_misc";
 import { SpawnFlags_or, type SpawnFlags } from "../spawnflags";
 import { irandom, frandom } from "../q_std";
 import { M_ChangeYaw } from "../m_move";
+import { Sphere_Spawn as RealSphere_Spawn } from "./g_rogue_sphere";
 // FRAME_stand01/FRAME_stand40 (m_boss31.h frame indices, 112/151) -- local
 // numeric duplicates, NOT an import from "../m_boss31": that file is a full
 // monster module with its own top-level frame-table construction reading
@@ -159,11 +159,20 @@ function frameTimeAsGtime(): GTime {
 
 const MOD_UNKNOWN: ModT = { id: ModIdT.MOD_UNKNOWN, friendly_fire: false, no_point_loss: false };
 
-/** rogue/g_rogue_sphere.cpp:684-ish -- `edict_t *Sphere_Spawn(edict_t
- *  *owner, spawnflags_t spawnflags)`. See file header's "STUBS THIS FILE
- *  OWNS" note. */
-function Sphere_Spawn(_owner: EdictT, _spawnflags: SpawnFlags): EdictT {
-  throw new Error("Sphere_Spawn: not yet ported (pending g_rogue_sphere.ts, see rogue/rogue_sphere.cpp)");
+/** rogue/g_rogue_sphere.cpp:583-647 -- `edict_t *Sphere_Spawn(edict_t
+ *  *owner, spawnflags_t spawnflags)`. WAS a local throwing stub here --
+ *  rogue/g_rogue_sphere.ts has since landed with a real, exported version
+ *  (2026-08-30 stale-comment sweep). The real function returns `EdictT |
+ *  null` (null only for an invalid spawnflags combination, the C++
+ *  `default:` case); this file's own call site below only ever passes
+ *  SPHERE_HUNTER/SPHERE_VENGEANCE combined with SPHERE_DOPPLEGANGER, both
+ *  valid combinations, so a null result here is an invariant violation,
+ *  not a normal case -- thrown, not silently narrowed, matching this
+ *  file's own `self.teammaster === null` treatment just below. */
+function Sphere_Spawn(owner: EdictT, spawnflags: SpawnFlags): EdictT {
+  const sphere = RealSphere_Spawn(owner, spawnflags);
+  if (sphere === null) throw new Error("Sphere_Spawn: got null for doppleganger_die's own spawnflags combo (invariant violated -- see this file's own call site)");
+  return sphere;
 }
 
 // ---------------------------------------------------------------------------

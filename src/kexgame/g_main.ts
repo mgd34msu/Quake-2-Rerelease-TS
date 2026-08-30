@@ -599,11 +599,32 @@ export function InitGame(): void {
   game.lag_origins = Array.from({ length: game.maxclients * game.max_lag_origins }, () => vec3());
 }
 
-/** ROGUE `InitGameRules()` (rogue/g_rogue_*.cpp) -- rogue mission-pack, not
- *  ported (excluded content dir). Reached only when `gamerules` is nonzero,
- *  a real, concretely-false-by-default guard (see file header). */
+/**
+ * ROGUE `InitGameRules()` (rogue/g_rogue_newdm.cpp:322-359). Reached only
+ * when `gamerules` is nonzero, a real, concretely-false-by-default guard
+ * (see file header).
+ *
+ * CORRECTION (2026-08-30 stale-comment sweep): this used to say "no
+ * src/kexgame/ home" -- that is no longer true. rogue/g_rogue_newdm.ts has
+ * since landed a real, exported `InitGameRules`, with its own doc comment
+ * explicitly noting "Exported so the coordinator can wire it in at
+ * g_main.ts's own InitGameRules call site... NOT called from anywhere in
+ * this port line by this unit." NOT wired in here either, deliberately:
+ * that file's real `InitGameRules` populates ITS OWN local module-scope
+ * `DMGame` object, which is a SEPARATE binding from g_combat.ts's own
+ * local, all-null `DMGame` constant that `T_Damage` actually reads for
+ * `ChangeDamage`/`ChangeKnockback` (g_combat.ts's own header, "CTFMatchSetup
+ * / DMGame" note). Simply calling the real `InitGameRules` here would
+ * populate a `DMGame` object nothing else ever reads -- `T_Damage` would
+ * still see all-null and silently no-op, exactly like g_target.ts's
+ * pre-fix `xyspeed` bug (see .orch/followups.md). Wiring this correctly
+ * needs g_combat.ts's `DMGame` unified with rogue/g_rogue_newdm.ts's real
+ * one (an exported setter/getter, matching p_view.ts's `SetXyspeed`
+ * precedent) before this stub can safely become a real call -- flagged
+ * precisely in .orch/followups.md rather than half-wired here.
+ */
 function InitGameRules(): void {
-  throw new Error("InitGameRules: not yet ported (ROGUE mission pack, no src/kexgame/ home); reached only when gamerules is nonzero (default 0)");
+  throw new Error("InitGameRules: not yet wired (rogue/g_rogue_newdm.ts has a real implementation, but its DMGame binding needs unifying with g_combat.ts's own local DMGame first -- see this function's own doc comment); reached only when gamerules is nonzero (default 0)");
 }
 
 // ---------------------------------------------------------------------------

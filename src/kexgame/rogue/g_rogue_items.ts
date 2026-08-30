@@ -44,43 +44,58 @@
 // (rogue/g_rogue_items.cpp:65) are the only two top-level functions in this
 // C++ source NOT already ported anywhere -- g_items.ts's own header
 // explicitly flags both as throwing stubs "pending g_rogue_newweap.ts"/
-// "pending g_rogue_spawn.ts/g_rogue_newdm.ts". Ported for real below, each
-// depending on functions that live in OTHER, not-yet-landed clusters:
+// "pending g_rogue_spawn.ts/g_rogue_newdm.ts". Ported for real below:
 //   - `Use_Nuke` needs `fire_nuke` (rogue/g_rogue_newweap.cpp:770) -- the
-//     WEAPONS cluster (a different concurrent unit's file scope). Left as
-//     a local throwing stub, cited to its real file.
+//     WEAPONS cluster. src/kexgame/rogue/g_rogue_newweap.ts has since
+//     landed with a real, exported `fire_nuke`; imported for real above
+//     (2026-08-30 stale-comment sweep).
 //   - `Use_Doppleganger` needs `FindSpawnPoint`/`CheckGroundSpawnPoint`
-//     (rogue/g_rogue_spawn.cpp:79/139) -- the FUNC/TRIG/TARG/SPAWN cluster
-//     (also a different concurrent unit) -- AND `SpawnGrow_Spawn`
-//     (rogue/g_rogue_spawn.cpp:200, same cluster) -- AND `fire_doppleganger`
+//     (rogue/g_rogue_spawn.cpp:79/139) -- AND `SpawnGrow_Spawn`
+//     (rogue/g_rogue_spawn.cpp:200) -- AND `fire_doppleganger`
 //     (rogue/g_rogue_newdm.cpp:242), which IS in this unit's scope and IS
 //     real (imported from `./g_rogue_newdm`, not stubbed).
-// `Use_Nuke`/`Use_Doppleganger` themselves are real, matching this port
-// line's "ported for real, deps that stay stubs" precedent (see
-// g_items.ts's own identical treatment of `Use_Defender`/`Use_Hunter`/
-// `Use_Vengeance` depending on the still-unported `Defender_Launch`/
-// `Hunter_Launch`/`Vengeance_Launch`).
+//
+// CORRECTION (2026-08-30 stale-comment sweep): `FindSpawnPoint`/
+// `CheckGroundSpawnPoint`/`SpawnGrow_Spawn` are NOT actually unported --
+// src/kexgame/m_medic.ts has real, exported versions of all three, cited
+// to the exact same C++ lines (rogue/g_rogue_spawn.cpp:79-97/139-151/
+// 684-704 respectively -- verified by reading m_medic.ts's own doc
+// comments and bodies, not assumed). src/kexgame/rogue/g_rogue_spawn.ts
+// (a DIFFERENT file, despite the similar name) only carries
+// `CreateMonster`/`CreateFlyMonster`, unrelated functions from the same
+// C++ source file -- the earlier "STILL genuinely unported" note in this
+// same paragraph was wrong, having checked only that file and not
+// m_medic.ts. HOWEVER, m_medic.ts's versions use a MATERIALLY DIFFERENT
+// calling convention than this file's own local stubs below expect:
+// `FindSpawnPoint` there is `(startpoint, mins, maxs, _maxMoveUp, drop =
+// true): Vec3 | null` (5 params, direct return) vs. the real C++'s 6-param
+// `(startPoint, mins, maxs, spawnPoint&, dist, inSolidCheck): bool`
+// out-param style this file's stub mirrors -- `_maxMoveUp` does not
+// obviously correspond to `dist` positionally, and it is not safe to
+// assume they are interchangeable without re-deriving m_medic.ts's
+// version against the real C++ body line-by-line. Reconciling the two
+// signatures (and verifying which callers of each need which semantics)
+// is real, careful work belonging to a dedicated unit, not a safe
+// same-session swap -- left as local throwing stubs here, NOT swapped
+// yet, and reported precisely (not vaguely) in .orch/followups.md.
 //
 // ============================================================================
 // NOT SWAPPED (out of this unit's edit scope) -- reported to the coordinator
 // ============================================================================
-// g_items.ts's own local throwing stubs for `Use_Nuke`/`Use_Doppleganger`
-// are SEPARATE copies from the real ones below (not the same function
-// object) -- g_items.ts is off-limits to this unit beyond its two
-// authorized stub swaps (`DoRandomRespawn`/`Tag_PickupToken`), so those two
-// stubs are NOT swapped for imports from here. Once the weapons cluster
-// lands `fire_nuke` and the func/trig/targ/spawn cluster lands
-// `FindSpawnPoint`/`CheckGroundSpawnPoint`/`SpawnGrow_Spawn` for real, the
-// coordinator can either (a) swap g_items.ts's two stubs for imports from
-// here, or (b) update this file's own two local stubs to import the real
-// versions -- whichever lands first determines which direction makes
-// sense; reported, not decided, here.
+// g_items.ts's own local throwing stub for `Use_Doppleganger` is a
+// SEPARATE copy from the real one below (not the same function object) --
+// NOT swapped for an import from here (this file's own `Use_Doppleganger`
+// itself still can't run for real either -- see the CORRECTION above).
+// `Use_Nuke`'s own g_items.ts stub WAS swapped (real import from
+// g_items.ts's own dependency, `fire_nuke`, landing directly there) in the
+// 2026-08-30 cleanup sweep -- see g_items.ts's own header.
 
 import { type Vec3, vec3 } from "../../shared/math";
 import { PITCH, YAW, ROLL } from "../../shared/q_shared";
 import type { EdictT, GClientT, GitemT } from "../g_local";
 import { AngleVectors, vec3_add, vec3_muls } from "../q_vec3";
 import { fire_doppleganger } from "./g_rogue_newdm";
+import { fire_nuke } from "./g_rogue_newweap";
 
 function requireClient(ent: EdictT, fnName: string): GClientT {
   if (ent.client === null) {
@@ -89,13 +104,11 @@ function requireClient(ent: EdictT, fnName: string): GClientT {
   return ent.client;
 }
 
-/** rogue/g_rogue_newweap.cpp:770: `void fire_nuke(edict_t *self, const
- *  vec3_t &start, const vec3_t &aimdir, int speed)` -- weapons cluster,
- *  not this unit's file scope. See file header's "THIS FILE'S ACTUAL
- *  CONTENT" note. */
-function fire_nuke(_self: EdictT, _start: Vec3, _aimdir: Vec3, _speed: number): void {
-  throw new Error("fire_nuke: not yet ported (pending g_rogue_newweap.ts, see rogue/g_rogue_newweap.cpp:770)");
-}
+// fire_nuke (rogue/g_rogue_newweap.cpp:770): WAS a local throwing stub here
+// (weapons cluster, not this unit's file scope at the time) --
+// src/kexgame/rogue/g_rogue_newweap.ts has since landed with a real,
+// exported `fire_nuke`; imported for real above (2026-08-30 stale-comment
+// sweep).
 
 /** rogue/g_rogue_spawn.cpp:79: `bool FindSpawnPoint(const vec3_t
  *  &startPoint, const vec3_t &mins, const vec3_t &maxs, vec3_t

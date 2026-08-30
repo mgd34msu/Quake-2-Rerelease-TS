@@ -137,19 +137,19 @@
 // N64_PHYSICS=+265, HEALTH_BAR_NAME=+266, STORY=+267.
 //
 // ============================================================================
-// xyspeed -- placement-mismatch global, ported as file-scoped state
+// xyspeed -- wired to p_view.ts's real global (2026-08-30 cleanup sweep)
 // ============================================================================
-// `extern float xyspeed;` (defined in p_view.cpp, not ported as an exported
-// value there -- p_view.ts's own copy is an unexported module-scope `let`)
-// is read by `target_camera_dummy_think` immediately before its own call
-// into the now-real, imported `G_SetClientFrame` (see the corrected
-// "EXTERNAL DEPENDENCIES NOT YET PORTED" section above -- G_SetClientFrame
-// itself has been a real import from p_view.ts since an earlier unit; this
-// note used to call it "(stubbed)", which was stale). Since p_view.ts's own
-// `xyspeed` isn't exported, this file still can't import it, so it stays a
-// local, unexported, module-scope mutable variable here -- same "placement
-// mismatch, report don't move" precedent g_monster.ts's own `st` note and
-// this file's `st` placeholder both already establish.
+// `extern float xyspeed;` (defined in p_view.cpp) is written by
+// `target_camera_dummy_think` immediately before its own call into
+// `G_SetClientFrame` (also from p_view.ts), which reads `xyspeed` to decide
+// the stand/run animation transition. This file used to carry its own
+// private, always-zero `let xyspeed = 0;` (p_view.ts's copy wasn't exported
+// yet), so the write never reached `G_SetClientFrame`'s read -- a
+// placement-mismatch bug, not a faithful port of the shared C extern.
+// Fixed by calling p_view.ts's exported `SetXyspeed` setter directly
+// instead of assigning to a local copy (a bare exported `let` cannot be
+// assigned through from another module, so p_view.ts added the setter
+// rather than exporting the binding itself).
 
 import { vec3, type Vec3 } from "../shared/math";
 import {
@@ -212,7 +212,7 @@ import { T_Damage, T_RadiusDamage } from "./g_combat";
 import { G_FindByString, G_FreeEdict, G_PickTarget, G_SetMovedir, G_Spawn, G_UseTargets, KillBox } from "./g_utils";
 import { fire_blaster, GetUnicastKey, markPierce, restorePierce, pierceTrace } from "./g_weapon";
 import { BeginIntermission, MoveClientToIntermission, G_EndOfUnitMessage } from "./p_hud";
-import { G_SetClientFrame } from "./p_view";
+import { G_SetClientFrame, SetXyspeed } from "./p_view";
 import { respawn, P_UseCoopInstancedItems } from "./p_client";
 import { GTIME_ZERO, Gtime_add, Gtime_from_ms, Gtime_from_sec, Gtime_nonzero, Gtime_seconds, Gtime_subtract } from "./gtime";
 import { SpawnFlags_from, SpawnFlags_has, type SpawnFlags } from "./spawnflags";
@@ -287,9 +287,6 @@ const CONFIG_STORY_INDEX = CONFIG_HEALTH_BAR_NAME_INDEX + 1;
 // respawn / P_UseCoopInstancedItems: formerly local throwing stubs here --
 // src/kexgame/p_client.ts has landed with real exports; see this file's own
 // header, "STUB SWAP: respawn / P_UseCoopInstancedItems".
-
-/** `extern float xyspeed;` (p_view.cpp) -- see file header. */
-let xyspeed = 0;
 
 // ---------------------------------------------------------------------------
 // target_temp_entity
@@ -1318,7 +1315,7 @@ export const target_camera_dummy_think: ThinkFn = RegisterThink("target_camera_d
 
   // bit of a hack, but this will let the dummy move like a player
   self.client = self.owner.client;
-  xyspeed = Math.sqrt(self.velocity[0] * self.velocity[0] + self.velocity[1] * self.velocity[1]);
+  SetXyspeed(Math.sqrt(self.velocity[0] * self.velocity[0] + self.velocity[1] * self.velocity[1]));
   G_SetClientFrame(self);
   self.client = null;
 

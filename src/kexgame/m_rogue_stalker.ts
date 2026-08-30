@@ -148,6 +148,8 @@ import { M_ChangeYaw } from "./m_move";
 import { Gtime_add, Gtime_from_ms, Gtime_from_sec, type GTime } from "./gtime";
 import { frandom, irandom, crandom } from "./q_std";
 import { PredictAim, M_CalculatePitchToFire, blocked_checkplat } from "./m_supertank";
+import { blocked_checkjump as RealBlockedCheckjump, monster_jump_finished as RealMonsterJumpFinished } from "./rogue/g_rogue_newai";
+import { monster_fire_blaster2 as RealMonsterFireBlaster2 } from "./rogue/g_rogue_monster";
 
 // ---------------------------------------------------------------------------
 // m_rogue_stalker.h frame-index enum (104 lines; anonymous enum, declaration
@@ -314,22 +316,23 @@ function must<T>(fn: T | null, name: string, self: EdictT): T {
 }
 
 // ---------------------------------------------------------------------------
-// Stubbed: owned by the concurrent rogue-SYSTEMS porting unit (see header).
+// blocked_checkjump/monster_jump_finished/monster_fire_blaster2: formerly
+// local throwing stubs here ("owned by the concurrent rogue-SYSTEMS
+// porting unit") -- rogue/g_rogue_newai.ts and rogue/g_rogue_monster.ts
+// have since landed with real, exported versions of all three; swapped
+// for delegating imports (2026-08-30 stale-comment sweep).
 // ---------------------------------------------------------------------------
 
-/** rogue/g_rogue_newai.cpp:123. */
-function blocked_checkjump(_self: EdictT, _dist: number): BlockedJumpResultT {
-  throw new Error("blocked_checkjump: not yet ported (rogue mission-pack content, see rogue/g_rogue_newai.cpp:123)");
+function blocked_checkjump(self: EdictT, dist: number): BlockedJumpResultT {
+  return RealBlockedCheckjump(self, dist);
 }
 
-/** rogue/g_rogue_newai.cpp:101. */
-function monster_jump_finished(_self: EdictT): boolean {
-  throw new Error("monster_jump_finished: not yet ported (rogue mission-pack content, see rogue/g_rogue_newai.cpp:101)");
+function monster_jump_finished(self: EdictT): boolean {
+  return RealMonsterJumpFinished(self);
 }
 
-/** m_medic.ts:810-812 verbatim (rogue/g_rogue_monster.cpp:7 + rogue/g_rogue_newweap.cpp:1374). */
-function monster_fire_blaster2(self: EdictT, _start: Vec3, _dir: Vec3, _damage: number, _speed: number, _flashtype: MonsterMuzzleflashIdT, _effect: EffectsT): void {
-  throw new Error(`monster_fire_blaster2: not yet ported (rogue mission pack, see rogue/g_rogue_monster.cpp:7 + rogue/g_rogue_newweap.cpp:1374) -- called against ${self.classname ?? "?"}`);
+function monster_fire_blaster2(self: EdictT, start: Vec3, dir: Vec3, damage: number, speed: number, flashtype: MonsterMuzzleflashIdT, effect: EffectsT): void {
+  RealMonsterFireBlaster2(self, start, dir, damage, speed, flashtype, effect);
 }
 
 // ---------------------------------------------------------------------------

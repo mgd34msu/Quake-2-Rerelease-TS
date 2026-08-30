@@ -133,21 +133,35 @@ export function SV_CheckForSavegame(): void {
   // get configstrings and areaportals
   SV_ReadLevelFile(); // sv_ccmds.ts pending stub -- throws if a savegame is actually found; see report
 
-  if (!sv.loadgame) {
-    // coming back to a level after being in a different level, so run it
-    // for ten seconds
+  // q2repro save.c's SV_CheckForSavegame(cmd): LOAD_NORMAL (loading an
+  // explicit savegame via the `load` command -- sv.loadgame is set true by
+  // SV_Loadgame_f's own SV_Map(false, svs.mapcmd, true) call) runs only 2
+  // frames ("called from SV_Loadgame_f" -- the savegame already captured a
+  // fully-settled state, so this just lets one-shot post-load bookkeeping
+  // run). LOAD_LEVEL_START (sv.loadgame false -- a normal level transition
+  // reading back the autosave written at this level's own start) runs a
+  // full ten seconds' worth so monsters/thinks that depend on elapsed time
+  // catch up naturally. Vanilla's sv_init.c has no LOAD_NORMAL case at all
+  // (always 0 frames when sv.loadgame is true); this distinction is a
+  // q2repro-era addition -- ARCHITECTURE.md names q2repro the reference
+  // specification for engine behavior generally, and this file already
+  // family-dispatches other engine behavior (SV_ComputeFramerate) the same
+  // way against the same reference.
+  const frames = sv.loadgame ? 2 : 10 * sv.framerate;
 
-    // rlava2 was sending too many lightstyles, and overflowing the reliable
-    // data. temporarily changing the server state to loading prevents these
-    // from being passed down.
-    const previousState = sv.state;
-    sv.state = ServerStateT.ss_loading;
-    const ge = requireGe();
-    // q2repro's save.c: `frames = 10 * SV_FRAMERATE;` -- run ten seconds'
-    // worth of ticks at the server's logic rate (100 at today's fixed 10Hz).
-    for (let i = 0; i < 10 * sv.framerate; i++) ge.RunFrame();
-    sv.state = previousState;
-  }
+  // rlava2 was sending too many lightstyles, and overflowing the reliable
+  // data. temporarily changing the server state to loading prevents these
+  // from being passed down. Applied to both branches here (q2repro's own
+  // SV_CheckForSavegame doesn't carry this trick at all, but it is
+  // unconditionally safe protective behavior against exactly the kind of
+  // reliable-buffer overflow the SZ_GetSpace investigation in
+  // .orch/followups.md is about) -- vanilla only guards the ten-second
+  // branch since it never ran the 2-frame one at all.
+  const previousState = sv.state;
+  sv.state = ServerStateT.ss_loading;
+  const ge = requireGe();
+  for (let i = 0; i < frames; i++) ge.RunFrame();
+  sv.state = previousState;
 }
 
 /*

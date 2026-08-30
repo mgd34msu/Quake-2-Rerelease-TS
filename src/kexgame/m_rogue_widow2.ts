@@ -200,6 +200,7 @@ import { frandom, irandom, clamp } from "./q_std";
 import { PredictAim } from "./m_supertank";
 import { realrange, M_SlotsLeft, PickCoopTarget, FindSpawnPoint, CreateGroundMonster, SpawnGrow_Spawn } from "./m_medic";
 import { monsterFlashOffset as monsterFlashOffsetTable } from "./m_flash";
+import { monster_fire_tracker as RealMonsterFireTracker, monster_fire_heatbeam as RealMonsterFireHeatbeam } from "./rogue/g_rogue_monster";
 
 // ---------------------------------------------------------------------------
 // m_rogue_widow2.h frame-index enum (126 entries; anonymous enum,
@@ -558,17 +559,18 @@ function WidowPowerups(self: EdictT): void {
 }
 
 // ---------------------------------------------------------------------------
-// monster_fire_tracker / monster_fire_heatbeam -- genuinely out-of-scope
-// stubs (rogue weapons files, see file header). Matches m_medic.ts's own
-// `monster_fire_blaster2` stub idiom exactly.
+// monster_fire_tracker / monster_fire_heatbeam: formerly local throwing
+// stubs here (genuinely out-of-scope at the time) -- rogue/g_rogue_monster.ts
+// has since landed with real, exported versions of both; swapped for
+// delegating imports (2026-08-30 stale-comment sweep).
 // ---------------------------------------------------------------------------
 
-function monster_fire_tracker(self: EdictT, _start: Vec3, _dir: Vec3, _damage: number, _speed: number, _enemy: EdictT | null, _flashtype: MonsterMuzzleflashIdT): void {
-  throw new Error(`monster_fire_tracker: not yet ported (rogue mission pack, see rogue/g_rogue_monster.cpp:13 + rogue/g_rogue_newweap.cpp) -- called against ${self.classname ?? "?"}`);
+function monster_fire_tracker(self: EdictT, start: Vec3, dir: Vec3, damage: number, speed: number, enemy: EdictT | null, flashtype: MonsterMuzzleflashIdT): void {
+  RealMonsterFireTracker(self, start, dir, damage, speed, enemy, flashtype);
 }
 
-function monster_fire_heatbeam(self: EdictT, _start: Vec3, _dir: Vec3, _offset: Vec3, _damage: number, _kick: number, _flashtype: MonsterMuzzleflashIdT): void {
-  throw new Error(`monster_fire_heatbeam: not yet ported (rogue mission pack, see rogue/g_rogue_monster.cpp:19 + rogue/g_rogue_newweap.cpp:1297) -- called against ${self.classname ?? "?"}`);
+function monster_fire_heatbeam(self: EdictT, start: Vec3, dir: Vec3, offset: Vec3, damage: number, kick: number, flashtype: MonsterMuzzleflashIdT): void {
+  RealMonsterFireHeatbeam(self, start, dir, offset, damage, kick, flashtype);
 }
 
 // ---------------------------------------------------------------------------

@@ -65,16 +65,13 @@
 // n, v, k)`) instead reassign: `v = SlideClipVelocity(v, n, k)`.
 //
 // ============================================================================
-// G_AddBlend -- ported here (not q_std.ts), per q_std.ts's own deferred note
+// G_AddBlend -- now in q_std.ts (2026-08-30 cleanup sweep)
 // ============================================================================
-// q_std.ts's file header explicitly defers `G_AddBlend` ("NOT ported here...
-// will be ported alongside whichever kex unit needs kex's own copy (p_view/
-// p_hud screen-blend code)"). `PM_ScreenEffects` below is exactly that first
-// real call site. This unit's file list is fixed to
-// bg_local.ts/p_move.ts/the test file only, so `G_AddBlend` is ported as a
-// local, non-exported helper in THIS file (q_std.h:154-166) rather than
-// edited into q_std.ts; a future unit that also needs it (p_view.ts) should
-// move it to q_std.ts and import from there instead of copying it again.
+// Previously ported as a local, non-exported copy in this file (q_std.h
+// deferred it; this unit's file list was fixed to bg_local.ts/p_move.ts/the
+// test file only). p_view.ts later needed the same function and carried its
+// own identical local copy for the same reason. Consolidated into q_std.ts
+// per both files' header notes; imported from there now.
 //
 // ============================================================================
 // PRESERVED QUIRKS (bug-for-bug, cited)
@@ -137,7 +134,7 @@
 // not silently "improved".
 
 import { vec3, VectorCopy, type Vec3 } from "../shared/math";
-import { PITCH, YAW, ROLL, clamp } from "./q_std";
+import { PITCH, YAW, ROLL, clamp, G_AddBlend } from "./q_std";
 import {
   vec3_add,
   vec3_sub,
@@ -157,7 +154,6 @@ import {
   type KexTraceT,
   type KexTouchListT,
   type KexCsurfaceT,
-  type Vec4,
   ContentsT,
   MASK_SOLID,
   MASK_DEADSOLID,
@@ -194,22 +190,6 @@ const pm_laddermod = 0.5;
 
 const MIN_STEP_NORMAL = 0.7; // p_move.cpp:265 -- can't step up onto very steep slopes
 const MAX_CLIP_PLANES = 5; // p_move.cpp:266
-
-// ---------------------------------------------------------------------------
-// G_AddBlend (q_std.h:154-166) -- see file header "G_AddBlend" note.
-// ---------------------------------------------------------------------------
-
-function G_AddBlend(r: number, g: number, b: number, a: number, v_blend: Vec4): void {
-  if (a <= 0) return;
-
-  const a2 = v_blend[3] + (1 - v_blend[3]) * a; // new total alpha
-  const a3 = v_blend[3] / a2; // fraction of color from old
-
-  v_blend[0] = v_blend[0] * a3 + r * (1 - a3);
-  v_blend[1] = v_blend[1] * a3 + g * (1 - a3);
-  v_blend[2] = v_blend[2] * a3 + b * (1 - a3);
-  v_blend[3] = a2;
-}
 
 // ---------------------------------------------------------------------------
 // G_FixStuckObject_Generic (p_move.cpp:9-154)

@@ -74,7 +74,9 @@
 //     stub" rule, these are left at the exact zero/`-1` value the C
 //     source's own `memset`/no-op-default state already produces before
 //     attempting to fill them, cited here rather than guessed at -- same
-//     shape as g_combat.ts's own dropped `STAT_HIT_MARKER` write.
+//     shape g_combat.ts's `STAT_HIT_MARKER` write used to have before this
+//     enum landed (restored in the 2026-08-30 cleanup sweep once the real
+//     stat index below existed to write to).
 //   - STAT_SELECTED_ICON / STAT_KEY_A/B/C: also `itemlist[]`-dependent
 //     (icon lookup by id / an `IF_KEY`-flag scan over the whole itemlist)
 //     and reached whenever `pers.selected_item !== IT_NULL` / always (key
@@ -122,11 +124,10 @@
 // "self-contained, port it here" precedent g_combat.ts set for
 // ArmorIndex/PowerArmorType, applied throughout this port line since)
 // ============================================================================
-//   - PlayerTrail_Destroy (p_trail.cpp:65-75): pure `g_edicts`/`classname`/
-//     `G_FreeEdict` scan; no `player_trail`-classname entity is ever
-//     spawned anywhere in this port line yet (`PlayerTrail_Add`/`_Spawn`,
-//     p_trail.cpp, not ported), so the free-branch is unreachable today but
-//     ported for real rather than assumed away.
+//   - PlayerTrail_Destroy (p_trail.cpp:65-75): this file used to carry an
+//     independent, identical copy (ported before p_trail.ts existed for
+//     real). p_trail.ts has since landed for real; canonicalized there in
+//     the 2026-08-30 cleanup sweep -- this file now imports/re-exports it.
 //   - G_CheckInfiniteAmmo (p_weapon.cpp:25-31): pure cvar + item-flags read.
 //
 // ============================================================================
@@ -205,10 +206,11 @@ import { irandom } from "./q_std";
 import { SpawnFlags_has } from "./spawnflags";
 import { ArmorIndex, PowerArmorType } from "./g_combat";
 import { G_TeamplayEnabled } from "./p_view";
-import { GetItemByIndex } from "./g_items";
+import { GetItemByIndex, itemlist } from "./g_items";
 import { CTFCalcRankings, CTFCalcScores, CTFScoreboardMessage, SetCTFStats } from "./ctf/g_ctf";
 import { PMenu_Close } from "./ctf/p_ctf_menu";
 import { respawn, P_UseCoopInstancedItems } from "./p_client";
+import { PlayerTrail_Destroy } from "./p_trail";
 
 // bg_local.h's `LAYOUTS_*` bit flags live in game.h (kexapi/game.ts) as
 // `LayoutFlagsT`, not bg_local.h itself.
@@ -431,8 +433,18 @@ export function G_CheckInfiniteAmmo(item: GitemT): boolean {
 // file's own header for the full consolidation inventory).
 // ---------------------------------------------------------------------------
 
+/** p_hud.cpp:315-326: strip players of all keys between coop units. WAS a
+ *  throwing stub (itemlist IF_KEY scan needed g_items.ts) --
+ *  src/kexgame/g_items.ts has since landed with a real, exported
+ *  `itemlist`; ported for real here (2026-08-30 stale-comment sweep). */
 function stripCoopKeys(): void {
-  throw new Error("BeginIntermission coop key-strip: not yet ported -- itemlist IF_KEY scan needs g_items.ts (see p_hud.cpp:322-327)");
+  for (let i = 0; i < game.maxclients; i++) {
+    const client = g_edicts[1 + i];
+    if (client === undefined || !client.inuse || client.client === null) continue;
+    for (let n = 0; n < ItemIdT.IT_TOTAL; n++) {
+      if ((itemlist[n]?.flags ?? 0) & ItemFlagsT.IF_KEY) client.client.pers.inventory[n] = 0;
+    }
+  }
 }
 
 /** `GetItemByIndex(id)`: REAL import from g_items.ts below. Wraps it to
@@ -802,34 +814,13 @@ export function G_SetSpectatorStats(ent: EdictT): void {
 }
 
 // ---------------------------------------------------------------------------
-// PlayerTrail_Destroy -- ported here, not a stub (see file header)
+// PlayerTrail_Destroy -- canonicalized on p_trail.ts (2026-08-30 cleanup
+// sweep). p_trail.ts has since landed for real; this file no longer carries
+// its own copy. Re-exported so p_client.ts's existing `import { ...
+// PlayerTrail_Destroy } from "./p_hud"` keeps working unchanged.
 // ---------------------------------------------------------------------------
 
-/** p_trail.cpp:65-75: `void PlayerTrail_Destroy(edict_t *player)`. */
-export function PlayerTrail_Destroy(player: EdictT | null): void {
-  for (let i = 0; i < globals.num_edicts; i++) {
-    const e = g_edicts[i];
-    if (e !== undefined && e.classname === "player_trail") {
-      if (player === null || e.owner === player) G_FreeEdict(e);
-    }
-  }
-
-  if (player !== null) {
-    const client = player.client;
-    if (client !== null) {
-      client.trail_head = null;
-      client.trail_tail = null;
-    }
-  } else {
-    for (let i = 0; i < game.maxclients; i++) {
-      const cl = game.clients[i];
-      if (cl !== undefined) {
-        cl.trail_head = null;
-        cl.trail_tail = null;
-      }
-    }
-  }
-}
+export { PlayerTrail_Destroy } from "./p_trail";
 
 // ---------------------------------------------------------------------------
 // MoveClientToIntermission

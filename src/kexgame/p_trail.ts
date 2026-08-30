@@ -24,30 +24,14 @@
 // an "Init".
 //
 // ============================================================================
-// PlayerTrail_Destroy: REAL DUPLICATE, not a stub -- already landed in
-// p_hud.ts under the "self-contained, port it here" precedent
+// PlayerTrail_Destroy: canonicalized HERE (2026-08-30 cleanup sweep)
 // ============================================================================
-// p_hud.ts's own file header ("REAL despite living in another not-yet-landed
-// C++ file") already ported a real, non-stub `PlayerTrail_Destroy` (pure
-// `g_edicts`/`classname`/`G_FreeEdict` scan, no dependency on this file
-// existing), and p_client.ts already imports THAT copy
-// (`import { ... PlayerTrail_Destroy } from "./p_hud"`). This unit's own
-// brief asked for a "p_view.ts reconciliation" step -- checking p_view.ts's
-// header for a local real PlayerTrail_Destroy implementation to fold into
-// this file and re-point at a one-line import swap. That premise does not
-// hold: p_view.ts has ZERO references to PlayerTrail anywhere (grepped;
-// confirmed against p_hud.ts, which is the actual file carrying the real
-// implementation, not p_view.ts). p_hud.ts is explicitly off-limits for
-// editing in this unit's own file list (no reconciliation exception was
-// granted for it, unlike the one-line exception p_view.ts was granted) --
-// so p_hud.ts's copy is left exactly as-is, and this file's own
-// `PlayerTrail_Destroy` below is a second, independent duplicate: this
-// port line's own established convention (see g_utils.ts's G_ShouldPlayersCollide
-// stub-swap note: "duplicate the tiny unexported helper, don't reach across
-// files for it" when no real, sanctioned, two-way import relationship
-// already exists between the two files). p_trail.ts and p_hud.ts have no
-// such relationship. Both copies are real, bug-for-bug ports of
-// p_trail.cpp:70-81 -- reported as a finding, not a defect.
+// p_hud.ts used to carry an independent, identical copy of this function
+// (ported before this file existed for real, under the "self-contained,
+// port it here" precedent). Now that p_trail.ts is this function's real
+// C++ home and has landed, p_hud.ts imports/re-exports it from here instead
+// of keeping its own copy; p_client.ts's existing
+// `import { ... PlayerTrail_Destroy } from "./p_hud"` is unaffected.
 //
 // ============================================================================
 // IMPORT: `visible` from g_ai.ts -- real, sanctioned, two-way cycle
