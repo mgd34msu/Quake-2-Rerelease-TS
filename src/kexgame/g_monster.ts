@@ -111,14 +111,41 @@
 // deleted and replaced with a shared import.
 //
 // ============================================================================
-// CROSS-DEPENDENCIES NOT YET PORTED
+// STUB SWAP: fire_bullet/fire_shotgun/fire_blaster/fire_grenade/fire_rocket/
+// fire_rail/fire_bfg are now real imports from src/kexgame/g_weapon.ts
+// ============================================================================
+// This file's own monster_fire_* wrapper family (monster_fire_bullet/
+// monster_fire_shotgun/monster_fire_blaster/monster_fire_grenade/
+// monster_fire_rocket/monster_fire_railgun/monster_fire_bfg) used to call
+// seven local, unexported throwing stubs for these names, each citing
+// "pending g_weapon.ts, see g_weapon.cpp:<line>". src/kexgame/g_weapon.ts
+// has now landed with real exports of all seven; this file's own seven
+// local stub definitions are DELETED and replaced with `import {
+// fire_bullet, fire_shotgun, fire_blaster, fire_grenade, fire_rocket,
+// fire_rail, fire_bfg } from "./g_weapon"`. None of these seven names were
+// ever registered in the save registry from this file (they're plain
+// monster_fire_* helper calls, not THINK/TOUCH/USE handlers), so there is
+// no registry duplicate-name collision to resolve.
+//
+// `fire_flechette` is DIFFERENT and stays a local, unexported throwing
+// stub here: g_weapon.ts's own file header confirms `fire_flechette`'s
+// real body is NOT in g_weapon.cpp at all (grepped the whole 1,216-line
+// file -- zero matches) -- it lives in the ROGUE mission pack's
+// rogue/g_rogue_newweap.cpp:41, out of this port line's current scope,
+// same treatment as this file's own `cleanupHealTarget` stub below. This
+// file's citation is corrected from the old (inaccurate) "pending
+// g_weapon.ts, see g_local.h:2530" to the real ROGUE owner, since
+// g_weapon.ts landing does NOT satisfy it.
+//
+// ============================================================================
+// CROSS-DEPENDENCIES STILL NOT YET PORTED
 // ============================================================================
 // g_monster.cpp calls into several other, not-yet-ported C++ files (grepped
 // quake2-rerelease-dll/rerelease/*.cpp for each symbol's real definition,
 // not just its g_local.h declaration):
-//   - fire_bullet/fire_shotgun/fire_blaster/fire_flechette/fire_grenade/
-//     fire_rocket/fire_rail/fire_bfg -> g_weapon.cpp (future g_weapon.ts).
-//     Reached only through this file's own monster_fire_* wrappers.
+//   - fire_flechette                 -> rogue/g_rogue_newweap.cpp:41 (ROGUE
+//     mission pack; out of this port line's current scope -- see the
+//     "STUB SWAP" note just above).
 //   - FindItemByClassname/Drop_Item  -> g_items.cpp (future g_items.ts).
 //     FindItemByClassname is unreachable today (see the `st` note above);
 //     Drop_Item is reached by monster_death_use whenever a dying monster
@@ -126,11 +153,11 @@
 //   - cleanupHealTarget              -> m_medic.cpp (ROGUE mission pack;
 //     out of this port line's current scope). Reached only by
 //     M_ProcessPain's AI_MEDIC branch.
-// Each is a local, unexported (fire_*/FindItemByClassname/Drop_Item/
-// cleanupHealTarget) throwing stub, naming itself and the file that owns
-// the real implementation, per PORTING.md's "a function you cannot port
-// faithfully is a reported deviation, not a TODO". None of these are
-// exercised by this unit's own test suite (its fixtures stick to
+// Each is a local, unexported (fire_flechette/FindItemByClassname/
+// Drop_Item/cleanupHealTarget) throwing stub, naming itself and the file
+// that owns the real implementation, per PORTING.md's "a function you
+// cannot port faithfully is a reported deviation, not a TODO". None of
+// these are exercised by this unit's own test suite (its fixtures stick to
 // M_CheckGround/M_CatagorizePosition/M_WorldEffects/M_droptofloor/
 // M_ProcessPain/M_SetAnimation/monster_death_use, per this unit's brief).
 //
@@ -315,6 +342,7 @@ import { G_FixStuckObject_Generic } from "./p_move";
 import type { StuckObjectTraceFn } from "./bg_local";
 import { RegisterThink, RegisterUse } from "./g_save_registry";
 import { FoundTarget, M_CheckAttack } from "./g_ai";
+import { fire_bullet, fire_shotgun, fire_blaster, fire_grenade, fire_rocket, fire_rail, fire_bfg } from "./g_weapon";
 
 // ---------------------------------------------------------------------------
 // small local helpers -- see file header for each
@@ -2020,60 +2048,14 @@ export function stationarymonster_start(self: EdictT): void {
 }
 
 // ---------------------------------------------------------------------------
-// CROSS-DEPENDENCIES NOT YET PORTED -- see file header
+// CROSS-DEPENDENCIES STILL NOT YET PORTED -- see file header ("STUB SWAP")
 // ---------------------------------------------------------------------------
-
-function fire_bullet(self: EdictT, _start: Vec3, _aimdir: Vec3, _damage: number, _kick: number, _hspread: number, _vspread: number, _mod: ModT): void {
-  throw new Error(`fire_bullet: not yet ported (pending g_weapon.ts, see g_weapon.cpp:328) -- called against ${self.classname ?? "?"}`);
-}
-
-function fire_shotgun(
-  self: EdictT,
-  _start: Vec3,
-  _aimdir: Vec3,
-  _damage: number,
-  _kick: number,
-  _hspread: number,
-  _vspread: number,
-  _count: number,
-  _mod: ModT,
-): void {
-  throw new Error(`fire_shotgun: not yet ported (pending g_weapon.ts, see g_weapon.cpp:340) -- called against ${self.classname ?? "?"}`);
-}
-
-function fire_blaster(self: EdictT, _start: Vec3, _dir: Vec3, _damage: number, _speed: number, _effect: EffectsT, _mod: ModT): void {
-  throw new Error(`fire_blaster: not yet ported (pending g_weapon.ts, see g_weapon.cpp:382) -- called against ${self.classname ?? "?"}`);
-}
+// fire_bullet/fire_shotgun/fire_blaster/fire_grenade/fire_rocket/fire_rail/
+// fire_bfg: formerly seven local throwing stubs here -- now real imports
+// from src/kexgame/g_weapon.ts (see this file's own header, "STUB SWAP").
 
 function fire_flechette(self: EdictT, _start: Vec3, _dir: Vec3, _damage: number, _speed: number, _kick: number): void {
-  throw new Error(`fire_flechette: not yet ported (pending g_weapon.ts, see g_local.h:2530) -- called against ${self.classname ?? "?"}`);
-}
-
-function fire_grenade(
-  self: EdictT,
-  _start: Vec3,
-  _aimdir: Vec3,
-  _damage: number,
-  _speed: number,
-  _timer: GTime,
-  _damage_radius: number,
-  _right_adjust: number,
-  _up_adjust: number,
-  _monster: boolean,
-): void {
-  throw new Error(`fire_grenade: not yet ported (pending g_weapon.ts, see g_weapon.cpp:537) -- called against ${self.classname ?? "?"}`);
-}
-
-function fire_rocket(self: EdictT, _start: Vec3, _dir: Vec3, _damage: number, _speed: number, _damage_radius: number, _radius_damage: number): EdictT {
-  throw new Error(`fire_rocket: not yet ported (pending g_weapon.ts, see g_weapon.cpp:701) -- called against ${self.classname ?? "?"}`);
-}
-
-function fire_rail(self: EdictT, _start: Vec3, _aimdir: Vec3, _damage: number, _kick: number): void {
-  throw new Error(`fire_rail: not yet ported (pending g_weapon.ts, see g_weapon.cpp:835) -- called against ${self.classname ?? "?"}`);
-}
-
-function fire_bfg(self: EdictT, _start: Vec3, _dir: Vec3, _damage: number, _speed: number, _damage_radius: number): void {
-  throw new Error(`fire_bfg: not yet ported (pending g_weapon.ts, see g_weapon.cpp:1140) -- called against ${self.classname ?? "?"}`);
+  throw new Error(`fire_flechette: not yet ported (ROGUE mission pack, see rogue/g_rogue_newweap.cpp:41 -- not g_weapon.cpp, which has no definition of this symbol) -- called against ${self.classname ?? "?"}`);
 }
 
 // FoundTarget/M_CheckAttack: formerly local throwing stubs here (see this

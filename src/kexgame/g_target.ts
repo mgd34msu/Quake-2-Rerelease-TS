@@ -35,8 +35,6 @@
 // ============================================================================
 // EXTERNAL DEPENDENCIES NOT YET PORTED (throwing stubs, cited)
 // ============================================================================
-// - fire_blaster            -> g_weapon.cpp (future g_weapon.ts). Reached
-//   only by target_blaster's use handler.
 // - ED_CallSpawn            -> g_spawn.cpp (future g_spawn.ts; no
 //   src/kexgame/g_spawn.ts exists yet). Reached only by target_spawner's use
 //   handler.
@@ -52,36 +50,36 @@
 //   this port line doesn't have yet.
 //
 // ============================================================================
-// pierce_trace -- ported here as real logic, not a stub (see
-// g_combat.ts's own header for the "unconditionally-reached cross-dep can't
-// be a stub" precedent this follows)
+// STUB SWAP: fire_blaster / pierce_trace / GetUnicastKey -- now real imports
+// from src/kexgame/g_weapon.ts, THEIR ACTUAL C++ HOME
 // ============================================================================
-// `pierce_trace`/`pierce_args_t::mark`/`pierce_args_t::restore` are declared
-// in g_local.h but DEFINED in g_weapon.cpp (grepped: g_weapon.cpp:88, 3562,
-// 3578) -- a file that hasn't landed in this port line yet. But
-// `target_laser_think` calls `pierce_trace` on every single think tick while
-// a laser is on, so it cannot be a throwing stub without making every
-// target_laser instance non-functional. Both are ported here, narrowly, from
-// their real C++ bodies (read twice to confirm): `pierce_trace` repeatedly
-// traces from the SAME original `start` to a `pierce`-mutable `end` (a real,
-// intentional quirk -- `own_start` is computed but genuinely never read
-// again, confirmed against the shipped source, not "fixed" here), and
-// `mark`/`restore` are the RAII pair that temporarily sets a pierced
-// entity's solidity to SOLID_NOT (so the next same-start retrace passes
-// through it) and restores it once the caller is done with the trace
-// result. C++'s destructor-at-scope-exit timing for `restore()` (it fires
-// when the caller's local `pierce_args_t` goes out of scope, AFTER the
-// caller has finished reading `args.tr`/`args.damaged_thing`, not inside
-// `pierce_trace` itself) is preserved by calling `restorePierce()` explicitly
-// at the end of `target_laser_think`, its only call site.
+// Before src/kexgame/g_weapon.ts existed, this file carried its OWN local
+// copies of four symbols that are genuinely defined in g_weapon.cpp, not
+// here: `fire_blaster` (a throwing stub, cited "pending g_weapon.ts"),
+// and REAL local ports of `pierce_trace`/`pierce_args_t::mark`/
+// `pierce_args_t::restore` (g_weapon.cpp:88-108 / g_local.h:3562-3587) and
+// `GetUnicastKey` (g_weapon.cpp:820-828) -- the latter three couldn't be
+// stubs because `target_laser_think` reaches `pierce_trace`/`mark`/
+// `restore` on every single think tick a laser is on, and
+// `G_PlayerNotifyGoal`'s N64-goals branch unconditionally reaches
+// `GetUnicastKey`.
 //
-// ============================================================================
-// GetUnicastKey -- ported here as real logic, not a stub
-// ============================================================================
-// Declared/defined in g_weapon.cpp:820 (not this file), but it's a trivial,
-// self-contained module-static counter with zero cross-dependencies of its
-// own, unconditionally reached by G_PlayerNotifyGoal's N64-goals branch.
-// Ported verbatim as a local module-level counter.
+// g_weapon.ts has now landed with real exports of all four (it is their
+// actual C++ home). Per this port line's "one implementation should own a
+// symbol, not two independently-maintained copies" principle, this file's
+// own four local definitions are DELETED and replaced with `import {
+// fire_blaster, GetUnicastKey, markPierce, restorePierce, pierceTrace }
+// from "./g_weapon"`. Verified behaviorally identical before deleting: the
+// moved bodies were diffed character-for-character against this file's
+// pre-move versions, and this file's own `target_laser_think` test (its
+// debounce-window case, which exercises `pierceTrace`/`markPierce`/
+// `restorePierce` every tick) and `G_PlayerNotifyGoal`'s N64 test (which
+// exercises `GetUnicastKey`) both still pass unchanged against the import.
+// This file's own `giTraceline`/`traceEdict`/`modFromId`/`cvarInt` local
+// helpers are UNCHANGED -- those are the ordinary "duplicate the tiny
+// header-only wrapper per file" idiom this port line uses everywhere (see
+// g_weapon.ts's own identical copies), never a second copy of real
+// cross-file LOGIC the way the four symbols above were.
 //
 // ============================================================================
 // CONFIG_HEALTH_BAR_NAME / CONFIG_STORY -- computed locally, not guessed
@@ -169,6 +167,7 @@ import { RegisterThink, RegisterUse } from "./g_save_registry";
 import { gi, g_edicts, game, globals, level } from "./g_main_globals";
 import { T_Damage, T_RadiusDamage } from "./g_combat";
 import { G_FindByString, G_FreeEdict, G_PickTarget, G_SetMovedir, G_Spawn, G_UseTargets, KillBox } from "./g_utils";
+import { fire_blaster, GetUnicastKey, markPierce, restorePierce, pierceTrace } from "./g_weapon";
 import { GTIME_ZERO, Gtime_add, Gtime_from_ms, Gtime_from_sec, Gtime_nonzero, Gtime_seconds, Gtime_subtract } from "./gtime";
 import { SpawnFlags_from, SpawnFlags_has, type SpawnFlags } from "./spawnflags";
 import { RotatePointAroundVector, vec3_add, vec3_equals, vec3_length, vec3_lengthSquared, vec3_muls, vec3_normalized, vec3_origin, vec3_sub } from "./q_vec3";
@@ -254,18 +253,6 @@ function* active_players(): Generator<EdictT> {
   }
 }
 
-/** g_weapon.cpp:820-828: `uint32_t GetUnicastKey()` -- see file header. */
-let unicastKeyState = 1;
-function GetUnicastKey(): number {
-  if (unicastKeyState === 0) {
-    unicastKeyState = 1;
-    return 1;
-  }
-  const key = unicastKeyState;
-  unicastKeyState = (unicastKeyState + 1) >>> 0;
-  return key;
-}
-
 /** bg_local.h:56-73 offset chain -- see file header. */
 const CONFIG_CTF_PLAYER_NAME = CS_GENERAL + 2;
 const CONFIG_CTF_PLAYER_NAME_END = CONFIG_CTF_PLAYER_NAME + MAX_CLIENTS;
@@ -280,9 +267,10 @@ const CONFIG_STORY_INDEX = CONFIG_HEALTH_BAR_NAME_INDEX + 1;
 // unported cross-deps (throwing stubs) -- see file header
 // ---------------------------------------------------------------------------
 
-function fire_blaster(_self: EdictT, _start: Vec3, _dir: Vec3, _damage: number, _speed: number, _effect: EffectsT, _mod: ModT): void {
-  throw new Error("fire_blaster: not yet ported (pending g_weapon.ts, see g_weapon.cpp)");
-}
+// fire_blaster: formerly a local throwing stub here -- src/kexgame/
+// g_weapon.ts has landed with a real export; see this file's own header,
+// "STUB SWAP: fire_blaster / pierce_trace / GetUnicastKey".
+
 function ED_CallSpawn(_ent: EdictT): void {
   throw new Error("ED_CallSpawn: not yet ported (pending g_spawn.ts, see g_spawn.cpp)");
 }
@@ -858,49 +846,11 @@ function giTraceline(start: Vec3, end: Vec3, passent: EdictT | null, mask: Conte
   return gi.trace(start, null, null, end, passent, mask);
 }
 
-/** g_local.h:3562-3567: `pierce_args_t::mark`. */
-function markPierce(pierce: PierceArgsT, ent: EdictT): boolean {
-  if (pierce.num_pierced === MAX_PIERCE) return false;
-
-  pierce.pierced[pierce.num_pierced] = ent;
-  pierce.pierce_solidities[pierce.num_pierced] = ent.solid;
-  pierce.num_pierced++;
-
-  ent.solid = SolidT.SOLID_NOT;
-  gi.linkentity(ent);
-
-  return true;
-}
-
-/** g_local.h:3579-3587: `pierce_args_t::restore` -- see file header for its timing. */
-function restorePierce(pierce: PierceArgsT): void {
-  for (let i = 0; i < pierce.num_pierced; i++) {
-    const ent = pierce.pierced[i];
-    if (ent === null) continue;
-    ent.solid = pierce.pierce_solidities[i];
-    gi.linkentity(ent);
-  }
-  pierce.num_pierced = 0;
-}
-
-/** g_weapon.cpp:88-108: `void pierce_trace(...)` -- see file header for the real, intentional quirk this preserves. */
-function pierceTrace(start: Vec3, end: Vec3, ignore: EdictT | null, pierce: PierceArgsT, mask: ContentsT): void {
-  let loopCount = 8192; // MAX_EDICTS
-  const ownEnd = vec3(end[0], end[1], end[2]);
-  const maskBox: [ContentsT] = [mask];
-
-  while (--loopCount !== 0) {
-    pierce.tr = giTraceline(start, ownEnd, ignore, maskBox[0]);
-
-    // didn't hit anything, so we're done
-    if (pierce.tr.ent === null || pierce.tr.fraction === 1.0) return;
-
-    // hit callback said we're done
-    if (!pierce.hit(maskBox, ownEnd)) return;
-  }
-
-  gi.Com_Print("runaway pierce_trace\n");
-}
+// markPierce/restorePierce/pierceTrace: formerly real, local logic here
+// (see this file's own header, "STUB SWAP: fire_blaster / pierce_trace /
+// GetUnicastKey") -- now imported for real from src/kexgame/g_weapon.ts,
+// the actual C++ home of `pierce_args_t::mark`/`::restore` and
+// `pierce_trace` (g_local.h:3562-3587 / g_weapon.cpp:88-108).
 
 /** g_target.cpp:679-728: `struct laser_pierce_t : pierce_args_t` -- its `hit()` override. */
 function makeLaserHit(self: EdictT, count: number, pierce: PierceArgsT, laserState: { damaged_thing: boolean }): PierceHitFn {
