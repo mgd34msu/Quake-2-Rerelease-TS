@@ -24,18 +24,24 @@
 // RegisterX wrapper at all.
 //
 // ============================================================================
-// Use_Boss3 -- OUT OF SCOPE, throwing stub, cited
+// Use_Boss3 -- imported from m_boss3.ts, not duplicated
 // ============================================================================
 // `void Use_Boss3(edict_t*, edict_t*, edict_t*)` is forward-declared in this
 // file (m_tank.cpp:1119) immediately before SP_monster_tank_stand assigns it
-// to `self->use`, but its real body lives in m_boss3.cpp (the Jorg/final-
-// boss chain) -- genuinely outside this task's six-monster scope (m_boss3.ts
-// is not one of them and does not exist yet). `monster_tank_stand` is a
-// decorative N64-only entity ("just stands and cycles in one place until
-// targeted, then teleports away") that a mapper must explicitly place and
-// then explicitly `use` to ever reach this code path; nothing in this port
-// line's spawn tables auto-triggers it. Local throwing stub, cited -- a
-// future m_boss3.ts unit should replace it with a real import.
+// to `self->use`, but its real body/definition lives in m_boss3.cpp:14 (the
+// Jorg/final-boss chain) -- this file previously carried a local throwing
+// stub here (cited "a future m_boss3.ts unit should replace it with a real
+// import"). m_boss3.ts now exists and is the canonical owner (it already
+// `RegisterUse("Use_Boss3", ...)`s the real implementation), so this file
+// imports that function directly instead of re-registering a second copy
+// under the same name -- a second `RegisterUse` call for "Use_Boss3" would
+// throw g_save_registry.ts's duplicate-registration error the moment both
+// files load in the same process (which happens today via this file's own
+// `st` import from `./g_spawn`, which statically imports every landed
+// monster file). `monster_tank_stand` is a decorative N64-only entity ("just
+// stands and cycles in one place until targeted, then teleports away") that
+// a mapper must explicitly place and then explicitly `use` to ever reach
+// this code path; nothing in this port line's spawn tables auto-triggers it.
 //
 // ============================================================================
 // EXTERNAL DEPENDENCIES PORTED FOR REAL (imported from m_supertank.ts, this
@@ -95,7 +101,6 @@ import {
   type MmoveEndfuncFn,
   type ModT,
   type ThinkFn,
-  type UseFn,
   MframeT,
   MmoveT,
   MonsterAiFlagsT,
@@ -131,9 +136,9 @@ import {
 import { ThrowGib, ThrowGibs, type GibDefT } from "./g_misc";
 import { monsterFlashOffset } from "./m_flash";
 import { PredictAim, monster_fire_heat, blocked_checkplat } from "./m_supertank";
+import { Use_Boss3 } from "./m_boss3";
 import {
   RegisterThink,
-  RegisterUse,
   RegisterDie,
   RegisterPain,
   RegisterMonsterinfoStand,
@@ -1396,13 +1401,9 @@ export function SP_monster_tank(self: EdictT): void {
 
 // ---------------------------------------------------------------------------
 // monster_tank_stand / Think_TankStand (m_tank.cpp:1119-1164) -- N64-only
-// decorative easter egg. See file header for Use_Boss3's out-of-scope stub.
+// decorative easter egg. See file header for Use_Boss3, imported from
+// m_boss3.ts rather than duplicated.
 // ---------------------------------------------------------------------------
-
-/** `void Use_Boss3(edict_t*, edict_t*, edict_t*);` -- see file header. */
-const Use_Boss3: UseFn = RegisterUse("Use_Boss3", (_ent: EdictT, _other: EdictT | null, _activator: EdictT | null): void => {
-  throw new Error("Use_Boss3: not yet ported (belongs to a future m_boss3.ts unit, see m_tank.cpp:1119)");
-});
 
 const Think_TankStand: ThinkFn = RegisterThink("Think_TankStand", (ent: EdictT): void => {
   if (ent.s.frame === FRAME_stand30) ent.s.frame = FRAME_stand01;

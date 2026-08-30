@@ -445,6 +445,11 @@ import { SP_monster_flyer, SP_monster_kamikaze } from "./m_flyer";
 import { SP_monster_hover } from "./m_hover";
 import { SP_monster_medic } from "./m_medic";
 import { SP_monster_floater } from "./m_float";
+import { SP_monster_boss2 } from "./m_boss2";
+import { SP_monster_boss3_stand } from "./m_boss3";
+import { SP_monster_jorg } from "./m_boss31";
+import { SP_monster_makron } from "./m_boss32";
+import { SP_monster_guncmdr } from "./m_guncmdr";
 import { SP_monster_guardian } from "./m_guardian";
 import { SP_misc_insane } from "./m_insane";
 import { SP_monster_shambler } from "./m_shambler";
@@ -1109,14 +1114,14 @@ export const spawns: readonly SpawnEntry[] = [
   { name: "monster_hover", spawn: SP_monster_hover },
   { name: "monster_mutant", spawn: SP_monster_mutant },
   { name: "monster_supertank", spawn: SP_monster_supertank },
-  { name: "monster_boss2", spawn: unported("SP_monster_boss2", "m_boss2.cpp (future src/kexgame/m_boss2.ts)") },
-  { name: "monster_boss3_stand", spawn: unported("SP_monster_boss3_stand", "m_boss3.cpp (future src/kexgame/m_boss3.ts)") },
-  { name: "monster_jorg", spawn: unported("SP_monster_jorg", "m_boss31.cpp (future src/kexgame/m_boss31.ts)") },
-  { name: "monster_makron", spawn: unported("SP_monster_makron", "m_boss32.cpp (future src/kexgame/m_boss32.ts)") },
+  { name: "monster_boss2", spawn: SP_monster_boss2 },
+  { name: "monster_boss3_stand", spawn: SP_monster_boss3_stand },
+  { name: "monster_jorg", spawn: SP_monster_jorg },
+  { name: "monster_makron", spawn: SP_monster_makron },
   { name: "monster_tank_stand", spawn: SP_monster_tank_stand },
   { name: "monster_guardian", spawn: SP_monster_guardian },
   { name: "monster_arachnid", spawn: SP_monster_arachnid },
-  { name: "monster_guncmdr", spawn: unported("SP_monster_guncmdr", "m_guncmdr.cpp (future src/kexgame/m_guncmdr.ts)") },
+  { name: "monster_guncmdr", spawn: SP_monster_guncmdr },
 
   { name: "monster_commander_body", spawn: SP_monster_commander_body },
 
