@@ -45,6 +45,8 @@ import { SV_Multicast, SV_ClientPrintf, SV_StartSound } from "./sv_send";
 import { SV_ModelIndex } from "./sv_init";
 import { SV_LinkEdict } from "./sv_world";
 import { LoadLegacyGame } from "./bindings/legacy";
+import { LoadKexGame } from "./bindings/kex";
+import { CS_REMAP_OLD, CS_REMAP_RERELEASE } from "../shared/cs_remap";
 
 export const geHolder: { ge: GameExports | null } = { ge: null };
 
@@ -297,9 +299,38 @@ export function SV_InitGameProgs(): void {
   // (FS_Gamedir()) -- there is no DLL to load in this port, so the "game"
   // cvar instead picks which statically-imported GetGameAPI LoadLegacyGame
   // calls (see that function's comment for the structural-typing details of
-  // the mission-pack bridge).
+  // the mission-pack bridge). "kex" (the re-release module, bindings/kex.ts)
+  // is a second peer track alongside the four legacy ones, per
+  // ARCHITECTURE.md's "Core model: one engine, five first-class game
+  // modules".
+  //
+  // FS_Gamedir: "game" doubles as qcommon/files.ts's gamedir cvar (its own
+  // CVAR_LATCH hook calls FS_SetGamedir(existing.string) whenever "game"
+  // changes -- see cvar.ts's Cvar_Set2/Cvar_GetLatchedVars). Setting "game"
+  // to "kex" therefore pushes an (empty, since no baseq2-tree "kex/"
+  // directory exists) search-path layer ahead of the base searchpaths via
+  // FS_AddGameDirectory -- but FS_SetGamedir never tears down
+  // fs_base_searchpaths, so asset reads (maps/models/sounds) fall through to
+  // baseq2 correctly regardless; kex plays on baseq2's assets, matching
+  // ARCHITECTURE.md's "content superset" framing. The only observable side
+  // effect is that FS_Gamedir() (savegame/demo writes) targets
+  // <basedir>/kex/... instead of baseq2/... until an explicit gamedir
+  // override is set -- an accepted, documented transitional gap, not a boot
+  // blocker (FS_CreatePath creates the directory tree on demand). Not
+  // special-cased here: doing so would mean fighting the generic "game"
+  // cvar hook (qcommon/cvar.ts/qcommon/files.ts, shared infra every cvar
+  // relies on) for a cosmetic save-path difference, out of this unit's
+  // scope.
+  //
+  // svs.csr (server.ts's own header comment names this binding as its
+  // intended owner): selects which configstring-index layout ("game
+  // family") is active. SV_ModelIndex/SV_SoundIndex/SV_ImageIndex/
+  // PF_Configstring are already family-aware (keyed off svs.csr.*, not a
+  // hardcoded constant) -- the only missing piece was actually choosing
+  // cs_remap_rerelease for the kex module, done here.
   const gameName = Cvar_VariableString("game");
-  const ge = LoadLegacyGame(gameName);
+  svs.csr = gameName === "kex" ? CS_REMAP_RERELEASE : CS_REMAP_OLD;
+  const ge = gameName === "kex" ? LoadKexGame() : LoadLegacyGame(gameName);
 
   if (ge.apiversion !== GAME_API_VERSION) {
     Com_Error(ERR_DROP, "game is version %i, not %i", ge.apiversion, GAME_API_VERSION);
