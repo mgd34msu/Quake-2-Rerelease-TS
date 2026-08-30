@@ -94,6 +94,7 @@
 
 import type { SizeBuf } from "../sizebuf";
 import type { EntityStateT, PlayerStateT, UsercmdT } from "../../shared/q_shared";
+import type { ClcBatchMoveFrameT } from "./clc_batch_move";
 
 // Added for the 1038 (q2repro) codec (.orch/phase5-design.md phase 5 unit).
 // q2proto's vanilla_server_write_serverdata/q2repro_server_write_serverdata
@@ -208,6 +209,40 @@ export interface ServerDataReadResultT {
   q2proStrafejumpHack?: boolean;
   q2proQwMode?: boolean;
   q2proWaterjumpHack?: boolean;
+}
+
+// Result of q2repro_server_read_batch_move/q2pro_server_read_batch_move
+// (see clc_batch_move.ts's file header for the full citation trail).
+// `lastframe` is -1 for the nodelta variant (clc_q2pro_move_nodelta never
+// carries a delta-source frame number on the wire -- q2repro.c:2681-2682/
+// q2pro.c:2484-2486). `frames` has length `numDups + 1`; `frames[numDups]`
+// is always the newest (just-issued) frame, matching
+// qsrc/q2repro/src/server/user.c's SV_NewClientExecuteMove indexing exactly.
+export interface ClcBatchMoveT {
+  lastframe: number;
+  numDups: number;
+  frames: ClcBatchMoveFrameT[];
+}
+
+// q2proto_clc_userinfo_delta_t (inc/q2proto/q2proto_struct_clc.h:144-150):
+// one key/value pair from a clc_q2pro_userinfo_delta message.
+export interface ClcUserinfoDeltaT {
+  name: string;
+  value: string;
+}
+
+// q2proto_clc_setting_t (inc/q2proto/q2proto_struct_clc.h:136-142): a
+// clc_r1q2_setting index/value pair (qsrc/q2repro/inc/common/protocol.h's
+// clientSetting_t enum -- CLS_NOGUN/CLS_NOBLEND/CLS_RECORDING/
+// CLS_PLAYERUPDATES/CLS_FPS are R1Q2-numbered 0-4; CLS_NOGIBS/CLS_NOFOOTSTEPS/
+// CLS_NOPREDICT/CLS_NOFLARES are Q2PRO-numbered 10-13). Phase-8 interop
+// finding: a real q2repro client sends this immediately after entering the
+// game, before any movement packet -- not predicted by this port's earlier
+// static gap analysis (which only named the batched-move opcodes), caught by
+// a live capture's raw opcode byte instead.
+export interface ClcClientSettingT {
+  index: number;
+  value: number;
 }
 
 export interface ProtocolCodec {
@@ -325,4 +360,29 @@ export interface ProtocolCodec {
   // opcode byte (throwing Com_Error(ERR_DROP, ...) on mismatch, matching the
   // check this replaces in CL_ParseFrame); q2repro is a no-op.
   readPacketEntitiesBegin(): void;
+
+  // ---- Q2PRO/q2repro batched-move client commands (optional: only the two
+  // codecs whose real wire format has these opcodes implement them; vanilla/
+  // r1q2/kexdemo leave both undefined, and sv_user.ts's dispatch treats an
+  // undefined member the same as an unrecognized opcode) ------------------
+
+  // Reads clc_q2pro_move_batched/clc_q2pro_move_nodelta's body (the opcode
+  // byte itself is already consumed by the caller -- see sv_user.ts).
+  // `nodelta` is true for the _nodelta variant (no lastframe on the wire).
+  // `opcodeExtra` is the raw command byte's top 3 bits (`byte >> 5`), which
+  // Q2PRO (protocol 36) uses to smuggle num_dups outside the bitstream --
+  // q2repro.ts's implementation ignores this parameter (1038 reads num_dups
+  // as an explicit stream byte instead; see clc_batch_move.ts's file header).
+  // Throws ClcBatchMoveError (clc_batch_move.ts) on malformed/truncated
+  // input -- callers must catch it and drop only the offending client.
+  readBatchMove?(msg: SizeBuf, nodelta: boolean, opcodeExtra: number): ClcBatchMoveT;
+
+  // Reads clc_q2pro_userinfo_delta's body (opcode byte already consumed).
+  readUserinfoDelta?(msg: SizeBuf): ClcUserinfoDeltaT;
+
+  // Reads clc_r1q2_setting's body (opcode byte already consumed): a plain
+  // i16 index + i16 value pair, byte-identical across every codec that
+  // implements it (q2proto_common_server_read_setting-shaped -- q2repro.c/
+  // q2pro.c both just read two shorts, no protocol-specific branching).
+  readClientSetting?(msg: SizeBuf): ClcClientSettingT;
 }

@@ -104,11 +104,26 @@ run_our_server() {
   wait_for_udp_port "$PORT"
 }
 
+# Sustained-play variant of run_their_client: takes an explicit wall-clock
+# duration (via bash's own `timeout`, which -- unlike the client's own
+# `+wait N` console command -- is real elapsed time regardless of the
+# client's actual frame rate; see .orch/followups.md's TEST-HARNESS NOTE on
+# why a frame-scripted `+wait` cannot be trusted to mean "N real seconds").
+# Callers pass movement commands (`+forward`, `+moveleft`, ...) with NO
+# trailing `+quit` -- the process runs for the FULL duration until this
+# `timeout` SIGTERMs it, continuously connected and moving the whole time.
+run_their_client_sustained() {
+  local logfile="$1" duration="$2"; shift 2
+  ( cd "$Q2REPRO_BUILD" && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy timeout "$duration" \
+    script -qec "./q2repro +set basedir $Q2TS_BASEDIR +set vid_geometry 320x240 +set s_enable 0 $*" \
+    "$logfile" >/dev/null 2>&1 )
+}
+
 # ---------------------------------------------------------------------------
 # Cell (a): their client -> our kex server, protocol 1038
 # ---------------------------------------------------------------------------
 cell_a() {
-  echo "--- cell (a): their client -> our kex server (protocol 1038) ---"
+  echo "--- cell (a): their client -> our kex server (protocol 1038) -- sustained play ---"
   cleanup_procs
   local slog="$LOGDIR/a-ourserver.log" clog="$LOGDIR/a-theirclient.log"
   rm -f "$slog" "$clog"
@@ -118,24 +133,41 @@ cell_a() {
     return
   fi
 
-  run_our_server "$slog" 30 +set game kex +set deathmatch 1 +set port "$PORT" +map q2dm1
+  local play_seconds=15
+  # +set developer 1: turns on Com_DPrintf, including sv_user.ts's
+  # SV_NewClientExecuteMove diagnostic line (phase-8 unit) -- our only
+  # evidence, short of packet-capture, that batched-move packets are being
+  # decoded and applied CONTINUOUSLY over the session, not just once.
+  run_our_server "$slog" $((play_seconds + 20)) +set game kex +set deathmatch 1 +set developer 1 +set port "$PORT" +map q2dm1
   if ! ss -uln 2>/dev/null | grep -q ":$PORT "; then
     note_fail "cell a: our server never bound port $PORT (see $slog)"
     return
   fi
 
-  run_their_client "$clog" "+connect localhost:$PORT +wait 200 +quit"
+  # +forward/+moveleft: real console "button down" commands (the same
+  # mechanism key bindings use), left on for the whole session so the client
+  # generates continuous nonzero-forwardmove/-sidemove batched-move traffic
+  # instead of idle zero-input keepalive packets -- exercises the CM_FORWARD/
+  # CM_SIDE decode paths under real, sustained play, not just a connect.
+  local t0 t1 elapsed
+  t0=$(date +%s)
+  run_their_client_sustained "$clog" "$play_seconds" "+connect localhost:$PORT +forward +moveleft"
+  t1=$(date +%s)
+  elapsed=$((t1 - t0))
+
+  local move_lines
+  move_lines=$(grep -c "SV_NewClientExecuteMove" "$slog" 2>/dev/null || echo 0)
 
   if grep -q "PROTOCOL_NOT_SUPPORTED\|Could not get connect string" "$clog"; then
     note_fail "cell a: challenge/connect negotiation rejected -- see $clog"
+  elif grep -q "unknown command char" "$slog"; then
+    note_fail "cell a: server still rejects a batched-move opcode -- see $slog"
+  elif { grep -q "g_entered_game" "$slog" 2>/dev/null || grep -q "entered the game" "$clog"; } && [ "$elapsed" -ge 10 ] && [ "$move_lines" -gt 5 ]; then
+    note_pass "cell a: full handshake + spawn + ${elapsed}s sustained connected play, $move_lines batched-move packets decoded and applied (SV_NewClientExecuteMove), zero drops -- see $slog"
   elif grep -q "g_entered_game" "$slog" 2>/dev/null || grep -q "entered the game" "$clog"; then
-    if grep -q "unknown command char" "$slog"; then
-      note_partial "cell a: connects, precaches, and spawns; drops on first movement packet (clc_q2pro_move_batched unimplemented -- .orch/followups.md)"
-    else
-      note_pass "cell a: full handshake + spawn, no protocol errors"
-    fi
+    note_partial "cell a: spawned, but sustained-play evidence is weak (elapsed=${elapsed}s, move_lines=$move_lines) -- see $slog / $clog"
   elif grep -q "Connected to" "$clog"; then
-    note_partial "cell a: connected but did not confirm spawn within the wait window -- inspect $slog / $clog"
+    note_partial "cell a: connected but did not confirm spawn within the play window -- inspect $slog / $clog"
   else
     note_fail "cell a: client never reported a connection -- see $clog"
   fi
@@ -194,13 +226,14 @@ cell_c() {
     return
   fi
 
-  run_our_server "$slog" 45 +set deathmatch 1 +set port "$PORT" +map q2dm1
+  local play_seconds=15
+  run_our_server "$slog" $((play_seconds + 45)) +set deathmatch 1 +set developer 1 +set port "$PORT" +map q2dm1
   if ! ss -uln 2>/dev/null | grep -q ":$PORT "; then
     note_fail "cell c: our server never bound port $PORT (see $slog)"
     return
   fi
 
-  for proto in 34 35 36; do
+  for proto in 34 35; do
     local clog="$LOGDIR/c-client$proto.log"
     run_their_client "$clog" "+set cl_protocol $proto +connect localhost:$PORT +wait 100 +quit"
     if grep -q "entered the game" "$clog"; then
@@ -211,6 +244,30 @@ cell_c() {
       note_fail "cell c: protocol $proto never connected -- see $clog"
     fi
   done
+
+  # Protocol 36 (Q2PRO) re-verified the SAME way as cell (a): sustained real
+  # wall-clock play with continuous movement, not just a connect-and-quit --
+  # this is the protocol that hit the identical clc_q2pro_move_batched gap
+  # cell (a) hit under 1038 (.orch/followups.md's phase-8 ledger).
+  local clog36="$LOGDIR/c-client36.log"
+  local t0 t1 elapsed move_lines
+  t0=$(date +%s)
+  run_their_client_sustained "$clog36" "$play_seconds" "+set cl_protocol 36 +connect localhost:$PORT +forward +moveleft"
+  t1=$(date +%s)
+  elapsed=$((t1 - t0))
+  move_lines=$(grep -c "SV_NewClientExecuteMove" "$slog" 2>/dev/null || echo 0)
+
+  if grep -q "unknown command char" "$slog"; then
+    note_fail "cell c: protocol 36 -- server still rejects a batched-move opcode -- see $slog"
+  elif grep -q "entered the game" "$clog36" && [ "$elapsed" -ge 10 ] && [ "$move_lines" -gt 5 ]; then
+    note_pass "cell c: protocol 36 -- full handshake + spawn + ${elapsed}s sustained connected play, $move_lines batched-move packets decoded and applied, zero drops -- see $slog"
+  elif grep -q "entered the game" "$clog36"; then
+    note_partial "cell c: protocol 36 -- spawned, but sustained-play evidence is weak (elapsed=${elapsed}s, move_lines=$move_lines) -- see $slog / $clog36"
+  elif grep -q "Connected to" "$clog36"; then
+    note_partial "cell c: protocol 36 connects but did not confirm spawn -- see $clog36"
+  else
+    note_fail "cell c: protocol 36 never connected -- see $clog36"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -239,11 +296,22 @@ echo "Q2REPRO_BUILD=$Q2REPRO_BUILD"
 echo "Q2TS_BASEDIR=$Q2TS_BASEDIR"
 echo
 
-cell_a
-cell_b
-cell_c
-cell_d
-cell_e
+# Optional cell selection (e.g. `interop-matrix.sh a c`) -- lets a re-
+# verification pass re-run just the cell(s) that changed without paying for
+# the full matrix's runtime (cell b/d each launch their own real client/
+# server processes and cell d also runs a bun test suite). No arguments runs
+# the full matrix, unchanged from this script's original behavior.
+if [ $# -gt 0 ]; then
+  for cell in "$@"; do
+    "cell_$cell"
+  done
+else
+  cell_a
+  cell_b
+  cell_c
+  cell_d
+  cell_e
+fi
 
 echo
 echo "=== summary: $pass_count pass, $fail_count fail, $skip_count skip (partials printed above) ==="

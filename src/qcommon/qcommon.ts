@@ -120,13 +120,32 @@ export enum SvcOpsT {
   svc_frame,
 }
 
-// client to server
+// client to server. Numeric values match q2proto_internal_protocol.h's
+// `enum common_clc_cmds` exactly (the gap at 6-9 is skipped -- not
+// implemented by this port; the numbering gap is deliberate, not a mistake,
+// so the three Q2PRO/q2repro batched-move opcodes below keep q2proto's real
+// wire values).
 export enum ClcOpsT {
   clc_bad,
   clc_nop,
   clc_move, // [[usercmd_t]
   clc_userinfo, // [[userinfo string]
   clc_stringcmd, // [string] message
+  // R1Q2/Q2PRO/q2repro client setting push (index/value pair, e.g.
+  // CLS_NOGUN/CLS_NOPREDICT/CLS_FPS -- qsrc/q2repro/inc/common/protocol.h's
+  // clientSetting_t). Phase-8 interop finding (NOT predicted by static
+  // analysis -- caught by a live capture's raw opcode byte): a real q2repro
+  // client sends this immediately after entering the game, BEFORE any
+  // movement packet, so it blocked cell (a)/(c) exactly like the batched-
+  // move opcodes below did. See qcommon/protocol/codec.ts's
+  // readClientSetting doc comment.
+  clc_r1q2_setting = 5,
+  // Q2PRO (protocol 36) and q2repro (protocol 1038) client commands --
+  // src/qcommon/protocol/clc_batch_move.ts decodes the wire body;
+  // src/server/sv_user.ts's SV_ExecuteClientMessage dispatches them.
+  clc_q2pro_move_nodelta = 10,
+  clc_q2pro_move_batched,
+  clc_q2pro_userinfo_delta,
 }
 
 // user_cmd_t communication -- ms and light always sent, the others are optional

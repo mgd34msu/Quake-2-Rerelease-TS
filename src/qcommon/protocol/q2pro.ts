@@ -10,14 +10,20 @@
 // U_MOREFX16/U_ALPHA/U_SCALE entity-delta extensions, EPS_CLIENTNUM/
 // PS_MOREBITS/PS_Q2PRO_PLAYERFOG playerstate extensions, the 23-bit packed
 // (q2pro_i23) coordinate encoding, svc_q2pro_gamestate/configstringstream/
-// baselinestream bulk-transfer opcodes, clc_q2pro_move_batched/move_nodelta/
-// userinfo_delta client commands, and the q2pro_flags word (only exists at
-// PROTOCOL_VERSION_Q2PRO_EXTENDED_LIMITS=1024 and above -- negotiated minor
-// versions are clamped below that ceiling, see qcommon.ts's
+// baselinestream bulk-transfer opcodes, and the q2pro_flags word (only exists
+// at PROTOCOL_VERSION_Q2PRO_EXTENDED_LIMITS=1024 and above -- negotiated
+// minor versions are clamped below that ceiling, see qcommon.ts's
 // PROTOCOL_VERSION_Q2PRO_CURRENT doc comment). A real Q2PRO client is
 // designed to fall back to this exact plain format when the server's
 // serverdata announces no extensions -- that is the entire mechanism this
 // port relies on for correctness within its scope.
+//
+// UPDATE (phase-8 q2repro interop unit): clc_q2pro_move_batched/move_nodelta/
+// userinfo_delta, listed above as NOT implemented, now ARE -- see this file's
+// readBatchMove/decodeQ2ProBatchCmd/readUserinfoDelta below and
+// clc_batch_move.ts's file header. This was the confirmed live-interop
+// blocker (a real q2repro client sends batched move for ALL movement under
+// this protocol too, not just 1038 -- .orch/followups.md's phase-8 ledger).
 //
 // Within the plain tier, verified directly against q2proto_proto_q2pro.c:
 //   - U_SOLID is ALWAYS a u32 (q2pro.c:133 `context->features.has_solid32 =
@@ -171,13 +177,22 @@ import {
   EPS_M_ORIGIN2,
   EPS_VIEWANGLE2,
   EPS_STATS,
+  CM_ANGLE1,
+  CM_ANGLE2,
+  CM_ANGLE3,
+  CM_FORWARD,
+  CM_SIDE,
+  CM_UP,
+  CM_BUTTONS,
+  CM_IMPULSE,
   ComError,
   ERR_FATAL,
 } from "../qcommon";
 import { net_message } from "../net_chan";
 import { EntityStateT, PlayerStateT, type UsercmdT, MAX_STATS, MAX_EDICTS, RF_BEAM } from "../../shared/q_shared";
 import { VectorCopy } from "../../shared/math";
-import type { ProtocolCodec, ServerDataParamsT, ServerDataReadResultT, FrameWriteParamsT, FrameHeaderT } from "./codec";
+import type { ProtocolCodec, ServerDataParamsT, ServerDataReadResultT, FrameWriteParamsT, FrameHeaderT, ClcBatchMoveT, ClcUserinfoDeltaT, ClcClientSettingT } from "./codec";
+import { BitReader, readBatchMoveAngleComponent, readBatchMoveFrames, seedFromPrev, ClcBatchMoveError, MAX_CLC_BATCH_MOVE_FRAMES } from "./clc_batch_move";
 
 const NULL_ENTITY_STATE = new EntityStateT();
 
@@ -573,6 +588,100 @@ function readDeltaUsercmd(msg: SizeBuf, from: UsercmdT, move: UsercmdT): void {
 }
 
 // ---------------------------------------------------------------------------
+// clc_q2pro_move_batched / clc_q2pro_move_nodelta / clc_q2pro_userinfo_delta
+// (phase-8 q2repro interop unit -- this port's SCOPE CUT note at the top of
+// this file previously excluded these three opcodes; that exclusion is
+// narrowed to exactly what remains unimplemented, see readBatchMove's own
+// note on num_dups/opcodeExtra). See clc_batch_move.ts's file header for the
+// shared citation trail and the "upmove/lightlevel decoded-but-never-
+// applied" findings this decode relies on.
+// ---------------------------------------------------------------------------
+
+// q2pro_server_read_batch_move_delta, q2proto_proto_q2pro.c:2415-2475. Two
+// real divergences from q2repro.ts's decodeCmd (both verified against the
+// reference source, not assumed to match): CM_UP is a real, decodable -10-bit
+// field here (q2pro.c:2457-2461) -- unlike 1038, this plain-tier format never
+// rejects it -- but it is still never copied into the resolved usercmd_t
+// (qsrc/q2repro/src/server/user.c's apply_usercmd_delta has no upmove
+// assignment on ANY protocol; see clc_batch_move.ts's file header), so it is
+// decoded here purely to stay byte-aligned and then discarded. CM_BUTTONS
+// reads only 3 raw bits and remaps them (q2pro.c:2465-2466: `(buttons_value &
+// 3) | ((buttons_value & 4) << 5)`) rather than q2repro's full 8-bit byte.
+function decodeQ2ProBatchCmd(br: BitReader, prev: UsercmdT | null): UsercmdT {
+  const cmd = seedFromPrev(prev);
+
+  const hasContents = br.readUnsigned(1);
+  if (!hasContents) return cmd;
+
+  const bits = br.readUnsigned(8);
+  if (bits & CM_ANGLE1) cmd.angles[0] = readBatchMoveAngleComponent(br, prev ? prev.angles[0] : 0);
+  if (bits & CM_ANGLE2) cmd.angles[1] = readBatchMoveAngleComponent(br, prev ? prev.angles[1] : 0);
+  if (bits & CM_ANGLE3) cmd.angles[2] = br.readSigned(16); // no delta form for roll (q2pro.c:2441-2445)
+
+  if (bits & CM_FORWARD) cmd.forwardmove = br.readSigned(10);
+  if (bits & CM_SIDE) cmd.sidemove = br.readSigned(10);
+  if (bits & CM_UP) {
+    // Decoded for wire-alignment parity with a real Q2PRO peer; never
+    // applied (file header citation) -- deliberately discarded, not stored
+    // on `cmd` at all (matches upstream's own apply_usercmd_delta exactly:
+    // NOT even a "decoded but unused" struct field survives past this read).
+    br.readSigned(10);
+  }
+
+  if (bits & CM_BUTTONS) {
+    const raw = br.readUnsigned(3);
+    cmd.buttons = (raw & 3) | ((raw & 4) << 5);
+  }
+
+  // CM_IMPULSE is reused as "an explicit msec byte follows" here too
+  // (q2pro.c:2468-2473), same convention as q2repro.ts's batch decode.
+  if (bits & CM_IMPULSE) cmd.msec = br.readUnsigned(8);
+  else cmd.msec = prev ? prev.msec : 0;
+
+  return cmd;
+}
+
+// q2pro_server_read_batch_move, q2proto_proto_q2pro.c:2477-2515. Unlike
+// q2repro's 1038 format, Q2PRO smuggles num_dups in the raw clc opcode
+// byte's top 3 bits ("Q2PRO stuffs some extra info into upper 3 command
+// bits", q2pro.c:2317-2320) instead of an explicit stream byte -- the caller
+// (sv_user.ts) extracts that value from the just-read opcode byte and passes
+// it as `opcodeExtra` BEFORE this function reads anything else.
+function readBatchMove(msg: SizeBuf, nodelta: boolean, opcodeExtra: number): ClcBatchMoveT {
+  const numDups = opcodeExtra;
+  if (numDups >= MAX_CLC_BATCH_MOVE_FRAMES - 1) {
+    throw new ClcBatchMoveError("clc_q2pro_move_batched (36): num_dups out of range (Q2P_ERR_BAD_DATA, q2proto_proto_q2pro.c:2481-2482)");
+  }
+
+  const lastframe = nodelta ? -1 : MSG_ReadLong(msg);
+
+  const lightlevel = MSG_ReadByte(msg); // decoded, never applied -- see clc_batch_move.ts's file header finding
+  if (lightlevel < 0) throw new ClcBatchMoveError("clc_q2pro_move_batched (36): truncated message (lightlevel)");
+
+  const br = new BitReader(msg);
+  const frames = readBatchMoveFrames(br, numDups, decodeQ2ProBatchCmd);
+  return { lastframe, numDups, frames };
+}
+
+// q2pro_server_read_userinfo_delta, q2proto_proto_q2pro.c:2517-2522 --
+// byte-identical shape to q2repro.ts's readUserinfoDelta (both wrap the same
+// two-string q2proto_string_t pair).
+function readUserinfoDelta(msg: SizeBuf): ClcUserinfoDeltaT {
+  const name = MSG_ReadString(msg);
+  const value = MSG_ReadString(msg);
+  return { name, value };
+}
+
+// q2pro_server_read_setting (q2proto_proto_q2pro.c, byte-identical shape to
+// q2repro's -- both just read two i16 shorts). Phase-8 interop finding: see
+// codec.ts's ClcClientSettingT doc comment.
+function readClientSetting(msg: SizeBuf): ClcClientSettingT {
+  const index = MSG_ReadShort(msg);
+  const value = MSG_ReadShort(msg);
+  return { index, value };
+}
+
+// ---------------------------------------------------------------------------
 // client-side reads (net_message singleton -- see codec.ts's asymmetry note)
 // ---------------------------------------------------------------------------
 
@@ -863,6 +972,9 @@ export function createQ2ProCodec(minorVersion: number): ProtocolCodec {
     readFrameHeader,
     readFramePlayerstate,
     readPacketEntitiesBegin,
+    readBatchMove,
+    readUserinfoDelta,
+    readClientSetting,
   };
 }
 

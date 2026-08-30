@@ -7,7 +7,8 @@
 // comment for the rationale) instead of bare reassignable globals.
 
 import { Com_sprintf } from "../shared/q_shared";
-import { UsercmdT, MAX_INFO_STRING, MAX_EDICTS, CS_NAME } from "../shared/q_shared";
+import { UsercmdT, MAX_INFO_STRING, MAX_EDICTS, CS_NAME, Info_SetValueForKey } from "../shared/q_shared";
+import { ClcBatchMoveError } from "../qcommon/protocol/clc_batch_move";
 import { SysError, ClcOpsT, SvcOpsT, MAX_MSGLEN, ERR_DROP, UPDATE_MASK } from "../qcommon/qcommon";
 import { Com_Printf, Com_DPrintf, Com_Error, COM_BlockSequenceCRCByte, Info_Print } from "../qcommon/common";
 import { Cmd_TokenizeString, Cmd_Argv, Cmd_Argc, Cbuf_AddText, Cbuf_InsertFromDefer } from "../qcommon/cmd";
@@ -538,8 +539,19 @@ export function SV_ExecuteClientMessage(cl: ClientT): void {
       return;
     }
 
-    const c = MSG_ReadByte(net_message);
-    if (c === -1) break;
+    // Q2PRO stuffs some extra info (num_dups for clc_q2pro_move_batched/
+    // move_nodelta) into the raw command byte's upper 3 bits
+    // (q2proto_proto_q2pro.c:2317-2320's "Q2PRO stuffs some extra info into
+    // upper 3 command bits" -- see codec.ts's readBatchMove doc comment).
+    // Masking unconditionally is safe for every OTHER opcode this port
+    // implements (clc_bad/nop/move/userinfo/stringcmd are all < 32, and
+    // q2repro's own clc_q2pro_* values never set these bits either -- only a
+    // real Q2PRO client's batched-move opcode byte ever has them nonzero), so
+    // there is no need to gate this on which protocol/codec is active.
+    const rawCmd = MSG_ReadByte(net_message);
+    if (rawCmd === -1) break;
+    const opcodeExtra = rawCmd >> 5;
+    const c = rawCmd & 0x1f;
 
     switch (c) {
       case ClcOpsT.clc_nop:
@@ -610,6 +622,138 @@ export function SV_ExecuteClientMessage(cl: ClientT): void {
         break;
       }
 
+      // clc_q2pro_move_batched / clc_q2pro_move_nodelta (phase-8 q2repro
+      // interop unit): the wire body is protocol-dependent (see
+      // q2repro.ts's/q2pro.ts's own readBatchMove), but the apply/backfill
+      // logic below is not -- ported from qsrc/q2repro/src/server/user.c's
+      // SV_NewClientExecuteMove (lines 1119-1200), which both protocols'
+      // servers share verbatim.
+      case ClcOpsT.clc_q2pro_move_nodelta:
+      case ClcOpsT.clc_q2pro_move_batched: {
+        // Matches this port's existing clc_move convention above (silent
+        // return, not a drop) rather than real q2repro's own
+        // `SV_DropClient(sv_client, "multiple clc_move commands in packet")`
+        // -- a pre-existing divergence in this port's non-batch clc_move
+        // case this unit did not expand scope to fix (protocol 34 dispatch
+        // is out of this unit's scope; see task report).
+        if (moveIssued) break;
+        moveIssued = true;
+
+        const readBatchMove = cl.codec.readBatchMove;
+        if (!readBatchMove) {
+          Com_Printf("SV_ReadClientMessage: unknown command char\n");
+          SV_DropClient(cl);
+          return;
+        }
+
+        let batch;
+        try {
+          batch = readBatchMove(net_message, c === ClcOpsT.clc_q2pro_move_nodelta, opcodeExtra);
+        } catch (e) {
+          if (e instanceof ClcBatchMoveError) {
+            Com_DPrintf("SV_ReadClientMessage: bad client message (%s)\n", e.message);
+            SV_DropClient(cl);
+            return;
+          }
+          throw e;
+        }
+
+        // SV_NewClientExecuteMove: state check BEFORE recording lastframe
+        // (user.c:1160-1165) -- unlike this port's pre-existing non-batch
+        // clc_move case above, which records lastframe/frame_latency before
+        // its own spawned check. New code, ported against the real current
+        // reference order rather than preserving that sibling's order.
+        if (cl.state !== ClientStateT.cs_spawned) {
+          cl.lastframe = -1;
+          break;
+        }
+
+        if (batch.lastframe !== cl.lastframe) {
+          cl.lastframe = batch.lastframe;
+          if (cl.lastframe > 0) {
+            cl.frame_latency[cl.lastframe & (LATENCY_COUNTS - 1)] = svs.realtime - cl.frames[cl.lastframe & UPDATE_MASK].senttime;
+          }
+        }
+
+        let lastcmd: UsercmdT | null = null;
+        for (const frame of batch.frames) for (const cmd of frame.cmds) lastcmd = cmd;
+        if (!lastcmd) break; // every frame was empty -- user.c's q_unlikely(!lastcmd) guard
+
+        // developer-gated diagnostic (matches this file's existing
+        // Com_DPrintf convention, e.g. SV_ClientThink's "commandMsec
+        // underflow" line above) -- phase-8 interop evidence that batched
+        // move packets are being decoded and applied CONTINUOUSLY across a
+        // live session, not just once on the first packet.
+        Com_DPrintf("SV_NewClientExecuteMove: %s numDups=%d newFrameCmds=%d lastframe=%d\n", cl.name, batch.numDups, batch.frames[batch.numDups].cmds.length, batch.lastframe);
+
+        // No sv_paused gate here: real q2repro's SV_NewClientExecuteMove has
+        // none (verified by reading the full function body) -- unlike this
+        // port's pre-existing non-batch clc_move case, which does check
+        // sv_paused. Pause handling apparently lives elsewhere in real
+        // q2repro's architecture; not investigated further (out of scope).
+        let net_drop = cl.netchan.dropped;
+        if (net_drop < 20) {
+          while (net_drop > batch.numDups) {
+            SV_ClientThink(cl, cl.lastcmd);
+            net_drop--;
+          }
+          while (net_drop > 0) {
+            const backfillFrame = batch.frames[batch.numDups - net_drop];
+            for (const cmd of backfillFrame.cmds) SV_ClientThink(cl, cmd);
+            net_drop--;
+          }
+        }
+        for (const cmd of batch.frames[batch.numDups].cmds) SV_ClientThink(cl, cmd);
+
+        cl.lastcmd = lastcmd;
+        break;
+      }
+
+      // clc_r1q2_setting (phase-8 interop finding, not in this unit's
+      // original brief -- discovered live: a real q2repro client sends this
+      // immediately after entering the game, BEFORE any movement packet, so
+      // it blocked cell (a)/(c) exactly like the three named opcodes did.
+      // See codec.ts's ClcClientSettingT / SV_ParseClientSetting citation.
+      case ClcOpsT.clc_r1q2_setting: {
+        const readClientSetting = cl.codec.readClientSetting;
+        if (!readClientSetting) {
+          Com_Printf("SV_ReadClientMessage: unknown command char\n");
+          SV_DropClient(cl);
+          return;
+        }
+
+        const setting = readClientSetting(net_message);
+        if (setting.index >= 0 && setting.index < cl.settings.length) {
+          cl.settings[setting.index] = setting.value;
+        }
+        break;
+      }
+
+      case ClcOpsT.clc_q2pro_userinfo_delta: {
+        const readUserinfoDelta = cl.codec.readUserinfoDelta;
+        if (!readUserinfoDelta) {
+          Com_Printf("SV_ReadClientMessage: unknown command char\n");
+          SV_DropClient(cl);
+          return;
+        }
+
+        let delta;
+        try {
+          delta = readUserinfoDelta(net_message);
+        } catch (e) {
+          if (e instanceof ClcBatchMoveError) {
+            Com_DPrintf("SV_ReadClientMessage: bad client message (%s)\n", e.message);
+            SV_DropClient(cl);
+            return;
+          }
+          throw e;
+        }
+
+        cl.userinfo = Info_SetValueForKey(cl.userinfo, delta.name, delta.value);
+        SV_UserinfoChanged(cl);
+        break;
+      }
+
       case ClcOpsT.clc_stringcmd: {
         const cmdStr = MSG_ReadString(net_message);
 
@@ -622,7 +766,7 @@ export function SV_ExecuteClientMessage(cl: ClientT): void {
       }
 
       default:
-        Com_Printf("SV_ReadClientMessage: unknown command char\n");
+        Com_Printf("SV_ReadClientMessage: unknown command char (raw=%d masked=%d extra=%d)\n", rawCmd, c, opcodeExtra);
         SV_DropClient(cl);
         return;
     }

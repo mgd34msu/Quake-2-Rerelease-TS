@@ -213,6 +213,7 @@ import {
   CM_ANGLE3,
   CM_FORWARD,
   CM_SIDE,
+  CM_UP,
   CM_BUTTONS,
   CM_IMPULSE,
   SvcOpsT,
@@ -223,8 +224,9 @@ import {
 import { net_message } from "../net_chan";
 import { SvcFogDataBitsT, type SvcFogDataT } from "../../kexapi/game";
 import { EntityStateT, PlayerStateT, type UsercmdT, ANGLE2SHORT, SHORT2ANGLE, RF_BEAM } from "../../shared/q_shared";
-import type { ProtocolCodec, ServerDataParamsT, ServerDataReadResultT, FrameWriteParamsT, FrameHeaderT } from "./codec";
+import type { ProtocolCodec, ServerDataParamsT, ServerDataReadResultT, FrameWriteParamsT, FrameHeaderT, ClcBatchMoveT, ClcUserinfoDeltaT, ClcClientSettingT } from "./codec";
 import { VANILLA_CODEC } from "./vanilla";
+import { BitReader, readBatchMoveAngleComponent, readBatchMoveFrames, seedFromPrev, ClcBatchMoveError, MAX_CLC_BATCH_MOVE_FRAMES } from "./clc_batch_move";
 
 // ---------------------------------------------------------------------------
 // Local bit constants: q2proto's U_/PS_/EPS_ layouts that protocol 34 never
@@ -895,6 +897,84 @@ function readDeltaUsercmd(msg: SizeBuf, from: UsercmdT, move: UsercmdT): void {
 }
 
 // ---------------------------------------------------------------------------
+// clc_q2pro_move_batched / clc_q2pro_move_nodelta / clc_q2pro_userinfo_delta
+// (phase-8 q2repro interop unit -- see clc_batch_move.ts's file header for
+// the full citation trail and the "upmove never applied"/"lightlevel never
+// applied" findings this decode relies on).
+// ---------------------------------------------------------------------------
+
+// q2repro_server_read_batch_move_delta, q2proto_proto_q2repro.c:2620-2677.
+// CM_UP is a hard protocol violation on this codec (q2repro.c:2662-2663
+// returns Q2P_ERR_BAD_DATA the instant the bit is set) -- real q2repro
+// clients never set it under 1038 (see clc_batch_move.ts's "upmove" finding:
+// even q2pro's plain-tier format, which CAN carry the bit, never has it
+// applied server-side, so a real client sending vertical movement here would
+// gain nothing and 1038's own encoder simply never emits it).
+function decodeQ2ReproBatchCmd(br: BitReader, prev: UsercmdT | null): UsercmdT {
+  const cmd = seedFromPrev(prev);
+
+  const hasContents = br.readUnsigned(1);
+  if (!hasContents) return cmd; // angles/forwardmove/sidemove/buttons/msec all inherit from prev (or zero) -- see seedFromPrev
+
+  const bits = br.readUnsigned(8);
+  if (bits & CM_ANGLE1) cmd.angles[0] = readBatchMoveAngleComponent(br, prev ? prev.angles[0] : 0);
+  if (bits & CM_ANGLE2) cmd.angles[1] = readBatchMoveAngleComponent(br, prev ? prev.angles[1] : 0);
+  if (bits & CM_ANGLE3) cmd.angles[2] = br.readSigned(16); // no delta form for roll (q2repro.c:2646-2650)
+
+  if (bits & CM_FORWARD) cmd.forwardmove = br.readSigned(10);
+  if (bits & CM_SIDE) cmd.sidemove = br.readSigned(10);
+  if (bits & CM_UP) {
+    throw new ClcBatchMoveError(
+      "clc_q2pro_move_batched (1038): CM_UP bit set -- q2repro's own decoder rejects this (Q2P_ERR_BAD_DATA, q2proto_proto_q2repro.c:2662-2663)",
+    );
+  }
+
+  if (bits & CM_BUTTONS) cmd.buttons = br.readUnsigned(8); // full byte, unlike Q2PRO's 3-bit remap -- see q2pro.ts's decodeCmd
+
+  // CM_IMPULSE is reused as "an explicit msec byte follows" in the batched
+  // format -- there is no impulse field at all here (q2repro.c:2670-2675).
+  if (bits & CM_IMPULSE) cmd.msec = br.readUnsigned(8);
+  else cmd.msec = prev ? prev.msec : 0;
+
+  return cmd;
+}
+
+// q2repro_server_read_batch_move, q2proto_proto_q2repro.c:2679-2709.
+function readBatchMove(msg: SizeBuf, nodelta: boolean, _opcodeExtra: number): ClcBatchMoveT {
+  const lastframe = nodelta ? -1 : MSG_ReadLong(msg);
+
+  const numDups = MSG_ReadByte(msg);
+  if (numDups < 0) throw new ClcBatchMoveError("clc_q2pro_move_batched (1038): truncated message (num_dups)");
+  if (numDups >= MAX_CLC_BATCH_MOVE_FRAMES - 1) {
+    throw new ClcBatchMoveError("clc_q2pro_move_batched (1038): num_dups out of range (Q2P_ERR_BAD_DATA, q2proto_proto_q2repro.c:2687-2688)");
+  }
+
+  const lightlevel = MSG_ReadByte(msg); // decoded, never applied -- see clc_batch_move.ts's file header finding
+  if (lightlevel < 0) throw new ClcBatchMoveError("clc_q2pro_move_batched (1038): truncated message (lightlevel)");
+
+  const br = new BitReader(msg);
+  const frames = readBatchMoveFrames(br, numDups, decodeQ2ReproBatchCmd);
+  return { lastframe, numDups, frames };
+}
+
+// q2repro_server_read_userinfo_delta, q2proto_proto_q2repro.c:2718-2724.
+function readUserinfoDelta(msg: SizeBuf): ClcUserinfoDeltaT {
+  const name = MSG_ReadString(msg);
+  const value = MSG_ReadString(msg);
+  return { name, value };
+}
+
+// q2repro_server_read_setting, q2proto_proto_q2repro.c:2711-2716 (phase-8
+// interop finding -- see codec.ts's ClcClientSettingT doc comment: a real
+// q2repro client sends clc_r1q2_setting immediately after entering the game,
+// before any movement packet).
+function readClientSetting(msg: SizeBuf): ClcClientSettingT {
+  const index = MSG_ReadShort(msg);
+  const value = MSG_ReadShort(msg);
+  return { index, value };
+}
+
+// ---------------------------------------------------------------------------
 // client-side reads (net_message singleton -- see codec.ts's asymmetry note)
 // ---------------------------------------------------------------------------
 
@@ -1378,4 +1458,7 @@ export const Q2REPRO_CODEC: ProtocolCodec = {
   readFramePlayerstate,
   readPacketEntitiesBegin,
   readPlayerStateDelta,
+  readBatchMove,
+  readUserinfoDelta,
+  readClientSetting,
 };

@@ -178,6 +178,20 @@ export class ClientT {
   frame_latency: Int32Array = new Int32Array(LATENCY_COUNTS);
   ping = 0;
 
+  // clc_r1q2_setting pushes (qsrc/q2repro/inc/common/protocol.h's
+  // clientSetting_t enum, CLS_MAX=14 -- CLS_NOGUN/CLS_NOBLEND/CLS_RECORDING/
+  // CLS_PLAYERUPDATES/CLS_FPS at indices 0-4, CLS_NOGIBS/CLS_NOFOOTSTEPS/
+  // CLS_NOPREDICT/CLS_NOFLARES at 10-13). Phase-8 interop unit: real q2repro/
+  // Q2PRO clients push these right after entering the game. SV_ParseClientSetting
+  // (user.c:1387-1404) only stores the value (`sv_client->settings[idx] =
+  // value`) for every index except CLS_FPS under real Q2PRO's variable-tick
+  // negotiation (USE_FPS, protocol-36-only) -- this port has no client-FPS
+  // renegotiation concept (server.ts's own framerate/frametime doc comment
+  // already documents the fixed-tick gap), so this array is a faithful
+  // decode-and-store sink with the same "no further consumer yet" status
+  // several other ported-but-dormant fields already have in this port line.
+  settings: Int16Array = new Int16Array(14);
+
   message_size: Int32Array = new Int32Array(RATE_MESSAGES); // used to rate drop packets
   rate = 0;
   surpressCount = 0; // number of messages rate supressed
