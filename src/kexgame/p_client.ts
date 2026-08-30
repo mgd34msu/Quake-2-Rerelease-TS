@@ -383,6 +383,7 @@ function* active_players(): Generator<EdictT> {
 // imports; the GetItemByIndex/FindItemByClassname adapters preserve this
 // file's original narrow signatures where the C++ would null-deref.)
 import { ChangeWeapon, Think_Weapon, NoAmmoWeaponChange } from "./p_weapon";
+import { PlayerTrail_Add } from "./p_trail";
 import {
   FindItemByClassname as G_FindItemByClassname,
   GetItemByIndex as G_GetItemByIndex,
@@ -403,9 +404,7 @@ function GetItemByIndex(id: ItemIdT): GitemT {
 
 const Touch_Item = G_Touch_Item;
 
-function PlayerTrail_Add(_ent: EdictT): void {
-  throw new Error("PlayerTrail_Add: not yet ported (pending p_trail.ts, see p_trail.cpp)");
-}
+
 
 function Bot_BeginFrame(_ent: EdictT): void {
   throw new Error("Bot_BeginFrame: not yet ported (pending bots module, see bots/bot_includes.h)");

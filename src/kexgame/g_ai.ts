@@ -34,10 +34,36 @@
 // untouched (ROGUE mission-pack files, out of this unit's scope).
 //
 // This creates one new import edge: g_monster.ts and g_combat.ts now import
-// from g_ai.ts. g_ai.ts itself imports nothing from either file (verified by
-// reading the whole of g_ai.cpp -- it calls no g_monster.cpp- or
-// g_combat.cpp-owned function), so this is a plain one-directional edge, not
-// a cycle.
+// from g_ai.ts. Neither of those two is a cycle (g_ai.ts imports nothing
+// back from either, verified by reading the whole of g_ai.cpp).
+//
+// ============================================================================
+// STUB SWAP: PlayerTrail_Pick is now a real import from p_trail.ts (a real,
+// sanctioned, TWO-WAY cycle -- unlike the g_monster.ts/g_combat.ts edges
+// above)
+// ============================================================================
+// This file's own local, unexported throwing stub for `PlayerTrail_Pick`
+// (cited "pending p_trail.ts, see p_trail.cpp:103" -- reached only from
+// `ai_run`'s "just lost sight, pick a pursuit marker" branch, gated behind
+// `AI_PURSUE_NEXT`) is deleted and replaced with a real import from
+// src/kexgame/p_trail.ts, now landed. Unlike the g_monster.ts/g_combat.ts
+// edge above, this one is a genuine two-way cycle: p_trail.ts's own
+// `PlayerTrail_Pick` calls `visible` (THIS file's export) for its
+// "find the first marker we can see" branch. Both cross-module symbols
+// (`visible` here, `PlayerTrail_Pick` in p_trail.ts) are hoisted `export
+// function` declarations, never a top-level `const` evaluated at
+// module-init time, and both are only ever called from inside another
+// function's body at real game-frame time -- no TDZ hazard, matching the
+// shape and safety argument of every other sanctioned cycle in this port
+// line (g_utils.ts<->g_phys.ts, g_utils.ts<->g_combat.ts,
+// g_utils.ts<->p_client.ts, g_phys.ts<->g_monster.ts). Verified end-to-end
+// by `bunx tsc --noEmit` and `bun test` actually importing both files
+// together. `ai_run`'s call site itself is unchanged: still reached only
+// when a monster's bounding box reaches its last-known-sighting spot (a
+// real, common-in-actual-play branch, but not reached by this unit's own
+// scripted single-call tests, which avoid placing `self` already at
+// `monsterinfo.last_sighting`, mirroring g_combat.ts's "stay clear of the
+// gap" pattern for everything except one deliberate documentation case).
 //
 // ============================================================================
 // EXTERNAL DEPENDENCIES NOT YET PORTED
@@ -48,15 +74,6 @@
 // comment below for why (the "unconditionally reachable" rule g_combat.ts's
 // header already established: a stub that breaks every caller isn't a
 // stub, it's a landmine).
-//   - `PlayerTrail_Pick(self, next)` -> p_trail.cpp:103 (future p_trail.ts).
-//     Reached from `ai_run`'s "just lost sight, pick a pursuit marker"
-//     branch, gated behind `AI_PURSUE_NEXT` -- set by `ai_run` itself once a
-//     monster's bounding box reaches its last-known-sighting spot (a real,
-//     common-in-actual-play branch, but NOT reached by a single scripted
-//     `ai_run` call unless the test deliberately places `self` already at
-//     `monsterinfo.last_sighting` -- this unit's own tests avoid that
-//     placement, mirroring g_combat.ts's "stay clear of the gap" pattern for
-//     everything except one deliberate documentation case).
 //   - `hintpath_stop(self)` -> rogue/g_rogue_newai.cpp:379 (future
 //     g_rogue_newai.ts). Reached only when `AI_HINT_PATH` is set; nothing in
 //     this port line can ever set that flag (no `hint_path` spawn function
@@ -198,6 +215,7 @@ import { YAW, frandom } from "./q_std";
 import { G_Spawn, G_FreeEdict, G_PickTarget } from "./g_utils";
 import { M_walkmove, M_ChangeYaw, M_MoveToGoal, SV_CloseEnough } from "./m_move";
 import { RegisterMonsterinfoCheckattack } from "./g_save_registry";
+import { PlayerTrail_Pick } from "./p_trail";
 
 // ---------------------------------------------------------------------------
 // module-scope statics (g_ai.cpp:10-16: `bool enemy_vis; bool
@@ -290,10 +308,6 @@ function formatEdictForPrint(e: EdictT): string {
 // unported cross-deps (throwing stubs, except monsterlost_checkhint) --
 // see file header
 // ---------------------------------------------------------------------------
-
-function PlayerTrail_Pick(_self: EdictT, _next: boolean): EdictT | null {
-  throw new Error("PlayerTrail_Pick: not yet ported (pending p_trail.ts, see p_trail.cpp:103)");
-}
 
 function hintpath_stop(_self: EdictT): void {
   throw new Error("hintpath_stop: not yet ported (pending g_rogue_newai.ts, see rogue/g_rogue_newai.cpp:379)");
