@@ -19,24 +19,34 @@
 // (g_monster.cpp:1611-1650's own citation) -- no overlap to resolve here.
 //
 // ============================================================================
-// `st` (spawn_temp_t) -- same "not a shared global yet" situation as
-// g_monster.ts, now backed by the REAL type
+// STUB SWAP: `st` (spawn_temp_t) -- now a real import from src/kexgame/g_spawn.ts
 // ============================================================================
-// g_monster.ts's own header already established this port line has no
-// g_spawn.ts yet, so `extern spawn_temp_t st;` (populated by ED_ParseField
-// during entity spawning) has no shared home; that file's own workaround was
-// a tiny ad hoc `{ item: string | null }` placeholder. g_local_types.ts has
-// since grown a REAL `SpawnTempT` interface (its own header: "types,
-// constants, registry only" scope) with every field this port's SP_*
-// functions touch, so this file's `st` placeholder is typed as the genuine
-// `SpawnTempT` instead of a narrower ad hoc shape -- same idea, better
-// fidelity. It is a local, unexported, permanently-defaulted (all
-// null/zero/empty) const with no setter, exactly like g_monster.ts's: nothing
-// in this port line can populate it yet, so every `st.X` read below is
-// honestly always "unset" until a future g_spawn.ts unit wires up a real
-// spawn-temp global and this placeholder is deleted in favor of an import.
-// `st.was_key_specified(key)` becomes `st.keys_specified.has(key)` per
-// g_local_types.ts's own note on that method.
+// This file used to carry a local, unexported, permanently-defaulted (all
+// null/zero/empty) `SpawnTempT` placeholder with no setter, since no shared
+// `st` global existed anywhere in this port line yet -- every `st.X` read
+// was honestly always "unset". src/kexgame/g_spawn.ts has now landed with
+// the real, shared `SpawnTempT` global (exported as `st`, mutated in place
+// by `ED_ParseField`/`ClearSpawnTemp` during real entity spawning); this
+// file's own local placeholder is DELETED and replaced with `import { st }
+// from "./g_spawn"`. Cross-checked this file's own placeholder defaults
+// against g_spawn.ts's canonical ones (itself verified against the real
+// g_local.h/game.h struct declarations) -- this file's copy was already
+// correct on every field g_spawn.ts's own header flags as a latent bug
+// elsewhere in this port line (`skyautorotate: 1`, `fade_start_dist: 96`,
+// `fade_end_dist: 384`, `health_multiplier: 1.0`, `sl.data.intensity: 1`),
+// so this swap is a clean behavior-neutral refactor for THIS file, unlike
+// g_misc.ts's own rewire (which fixed real bugs). `st.was_key_specified(key)`
+// stays inlined as `st.keys_specified.has(key)`, unchanged by the swap --
+// the real `SpawnTempT.keys_specified` is genuinely populated now (by real
+// spawning through ED_ParseField), where the old placeholder's was
+// permanently empty, so every `st.X`-gated branch below is reachable for
+// the first time in this port line, not dead code.
+//
+// This creates a two-way module cycle with g_spawn.ts (which imports
+// several of this file's SP_trigger_* functions for its registry) -- safe,
+// since `st` is only ever read inside function bodies here (never at this
+// file's own module top level); see g_spawn.ts's own header, "Two-way
+// circular imports," for the full rationale this file now shares.
 //
 // ============================================================================
 // EDICT_NUM / traceEdict -- same idiom as g_phys.ts/g_monster.ts
@@ -101,7 +111,6 @@ import {
   MODELINDEX_PLAYER,
   PrintTypeT,
   ServerCommandT,
-  ShadowLightTypeT,
   SolidityAreaT,
   SolidT,
   SoundchanT,
@@ -116,7 +125,6 @@ import {
   ModIdT,
   MovetypeT,
   SFL_CROSS_TRIGGER_MASK,
-  type SpawnTempT,
   type ThinkFn,
   type TouchFn,
   type UseFn,
@@ -125,6 +133,7 @@ import {
 import { RegisterThink, RegisterTouch, RegisterUse } from "./g_save_registry";
 import { gi, g_edicts, game, level } from "./g_main_globals";
 import { G_GetClipMask } from "./g_phys";
+import { st } from "./g_spawn";
 import { T_Damage } from "./g_combat";
 import { G_UseTargets, G_FreeEdict, G_SetMovedir, G_PickTarget } from "./g_utils";
 import { GTIME_ZERO, Gtime_add, Gtime_from_ms, Gtime_from_sec, Gtime_nonzero, Gtime_seconds } from "./gtime";
@@ -134,46 +143,8 @@ import { clamp, frandom, irandom } from "./q_std";
 import { FindItemByClassname, P_ToggleFlashlight } from "./g_items";
 
 // ---------------------------------------------------------------------------
-// `st` placeholder (see file header)
+// `st` -- real shared import (see file header)
 // ---------------------------------------------------------------------------
-
-const st: SpawnTempT = {
-  sky: null,
-  skyrotate: 0,
-  skyaxis: vec3(0, 0, 0),
-  skyautorotate: 1,
-  nextmap: null,
-  lip: 0,
-  distance: 0,
-  height: 0,
-  noise: null,
-  pausetime: 0,
-  item: null,
-  gravity: null,
-  minyaw: 0,
-  maxyaw: 0,
-  minpitch: 0,
-  maxpitch: 0,
-  sl: { data: { lighttype: ShadowLightTypeT.point, radius: 0, resolution: 0, intensity: 1, fade_start: 0, fade_end: 0, lightstyle: -1, coneangle: 45, conedirection: vec3(0, 0, 0) }, lightstyletarget: null },
-  music: null,
-  instantitems: 0,
-  radius: 0,
-  hub_map: false,
-  achievement: null,
-  goals: null,
-  image: null,
-  fade_start_dist: 96,
-  fade_end_dist: 384,
-  start_items: null,
-  no_grapple: 0,
-  health_multiplier: 1.0,
-  reinforcements: null,
-  noise_start: null,
-  noise_middle: null,
-  noise_end: null,
-  loop_count: 0,
-  keys_specified: new Set<string>(),
-};
 
 /** EDICT_NUM idiom -- see g_phys.ts's/g_monster.ts's own `traceEdict`. */
 function traceEdict(ent: KexEdictT | null): EdictT {

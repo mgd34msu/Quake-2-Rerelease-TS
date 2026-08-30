@@ -92,23 +92,28 @@
 //   own scope), ported locally.
 //
 // ============================================================================
-// `st` (spawn_temp_t) -- NOT a shared global anywhere in this port line yet
+// STUB SWAP: `st` (spawn_temp_t) -- now a real import from src/kexgame/g_spawn.ts
 // ============================================================================
 // `monster_start`'s `if (st.item) self->item = FindItemByClassname(st.item);`
-// reads the C++ global `extern spawn_temp_t st;`, populated by
-// ED_ParseField during entity spawning (g_spawn.cpp). No src/kexgame/
-// g_spawn.ts exists yet (confirmed by directory listing), so there is no
-// shared home for that global to live in, and this unit's file scope does
-// not include creating one in g_main_globals.ts. A local, file-scoped `st:
-// { item: string | null }` placeholder stands in -- only the one field this
-// file actually reads -- permanently `{ item: null }` (no setter is
-// exported; nothing in this port line can populate it yet). This means
-// `monster_start`'s `if (st.item)` branch is always false today, so
-// `FindItemByClassname` (itself an unported g_items.cpp stub, see below) is
-// never actually reached by any real call path -- an honest, documented
-// consequence of the missing upstream global, not a silent behavior change:
-// once g_spawn.ts lands and wires up a real `st`, this placeholder should be
-// deleted and replaced with a shared import.
+// reads the C++ global `extern spawn_temp_t st;`, populated by ED_ParseField
+// during entity spawning (g_spawn.cpp). This file used to carry a local,
+// file-scoped `st: { item: string | null }` placeholder -- permanently
+// `{ item: null }`, since nothing in this port line could populate it yet --
+// covering only the one field this file reads. src/kexgame/g_spawn.ts has
+// now landed with the real, shared `SpawnTempT` global (exported as `st`,
+// mutated in place by `ED_ParseField`/`ClearSpawnTemp` during real entity
+// spawning); this file's own local placeholder is DELETED and replaced with
+// `import { st } from "./g_spawn"`. `monster_start`'s `if (st.item)` branch
+// is consequently now genuinely reachable for the first time in this port
+// line, for any spawned entity whose entity string sets an `item` key --
+// `FindItemByClassname` (already a real import from g_items.ts, see below)
+// is a real call path now, not dead code.
+//
+// This creates a two-way module cycle with g_spawn.ts (which imports this
+// file's own `SP_trigger_health_relay` for its registry) -- safe, since
+// `st` is only ever read inside function bodies here (never at this file's
+// own module top level); see g_spawn.ts's own header, "Two-way circular
+// imports," for the full rationale this file now shares.
 //
 // ============================================================================
 // STUB SWAP: fire_bullet/fire_shotgun/fire_blaster/fire_grenade/fire_rocket/
@@ -360,6 +365,7 @@ import { RegisterThink, RegisterUse } from "./g_save_registry";
 import { FoundTarget, M_CheckAttack } from "./g_ai";
 import { fire_bullet, fire_shotgun, fire_blaster, fire_grenade, fire_rocket, fire_rail, fire_bfg } from "./g_weapon";
 import { FindItemByClassname, Drop_Item } from "./g_items";
+import { st } from "./g_spawn";
 
 // ---------------------------------------------------------------------------
 // small local helpers -- see file header for each
@@ -397,9 +403,6 @@ function G_PowerUpExpiringRelative(left: GTime): boolean {
 function G_PowerUpExpiring(time: GTime): boolean {
   return G_PowerUpExpiringRelative(Gtime_subtract(time, level.time));
 }
-
-/** `st.item` (spawn_temp_t) placeholder -- see file header. */
-const st: { item: string | null } = { item: null };
 
 // ---------------------------------------------------------------------------
 // monster weapons (g_monster.cpp:6-138)

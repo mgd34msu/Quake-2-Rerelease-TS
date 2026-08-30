@@ -60,21 +60,32 @@
 // (p_client.cpp:1606), `RemoveAttackingPainDaemons` (p_client.cpp:3838).
 //
 // ============================================================================
-// g_spawn.cpp cross-dependencies -- throwing stubs (no src/kexgame/g_spawn.ts
-// exists yet)
+// STUB SWAP: ED_ParseField/ED_CallSpawn/`st` -- now real imports from
+// src/kexgame/g_spawn.ts
 // ============================================================================
-// `ED_ParseField`/`ED_CallSpawn` (g_spawn.cpp) and the `st` (spawn_temp_t)
-// global they populate have no home in this port line yet (confirmed by
-// directory listing -- same gap g_monster.ts's/g_trigger.ts's/g_target.ts's
-// own headers already documented for their own `st` placeholders). Reached
-// only by `Cmd_Spawn_f` (the "spawn <classname> [key value]..." dev cheat),
-// which ALWAYS calls `ED_CallSpawn` unconditionally on every invocation --
-// so `Cmd_Spawn_f` genuinely always throws today, an honest consequence of
-// the missing g_spawn.ts, not a silent behavior change. `st` gets the same
-// permanently-`{ item: null }`-shaped local placeholder g_monster.ts/
-// g_trigger.ts/g_target.ts already use (only reset, never read meaningfully
-// here -- `Cmd_Spawn_f` resets it via `st = {}` then never reads it back
-// itself; `ED_ParseField`, the only reader, is itself an unported stub).
+// This file used to carry two local throwing stubs for `ED_ParseField`/
+// `ED_CallSpawn` (g_spawn.cpp) and a permanently-`{ item: null }`-shaped
+// narrow local `st` placeholder (only ever reset via `st.item = null`,
+// never read meaningfully), since no src/kexgame/g_spawn.ts existed yet --
+// the same gap g_monster.ts's/g_trigger.ts's/g_target.ts's own headers
+// documented for their own `st` placeholders. `Cmd_Spawn_f` (the "spawn
+// <classname> [key value]..." dev cheat) reaches `ED_ParseField`/
+// `ED_CallSpawn` UNCONDITIONALLY on every invocation, so it genuinely
+// always threw before this swap. src/kexgame/g_spawn.ts has now landed
+// with real, exported `ED_ParseField`/`ED_CallSpawn` and the real, shared
+// `st` global (mutated in place by `ClearSpawnTemp()`/`ED_ParseField`);
+// this file's own stub definitions and narrow `st` placeholder are DELETED
+// and replaced with `import { ED_ParseField, ED_CallSpawn, ClearSpawnTemp }
+// from "./g_spawn"` (this file never reads `st` directly -- its own
+// `st = {};` reset becomes a `ClearSpawnTemp()` call instead). `Cmd_Spawn_f`
+// now genuinely spawns an entity (subject to
+// whatever real spawn function `spawns[]` resolves the given classname
+// to -- including this port line's own registered throwing stubs for
+// still-unported classnames, e.g. any `monster_*` name), rather than
+// always throwing.
+//
+// g_spawn.ts does not import anything from this file, so this is an
+// ordinary one-directional dependency, not a cycle.
 //
 // ============================================================================
 // CTF (ctf/g_ctf.cpp, ctf/p_ctf_menu.cpp) -- throwing stubs, unreachable by
@@ -243,6 +254,7 @@ import {
 } from "./g_items";
 import { P_ProjectSource } from "./p_weapon";
 import { player_die, respawn, PutClientInServer, G_PostRespawn, RemoveAttackingPainDaemons } from "./p_client";
+import { ED_ParseField, ED_CallSpawn, ClearSpawnTemp } from "./g_spawn";
 
 // ---------------------------------------------------------------------------
 // atoi/atof -- see src/game/g_cmds.ts's identical `atoiC` precedent (this
@@ -328,19 +340,10 @@ function* active_players(): Generator<EdictT> {
 // unported cross-deps (throwing stubs) -- see file header
 // ---------------------------------------------------------------------------
 
-function ED_ParseField(_key: string, _value: string, _ent: EdictT): void {
-  throw new Error("ED_ParseField: not yet ported (pending g_spawn.ts, see g_spawn.cpp)");
-}
-function ED_CallSpawn(_ent: EdictT): void {
-  throw new Error("ED_CallSpawn: not yet ported (pending g_spawn.ts, see g_spawn.cpp:447)");
-}
-// `extern spawn_temp_t st;` -- no shared home yet, see file header. Narrowed
-// to the one field `Cmd_Spawn_f` itself ever touches (a reset before
-// `ED_ParseField`, which is itself an unported stub and never reads it
-// back), matching g_monster.ts's own identical narrow-`st` precedent
-// exactly (its file header: "only the one field this file actually reads").
-const st: { item: string | null } = { item: null };
-
+// ED_ParseField/ED_CallSpawn/`st`: formerly local throwing stubs (and a
+// narrow local `st` placeholder) here -- src/kexgame/g_spawn.ts has landed
+// with real exports of all three; see this file's own header, "STUB SWAP:
+// ED_ParseField/ED_CallSpawn/`st`".
 
 // ctf/p_ctf_menu.cpp -- see file header
 function PMenu_Prev(_ent: EdictT): void {
@@ -674,7 +677,10 @@ export function Cmd_Spawn_f(ent: EdictT): void {
   other.s.origin[2] = ent.s.origin[2] + facingForward[2] * 24;
   other.s.angles[1] = ent.s.angles[1];
 
-  st.item = null;
+  // `st = {};` -- a full reset now that `st` is the real shared global
+  // (see file header), not the narrow `st.item = null` this file used
+  // before the stub swap.
+  ClearSpawnTemp();
 
   if (gi.argc() > 3) {
     for (let i = 2; i < gi.argc(); i += 2) {

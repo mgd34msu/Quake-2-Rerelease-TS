@@ -95,30 +95,46 @@
 //   CTF/grapple-specific path this file has no business implementing.
 //
 // ============================================================================
-// `st` (spawn_temp_t) -- a real-shaped, permanently-default placeholder
+// STUB SWAP: `st` (spawn_temp_t) -- now a real import from src/kexgame/g_spawn.ts
 // ============================================================================
-// g_monster.ts's own header already established the precedent this file
-// follows: no src/kexgame/g_spawn.ts exists yet (confirmed by directory
-// listing), so there is no shared global `st` to import. That file's own
-// placeholder was a narrow `{ item: string | null }` shape covering the one
-// field it needed; THIS file reads many more spawn_temp_t fields (sl/image/
-// radius/fade_start_dist/fade_end_dist/height/goals/distance/
-// keys_specified), so the placeholder here is a full, real `SpawnTempT`
-// object (the type g_local_types.ts already exports) populated with the
-// same all-zero/all-null defaults ED_ParseField would leave an unset
-// spawn_temp_t with. `st.was_key_specified(key)` (g_local.h, a method on the
-// real spawn_temp_t) is inlined as `st.keys_specified.has(key)` at its two
-// call sites (misc_player_mannequin) since keys_specified is always empty.
-// CONSEQUENCE, stated plainly per PORTING.md's "an honest, documented
-// consequence of a missing upstream global, not a silent behavior change":
-// dynamic/shadow-light spawning (`setup_dynamic_light`'s `st.sl.data.radius
-// > 0` gate), misc_flare's custom skin/fade-distance overrides, misc_light's
-// `st.sl.data.radius`-driven early-out, info_world_text's custom text size,
-// and misc_player_mannequin's per-map gesture/model/weapon/skin selection
-// are ALL permanently at their C++ "key not specified" defaults until a
-// future g_spawn.ts lands and wires a real per-entity `st` through
-// SpawnEntities. A future unit should delete this placeholder and import
-// the real one.
+// This file used to carry a full, real-shaped `SpawnTempT` object as a
+// local, permanently-defaulted placeholder (all-zero/all-null, matching
+// what ED_ParseField would leave an unset spawn_temp_t with) -- covering
+// every field this file reads (sl/image/radius/fade_start_dist/
+// fade_end_dist/height/goals/distance/keys_specified), since no shared `st`
+// global existed anywhere in this port line yet. src/kexgame/g_spawn.ts has
+// now landed with the real, shared `SpawnTempT` global (exported as `st`,
+// mutated in place by `ED_ParseField`/`ClearSpawnTemp` during real entity
+// spawning); this file's own local placeholder is DELETED and replaced with
+// `import { st } from "./g_spawn"`.
+//
+// Cross-checking this file's own placeholder defaults against g_spawn.ts's
+// canonical ones (which g_spawn.ts itself verified line-by-line against the
+// real g_local.h/game.h struct declarations) turned up ONE real fix: this
+// file's own placeholder used `skyautorotate: 0`, but the real C++ default
+// (g_local.h:1274, `int32_t skyautorotate = 1;`) is 1 -- g_target.ts's/
+// g_trigger.ts's own placeholders already had this one right. This file's
+// `fade_start_dist`/`fade_end_dist`/`health_multiplier`/
+// `sl.data.intensity` defaults were ALSO wrong (0 instead of the real
+// 96/384/1.0/1 -- see g_spawn.ts's own header for the full citation), the
+// same latent bug independently repeated across every placeholder in this
+// port line; importing the shared `st` fixes all of these for this file at
+// once. `st.was_key_specified(key)` (g_local.h, a method on the real
+// spawn_temp_t) stays inlined as `st.keys_specified.has(key)` at its two
+// call sites (misc_player_mannequin), unchanged by the swap -- the real
+// `SpawnTempT.keys_specified` is genuinely populated now (by real spawning
+// through ED_ParseField), where the old placeholder's was permanently
+// empty, so dynamic/shadow-light spawning, misc_flare's custom skin/fade-
+// distance overrides, misc_light's early-out, info_world_text's custom
+// text size, and misc_player_mannequin's per-map selection are all now
+// genuinely reachable for the first time in this port line, not dead code.
+//
+// This creates a two-way module cycle with g_spawn.ts (which imports this
+// file's own `setup_shadow_lights` for SpawnEntities/SP_worldspawn, and
+// several of this file's SP_* functions for its registry) -- safe, since
+// `st` is only ever read inside function bodies here (never at this file's
+// own module top level); see g_spawn.ts's own header, "Two-way circular
+// imports," for the full rationale this file now shares.
 //
 // ============================================================================
 // ThrowGibs / gib_def_t -- placement-mismatch, ported locally
@@ -292,7 +308,6 @@ import {
   type TouchFn,
   type DieFn,
   type PrethinkFn,
-  type SpawnTempT,
   MovetypeT,
   EntFlagsT,
   MonsterAiFlagsT,
@@ -331,6 +346,7 @@ import {
   FRAME_stand40,
 } from "./m_player";
 import { RegisterThink, RegisterTouch, RegisterUse, RegisterDie, RegisterPrethink } from "./g_save_registry";
+import { st } from "./g_spawn";
 
 // ---------------------------------------------------------------------------
 // small local helpers -- see file header for each
@@ -392,43 +408,6 @@ function defaultShadowLightData(): ShadowLightDataT {
   };
 }
 
-const st: SpawnTempT = {
-  sky: null,
-  skyrotate: 0,
-  skyaxis: vec3(0, 0, 0),
-  skyautorotate: 0,
-  nextmap: null,
-  lip: 0,
-  distance: 0,
-  height: 0,
-  noise: null,
-  pausetime: 0,
-  item: null,
-  gravity: null,
-  minyaw: 0,
-  maxyaw: 0,
-  minpitch: 0,
-  maxpitch: 0,
-  sl: { data: defaultShadowLightData(), lightstyletarget: null },
-  music: null,
-  instantitems: 0,
-  radius: 0,
-  hub_map: false,
-  achievement: null,
-  goals: null,
-  image: null,
-  fade_start_dist: 0,
-  fade_end_dist: 0,
-  start_items: null,
-  no_grapple: 0,
-  health_multiplier: 0,
-  reinforcements: null,
-  noise_start: null,
-  noise_middle: null,
-  noise_end: null,
-  loop_count: 0,
-  keys_specified: new Set<string>(),
-};
 
 // ---------------------------------------------------------------------------
 // CROSS-DEPENDENCY STUBS -- see file header

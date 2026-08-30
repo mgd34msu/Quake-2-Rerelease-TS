@@ -24,13 +24,32 @@
 // overlap candidate, trigger_health_relay).
 //
 // ============================================================================
-// `st` (spawn_temp_t) placeholder -- same situation/idiom as g_trigger.ts
+// STUB SWAP: `st` (spawn_temp_t) -- now a real import from src/kexgame/g_spawn.ts
 // ============================================================================
-// See g_trigger.ts's own header for the full rationale (no g_spawn.ts yet in
-// this port line, so `extern spawn_temp_t st;` has no shared home). This
-// file's own local `st` mirrors that one exactly (same real `SpawnTempT`
-// type, permanently defaulted, no setter) -- every `st.X` read below is
-// honestly always "unset" until a future g_spawn.ts unit lands.
+// This file used to carry a local, unexported, permanently-defaulted `st`
+// mirroring g_trigger.ts's own identical placeholder (same real
+// `SpawnTempT` type, no setter) -- every `st.X` read was honestly always
+// "unset". src/kexgame/g_spawn.ts has now landed with the real, shared
+// `SpawnTempT` global (exported as `st`, mutated in place by
+// `ED_ParseField`/`ClearSpawnTemp` during real entity spawning); this
+// file's own local placeholder is DELETED and replaced with `import { st }
+// from "./g_spawn"`. Like g_trigger.ts's own copy (and unlike g_misc.ts's),
+// this file's placeholder defaults were already correct on every field
+// g_spawn.ts's own header flags as a latent bug elsewhere in this port line
+// (`skyautorotate: 1`, `fade_start_dist: 96`, `fade_end_dist: 384`,
+// `health_multiplier: 1.0`, `sl.data.intensity: 1`), so this swap is a
+// clean behavior-neutral refactor. `target_spawner`'s own `st = {};` reset
+// (see below, previously a documented no-op since this file's placeholder
+// was always already empty) is now a REAL reset of shared state via
+// `ClearSpawnTemp()`, since the shared `st` can genuinely carry leftover
+// values from whatever entity was parsed immediately before the spawner
+// fires.
+//
+// This creates a two-way module cycle with g_spawn.ts (which imports
+// several of this file's SP_target_* functions for its registry) -- safe,
+// since `st` is only ever read inside function bodies here (never at this
+// file's own module top level); see g_spawn.ts's own header, "Two-way
+// circular imports," for the full rationale this file now shares.
 //
 // ============================================================================
 // EXTERNAL DEPENDENCIES NOT YET PORTED (throwing stubs, cited) -- CORRECTED
@@ -43,12 +62,13 @@
 // import from src/kexgame/p_view.ts, line ~172) to real implementations
 // without updating this comment. The p_client.ts unit that swapped
 // respawn/P_UseCoopInstancedItems to real imports below is the one that
-// finally corrected this. As of now, the only genuinely unported cross-dep
-// left in this file is:
-// - ED_CallSpawn            -> g_spawn.cpp (future g_spawn.ts; no
-//   src/kexgame/g_spawn.ts exists yet in THIS port line -- the legacy/
-//   vanilla `src/game/g_spawn.ts` is a different port line and does not
-//   satisfy this). Reached only by target_spawner's use handler.
+// finally corrected this. ED_CallSpawn (reached only by target_spawner's
+// use handler) is the LAST one this comment used to list as "genuinely
+// unported" -- src/kexgame/g_spawn.ts has now landed with a real
+// `ED_CallSpawn`, so this file's own local throwing stub is DELETED and
+// replaced with a real import (same st-rewire pass, since g_spawn.ts is
+// already a two-way cycle partner for `st`). There are no remaining
+// genuinely unported cross-deps left in this file.
 //
 // ============================================================================
 // STUB SWAP: fire_blaster / pierce_trace / GetUnicastKey -- now real imports
@@ -165,7 +185,6 @@ import {
   RenderfxT,
   RF_BEAM_LIGHTNING,
   ServerCommandT,
-  ShadowLightTypeT,
   SolidT,
   SoundchanT,
   SvflagsT,
@@ -184,7 +203,6 @@ import {
   type PierceArgsT,
   type PierceHitFn,
   SFL_CROSS_TRIGGER_MASK,
-  type SpawnTempT,
   type ThinkFn,
   type UseFn,
 } from "./g_local";
@@ -200,48 +218,11 @@ import { GTIME_ZERO, Gtime_add, Gtime_from_ms, Gtime_from_sec, Gtime_nonzero, Gt
 import { SpawnFlags_from, SpawnFlags_has, type SpawnFlags } from "./spawnflags";
 import { RotatePointAroundVector, vec3_add, vec3_equals, vec3_length, vec3_lengthSquared, vec3_muls, vec3_normalized, vec3_origin, vec3_sub } from "./q_vec3";
 import { brandom } from "./q_std";
+import { st, ClearSpawnTemp, ED_CallSpawn } from "./g_spawn";
 
 // ---------------------------------------------------------------------------
 // `st` placeholder (see file header)
 // ---------------------------------------------------------------------------
-
-const st: SpawnTempT = {
-  sky: null,
-  skyrotate: 0,
-  skyaxis: vec3(0, 0, 0),
-  skyautorotate: 1,
-  nextmap: null,
-  lip: 0,
-  distance: 0,
-  height: 0,
-  noise: null,
-  pausetime: 0,
-  item: null,
-  gravity: null,
-  minyaw: 0,
-  maxyaw: 0,
-  minpitch: 0,
-  maxpitch: 0,
-  sl: { data: { lighttype: ShadowLightTypeT.point, radius: 0, resolution: 0, intensity: 1, fade_start: 0, fade_end: 0, lightstyle: -1, coneangle: 45, conedirection: vec3(0, 0, 0) }, lightstyletarget: null },
-  music: null,
-  instantitems: 0,
-  radius: 0,
-  hub_map: false,
-  achievement: null,
-  goals: null,
-  image: null,
-  fade_start_dist: 96,
-  fade_end_dist: 384,
-  start_items: null,
-  no_grapple: 0,
-  health_multiplier: 1.0,
-  reinforcements: null,
-  noise_start: null,
-  noise_middle: null,
-  noise_end: null,
-  loop_count: 0,
-  keys_specified: new Set<string>(),
-};
 
 /** EDICT_NUM idiom -- see g_phys.ts's/g_monster.ts's own `traceEdict`. */
 function traceEdict(ent: KexEdictT | null): EdictT {
@@ -299,9 +280,9 @@ const CONFIG_STORY_INDEX = CONFIG_HEALTH_BAR_NAME_INDEX + 1;
 // g_weapon.ts has landed with a real export; see this file's own header,
 // "STUB SWAP: fire_blaster / pierce_trace / GetUnicastKey".
 
-function ED_CallSpawn(_ent: EdictT): void {
-  throw new Error("ED_CallSpawn: not yet ported (pending g_spawn.ts, see g_spawn.cpp)");
-}
+// ED_CallSpawn: formerly a local throwing stub here -- src/kexgame/
+// g_spawn.ts has landed with a real export; see this file's own header,
+// "STUB SWAP: `st` (spawn_temp_t)".
 
 // respawn / P_UseCoopInstancedItems: formerly local throwing stubs here --
 // src/kexgame/p_client.ts has landed with real exports; see this file's own
@@ -743,9 +724,14 @@ export const use_target_spawner: UseFn = RegisterUse("use_target_spawner", (self
   // RAFAEL
   ent.s.origin = vec3(self.s.origin[0], self.s.origin[1], self.s.origin[2]);
   ent.s.angles = vec3(self.s.angles[0], self.s.angles[1], self.s.angles[2]);
-  // `st = {};` in the C++ resets the shared spawn-temp global for the
-  // upcoming ED_CallSpawn -- a no-op here since this port's own `st`
-  // placeholder (see file header) is always already empty.
+  // `st = {};` in the C++ resets the shared spawn-temp global before the
+  // upcoming ED_CallSpawn -- this path constructs `ent` directly (no
+  // ED_ParseEdict call, so nothing else would clear `st` first), and the
+  // registered spawn function `ent.classname` resolves to may itself read
+  // `st` (e.g. an item's classname, or any SP_* touching `st.item`). Now
+  // that `st` is the real shared global (see file header), this is a real
+  // reset via `ClearSpawnTemp()`, not a no-op.
+  ClearSpawnTemp();
 
   // [Paril-KEX] although I fixed these in our maps, this is just in case
   // anybody else does this by accident. Don't count these monsters so they
