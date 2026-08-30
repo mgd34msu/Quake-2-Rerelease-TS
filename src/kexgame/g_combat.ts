@@ -29,24 +29,19 @@
 // established idiom this follows: throwing, unexported, cited stubs)
 // ============================================================================
 // g_combat.cpp calls several functions this port line hasn't ported yet.
-// Two are reached UNCONDITIONALLY on every call into their caller and are
-// ported here as real (if narrow) logic instead, per the "an unported
-// cross-dep that's actually unconditionally reachable can't be a throwing
-// stub without breaking every caller" rule (see each function's own comment
-// for why it's safe to port narrowly). The rest are reached only on genuinely
-// guarded, narrow paths and ARE throwing stubs:
-//   - visible              -> g_ai.cpp:392  (future src/kexgame/g_ai.ts) --
-//     reached only when a monster with a live `.client` `enemy` reacts to a
-//     NEW client attacker (M_ReactToDamage's "can't see the current enemy"
-//     branch).
-//   - FoundTarget           -> g_ai.cpp:484  (future src/kexgame/g_ai.ts) --
-//     reached whenever M_ReactToDamage acquires/changes a monster's enemy
-//     and the monster isn't AI_DUCKED. This is the COMMON case for "a fresh
-//     monster takes its first hit from a player" -- one test below
-//     deliberately exercises this path to document the gap; every other
-//     monster-damage test in this suite uses a non-client/non-monster
-//     attacker (e.g. a trigger_hurt-style damage source) specifically to
-//     stay clear of it, or pre-sets AI_DUCKED/an existing `.enemy`.
+// `visible`/`FoundTarget` (g_ai.cpp:392/484) were formerly local throwing
+// stubs here -- both are now real imports from src/kexgame/g_ai.ts (that
+// unit has landed; see g_ai.ts's own "STUB SWAP" header section). They were
+// reached UNCONDITIONALLY on their respective M_ReactToDamage branches
+// (`visible`: a monster with a live `.client` enemy reacting to a NEW client
+// attacker; `FoundTarget`: whenever M_ReactToDamage acquires/changes a
+// monster's enemy and the monster isn't AI_DUCKED -- the COMMON case for "a
+// fresh monster takes its first hit from a player"), so this is also where
+// the "an unported cross-dep that's actually unconditionally reachable can't
+// be a throwing stub without breaking every caller" rule first got written
+// down for this file, before g_ai.ts existed to satisfy it for real. The
+// rest are reached only on genuinely guarded, narrow paths and remain
+// throwing stubs:
 //   - MarkTeslaArea/TargetTesla -> rogue/g_rogue_newai.cpp:1019/1472 (future
 //     src/kexgame/g_rogue_newai.ts) -- reached only when `inflictor.classname
 //     === "tesla_mine"`; no tesla_mine spawn function exists in this port
@@ -158,6 +153,7 @@ import { Gtime_add, Gtime_from_ms, Gtime_from_sec } from "./gtime";
 import { findradius } from "./g_utils";
 import { AngleVectors, closest_point_to_box, vec3_add, vec3_addEq, vec3_dot, vec3_length, vec3_muls, vec3_normalized, vec3_sub } from "./q_vec3";
 import { brandom } from "./q_std";
+import { visible, FoundTarget } from "./g_ai";
 
 // ---------------------------------------------------------------------------
 // cvar-read helpers (see g_utils.ts's own `coopEnabled()` precedent for the
@@ -177,14 +173,6 @@ function cvarBool(name: string, def: string, flags: CvarFlagsT = CvarFlagsT.CVAR
 // ---------------------------------------------------------------------------
 // unported cross-deps (throwing stubs) -- see file header
 // ---------------------------------------------------------------------------
-
-function visible(_self: EdictT, _other: EdictT): boolean {
-  throw new Error("visible: not yet ported (pending g_ai.ts, see g_ai.cpp:392)");
-}
-
-function FoundTarget(_self: EdictT): void {
-  throw new Error("FoundTarget: not yet ported (pending g_ai.ts, see g_ai.cpp:484)");
-}
 
 function MarkTeslaArea(_self: EdictT, _tesla: EdictT): boolean {
   throw new Error("MarkTeslaArea: not yet ported (pending g_rogue_newai.ts, see rogue/g_rogue_newai.cpp:1019)");

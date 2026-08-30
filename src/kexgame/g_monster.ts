@@ -119,16 +119,6 @@
 //   - fire_bullet/fire_shotgun/fire_blaster/fire_flechette/fire_grenade/
 //     fire_rocket/fire_rail/fire_bfg -> g_weapon.cpp (future g_weapon.ts).
 //     Reached only through this file's own monster_fire_* wrappers.
-//   - FoundTarget                    -> g_ai.cpp:484 (future g_ai.ts).
-//   - M_CheckAttack                  -> g_ai.cpp:1093 (future g_ai.ts).
-//     `monster_start`'s `MONSTERINFO_CHECKATTACK(M_CheckAttack)` default
-//     assignment is preserved (`self.monsterinfo.checkattack ??=
-//     M_CheckAttack`-shaped), so the stub is registered under its real save
-//     name via RegisterMonsterinfoCheckattack -- once g_ai.ts lands, delete
-//     this file's stub and let g_ai.ts's own real implementation register
-//     under the same name instead (mirroring the g_phys.ts swap pattern).
-//   - M_walkmove                     -> m_move.cpp:1479 (future m_move.ts).
-//     Reached by monster_start_go's stuck-check/nudge logic.
 //   - FindItemByClassname/Drop_Item  -> g_items.cpp (future g_items.ts).
 //     FindItemByClassname is unreachable today (see the `st` note above);
 //     Drop_Item is reached by monster_death_use whenever a dying monster
@@ -136,14 +126,18 @@
 //   - cleanupHealTarget              -> m_medic.cpp (ROGUE mission pack;
 //     out of this port line's current scope). Reached only by
 //     M_ProcessPain's AI_MEDIC branch.
-// Each is a local, unexported (fire_*/FoundTarget/M_walkmove/
-// FindItemByClassname/Drop_Item/cleanupHealTarget) or save-registered
-// (M_CheckAttack) throwing stub, naming itself and the file that owns the
-// real implementation, per PORTING.md's "a function you cannot port
+// Each is a local, unexported (fire_*/FindItemByClassname/Drop_Item/
+// cleanupHealTarget) throwing stub, naming itself and the file that owns
+// the real implementation, per PORTING.md's "a function you cannot port
 // faithfully is a reported deviation, not a TODO". None of these are
 // exercised by this unit's own test suite (its fixtures stick to
 // M_CheckGround/M_CatagorizePosition/M_WorldEffects/M_droptofloor/
 // M_ProcessPain/M_SetAnimation/monster_death_use, per this unit's brief).
+//
+// FoundTarget/M_CheckAttack: formerly this section's two remaining stubs
+// (g_ai.cpp:484/1093) -- now real imports from src/kexgame/g_ai.ts (that
+// unit has landed; see g_ai.ts's own "STUB SWAP" header section). No local
+// stub remains for either name in this file.
 //
 // `stationarymonster_start` is a SPECIAL case, not the usual "future file"
 // stub: it is declared in g_local.h:2240 and called from m_insane.cpp:686,
@@ -209,10 +203,12 @@
 // monster_think (THINK), monster_use (USE), monster_triggered_spawn
 // (THINK), monster_triggered_spawn_use (USE), monster_triggered_think
 // (THINK), walkmonster_start_go/flymonster_start_go/swimmonster_start_go
-// (THINK), trigger_health_relay_use (USE), plus M_CheckAttack (registered
-// as the stub it currently is, see above) under
-// SAVE_FUNC_MONSTERINFO_CHECKATTACK's real name via
-// RegisterMonsterinfoCheckattack. Plain `void`-returning C++ functions with
+// (THINK), trigger_health_relay_use (USE). M_CheckAttack is ALSO
+// save-registered under SAVE_FUNC_MONSTERINFO_CHECKATTACK's real name, but
+// the `RegisterMonsterinfoCheckattack(...)` call itself now lives in
+// g_ai.ts, not this file (see this file's own "CROSS-DEPENDENCIES" section
+// above) -- `monster_start`'s default-assignment call site below just reads
+// the already-registered import. Plain `void`-returning C++ functions with
 // no THINK/USE/etc. wrapper (monster_dead, monster_triggered_start,
 // monster_death_use, monster_start, monster_start_go, G_FixStuckObject,
 // walkmonster_start/flymonster_start/swimmonster_start,
@@ -260,7 +256,6 @@ import {
   type ModT,
   type ThinkFn,
   type UseFn,
-  type MonsterinfoCheckattackFn,
   MovetypeT,
   EntFlagsT,
   MonsterAiFlagsT,
@@ -318,7 +313,8 @@ import { G_GetClipMask } from "./g_phys";
 import { M_walkmove } from "./m_move";
 import { G_FixStuckObject_Generic } from "./p_move";
 import type { StuckObjectTraceFn } from "./bg_local";
-import { RegisterThink, RegisterUse, RegisterMonsterinfoCheckattack } from "./g_save_registry";
+import { RegisterThink, RegisterUse } from "./g_save_registry";
+import { FoundTarget, M_CheckAttack } from "./g_ai";
 
 // ---------------------------------------------------------------------------
 // small local helpers -- see file header for each
@@ -2080,15 +2076,13 @@ function fire_bfg(self: EdictT, _start: Vec3, _dir: Vec3, _damage: number, _spee
   throw new Error(`fire_bfg: not yet ported (pending g_weapon.ts, see g_weapon.cpp:1140) -- called against ${self.classname ?? "?"}`);
 }
 
-function FoundTarget(self: EdictT): void {
-  throw new Error(`FoundTarget: not yet ported (pending g_ai.ts, see g_ai.cpp:484) -- called against ${self.classname ?? "?"}`);
-}
-
-/** SAVE_FUNC_MONSTERINFO_CHECKATTACK("M_CheckAttack") -- see file header. */
-const M_CheckAttack: MonsterinfoCheckattackFn = RegisterMonsterinfoCheckattack("M_CheckAttack", (self: EdictT): boolean => {
-  throw new Error(`M_CheckAttack: not yet ported (pending g_ai.ts, see g_ai.cpp:1093) -- called against ${self.classname ?? "?"}`);
-});
-
+// FoundTarget/M_CheckAttack: formerly local throwing stubs here (see this
+// file's own header, "CROSS-DEPENDENCIES NOT YET PORTED" / "STUB SWAP" in
+// g_ai.ts's own header) -- now real imports, src/kexgame/g_ai.ts has landed.
+// M_CheckAttack is registered under its real save name
+// (SAVE_FUNC_MONSTERINFO_CHECKATTACK("M_CheckAttack")) inside g_ai.ts
+// itself now, not here; this file just imports the already-registered
+// function.
 
 
 function FindItemByClassname(classname: string): GitemT | null {

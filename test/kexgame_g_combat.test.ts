@@ -27,9 +27,13 @@ every documented deviation/stub this suite's design routes around):
     mentions "the relevant dmflag" -- this KEX source has no dmflags check
     in either function at all (see g_combat.ts's own CheckTeamDamage
     comment); the real gates are g_friendly_fire and coop.
-  - One deliberate test proving the still-unported FoundTarget cross-dep
-    throws for a fresh monster reacting to a client's first hit -- honestly
-    documenting the gap rather than avoiding it everywhere.
+  - One test exercising the FoundTarget/HuntTarget cross-dep for a fresh
+    monster reacting to a client's first hit (src/kexgame/g_ai.ts has since
+    landed and g_combat.ts's own `visible`/`FoundTarget` stubs were swapped
+    for real imports from it -- this test used to assert a throw through the
+    stub; it now asserts the real FoundTarget/HuntTarget side effects
+    instead: `.enemy` set, the attacker's `sight_entity` woken up, and
+    `monsterinfo.run` invoked).
 */
 
 import { describe, test, expect } from "bun:test";
@@ -863,7 +867,7 @@ describe("T_Damage: monster-specific paths", () => {
     expect(targ.health).toBe(60); // 100 - 20*2
   });
 
-  test("a fresh (non-AI_DUCKED) monster reacting to its first hit from a client throws through the still-unported FoundTarget stub (g_ai.cpp:484) -- documents the gap, doesn't route around it", () => {
+  test("a fresh (non-AI_DUCKED) monster reacting to its first hit from a client runs the real FoundTarget/HuntTarget now that g_ai.ts has landed (g_ai.cpp:484) -- sets .enemy, wakes the attacker's sight_entity, and calls monsterinfo.run", () => {
     const { edicts } = setupWorld(1, 8, 8);
     const targ = edicts[1]!;
     targ.inuse = true;
@@ -874,11 +878,18 @@ describe("T_Damage: monster-specific paths", () => {
     targ.mass = 200;
     targ.svflags |= 4; // SVF_MONSTER
 
+    const runRecorder: { self: EdictT | null } = { self: null };
+    targ.monsterinfo.run = (self) => {
+      runRecorder.self = self;
+    };
+
     const attacker = makePlayerEdict(edicts, 0);
 
-    expect(() =>
-      T_Damage(targ, attacker, attacker, vec3(1, 0, 0), ORIGIN, NORMAL, 5, 0, DamageflagsT.DAMAGE_NONE, MOD_UNKNOWN),
-    ).toThrow(/FoundTarget/);
+    T_Damage(targ, attacker, attacker, vec3(1, 0, 0), ORIGIN, NORMAL, 5, 0, DamageflagsT.DAMAGE_NONE, MOD_UNKNOWN);
+
+    expect(targ.enemy).toBe(attacker);
+    expect(runRecorder.self).toBe(targ);
+    expect(attacker.client!.sight_entity).toBe(targ);
   });
 
   test("a non-client, non-monster attacker (e.g. trigger_hurt) never reaches M_ReactToDamage's AI cross-deps", () => {
