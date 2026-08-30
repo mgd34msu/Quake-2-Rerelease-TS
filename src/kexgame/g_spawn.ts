@@ -438,6 +438,11 @@ import { SP_monster_mutant } from "./m_mutant";
 import { SP_monster_parasite } from "./m_parasite";
 import { SP_monster_boss5, SP_monster_supertank } from "./m_supertank";
 import { SP_monster_tank, SP_monster_tank_stand } from "./m_tank";
+import { SP_misc_actor, SP_target_actor } from "./m_actor";
+import { SP_monster_arachnid } from "./m_arachnid";
+import { SP_monster_guardian } from "./m_guardian";
+import { SP_misc_insane } from "./m_insane";
+import { SP_monster_shambler } from "./m_shambler";
 import {
   SP_target_temp_entity,
   SP_target_speaker,
@@ -1025,7 +1030,7 @@ export const spawns: readonly SpawnEntry[] = [
   { name: "target_crossunit_target", spawn: SP_target_crossunit_target },
   { name: "target_laser", spawn: SP_target_laser },
   { name: "target_help", spawn: SP_target_help },
-  { name: "target_actor", spawn: unported("SP_target_actor", "m_actor.cpp (future src/kexgame/m_actor.ts)") },
+  { name: "target_actor", spawn: SP_target_actor },
   { name: "target_lightramp", spawn: SP_target_lightramp },
   { name: "target_earthquake", spawn: SP_target_earthquake },
   { name: "target_character", spawn: SP_target_character },
@@ -1060,13 +1065,13 @@ export const spawns: readonly SpawnEntry[] = [
   { name: "misc_explobox", spawn: SP_misc_explobox },
   { name: "misc_banner", spawn: SP_misc_banner },
   { name: "misc_satellite_dish", spawn: SP_misc_satellite_dish },
-  { name: "misc_actor", spawn: unported("SP_misc_actor", "m_actor.cpp (future src/kexgame/m_actor.ts)") },
+  { name: "misc_actor", spawn: SP_misc_actor },
   { name: "misc_player_mannequin", spawn: SP_misc_player_mannequin },
   { name: "misc_model", spawn: SP_misc_model },
   { name: "misc_gib_arm", spawn: SP_misc_gib_arm },
   { name: "misc_gib_leg", spawn: SP_misc_gib_leg },
   { name: "misc_gib_head", spawn: SP_misc_gib_head },
-  { name: "misc_insane", spawn: unported("SP_misc_insane", "m_insane.cpp (future src/kexgame/m_insane.ts)") },
+  { name: "misc_insane", spawn: SP_misc_insane },
   { name: "misc_deadsoldier", spawn: SP_misc_deadsoldier },
   { name: "misc_viper", spawn: SP_misc_viper },
   { name: "misc_viper_bomb", spawn: SP_misc_viper_bomb },
@@ -1106,8 +1111,8 @@ export const spawns: readonly SpawnEntry[] = [
   { name: "monster_jorg", spawn: unported("SP_monster_jorg", "m_boss31.cpp (future src/kexgame/m_boss31.ts)") },
   { name: "monster_makron", spawn: unported("SP_monster_makron", "m_boss32.cpp (future src/kexgame/m_boss32.ts)") },
   { name: "monster_tank_stand", spawn: SP_monster_tank_stand },
-  { name: "monster_guardian", spawn: unported("SP_monster_guardian", "m_guardian.cpp (future src/kexgame/m_guardian.ts)") },
-  { name: "monster_arachnid", spawn: unported("SP_monster_arachnid", "m_arachnid.cpp (future src/kexgame/m_arachnid.ts)") },
+  { name: "monster_guardian", spawn: SP_monster_guardian },
+  { name: "monster_arachnid", spawn: SP_monster_arachnid },
   { name: "monster_guncmdr", spawn: unported("SP_monster_guncmdr", "m_guncmdr.cpp (future src/kexgame/m_guncmdr.ts)") },
 
   { name: "monster_commander_body", spawn: SP_monster_commander_body },
@@ -1171,7 +1176,7 @@ export const spawns: readonly SpawnEntry[] = [
   { name: "info_player_team1", spawn: unported("SP_info_player_team1", "ctf/g_ctf.cpp (future src/ctf/g_ctf.ts)") },
   { name: "info_player_team2", spawn: unported("SP_info_player_team2", "ctf/g_ctf.cpp (future src/ctf/g_ctf.ts)") },
 
-  { name: "monster_shambler", spawn: unported("SP_monster_shambler", "m_shambler.cpp (future src/kexgame/m_shambler.ts)") },
+  { name: "monster_shambler", spawn: SP_monster_shambler },
 ];
 
 /*
