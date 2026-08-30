@@ -51,7 +51,7 @@
 
 import { NetadrT, NetsrcT, MAX_MSGLEN, SysError } from "./qcommon";
 import { tryWrapZPacket } from "./protocol/zpacket";
-import { SizeBuf, SZ_Init, SZ_Write, MSG_WriteLong, MSG_WriteShort, MSG_BeginReading, MSG_ReadLong, MSG_ReadShort, stringToBytes } from "./sizebuf";
+import { SizeBuf, SZ_Init, SZ_Write, MSG_WriteLong, MSG_WriteShort, MSG_WriteByte, MSG_BeginReading, MSG_ReadLong, MSG_ReadShort, MSG_ReadByte, stringToBytes } from "./sizebuf";
 import { Cvar_Get } from "./cvar";
 import { Com_Printf } from "./common";
 import { curtime } from "../platform/sys";
@@ -72,6 +72,41 @@ export let showpackets: CvarT | null = null;
 export let showdrop: CvarT | null = null;
 export let qport: CvarT | null = null;
 
+// RULE-17 FINDING (phase-8 q2repro interop, matrix cell a): a real q2repro
+// client negotiating protocol 1038 (or 36/Q2PRO) never uses the classic
+// header this file previously implemented unconditionally. q2repro's own
+// src/common/net/chan.c defines TWO wire framings selected per-connection
+// (inc/common/net/chan.h's netchan_type_t): NETCHAN_OLD (this file's
+// pre-existing behavior -- unconditional 16-bit qport, reliable flag in bit
+// 31) and NETCHAN_NEW (qport is a SINGLE byte, written only when nonzero,
+// and bit 30 of both sequence longs is reserved as a fragmentation flag
+// FRG_BIT so usable sequence numbers are 30 bits instead of 31 -- chan.c:
+// 98-101's REL_BIT/FRG_BIT/OLD_MASK/NEW_MASK). Confirmed by capturing a real
+// q2repro binary: with only NETCHAN_OLD implemented, its client's post-
+// connect packets were silently dropped by SV_ReadPackets' qport check
+// (reading a 16-bit field where the client wrote a 1-byte one), so the
+// client never advanced past "Connected to ..." even though every server
+// send succeeded. Q2PRO and the kex/rerelease family both request
+// NETCHAN_NEW (q2repro's src/client/main.c CL_CheckForResend: `type =
+// (cls.serverProtocol == PROTOCOL_VERSION_Q2PRO || == PROTOCOL_VERSION_
+// RERELEASE) ? NETCHAN_NEW : NETCHAN_OLD`); vanilla and R1Q2 stay
+// NETCHAN_OLD. Fragmentation reassembly itself (needed only if a single
+// reliable write exceeds one packet) is NOT implemented here -- a fragmented
+// incoming packet is detected and dropped cleanly (see Netchan_Process)
+// rather than misparsed; this port's reliable-message pacing already keeps
+// per-frame writes inside one packet the way vanilla's own chan.c does, so
+// this scope cut has not been observed to trigger in practice. Ledgered in
+// .orch/followups.md.
+export const NETCHAN_OLD = 0;
+export const NETCHAN_NEW = 1;
+export type NetchanTypeT = typeof NETCHAN_OLD | typeof NETCHAN_NEW;
+
+// bit 31 = REL_BIT, bit 30 = FRG_BIT (NETCHAN_NEW only). `1 << 31` is
+// negative in JS's 32-bit signed bitwise ops, so the masks below are spelled
+// as hex literals rather than derived via arithmetic on that shift.
+const OLD_MASK = 0x7fffffff; // 31 usable sequence bits (bit 31 = REL_BIT)
+const NEW_MASK = 0x3fffffff; // 30 usable sequence bits (bit 31 = REL_BIT, bit 30 = FRG_BIT)
+
 function mustCvar(name: string, value: string, flags: number): CvarT {
   const v = Cvar_Get(name, value, flags);
   if (!v) {
@@ -85,6 +120,7 @@ export class NetchanT {
   fatal_error = false;
 
   sock: NetsrcT = NetsrcT.NS_CLIENT;
+  type: NetchanTypeT = NETCHAN_OLD;
 
   dropped = 0; // between last packet and previous
 
@@ -158,13 +194,18 @@ export function Netchan_OutOfBandPrint(net_socket: NetsrcT, adr: NetadrT, format
   Netchan_OutOfBand(net_socket, adr, bytes.length, bytes);
 }
 
-// called to open a channel to a remote system
-export function Netchan_Setup(sock: NetsrcT, chan: NetchanT, adr: NetadrT, qportNum: number): void {
+// called to open a channel to a remote system. `chanType` defaults to
+// NETCHAN_OLD so every pre-existing call site (vanilla/R1Q2 server dispatch,
+// this port's own client connect flow) keeps its prior behavior unchanged;
+// only kex-family and Q2PRO connections pass NETCHAN_NEW explicitly (see
+// NETCHAN_NEW's doc comment above).
+export function Netchan_Setup(sock: NetsrcT, chan: NetchanT, adr: NetadrT, qportNum: number, chanType: NetchanTypeT = NETCHAN_OLD): void {
   chan.fatal_error = false;
   chan.dropped = 0;
   chan.last_sent = 0;
 
   chan.sock = sock;
+  chan.type = chanType;
   chan.remote_address = adr;
   chan.qport = qportNum;
   chan.last_received = curtime.value;
@@ -251,9 +292,10 @@ export function Netchan_Transmit(chan: NetchanT, length: number, data: Uint8Arra
   const send = new SizeBuf();
   SZ_Init(send, send_buf, send_buf.length);
 
+  const seqMask = chan.type === NETCHAN_NEW ? NEW_MASK : OLD_MASK;
   const sendReliableBit = send_reliable ? 1 : 0;
-  const w1 = (chan.outgoing_sequence & ~(1 << 31)) | (sendReliableBit << 31);
-  const w2 = (chan.incoming_sequence & ~(1 << 31)) | (chan.incoming_reliable_sequence << 31);
+  const w1 = (chan.outgoing_sequence & seqMask) | (sendReliableBit << 31);
+  const w2 = (chan.incoming_sequence & seqMask) | (chan.incoming_reliable_sequence << 31);
 
   chan.outgoing_sequence++;
   chan.last_sent = curtime.value;
@@ -261,9 +303,17 @@ export function Netchan_Transmit(chan: NetchanT, length: number, data: Uint8Arra
   MSG_WriteLong(send, w1);
   MSG_WriteLong(send, w2);
 
-  // send the qport if we are a client
+  // send the qport if we are a client. NETCHAN_NEW writes it as a single
+  // byte, and only when nonzero (q2repro chan.c:390-393/505-510); NETCHAN_OLD
+  // always writes an unconditional 16-bit short (this file's pre-existing
+  // behavior).
   if (chan.sock === NetsrcT.NS_CLIENT) {
-    MSG_WriteShort(send, qport ? qport.value : 0);
+    const qportValue = qport ? qport.value : 0;
+    if (chan.type === NETCHAN_NEW) {
+      if (qportValue) MSG_WriteByte(send, qportValue & 0xff);
+    } else {
+      MSG_WriteShort(send, qportValue);
+    }
   }
 
   // copy the reliable message to the packet first
@@ -306,16 +356,35 @@ export function Netchan_Process(chan: NetchanT, msg: SizeBuf): boolean {
   let sequence = MSG_ReadLong(msg);
   let sequence_ack = MSG_ReadLong(msg);
 
-  // read the qport if we are a server
+  // read the qport if we are a server. NETCHAN_NEW's qport is a single byte
+  // present only when this connection's stored qport is nonzero (mirrors
+  // q2repro's own src/server/main.c:1475-1482 SV_PacketEvent peek, which
+  // this port's SV_ReadPackets now matches -- see its own header comment);
+  // NETCHAN_OLD always consumes an unconditional 16-bit short.
   if (chan.sock === NetsrcT.NS_SERVER) {
-    MSG_ReadShort(msg); // qport -- read to consume the header bytes, unused here (see report)
+    if (chan.type === NETCHAN_NEW) {
+      if (chan.qport) MSG_ReadByte(msg); // qport -- read to consume the header byte, unused here (see report)
+    } else {
+      MSG_ReadShort(msg); // qport -- read to consume the header bytes, unused here (see report)
+    }
   }
 
+  const seqMask = chan.type === NETCHAN_NEW ? NEW_MASK : OLD_MASK;
   const reliable_message = (sequence >>> 31) & 1;
   const reliable_ack = (sequence_ack >>> 31) & 1;
+  // NETCHAN_NEW: bit 30 (FRG_BIT) marks a fragmented packet. Fragmentation
+  // reassembly is not implemented (see NETCHAN_NEW's doc comment above) --
+  // drop such a packet cleanly instead of misparsing it as an oversized,
+  // garbage-sequenced message.
+  if (chan.type === NETCHAN_NEW && (sequence & (1 << 30)) !== 0) {
+    if (showdrop && showdrop.value) {
+      Com_Printf("%s:fragmented NETCHAN_NEW packet unsupported -- dropped\n", NET_AdrToString(chan.remote_address));
+    }
+    return false;
+  }
 
-  sequence &= ~(1 << 31);
-  sequence_ack &= ~(1 << 31);
+  sequence &= seqMask;
+  sequence_ack &= seqMask;
 
   if (showpackets && showpackets.value) {
     if (reliable_message) {

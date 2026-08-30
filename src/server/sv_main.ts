@@ -22,9 +22,9 @@ import { Q2REPRO_CODEC } from "../qcommon/protocol/q2repro";
 import { createR1Q2Codec } from "../qcommon/protocol/r1q2";
 import { createQ2ProCodec } from "../qcommon/protocol/q2pro";
 import { CS_REMAP_RERELEASE } from "../shared/cs_remap";
-import { Netchan_OutOfBandPrint, Netchan_Setup, Netchan_Process, Netchan_Transmit, net_message_buffer } from "../qcommon/net_chan";
+import { Netchan_OutOfBandPrint, Netchan_Setup, Netchan_Process, Netchan_Transmit, net_message_buffer, NETCHAN_OLD, NETCHAN_NEW } from "../qcommon/net_chan";
 import { NET_CompareBaseAdr, NET_AdrToString, NET_IsLocalAddress, NET_GetPacket } from "../platform/net_udp";
-import { MSG_BeginReading, MSG_ReadLong, MSG_ReadShort, MSG_ReadStringLine, MSG_WriteByte, MSG_WriteString, SZ_Init, SZ_Clear } from "../qcommon/sizebuf";
+import { MSG_BeginReading, MSG_ReadLong, MSG_ReadStringLine, MSG_WriteByte, MSG_WriteString, SZ_Init, SZ_Clear } from "../qcommon/sizebuf";
 import { Cmd_TokenizeString, Cmd_Argv, Cmd_Argc, Cmd_ExecuteString } from "../qcommon/cmd";
 import { Cvar_Get, Cvar_Serverinfo } from "../qcommon/cvar";
 import { Com_Printf, Com_DPrintf, Com_BeginRedirect, Com_EndRedirect, Com_SetServerState, comTiming, dedicated, host_speeds } from "../qcommon/common";
@@ -305,8 +305,33 @@ export function SVC_GetChallenge(): void {
     i = oldest;
   }
 
+  // RULE-17 FINDING (phase-8 q2repro interop, matrix cell a): q2proto_client.c's
+  // q2proto_parse_challenge (q2repro's real client wire code) only accepts a
+  // bare "challenge %i" with no "p=" suffix as an IMPLICIT vanilla-protocol
+  // offer, and that implicit path leaves cls.serverProtocol at its stale
+  // default instead of resolving to PROTOCOL_VERSION_VANILLA -- confirmed by
+  // capturing a real q2repro binary's client against this server: it printed
+  // "Requesting connection... N" then immediately errored "Could not get
+  // connect string (PROTOCOL_NOT_SUPPORTED)" from client/main.c's
+  // CL_CheckForResend, because q2proto_complete_connect() rejects the
+  // leftover protocol value. Real q2repro/q2proto SERVERS (src/server/main.c's
+  // own SVC_GetChallenge) never send the bare form: they always append a
+  // "p=<comma-separated netvers>" suffix via q2proto_get_challenge_extras(),
+  // built from the exact protocol list that server instance accepts (q2repro's
+  // own dedicated server hardcodes q2repro_accepted_protocols = {Q2P_PROTOCOL_
+  // Q2REPRO} only -- it never serves vanilla/R1Q2/Q2PRO). This server mirrors
+  // that: the kex family (svs.csr === CS_REMAP_RERELEASE) advertises only
+  // 1038 (SVC_DirectConnect's own isKexFamily gate already only accepts
+  // that version); the legacy family advertises 34/35/36 ascending, matching
+  // q2proto_get_challenge_extras' qsort-ascending order, so real q2proto
+  // clients can negotiate any of the three instead of falling into the same
+  // broken implicit-vanilla path.
+  const protocolExtras = svs.csr === CS_REMAP_RERELEASE
+    ? `p=${PROTOCOL_VERSION_RERELEASE}`
+    : `p=${PROTOCOL_VERSION},${PROTOCOL_VERSION_R1Q2},${PROTOCOL_VERSION_Q2PRO}`;
+
   // send it back
-  Netchan_OutOfBandPrint(NetsrcT.NS_SERVER, net_from, "challenge %i", svs.challenges[i].challenge);
+  Netchan_OutOfBandPrint(NetsrcT.NS_SERVER, net_from, "challenge %i %s", svs.challenges[i].challenge, protocolExtras);
 }
 
 /*
@@ -338,6 +363,15 @@ export function SVC_DirectConnect(): void {
   // at once.
   const version = atoi(Cmd_Argv(1));
   const isKexFamily = svs.csr === CS_REMAP_RERELEASE;
+
+  // RULE-17 FINDING (phase-8 q2repro interop): a real client speaking kex
+  // (1038) or Q2PRO (36) always transmits with NETCHAN_NEW framing (single
+  // conditional-byte qport, fragmentation bit) rather than this port's
+  // pre-existing NETCHAN_OLD-only header -- see net_chan.ts's NETCHAN_NEW
+  // doc comment for the exact wire difference and how it was confirmed
+  // against the real q2repro binary (matrix cell a). Vanilla and R1Q2 stay
+  // NETCHAN_OLD, matching q2repro's own client/main.c CL_CheckForResend.
+  const chanType = isKexFamily || version === PROTOCOL_VERSION_Q2PRO ? NETCHAN_NEW : NETCHAN_OLD;
 
   let negotiatedCodec: ProtocolCodec;
   let negotiatedMinorVersion = 0;
@@ -501,7 +535,7 @@ export function SVC_DirectConnect(): void {
     Netchan_OutOfBandPrint(NetsrcT.NS_SERVER, adr, "client_connect");
   }
 
-  Netchan_Setup(NetsrcT.NS_SERVER, newcl.netchan, adr, qport);
+  Netchan_Setup(NetsrcT.NS_SERVER, newcl.netchan, adr, qport, chanType);
   // svc_zpacket eligibility for this connection (qcommon/protocol/
   // zpacket.ts) -- set after Netchan_Setup since that call replaces
   // newcl.netchan wholesale via Netchan_Setup's own chan mutation (not a
@@ -673,19 +707,32 @@ export function SV_ReadPackets(): void {
       continue;
     }
 
-    // read the qport out of the message so we can fix up
-    // stupid address translating routers
-    MSG_BeginReading(net_message);
-    MSG_ReadLong(net_message); // sequence number
-    MSG_ReadLong(net_message); // sequence number
-    const qport = MSG_ReadShort(net_message) & 0xffff;
+    // RULE-17 FINDING (phase-8 q2repro interop): the qport field's WIDTH
+    // depends on the matched client's own netchan type (NETCHAN_NEW's is a
+    // single conditional byte; NETCHAN_OLD's is an unconditional 16-bit
+    // short -- see net_chan.ts's NETCHAN_NEW doc comment), so it cannot be
+    // read generically before knowing which client a packet belongs to.
+    // This now matches by BASE ADDRESS first and peeks the qport bytes
+    // per-candidate, mirroring q2repro's own real dispatcher exactly
+    // (src/server/main.c's SV_PacketEvent, lines 1467-1487: address match,
+    // then `if (netchan->qport) { qport = msg_read.data[8]; ... }`).
+    const d2 = net_message.data;
 
     // check for packets from connected clients
     for (let i = 0; i < maxc; i++) {
       const cl = svs.clients[i];
       if (cl.state === ClientStateT.cs_free) continue;
       if (!NET_CompareBaseAdr(net_from, cl.netchan.remote_address)) continue;
-      if (cl.netchan.qport !== qport) continue;
+
+      if (cl.netchan.qport) {
+        const qportSize = cl.netchan.type === NETCHAN_NEW ? 1 : 2;
+        if (net_message.cursize < 8 + qportSize) continue;
+        const qport = cl.netchan.type === NETCHAN_NEW ? d2[8] : d2[8] | (d2[9] << 8);
+        if (cl.netchan.qport !== qport) continue;
+      } else if (cl.netchan.remote_address.port !== net_from.port) {
+        continue;
+      }
+
       if (cl.netchan.remote_address.port !== net_from.port) {
         Com_Printf("SV_ReadPackets: fixing up a translated port\n");
         cl.netchan.remote_address.port = net_from.port;

@@ -79,11 +79,12 @@ import {
   PROTOCOL_VERSION_R1Q2_CURRENT,
   PROTOCOL_VERSION_Q2PRO,
   PROTOCOL_VERSION_Q2PRO_CURRENT,
+  PROTOCOL_VERSION_RERELEASE,
   PORT_SERVER,
   MAX_MSGLEN,
 } from "../qcommon/qcommon";
 import { NET_StringToAdr, NET_AdrToString, NET_CompareAdr, NET_IsLocalAddress, NET_SendPacket, NET_GetPacket, NET_Config } from "../platform/net_udp";
-import { Netchan_OutOfBandPrint, Netchan_Setup, Netchan_Transmit, Netchan_Process, net_from, net_message } from "../qcommon/net_chan";
+import { Netchan_OutOfBandPrint, Netchan_Setup, Netchan_Transmit, Netchan_Process, net_from, net_message, NETCHAN_OLD, NETCHAN_NEW } from "../qcommon/net_chan";
 import { SizeBuf, SZ_Init, SZ_Clear, SZ_Print, MSG_WriteByte, MSG_WriteChar, MSG_WriteShort, MSG_WriteLong, MSG_WriteString, MSG_ReadString, MSG_ReadStringLine, MSG_BeginReading, MSG_ReadLong } from "../qcommon/sizebuf";
 import { FS_Gamedir, FS_CreatePath, FS_FOpenFileWrite, FS_Write, FS_FCloseFile, FS_ExecAutoexec, FS_LoadFile } from "../qcommon/files";
 import { CM_LoadMap, CM_NumTexinfo, CM_TexinfoName } from "../qcommon/cmodel";
@@ -462,13 +463,25 @@ export function CL_SendConnectPacket(): void {
   if (protocol === PROTOCOL_VERSION_R1Q2) {
     tail = ` ${packetLength} ${PROTOCOL_VERSION_R1Q2_CURRENT}`;
   } else if (protocol === PROTOCOL_VERSION_Q2PRO) {
-    // netchan_type=0 (NETCHAN_OLD): this port never implements Q2PRO's
-    // alternate fragmented netchan variant (documented scope cut, see
-    // q2pro.ts's file header) -- requesting NETCHAN_OLD is the honest
-    // request, not a lie our own transport can't back up. has_zlib=1: this
-    // port DOES implement svc_r1q2_zpacket unwrap (qcommon/protocol/
-    // zpacket.ts), so advertising support is accurate.
-    tail = ` ${packetLength} 0 1 ${PROTOCOL_VERSION_Q2PRO_CURRENT}`;
+    // netchan_type=1 (NETCHAN_NEW): phase-8 q2repro interop (matrix cell b)
+    // confirmed a real q2repro-family client/server always uses NETCHAN_NEW
+    // framing at this protocol version (net_chan.ts's NETCHAN_NEW doc
+    // comment has the exact wire difference and how it was found). This
+    // port now implements NETCHAN_NEW's non-fragmented subset, so requesting
+    // it here is what CL_SendConnectPacket's own Netchan_Setup call below
+    // actually transmits -- no longer the "honest NETCHAN_OLD" this comment
+    // used to describe back when the framing wasn't implemented at all.
+    // has_zlib=1: this port DOES implement svc_r1q2_zpacket unwrap
+    // (qcommon/protocol/zpacket.ts), so advertising support is accurate.
+    tail = ` ${packetLength} 1 1 ${PROTOCOL_VERSION_Q2PRO_CURRENT}`;
+  } else if (protocol === PROTOCOL_VERSION_RERELEASE) {
+    // q2repro's own connect tail for 1038 (q2proto_q2repro_connect_tail:
+    // "%d %d" = packet_length, has_zlib) -- no netchan_type field at all,
+    // because kex/1038 always implies NETCHAN_NEW unconditionally on both
+    // ends (this port's sv_main.ts SVC_DirectConnect mirrors this: the kex
+    // family always selects NETCHAN_NEW with no per-client negotiation,
+    // matching q2repro's own hardcoded client-side behavior).
+    tail = ` ${packetLength} 1`;
   }
 
   Netchan_OutOfBandPrint(NetsrcT.NS_CLIENT, adr, `connect ${protocol} ${port} ${cls.challenge} "${Cvar_Userinfo()}"${tail}\n`);
@@ -885,7 +898,16 @@ export function CL_ConnectionlessPacket(): void {
     }
     HTTP_SetServer(dlserver, NET_IsLocalAddress(net_from));
 
-    Netchan_Setup(NetsrcT.NS_CLIENT, cls.netchan, net_from, cls.quakePort);
+    // phase-8 q2repro interop (matrix cell b): must match whatever netchan
+    // framing CL_SendConnectPacket actually requested for this protocol
+    // (net_chan.ts's NETCHAN_NEW doc comment) -- cls.serverProtocol is never
+    // set anywhere in this port (see client.ts's own doc comment on it), so
+    // cl_protocol's cvar value (unchanged since CL_SendConnectPacket read it
+    // to build the connect string) is the only real record of what was
+    // negotiated.
+    const connectProtocol = clCvars.cl_protocol ? clCvars.cl_protocol.value : PROTOCOL_VERSION;
+    const chanType = connectProtocol === PROTOCOL_VERSION_RERELEASE || connectProtocol === PROTOCOL_VERSION_Q2PRO ? NETCHAN_NEW : NETCHAN_OLD;
+    Netchan_Setup(NetsrcT.NS_CLIENT, cls.netchan, net_from, cls.quakePort, chanType);
     MSG_WriteChar(cls.netchan.message, ClcOpsT.clc_stringcmd);
     MSG_WriteString(cls.netchan.message, "new");
     cls.state = ConnstateT.ca_connected;

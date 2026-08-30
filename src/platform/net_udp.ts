@@ -231,7 +231,16 @@ async function NET_Socket(net_interface: string, port: number, sock: NetsrcT): P
           rxQueue[sock].push({ data: new Uint8Array(data), port: fromPort, address: fromAddress });
         },
         error(_socket, error) {
-          Com_Printf("NET_GetPacket: %s\n", error.message);
+          // RULE-17 FINDING (phase-8 q2repro interop): bun-types declares
+          // this callback's `error` parameter as a non-optional `Error`, but
+          // real Bun 1.3.14 invokes it with `error === undefined` under
+          // genuine interop load (observed only once a real q2repro client
+          // connected -- never triggered by this engine's own synthetic UDP
+          // tests). The declared type cannot be trusted at this native
+          // boundary; narrow the same way the catch block just below this
+          // handler already does for the identical mismatch.
+          const message = error instanceof Error ? error.message : String(error);
+          Com_Printf("NET_GetPacket: %s\n", message);
         },
       },
     });
