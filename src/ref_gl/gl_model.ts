@@ -185,6 +185,34 @@ export class MsurfaceT {
   styles: number[] = new Array<number>(MAXLIGHTMAPS).fill(0);
   cached_light: number[] = new Array<number>(MAXLIGHTMAPS).fill(0); // values currently used in lightmap
   samples: Uint8Array | null = null; // [numstyles*surfsize]
+
+  // BSPX DECOUPLED_LM override for this face (qcommon/bspx.ts's
+  // parseDecoupledLM; see q2repro's src/common/bsp.c BSP_ParseDecoupledLM
+  // and src/refresh/surf.c build_surface_poly's `if (bsp->lm_decoupled)`
+  // branch). When set, this face's lightmap texel dimensions and its
+  // vertex->lightmap-texel mapping come from `width`/`height`/`axis`/
+  // `offset` instead of the classic CalcSurfaceExtents-derived
+  // texturemins/extents grid (texturemins/extents are still computed and
+  // still drive the *texture* s/t coordinates and warp overrides -- only
+  // the *lightmap* coordinates and lightmap block size are replaced). null
+  // for every classic face and for every face on a BSP with no
+  // DECOUPLED_LM lump.
+  decoupledLm: { width: number; height: number; axis: readonly [Vec3, Vec3]; offset: readonly [number, number] } | null = null;
+}
+
+// Shared lightmap-texel-grid dimensions for a face: q2repro's surf.c always
+// has smax/tmax on hand as surf->lm_width/lm_height (populated either by
+// BSP_ParseDecoupledLM or by build_surface_poly's classic derivation); this
+// port instead computes the classic case on demand from extents (as vanilla
+// gl_rsurf.c always did) and only substitutes the decoupled dimensions when
+// present. Every call site that used to compute `(surf.extents[i]>>4)+1`
+// inline (GL_CreateSurfaceLightmap/R_BuildLightMap/R_AddDynamicLights/the
+// dynamic-relight paths in gl_rsurf.ts) goes through this instead, so a
+// decoupled face's lightmap block allocation, sample-buffer sizing, and
+// static/dynamic relight all agree on the same width/height.
+export function surfaceLightmapDims(surf: MsurfaceT): readonly [number, number] {
+  if (surf.decoupledLm) return [surf.decoupledLm.width, surf.decoupledLm.height];
+  return [(surf.extents[0] >> 4) + 1, (surf.extents[1] >> 4) + 1];
 }
 
 export const CONTENTS_NODE = -1;
@@ -853,6 +881,24 @@ function Mod_LoadFaces(l: LumpT): void {
     const lightofs = mod_view.getInt32(base + 16, true);
     s.samples = lightofs === -1 ? null : loadmodel.lightdata ? loadmodel.lightdata.subarray(lightofs) : null;
 
+    // BSPX DECOUPLED_LM override (see MsurfaceT.decoupledLm's comment and
+    // q2repro's BSP_ParseDecoupledLM, which does this same unconditional
+    // per-face overwrite -- including replacing `lightofs`/`samples`
+    // itself -- right after the classic face lump loads). On a real
+    // rerelease BSP the classic dface_t lightofs field above is -1 for
+    // every face (verified against baseq2/maps/base1.bsp: all 16787 faces);
+    // this is the only source of lightmap data for such a map.
+    const dlmFace = loadmodel.bspx?.decoupledLm?.faces[surfnum] ?? null;
+    if (dlmFace) {
+      s.decoupledLm = {
+        width: dlmFace.lmWidth,
+        height: dlmFace.lmHeight,
+        axis: [vec3(dlmFace.lmAxis[0][0], dlmFace.lmAxis[0][1], dlmFace.lmAxis[0][2]), vec3(dlmFace.lmAxis[1][0], dlmFace.lmAxis[1][1], dlmFace.lmAxis[1][2])],
+        offset: dlmFace.lmOffset,
+      };
+      s.samples = dlmFace.lightofs === null ? null : loadmodel.lightdata ? loadmodel.lightdata.subarray(dlmFace.lightofs) : null;
+    }
+
     // set the drawing flags
     if (s.texinfo.flags & SURF_WARP) {
       s.flags |= SURF_DRAWTURB;
@@ -1047,20 +1093,36 @@ function Mod_LoadBrushModel(mod: ModelT, buffer: Uint8Array): void {
   Mod_LoadLighting(header.lumps[LUMP_LIGHTING]);
   Mod_LoadPlanes(header.lumps[LUMP_PLANES]);
   Mod_LoadTexinfo(header.lumps[LUMP_TEXINFO]);
-  Mod_LoadFaces(header.lumps[LUMP_FACES]);
-  Mod_LoadMarksurfaces(header.lumps[LUMP_LEAFFACES]);
-  Mod_LoadVisibility(header.lumps[LUMP_VISIBILITY]);
-  Mod_LoadLeafs(header.lumps[LUMP_LEAFS]);
-  Mod_LoadNodes(header.lumps[LUMP_NODES]);
-  Mod_LoadSubmodels(header.lumps[LUMP_MODELS]);
-  mod.numframes = 2; // regular and alternate animation
 
   // BSPX extension directory -- not part of q2repro's bsp.c (which this
   // renderer's Load* functions above are otherwise NOT ported from: this
-  // is vanilla-shape gl_model.c). Parse-and-report only, see qcommon/bspx.ts's
-  // header comment and ModelT.bspx's comment above for exactly what's not
-  // wired up (the lightmap-building and lighting-sampling pipeline still
-  // ignores decoupled lightmaps and the lightgrid entirely).
+  // is vanilla-shape gl_model.c). Parsed here, BEFORE Mod_LoadFaces, so
+  // Mod_LoadFaces can apply DECOUPLED_LM's per-face overrides while it
+  // builds each MsurfaceT (see q2repro's src/common/bsp.c
+  // BSP_ParseDecoupledLM, which similarly overwrites bsp->faces[i] right
+  // after the classic face lump is loaded). `numfaces` is computed
+  // directly from the face lump's size rather than read from
+  // `loadmodel.numsurfaces` -- that field isn't set until Mod_LoadFaces
+  // runs, a few lines below.
+  //
+  // Lightgrid consumption (entity/dynamic-model lighting) is intentionally
+  // NOT wired here -- deferred, optional scope. q2repro DOES consume it:
+  // src/refresh/world.c's GL_LightPoint_ calls GL_LightGridPoint (which
+  // calls BSP_LookupLightgrid) BEFORE falling back to its classic/decoupled
+  // per-face lightmap sample (GL_SampleLightPoint) when the grid lookup
+  // misses or the map has no lightgrid. That's a full trilinear
+  // 8-sample-cube octree lookup with occluded-sample averaging (see
+  // GL_LightGridPoint, world.c ~line 69) -- a materially bigger unit than
+  // this one's per-face DECOUPLED_LM wiring below. gl_light.ts's
+  // R_LightPoint (RecursiveLightPoint) below DOES get the DECOUPLED_LM
+  // branch (matching bsp.c's BSP_RecursiveLightPoint, which unconditionally
+  // samples via lm_axis/lm_offset/lm_width/lm_height for every face) --
+  // only the lightgrid-first fast path is left uncalled. On a real
+  // BSPX-lit rerelease map this means entity/dynamic-model lighting still
+  // resolves via the correct per-face lightmap sample (this unit's fix)
+  // rather than the grid's smoother interpolated result; qcommon/bspx.ts's
+  // lookupLightgrid remains fully implemented and unit-tested, just not
+  // called from here yet.
   {
     const lumpsEnd = header.lumps.reduce((max, l) => Math.max(max, l.fileofs + l.filelen), 0);
     const bspxDir = parseBspxDirectory(buffer, lumpsEnd, buffer.length);
@@ -1069,10 +1131,11 @@ function Mod_LoadBrushModel(mod: ModelT, buffer: Uint8Array): void {
 
     if (bspxDir) {
       const lightingLump = header.lumps[LUMP_LIGHTING];
+      const numfaces = header.lumps[LUMP_FACES].filelen / DFACE_T_SIZE;
 
       const dlm = bspxDir.lumps.get("DECOUPLED_LM");
       if (dlm) {
-        decoupledLm = parseDecoupledLM(buffer, dlm.fileofs, dlm.filelen, loadmodel.numsurfaces, lightingLump.filelen);
+        decoupledLm = parseDecoupledLM(buffer, dlm.fileofs, dlm.filelen, numfaces, lightingLump.filelen);
         if (decoupledLm) ri.Con_Printf(PRINT_ALL, `${mod.name}: DECOUPLED_LM lump present (${decoupledLm.faces.length} faces)\n`);
       }
 
@@ -1085,6 +1148,14 @@ function Mod_LoadBrushModel(mod: ModelT, buffer: Uint8Array): void {
 
     loadmodel.bspx = decoupledLm || lightgrid ? { decoupledLm, lightgrid } : null;
   }
+
+  Mod_LoadFaces(header.lumps[LUMP_FACES]);
+  Mod_LoadMarksurfaces(header.lumps[LUMP_LEAFFACES]);
+  Mod_LoadVisibility(header.lumps[LUMP_VISIBILITY]);
+  Mod_LoadLeafs(header.lumps[LUMP_LEAFS]);
+  Mod_LoadNodes(header.lumps[LUMP_NODES]);
+  Mod_LoadSubmodels(header.lumps[LUMP_MODELS]);
+  mod.numframes = 2; // regular and alternate animation
 
   //
   // set up the submodels

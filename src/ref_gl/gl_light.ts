@@ -24,7 +24,7 @@ import { ERR_DROP, SURF_SKY, SURF_TRANS33, SURF_TRANS66, SURF_WARP, Q_ftol } fro
 import type { DlightT } from "../client/ref";
 import { ri, glCvars, r_newrefdef, r_framecount, currententity, vpn, vright, vup, r_origin, r_worldmodel } from "./gl_local";
 import { qgl } from "./gl_image";
-import { type MnodeOrLeaf, type MsurfaceT, type MplaneT, MAXLIGHTMAPS, isMleaf, SURF_DRAWTURB, SURF_DRAWSKY } from "./gl_model";
+import { type MnodeOrLeaf, type MsurfaceT, type MplaneT, MAXLIGHTMAPS, isMleaf, SURF_DRAWTURB, SURF_DRAWSKY, surfaceLightmapDims } from "./gl_model";
 
 // OpenGL 1.1 enum values gl_light.c's R_RenderDlight/R_RenderDlights need;
 // no shared GL-enum module exists yet across gl_*.ts (every other landed
@@ -220,6 +220,49 @@ function RecursiveLightPoint(node: MnodeOrLeaf, start: Vec3, end: Vec3): number 
     const surf = r_worldmodel.surfaces[node.firstsurface + i];
     if (surf.flags & (SURF_DRAWTURB | SURF_DRAWSKY)) continue; // no lightmaps
 
+    if (surf.decoupledLm) {
+      // q2repro's src/common/bsp.c BSP_RecursiveLightPoint samples every
+      // face (classic or decoupled) via lm_axis/lm_offset/lm_width/
+      // lm_height unconditionally, and never references surf->texinfo at
+      // all for that -- this branch matches that: it runs BEFORE the
+      // `!tex` guard below (a decoupled face's lm_axis/lm_offset stand
+      // fully on their own, same as q2repro's reference). This port keeps
+      // the classic branch below byte-for-byte and only substitutes this
+      // selection for a DECOUPLED_LM face. Sampling stays nearest-neighbor
+      // (matching this function's classic branch, not q2repro's bilinear
+      // GL_SampleLightPoint) -- see gl_model.ts's MsurfaceT.decoupledLm.
+      const dlm = surf.decoupledLm;
+      const ds = DotProduct(mid, dlm.axis[0]) + dlm.offset[0];
+      const dt = DotProduct(mid, dlm.axis[1]) + dlm.offset[1];
+
+      if (ds < 0 || ds > dlm.width - 1) continue;
+      if (dt < 0 || dt > dlm.height - 1) continue;
+
+      if (!surf.samples) return 0;
+
+      const s = ds | 0;
+      const t = dt | 0;
+
+      const lightmap = surf.samples;
+      VectorCopy(vec3_origin, pointcolor);
+
+      let lightmapOffset = 3 * (t * dlm.width + s);
+      for (let maps = 0; maps < MAXLIGHTMAPS && surf.styles[maps] !== 255; maps++) {
+        const scale = vec3();
+        const style = r_newrefdef.lightstyles[surf.styles[maps]];
+        const modulate = glCvars.gl_modulate ? glCvars.gl_modulate.value : 1;
+        for (let i2 = 0; i2 < 3; i2++) scale[i2] = modulate * style.rgb[i2];
+
+        pointcolor[0] += lightmap[lightmapOffset + 0] * scale[0] * (1.0 / 255);
+        pointcolor[1] += lightmap[lightmapOffset + 1] * scale[1] * (1.0 / 255);
+        pointcolor[2] += lightmap[lightmapOffset + 2] * scale[2] * (1.0 / 255);
+
+        lightmapOffset += 3 * dlm.width * dlm.height;
+      }
+
+      return 1;
+    }
+
     const tex = surf.texinfo;
     if (!tex) continue;
 
@@ -298,12 +341,31 @@ export function R_LightPoint(p: Vec3, color: Vec3): void {
 
 //===================================================================
 
-const s_blocklights = new Float32Array(34 * 34 * 3);
+// Vanilla sized this 34*34*3 (headroom over the classic 256-unit extents
+// cap, max smax/tmax ~17). Bumped to 128*128*3 to cover DECOUPLED_LM faces,
+// whose lm_width/lm_height come straight from the BSPX lump instead of the
+// 256-unit-extents-derived grid (real rerelease data: up to 32x36, still
+// well inside the atlas's own BLOCK_WIDTH/BLOCK_HEIGHT=128 cap -- see
+// gl_rsurf.ts's GL_CreateSurfaceLightmap, which allocates this same face
+// into the shared lightmap atlas via surfaceLightmapDims).
+const s_blocklights = new Float32Array(128 * 128 * 3);
 
 /*
 ===============
 R_AddDynamicLights
-===============
+
+NOTE: this still iterates the classic texinfo-vecs/texturemins/16-unit grid
+(smax/tmax below, NOT surfaceLightmapDims) even for a DECOUPLED_LM face --
+q2repro's dynamic-light equivalent is architecturally per-vertex
+(GL_SampleLightPoint from vbo texcoords), not a grid walk like this one, so
+there is no reference selection logic to port here. The practical effect is
+a dynamic light's glow falls off using the surface's classic-extents grid
+placement rather than the decoupled lightmap's texel grid -- a minor visual
+inaccuracy on decoupled surfaces (dynamic light halo slightly misaligned),
+not a bounds or crash risk (this loop's own smax/tmax stay within
+s_blocklights regardless, since the copy loop in R_BuildLightMap below is
+the one iterating the (possibly larger) decoupled dimensions). The primary
+goal -- correct STATIC baked lighting on decoupled maps -- is unaffected.
 */
 function R_AddDynamicLights(surf: MsurfaceT): void {
   const smax = (surf.extents[0] >> 4) + 1;
@@ -384,12 +446,13 @@ export function R_BuildLightMap(surf: MsurfaceT, dest: Uint8Array, stride: numbe
     ri.Sys_Error(ERR_DROP, "R_BuildLightMap called for non-lit surface");
   }
 
-  const smax = (surf.extents[0] >> 4) + 1;
-  const tmax = (surf.extents[1] >> 4) + 1;
+  const [smax, tmax] = surfaceLightmapDims(surf);
   const size = smax * tmax;
-  // C: sizeof(s_blocklights)>>4 -- BYTES (float[34*34*3] = 13872 -> 867),
-  // not element count (3468 -> 216, which false-errors ordinary 17x17+
-  // lightmaps the moment a dynamic light or lightstyle touches them).
+  // C: sizeof(s_blocklights)>>4 -- BYTES, not element count (this port's
+  // enlarged buffer makes that (128*128*3*4)>>4 = 12288, not vanilla's 867
+  // -- see s_blocklights's own comment for why. Still a genuine backstop:
+  // a face whose lightmap is bigger than the shared atlas block itself
+  // (BLOCK_WIDTH*BLOCK_HEIGHT) can never legitimately fit here).
   if (size > (s_blocklights.length * Float32Array.BYTES_PER_ELEMENT) >> 4) {
     ri.Sys_Error(ERR_DROP, "Bad s_blocklights size");
   }

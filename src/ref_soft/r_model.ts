@@ -1099,21 +1099,18 @@ function Mod_LoadBrushModel(mod: ModelT, buffer: Uint8Array): void {
   Mod_LoadLighting(header.lumps[LUMP_LIGHTING]);
   Mod_LoadPlanes(header.lumps[LUMP_PLANES]);
   Mod_LoadTexinfo(header.lumps[LUMP_TEXINFO]);
-  Mod_LoadFaces(header.lumps[LUMP_FACES]);
-  Mod_LoadMarksurfaces(header.lumps[LUMP_LEAFFACES]);
-  Mod_LoadVisibility(header.lumps[LUMP_VISIBILITY]);
-  Mod_LoadLeafs(header.lumps[LUMP_LEAFS]);
-  Mod_LoadNodes(header.lumps[LUMP_NODES]);
-  Mod_LoadSubmodels(header.lumps[LUMP_MODELS]);
-  r_numvisleafs = 0;
-  R_NumberLeafs(loadmodel.nodes[0]);
 
   // BSPX extension directory -- not part of any r_model.c this file is
   // otherwise ported from (vanilla software renderer has no such concept).
-  // Parse-and-report only, see qcommon/bspx.ts's header comment and
-  // ModelT.bspx's comment above for exactly what's not wired up (the
-  // lightmap-building and lighting-sampling pipeline still ignores
-  // decoupled lightmaps and the lightgrid entirely).
+  // Parsed here, BEFORE Mod_LoadFaces, purely to detect DECOUPLED_LM/
+  // LIGHTGRID_OCTREE up front (see the graceful-refusal block right below
+  // this one) -- `numfaces` is computed directly from the face lump's size
+  // rather than read from `loadmodel.numsurfaces`, which isn't set until
+  // Mod_LoadFaces runs a few lines down. Otherwise parse-and-report only:
+  // this renderer's lightmap-building/lighting-sampling pipeline (r_light.ts/
+  // r_surf.ts) still ignores decoupled lightmaps and the lightgrid entirely
+  // -- see the graceful-refusal block's comment for why that isn't fixed
+  // here (there is no reference software renderer to port a fix from).
   {
     const lumpsEnd = header.lumps.reduce((max, l) => Math.max(max, l.fileofs + l.filelen), 0);
     const bspxDir = parseBspxDirectory(buffer, lumpsEnd, buffer.length);
@@ -1122,10 +1119,11 @@ function Mod_LoadBrushModel(mod: ModelT, buffer: Uint8Array): void {
 
     if (bspxDir) {
       const lightingLump = header.lumps[LUMP_LIGHTING];
+      const numfaces = header.lumps[LUMP_FACES].filelen / DFACE_T_SIZE;
 
       const dlm = bspxDir.lumps.get("DECOUPLED_LM");
       if (dlm) {
-        decoupledLm = parseDecoupledLM(buffer, dlm.fileofs, dlm.filelen, loadmodel.numsurfaces, lightingLump.filelen);
+        decoupledLm = parseDecoupledLM(buffer, dlm.fileofs, dlm.filelen, numfaces, lightingLump.filelen);
         if (decoupledLm) ri.Con_Printf(PRINT_ALL, `${mod.name}: DECOUPLED_LM lump present (${decoupledLm.faces.length} faces)\n`);
       }
 
@@ -1138,6 +1136,48 @@ function Mod_LoadBrushModel(mod: ModelT, buffer: Uint8Array): void {
 
     loadmodel.bspx = decoupledLm || lightgrid ? { decoupledLm, lightgrid } : null;
   }
+
+  // Graceful refusal for BSPX DECOUPLED_LM maps (rule 17/FIDELITY RAZOR --
+  // Mike, 2026-08-30): q2repro (the only rerelease-era reference this port
+  // has) HAS NO SOFTWARE RENDERER AT ALL (verified: no src/refresh/*soft*,
+  // no sw_*.c anywhere in ~/Projects/qsrc/q2repro) -- there is no reference
+  // "how does the soft path handle DECOUPLED_LM" behavior to port, faithfully
+  // or otherwise. Left unhandled, a DECOUPLED_LM map's classic dface_t
+  // lightofs field is -1 for every face on real data (verified against
+  // baseq2/maps/base1.bsp: all 16787 faces) -- meaning this renderer's
+  // lighting pipeline, which never reads BSPX data, would render the whole
+  // map fully unlit, and on some DECOUPLED_LM remaster maps (verified: real
+  // baseq2/maps/rhangar1.bsp, q2dm3.bsp, rlava1.bsp, rlava2.bsp, rmine1.bsp)
+  // a handful of surfaces' plain geometry/texture-axis extents ALSO happen
+  // to exceed vanilla's 256-unit cap, which is what actually throws
+  // "Bad surface extents" below, deep inside CalcSurfaceExtents, with no
+  // context connecting the crash to BSPX at all.
+  //
+  // Rather than let either of those happen by accident, refuse the whole
+  // class up front with a clear reason. This does NOT touch
+  // CalcSurfaceExtents's own "Bad surface extents" check (Mod_LoadFaces
+  // below, still hit by non-BSPX content whose geometry genuinely exceeds
+  // vanilla's cap -- verified real, unrelated example: baseq2/maps/q64/*.bsp,
+  // the N64 remaster set, which carries NO BSPX at all and still violates
+  // the cap on 150-275 surfaces per map) -- that throw is vanilla's own
+  // real behavior for content the classic format was never built for, and
+  // stays exactly as it was.
+  if (loadmodel.bspx?.decoupledLm) {
+    ri.Con_Printf(
+      PRINT_ALL,
+      `${mod.name}: this map uses BSPX decoupled lightmaps (DECOUPLED_LM), which the software renderer does not support (no q2repro software renderer exists to port support from)\n`,
+    );
+    ri.Sys_Error(ERR_DROP, `${mod.name}: decoupled lightmaps are not supported by the software renderer -- load this map with the OpenGL renderer instead`);
+  }
+
+  Mod_LoadFaces(header.lumps[LUMP_FACES]);
+  Mod_LoadMarksurfaces(header.lumps[LUMP_LEAFFACES]);
+  Mod_LoadVisibility(header.lumps[LUMP_VISIBILITY]);
+  Mod_LoadLeafs(header.lumps[LUMP_LEAFS]);
+  Mod_LoadNodes(header.lumps[LUMP_NODES]);
+  Mod_LoadSubmodels(header.lumps[LUMP_MODELS]);
+  r_numvisleafs = 0;
+  R_NumberLeafs(loadmodel.nodes[0]);
 
   //
   // set up the submodels

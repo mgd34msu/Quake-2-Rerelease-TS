@@ -61,6 +61,7 @@ import {
   SURF_DRAWTURB,
   isMleaf,
   Mod_ClusterPVS,
+  surfaceLightmapDims,
   type MsurfaceT,
   type MtexinfoT,
   type MnodeOrLeaf,
@@ -338,8 +339,7 @@ export function R_BlendLightmaps(): void {
     newdrawsurf = gl_lms.lightmap_surfaces[0];
 
     for (let surf = gl_lms.lightmap_surfaces[0]; surf; surf = surf.lightmapchain) {
-      const smax = (surf.extents[0] >> 4) + 1;
-      const tmax = (surf.extents[1] >> 4) + 1;
+      const [smax, tmax] = surfaceLightmapDims(surf);
 
       const alloc = LM_AllocBlock(smax, tmax);
       if (alloc.ok) {
@@ -462,9 +462,15 @@ export function R_RenderBrushPoly(fa: MsurfaceT): void {
     // which fails both comparisons below exactly like an out-of-range style
     // byte would in every real, non-corrupted case.
     if ((fa.styles[maps] >= 32 || fa.styles[maps] === 0) && fa.dlightframe !== r_framecount) {
-      const smax = (fa.extents[0] >> 4) + 1;
-      const tmax = (fa.extents[1] >> 4) + 1;
-      const temp = new Uint32Array(34 * 34);
+      const [smax, tmax] = surfaceLightmapDims(fa);
+      // 34*34 is vanilla's fixed relight scratch buffer, sized for the
+      // classic 256-unit extents cap (max smax/tmax ~17); bumped to match
+      // GL_RenderLightmappedPoly's sibling buffer below (128*128) so a
+      // DECOUPLED_LM face's larger lm_width/lm_height (real rerelease data:
+      // up to 32x36) doesn't overrun it. R_BuildLightMap's own
+      // "Bad s_blocklights size" check (gl_light.ts) is still the actual
+      // backstop against a face too big for either buffer.
+      const temp = new Uint32Array(128 * 128);
 
       R_BuildLightMap(fa, new Uint8Array(temp.buffer), smax * 4);
       R_SetCacheState(fa);
@@ -630,8 +636,7 @@ function GL_RenderLightmappedPoly(surf: MsurfaceT): void {
     let tmax: number;
 
     if ((surf.styles[map] >= 32 || surf.styles[map] === 0) && surf.dlightframe !== r_framecount) {
-      smax = (surf.extents[0] >> 4) + 1;
-      tmax = (surf.extents[1] >> 4) + 1;
+      [smax, tmax] = surfaceLightmapDims(surf);
 
       R_BuildLightMap(surf, new Uint8Array(temp.buffer), smax * 4);
       R_SetCacheState(surf);
@@ -641,8 +646,7 @@ function GL_RenderLightmappedPoly(surf: MsurfaceT): void {
 
       qgl.qglTexSubImage2D(GL_TEXTURE_2D, 0, surf.light_s, surf.light_t, smax, tmax, GL_LIGHTMAP_FORMAT, GL_UNSIGNED_BYTE, temp);
     } else {
-      smax = (surf.extents[0] >> 4) + 1;
-      tmax = (surf.extents[1] >> 4) + 1;
+      [smax, tmax] = surfaceLightmapDims(surf);
 
       R_BuildLightMap(surf, new Uint8Array(temp.buffer), smax * 4);
 
@@ -1108,17 +1112,38 @@ export function GL_BuildPolygonFromSurface(fa: MsurfaceT): void {
     row[4] = t;
 
     // lightmap texture coordinates
-    let ls = DotProduct(vec, texinfo.vecs[0]) + texinfo.vecs[0][3];
-    ls -= fa.texturemins[0];
-    ls += fa.light_s * 16;
-    ls += 8;
-    ls /= BLOCK_WIDTH * 16;
+    let ls: number;
+    let lt: number;
+    if (fa.decoupledLm) {
+      // q2repro's build_surface_poly, `if (bsp->lm_decoupled)` branch: the
+      // vertex's lightmap texel coordinate comes straight from the
+      // DECOUPLED_LM axis/offset (already in per-texel units, unlike
+      // texinfo.vecs which are in per-world-unit/16 units below) -- no
+      // texturemins subtraction or *16/8 half-texel bias in world units,
+      // just a direct atlas-position shift and the same half-texel center
+      // bias q2repro's normalize_surface_lmtc applies (`s = light_s + 0.5`).
+      ls = DotProduct(vec, fa.decoupledLm.axis[0]) + fa.decoupledLm.offset[0];
+      ls += fa.light_s;
+      ls += 0.5;
+      ls /= BLOCK_WIDTH;
 
-    let lt = DotProduct(vec, texinfo.vecs[1]) + texinfo.vecs[1][3];
-    lt -= fa.texturemins[1];
-    lt += fa.light_t * 16;
-    lt += 8;
-    lt /= BLOCK_HEIGHT * 16;
+      lt = DotProduct(vec, fa.decoupledLm.axis[1]) + fa.decoupledLm.offset[1];
+      lt += fa.light_t;
+      lt += 0.5;
+      lt /= BLOCK_HEIGHT;
+    } else {
+      ls = DotProduct(vec, texinfo.vecs[0]) + texinfo.vecs[0][3];
+      ls -= fa.texturemins[0];
+      ls += fa.light_s * 16;
+      ls += 8;
+      ls /= BLOCK_WIDTH * 16;
+
+      lt = DotProduct(vec, texinfo.vecs[1]) + texinfo.vecs[1][3];
+      lt -= fa.texturemins[1];
+      lt += fa.light_t * 16;
+      lt += 8;
+      lt /= BLOCK_HEIGHT * 16;
+    }
 
     row[5] = ls;
     row[6] = lt;
@@ -1138,8 +1163,11 @@ GL_CreateSurfaceLightmap
 export function GL_CreateSurfaceLightmap(surf: MsurfaceT): void {
   if (surf.flags & (SURF_DRAWSKY | SURF_DRAWTURB)) return;
 
-  const smax = (surf.extents[0] >> 4) + 1;
-  const tmax = (surf.extents[1] >> 4) + 1;
+  // q2repro's LM_BuildSurface reads surf->lm_width/lm_height directly here
+  // (populated either by the classic build_surface_poly derivation or by
+  // BSP_ParseDecoupledLM); surfaceLightmapDims is this port's equivalent
+  // selection (see gl_model.ts).
+  const [smax, tmax] = surfaceLightmapDims(surf);
 
   let alloc = LM_AllocBlock(smax, tmax);
   if (!alloc.ok) {
