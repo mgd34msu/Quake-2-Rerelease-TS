@@ -296,6 +296,87 @@ export function Draw_ColorPic(x: number, y: number, w: number, h: number, name: 
 
 /*
 =============
+Draw_StretchPicRegion
+
+Like Draw_ColorPic, but samples a pixel-space sub-rectangle of the source
+image (srcX/srcY/srcW/srcH) instead of the whole thing, and stretches that
+sub-rectangle into the dest w*h box (generalizing
+Draw_StretchPicImplementation's whole-image nearest-neighbor row/column
+sampling the same way). No classic-engine precedent -- added for
+RefExports.DrawStretchPicRegion (see that interface member's own doc
+comment, client/ref.ts); tinting reuses Draw_ColorPic's own palette-remap +
+4x4 ordered-dither approach verbatim (see that function's header comment for
+why: the framebuffer here is 8-bit palette indices, so there is no true
+alpha blend to fall back on).
+=============
+*/
+export function Draw_StretchPicRegion(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  name: string,
+  srcX: number,
+  srcY: number,
+  srcW: number,
+  srcH: number,
+  color: { r: number; g: number; b: number; a: number },
+): void {
+  // C declares these parameters int; JS callers can pass fractional
+  // values (typed-array writes at fractional indices are silently dropped),
+  // so truncate at the boundary exactly as the C parameter types did.
+  x = x | 0;
+  y = y | 0;
+  w = w | 0;
+  h = h | 0;
+  srcX = srcX | 0;
+  srcY = srcY | 0;
+  srcW = srcW | 0;
+  srcH = srcH | 0;
+  const pic = Draw_FindPic(name);
+  if (!pic) {
+    ri.Con_Printf(PRINT_ALL, `Can't find pic: ${name}\n`);
+    return;
+  }
+  const picPixels = pic.pixels[0];
+  if (!picPixels) return;
+
+  if (x < 0 || x + w > vid.width || y + h > vid.height) {
+    ri.Sys_Error(ERR_FATAL, "Draw_StretchPicRegion: bad coordinates");
+  }
+
+  const remap = buildColorRemap(color.r & 255, color.g & 255, color.b & 255);
+  const alphaThreshold = (color.a & 255) >> 4; // 0-15, matches BAYER_4X4's range
+
+  let height = h;
+  let skip = 0;
+  if (y < 0) {
+    skip = -y;
+    height += y;
+    y = 0;
+  }
+
+  let destOfs = y * vid.rowbytes + x;
+  const fstep = ((srcW * 0x10000) / w) | 0;
+
+  for (let v = 0; v < height; v++, destOfs += vid.rowbytes) {
+    const sv = srcY + ((((skip + v) * srcH) / h) | 0);
+    const sourceRowOfs = sv * pic.width;
+    const rowDither = (y + v) & 3;
+    let f = 0;
+    for (let u = 0; u < w; u++) {
+      const su = srcX + (f >> 16);
+      f += fstep;
+      const tinted = remap[picPixels[sourceRowOfs + su]];
+      if (alphaThreshold >= 15 || BAYER_4X4[rowDither * 4 + (u & 3)] < alphaThreshold) {
+        vid.buffer[destOfs + u] = tinted;
+      }
+    }
+  }
+}
+
+/*
+=============
 Draw_StretchRaw
 =============
 */

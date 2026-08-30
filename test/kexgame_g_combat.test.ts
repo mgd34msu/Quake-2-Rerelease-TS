@@ -40,7 +40,7 @@ import { describe, test, expect } from "bun:test";
 import { vec3 } from "../src/shared/math";
 import { CplaneT, CvarT } from "../src/shared/q_shared";
 import type { KexEdictT, KexGameExports, KexGameImports, KexTraceT, KexPlayerStateT, KexPmoveStateT, KexUsercmdT } from "../src/kexapi/game";
-import { GAME_API_VERSION, MAX_STATS, SolidT } from "../src/kexapi/game";
+import { GAME_API_VERSION, MAX_STATS, SolidT, SvflagsT } from "../src/kexapi/game";
 import {
   type EdictT,
   type GClientT,
@@ -58,6 +58,7 @@ import { jacketarmor_info, combatarmor_info, bodyarmor_info } from "../src/kexga
 import { defaultEdict, gi, globals, game, level, g_edicts, SetGameImports, SetGameExports, SetGEdicts } from "../src/kexgame/g_main_globals";
 import { Gtime_from_ms } from "../src/kexgame/gtime";
 import { CanDamage, Killed, CheckArmor, CheckPowerArmor, CheckTeamDamage, OnSameTeam, T_Damage, T_RadiusDamage } from "../src/kexgame/g_combat";
+import { PlayerStatT } from "../src/kexgame/p_hud";
 
 // ---------------------------------------------------------------------------
 // fake KexGameImports / KexGameExports fixture (mirrors
@@ -930,6 +931,109 @@ describe("T_Damage: inline friendly-fire (g_combat.cpp:549-563)", () => {
 
     expect(targ.health).toBe(100); // damage zeroed
     expect(callerMod.friendly_fire).toBe(false); // by-value clone -- caller's object is untouched
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T_Damage -- STAT_HIT_MARKER (g_combat.cpp:717-719, restored 2026-08-30)
+// ---------------------------------------------------------------------------
+
+describe("T_Damage: STAT_HIT_MARKER write (g_combat.cpp:717-719)", () => {
+  test("attacker with a client accumulates take+psave+asave into their own STAT_HIT_MARKER stat", () => {
+    const { edicts } = setupWorld(1, 8, 8);
+    const targ = makeBreakableEdict(edicts, 1);
+    const attacker = makePlayerEdict(edicts, 0);
+
+    T_Damage(targ, attacker, attacker, vec3(1, 0, 0), ORIGIN, NORMAL, 30, 0, DamageflagsT.DAMAGE_NONE, MOD_UNKNOWN);
+
+    expect(targ.health).toBe(20); // 50 - 30, unaffected by the stat write
+    expect(attacker.client!.ps.stats[PlayerStatT.STAT_HIT_MARKER]).toBe(30); // take=30, psave=asave=0
+  });
+
+  test("accumulates across multiple hits rather than overwriting", () => {
+    const { edicts } = setupWorld(1, 8, 8);
+    const targ = makeBreakableEdict(edicts, 1);
+    const attacker = makePlayerEdict(edicts, 0);
+
+    T_Damage(targ, attacker, attacker, vec3(1, 0, 0), ORIGIN, NORMAL, 10, 0, DamageflagsT.DAMAGE_NONE, MOD_UNKNOWN);
+    T_Damage(targ, attacker, attacker, vec3(1, 0, 0), ORIGIN, NORMAL, 15, 0, DamageflagsT.DAMAGE_NONE, MOD_UNKNOWN);
+
+    expect(attacker.client!.ps.stats[PlayerStatT.STAT_HIT_MARKER]).toBe(25);
+  });
+
+  test("attacker with no client (e.g. a trap/trigger) does not write the stat (nothing to write into)", () => {
+    const { edicts } = setupWorld(0, 8, 8);
+    const targ = makeBreakableEdict(edicts, 1);
+    const attacker = makeBreakableEdict(edicts, 2); // no .client
+
+    T_Damage(targ, attacker, attacker, vec3(1, 0, 0), ORIGIN, NORMAL, 30, 0, DamageflagsT.DAMAGE_NONE, MOD_UNKNOWN);
+
+    expect(targ.health).toBe(20); // damage still applies; just no client to record the marker on
+  });
+
+  test("self-damage (targ === attacker) does not write the stat (g_combat.cpp:718's `targ != attacker` gate)", () => {
+    const { edicts } = setupWorld(1, 8, 8);
+    const self = makePlayerEdict(edicts, 0);
+
+    T_Damage(self, self, self, vec3(1, 0, 0), ORIGIN, NORMAL, 20, 0, DamageflagsT.DAMAGE_NONE, MOD_UNKNOWN);
+
+    expect(self.client!.ps.stats[PlayerStatT.STAT_HIT_MARKER]).toBe(0);
+  });
+
+  test("a killing blow still marks (health is read BEFORE this call's own subtraction -- g_combat.cpp checks `targ->health > 0` ahead of `targ->health -= take`)", () => {
+    const { edicts } = setupWorld(1, 8, 8);
+    const targ = makeBreakableEdict(edicts, 1);
+    const attacker = makePlayerEdict(edicts, 0);
+
+    T_Damage(targ, attacker, attacker, vec3(1, 0, 0), ORIGIN, NORMAL, 999, 0, DamageflagsT.DAMAGE_NONE, MOD_UNKNOWN);
+
+    expect(targ.health).toBeLessThanOrEqual(0);
+    expect(attacker.client!.ps.stats[PlayerStatT.STAT_HIT_MARKER]).toBe(999); // targ was alive (health=50>0) when the gate was checked
+  });
+
+  test("hitting an already-dead target (health <= 0 before this call) does not write the stat (g_combat.cpp:718's `targ->health > 0` gate)", () => {
+    const { edicts } = setupWorld(1, 8, 8);
+    const targ = makeBreakableEdict(edicts, 1);
+    targ.health = 0; // already dead before this hit
+    const attacker = makePlayerEdict(edicts, 0);
+
+    T_Damage(targ, attacker, attacker, vec3(1, 0, 0), ORIGIN, NORMAL, 30, 0, DamageflagsT.DAMAGE_NONE, MOD_UNKNOWN);
+
+    expect(attacker.client!.ps.stats[PlayerStatT.STAT_HIT_MARKER]).toBe(0);
+  });
+
+  test("MOD_TARGET_LASER hits never mark (g_combat.cpp:718's `mod.id != MOD_TARGET_LASER` gate)", () => {
+    const { edicts } = setupWorld(1, 8, 8);
+    const targ = makeBreakableEdict(edicts, 1);
+    const attacker = makePlayerEdict(edicts, 0);
+    const laserMod = { id: ModIdT.MOD_TARGET_LASER, friendly_fire: false, no_point_loss: false };
+
+    T_Damage(targ, attacker, attacker, vec3(1, 0, 0), ORIGIN, NORMAL, 30, 0, DamageflagsT.DAMAGE_NONE, laserMod);
+
+    expect(targ.health).toBe(20);
+    expect(attacker.client!.ps.stats[PlayerStatT.STAT_HIT_MARKER]).toBe(0);
+  });
+
+  test("a dead monster target (SVF_DEADMONSTER) does not write the stat", () => {
+    const { edicts } = setupWorld(1, 8, 8);
+    const targ = makeBreakableEdict(edicts, 1);
+    targ.svflags |= SvflagsT.SVF_DEADMONSTER;
+    const attacker = makePlayerEdict(edicts, 0);
+
+    T_Damage(targ, attacker, attacker, vec3(1, 0, 0), ORIGIN, NORMAL, 30, 0, DamageflagsT.DAMAGE_NONE, MOD_UNKNOWN);
+
+    expect(attacker.client!.ps.stats[PlayerStatT.STAT_HIT_MARKER]).toBe(0);
+  });
+
+  test("a target with FL_NO_DAMAGE_EFFECTS does not write the stat", () => {
+    const { edicts } = setupWorld(1, 8, 8);
+    const targ = makeBreakableEdict(edicts, 1);
+    targ.flags |= EntFlagsT.FL_NO_DAMAGE_EFFECTS;
+    const attacker = makePlayerEdict(edicts, 0);
+
+    T_Damage(targ, attacker, attacker, vec3(1, 0, 0), ORIGIN, NORMAL, 30, 0, DamageflagsT.DAMAGE_NONE, MOD_UNKNOWN);
+
+    expect(attacker.client!.ps.stats[PlayerStatT.STAT_HIT_MARKER]).toBe(0);
   });
 });
 

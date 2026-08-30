@@ -84,6 +84,7 @@ function makeSpyRe(log: DrawCall[]): RefExports {
       log.push({ fn: "DrawStretchPic", x, y, w, h, name });
     },
     DrawColorPic: (_x: number, _y: number, _w: number, _h: number, _name: string, _color: DrawColorT) => undefined,
+    DrawStretchPicRegion: (_x: number, _y: number, _w: number, _h: number, _name: string, _srcX: number, _srcY: number, _srcW: number, _srcH: number, _color: DrawColorT) => undefined,
     DrawChar(x: number, y: number, num: number) {
       log.push({ fn: "DrawChar", x, y, num });
     },

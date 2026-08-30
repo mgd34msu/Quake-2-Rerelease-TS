@@ -40,15 +40,18 @@ import { Com_Printf, Com_Error as Engine_Com_Error } from "../../qcommon/common"
 import { Loc_Localize } from "../../qcommon/loc";
 import { ERR_DROP } from "../../qcommon/qcommon";
 import { Cvar_Get, Cvar_Set, Cvar_ForceSet } from "../../qcommon/cvar";
+import { FS_LoadFile } from "../../qcommon/files";
 import type { KexCgameImports, Vec2T, KexPlayerStateT, KexPmoveStateT, CgServerDataT, VrectT } from "../../kexapi/game";
-import { TextAlignT, KexPmTypeT, MAX_STATS as KEX_MAX_STATS } from "../../kexapi/game";
+import { TextAlignT, KexPmTypeT, MAX_STATS as KEX_MAX_STATS, rgba_white } from "../../kexapi/game";
 import type { PlayerStateT, PmoveStateT } from "../../shared/q_shared";
 import { PmTypeT, SHORT2ANGLE } from "../../shared/q_shared";
 import type { Vec3 } from "../../shared/math";
+import type { DrawColorT } from "../ref";
 import { Key_GetBinding } from "../keys_impl";
 import { viddef } from "../vid";
 import { GetClassicCgameAPI } from "./classic";
 import { GetCGameAPI as GetKexCgameAPI } from "../../kexgame/cgame/cg_main";
+import { ParseKfont, SCR_KFontLookup, type KfontT } from "./kfont";
 
 // ---------------------------------------------------------------------------
 // Fallback text metrics (kfont-less path) -- see the SCR_DrawFontString /
@@ -80,47 +83,229 @@ function drawConchar(x: number, y: number, num: number): void {
   re.DrawChar(x, y, num);
 }
 
-// SCR_MeasureFontString's fallback body, factored out so SCR_DrawFontString
-// (which needs the total width for CENTER/RIGHT alignment) and
-// SCR_FontLineHeight can both call it without duplicating the split-on-'\n'
-// walk. See the doc comment on SCR_MeasureFontString below for the
-// side-by-side with q2repro's CG_SCR_MeasureFontString.
-function measureFontStringFallback(str: string, scale: number): Vec2T {
+// ---------------------------------------------------------------------------
+// [Paril-KEX] kfont loading -- see ./kfont.ts's own header comment for the
+// full format writeup and the FIDELITY RAZOR (rule 17) history: this port
+// used to ship ONLY the conchars-fallback branch of the four font functions
+// below, with a FINDING comment (now superseded) recording that q2repro's
+// real "fonts/qconfont.kfont" + "fonts/qconfont.png" assets exist in the
+// retail rerelease KPF (Q2Game.kpf) this project can now mount, but that no
+// PNG decoder or atlas-subrect draw primitive existed yet to load/render
+// them. Both now exist (qcommon/png.ts, RefExports.DrawStretchPicRegion) --
+// this section is the real load path q2repro's own SCR_Init
+// (`SCR_LoadKFont(&scr.kfont, "fonts/qconfont.kfont")`) exercises.
+//
+// Memoized by `re` IDENTITY, not a one-shot flag: `re` is swapped out
+// exactly once in a real process (client.ts's setRe, right after the
+// renderer constructs) and stays stable for the rest of that process's
+// life, so in real play this reduces to "load once, right after the
+// renderer exists" -- the same timing q2repro's SCR_Init achieves by
+// running once at startup. The identity-keyed cache (rather than a plain
+// "attempted yet?" boolean) exists so this module's shared state stays
+// correct across test files that call `setRe` repeatedly with different
+// fakes in the same process (test/cgame_draw.test.ts's beforeEach, etc.) --
+// a plain boolean would wrongly stick to whatever the FIRST test's `re`
+// value produced for the rest of the suite.
+let kfontCacheFor: unknown = undefined;
+let kfontCache: KfontT | null = null;
+
+// SCR_LoadKFont (src/refresh/draw.c), engine-side half: ./kfont.ts's
+// ParseKfont does the pure text-format parsing (unit-tested directly,
+// test/kfont.test.ts); this wires that result to the actual FS + renderer.
+// `"/" + textureToken` matches Draw_FindPic's own "leading '/' means exact
+// path, no pics/*.pcx default" convention (this port's gl_draw.ts/
+// r_draw.ts) -- the same trick q2repro's own `R_RegisterFont(va("/%s",
+// token))` call relies on. re.RegisterPic(...) !== null as the "does this
+// texture actually exist" check mirrors Draw_RegisterPic's own existing
+// convention just below in this file, rather than the documented
+//0-vs-(-1) DrawGetPicSize mismatch noted on that member.
+function loadKfontAsset(filename: string): KfontT | null {
+  if (!re) return null;
+  const raw = FS_LoadFile(filename);
+  if (!raw) return null;
+  const text = Buffer.from(raw).toString("latin1");
+  const parsed = ParseKfont(text);
+  if (!parsed) return null;
+  const pic = "/" + parsed.textureToken;
+  if (!re.RegisterPic(pic)) return null;
+  return { pic, chars: parsed.chars, line_height: parsed.line_height };
+}
+
+function ensureKfont(): KfontT | null {
+  if (re !== kfontCacheFor) {
+    kfontCacheFor = re;
+    kfontCache = loadKfontAsset("fonts/qconfont.kfont");
+  }
+  return kfontCache;
+}
+
+// CG_SCR_FontLineHeight (src/client/cgame.c): NOTE `scale` is read in the
+// fallback branch but NOT in the kfont branch -- `return scr.kfont.
+// line_height;`, no `* scale`. That is q2repro's own code, not a bug
+// introduced by this port; preserved per FIDELITY RAZOR (rule 17) since it
+// is real, observable behavior with the shipped asset (a HUD string drawn
+// at scale=2 through the kfont path gets a scaled glyph ADVANCE per
+// character -- see drawKfontChar below -- but an UNSCALED line pitch and
+// UNSCALED measured width; see measureFontStringDispatch's own doc comment
+// for the matching quirk on the measure side).
+function fontLineHeightForScale(font: KfontT | null, scale: number): number {
+  if (!font) return CONCHAR_HEIGHT * scale;
+  return font.line_height;
+}
+
+// CG_MeasureKFontWidth (src/client/cgame.c): sums each looked-up glyph's
+// native atlas width. Codepoints SCR_KFontLookup can't find (out of range,
+// or a zero-width atlas entry -- e.g. the real qconfont.kfont has no entry
+// at all for ` or ~) contribute nothing, matching `if (ch) x += ch->w;`
+// exactly (silently skipped, not substituted with a fallback width).
+function measureKfontLineWidth(font: KfontT, line: string): number {
+  let width = 0;
+  for (let i = 0; i < line.length; i++) {
+    const ch = SCR_KFontLookup(font, line.charCodeAt(i));
+    if (ch) width += ch.w;
+  }
+  return width;
+}
+
+// CG_SCR_MeasureFontString (src/client/cgame.c): branches per-line on
+// `scr.kfont.pic` exactly like the real function (`scr.kfont.pic ?
+// CG_MeasureKFontWidth(...) : maxlen * CONCHAR_WIDTH * scale`); height is
+// `num_lines * CG_SCR_FontLineHeight(scale)` either way. KFONT QUIRK
+// (preserved, see fontLineHeightForScale's own doc comment): the kfont
+// branch's width sum (measureKfontLineWidth) and its line-height
+// (fontLineHeightForScale) are BOTH unscaled by `scale`, unlike the
+// fallback branch, which scales both -- this is q2repro's own real
+// behavior with kfont data, not something to "fix" here.
+function measureFontStringDispatch(font: KfontT | null, str: string, scale: number): Vec2T {
   const lines = str.split("\n");
   let maxWidth = 0;
   for (const line of lines) {
-    const width = line.length * CONCHAR_WIDTH * scale;
+    const width = font ? measureKfontLineWidth(font, line) : line.length * CONCHAR_WIDTH * scale;
     if (width > maxWidth) maxWidth = width;
   }
-  return { x: maxWidth, y: lines.length * CONCHAR_HEIGHT * scale };
+  return { x: maxWidth, y: lines.length * fontLineHeightForScale(font, scale) };
 }
 
-// SCR_DrawFontString's fallback body. KNOWN GAP (documented, not silently
-// dropped): re.DrawChar(x, y, c) -- the only char-drawing primitive this
-// port's renderer surface has (ref.ts's RefExports) -- takes no scale and
-// no color, unlike q2repro's R_DrawStretchChar(x, y, w, h, flags, c, color,
-// font) which the real conchars fallback (SCR_DrawStringMultiStretch) uses.
-// So: position/line-wrap/alignment math below is scale-correct (matches
-// q2repro's own math exactly, see SCR_MeasureFontString's doc comment), but
-// each glyph itself always draws at its native 8x8 size in the conchars
-// texture's baked color, ignoring `scale`'s effect on glyph size, `color`,
-// and `shadow`. This is the exact same gap this file's own SCR_DrawChar
+// draw_kfont_char (src/refresh/draw.c): looks up the glyph, then draws it
+// (and, when `shadow` is set, a black copy offset by `1 * scale` first --
+// SIMPLIFIED from q2repro's own `(flags & UI_DROPSHADOW) || gl_fontshadow->
+// integer > 0` gate and its `gl_fontshadow->integer > 1` SECOND offset copy:
+// this port has no gl_fontshadow cvar (a renderer-tuning knob with no
+// existing counterpart anywhere in this client), so the shadow decision is
+// driven by the `shadow` parameter alone, and only the single `1 * scale`
+// offset copy draws, never the double-offset second pass. Documented
+// deviation, not a silent drop -- the base single-shadow-offset behavior
+// this DOES implement is identical to q2repro's own in the (default,
+// gl_fontshadow=0) case any caller here would actually hit.
+// Returns `ch.w * scale` (the SCALED advance) -- see
+// measureFontStringDispatch's doc comment for why this differs from the
+// UNSCALED width the measure path sums; both sides are faithful to
+// q2repro's own respective functions.
+function drawKfontChar(font: KfontT, x: number, y: number, scale: number, codepoint: number, color: DrawColorT, shadow: boolean): number {
+  if (!re) return 0;
+  const ch = SCR_KFontLookup(font, codepoint);
+  if (!ch) return 0;
+
+  const w = ch.w * scale;
+  const h = ch.h * scale;
+
+  if (shadow) {
+    const offset = 1 * scale;
+    const black: DrawColorT = { r: 0, g: 0, b: 0, a: color.a };
+    re.DrawStretchPicRegion(x + offset, y + offset, w, h, font.pic, ch.x, ch.y, ch.w, ch.h, black);
+  }
+  re.DrawStretchPicRegion(x, y, w, h, font.pic, ch.x, ch.y, ch.w, ch.h, color);
+
+  return w;
+}
+
+// SCR_DrawKStringStretch (src/client/screen.c): draws a single line
+// (no '\n' handling -- that's SCR_DrawKStringMultiStretch's job just
+// below), returning the cursor's final x (used by q2repro's own caller to
+// place the blink cursor; unused here, but kept for shape parity/future
+// callers).
+function drawKStringStretch(font: KfontT, x: number, y: number, scale: number, maxlen: number, s: string, color: DrawColorT, shadow: boolean): number {
+  let cx = x;
+  for (let i = 0; i < maxlen && i < s.length; i++) {
+    cx += drawKfontChar(font, cx, y, scale, s.charCodeAt(i), color, shadow);
+  }
+  return cx;
+}
+
+// SCR_DrawKStringMultiStretch (src/client/screen.c): splits on '\n'.
+// PRESERVED QUIRK: the newline advance is `CONCHAR_HEIGHT * scale`, NOT
+// `font.line_height` -- that is q2repro's own literal code (its
+// SCR_DrawKStringMultiStretch shares the exact same `y += CONCHAR_HEIGHT *
+// scale;` line its conchars-fallback sibling SCR_DrawStringMultiStretch
+// uses), not a mistake introduced by this port. Every line restarts at the
+// SAME `x` (the caller's already-aligned draw position, computed once from
+// the whole string's measured width -- see drawFontStringDispatch below),
+// matching q2repro's own `x = sx;` per-line reset rather than re-aligning
+// each line independently.
+function drawKStringMultiStretch(font: KfontT, x: number, y: number, scale: number, maxlen: number, s: string, color: DrawColorT, shadow: boolean): void {
+  let remaining = maxlen;
+  let pos = 0;
+  let cy = y;
+  while (pos < s.length && remaining > 0) {
+    const newlineIndex = s.indexOf("\n", pos);
+    if (newlineIndex === -1) {
+      drawKStringStretch(font, x, cy, scale, remaining, s.slice(pos), color, shadow);
+      break;
+    }
+    const len = Math.min(newlineIndex - pos, remaining);
+    drawKStringStretch(font, x, cy, scale, len, s.slice(pos, pos + len), color, shadow);
+    remaining -= len;
+    cy += CONCHAR_HEIGHT * scale;
+    pos = newlineIndex + 1;
+  }
+}
+
+// SCR_DrawStringMultiStretch's kfont-less/conchars-fallback shape (used by
+// drawFontStringDispatch's `!font` branch below). KNOWN GAP (documented,
+// not silently dropped): re.DrawChar(x, y, c) -- the only char-drawing
+// primitive this port's renderer surface had before this unit (ref.ts's
+// RefExports.DrawChar) -- takes no scale and no color, unlike q2repro's
+// R_DrawStretchChar(x, y, w, h, flags, c, color, font) which the real
+// conchars fallback uses. So: position/line-wrap math below is
+// scale-correct, but each glyph itself always draws at its native 8x8 size
+// in the conchars texture's baked color, ignoring `scale`'s effect on glyph
+// size, `color`, and `shadow`. Same gap this file's own SCR_DrawChar
 // wrapper above already documents and defers to "once scaled/kfont-aware
-// char drawing lands with the kex module" -- not a new gap introduced here.
-function drawFontStringFallback(str: string, x: number, y: number, scale: number, align: TextAlignT): void {
+// char drawing lands" -- unrelated to (and not fixed by) this unit's new
+// DrawStretchPicRegion primitive, since the conchars.pcx texture is not an
+// atlas with per-glyph metrics the way the kfont path's atlas is.
+function drawConcharLines(str: string, x: number, y: number, scale: number): void {
   const lines = str.split("\n");
   let lineY = y;
   for (const line of lines) {
-    let lineX = x;
-    if (align !== TextAlignT.LEFT) {
-      const width = line.length * CONCHAR_WIDTH * scale;
-      lineX = align === TextAlignT.CENTER ? x - width / 2 : x - width;
-    }
     for (let i = 0; i < line.length; i++) {
-      drawConchar(lineX + i * CONCHAR_WIDTH * scale, lineY, line.charCodeAt(i));
+      drawConchar(x + i * CONCHAR_WIDTH * scale, lineY, line.charCodeAt(i));
     }
     lineY += CONCHAR_HEIGHT * scale;
   }
+}
+
+// CG_SCR_DrawFontString (src/client/cgame.c): alignment is computed ONCE
+// from the whole string's measured width (CENTER: `-= width/2`, RIGHT:
+// `-= width`) and applied as a single x offset to every line -- NOT
+// recomputed per line. This matches q2repro's own structure exactly
+// (`draw_x` is computed once, then handed to SCR_DrawStringMultiStretch/
+// SCR_DrawKStringMultiStretch, both of which reset to that same `x` after
+// every newline -- see drawKStringMultiStretch's own doc comment above).
+function drawFontStringDispatch(str: string, x: number, y: number, scale: number, color: DrawColorT, shadow: boolean, align: TextAlignT): void {
+  const font = ensureKfont();
+
+  let drawX = x;
+  if (align !== TextAlignT.LEFT) {
+    const width = measureFontStringDispatch(font, str, scale).x;
+    drawX = align === TextAlignT.CENTER ? x - width / 2 : x - width;
+  }
+
+  if (!font) {
+    drawConcharLines(str, drawX, y, scale);
+    return;
+  }
+  drawKStringMultiStretch(font, drawX, y, scale, str.length, str, color, shadow);
 }
 
 // ---------------------------------------------------------------------------
@@ -346,52 +531,51 @@ export function buildCgameImports(): CgameImports {
       re.DrawColorPic(x, y, w, h, name, color);
     },
 
-    // [Paril-KEX] kfont stuff. FINDING (this unit's brief asked for it to be
-    // reported): q2repro's SCR_Init loads `fonts/qconfont.kfont` (see
-    // src/client/screen.c's SCR_Init and src/refresh/draw.c's
-    // SCR_LoadKFont); every one of these four functions branches on
-    // `scr.kfont.pic` and falls back to the plain conchars.pcx path
-    // (SCR_DrawStringMultiStretch / CONCHAR_WIDTH*scale math) whenever that
-    // load failed or never ran. The user's baseq2/rogue/xatrix/ctf/lmctf
-    // data at /home/buzzkill/q2ts is 3.21-era: grepping every .pak there for
-    // "kfont"/"qconfont" (buzzpak.pak, pak0-2.pak, etc.) finds nothing --
-    // no .kfont asset exists in this install, matching a case q2repro
-    // itself handles by design (its own load path is a graceful
-    // `if (!file) return` in SCR_LoadKFont before ever writing kfont.pic).
-    // This port therefore implements ONLY the conchars-fallback branch of
-    // all four functions below (the branch that's actually reachable with
-    // today's data), with the kfont branch called out as the upgrade path
-    // rather than faked: adding it for real means porting the .kfont binary
-    // format (SCR_LoadKFont), a kfont-glyph draw primitive
-    // (R_DrawKFontChar) neither ref_gl/ nor ref_soft/ has a counterpart for
-    // yet, and shipping a rerelease asset pak this install doesn't have.
+    // [Paril-KEX] kfont stuff. UPDATE (FIDELITY RAZOR sweep,
+    // .orch/preferences.md rule 17): a previous unit's FINDING here recorded
+    // that q2repro's SCR_Init loads `fonts/qconfont.kfont` (src/client/
+    // screen.c's SCR_Init, src/refresh/draw.c's SCR_LoadKFont) and that every
+    // one of these four functions branches on `scr.kfont.pic`, but that no
+    // .kfont asset existed in this project's mounted data at the time and no
+    // PNG decoder or atlas-subrect draw primitive existed to load/render one
+    // even if it had. Both gaps are closed now: the retail rerelease KPF
+    // (Q2Game.kpf) is mounted with real fonts/qconfont.kfont +
+    // fonts/qconfont.png assets, qcommon/png.ts decodes the PNG, and
+    // RefExports.DrawStretchPicRegion draws atlas sub-rects. All four
+    // functions below now branch on ensureKfont() (./kfont.ts + the loader
+    // just above) exactly like q2repro's own `scr.kfont.pic` check, falling
+    // back to the ORIGINAL conchars-only math/draw (unchanged, still
+    // reachable and still exercised by test/cgame_draw.test.ts) whenever
+    // that load fails or hasn't run yet -- which remains the ONLY reachable
+    // path for the 3.21-era baseq2/rogue/xatrix/ctf/lmctf data at
+    // /home/buzzkill/q2ts (no fonts/qconfont.kfont there), matching
+    // q2repro's own graceful `if (!file) return` in SCR_LoadKFont before
+    // ever writing kfont.pic.
     //
     // SCR_SetAltTypeface: state-only (see CG_IsAltTypefaceEnabled above) --
     // matches q2repro's own CG_SCR_SetAltTypeface, which is *also* a
     // documented no-op (`// We don't support alternate type faces`) even
-    // WITH a kfont loaded; alt-typeface selection is a kfont-internal
-    // second glyph set this port has no reader for regardless of the
-    // asset-availability finding above.
+    // WITH a kfont loaded; alt-typeface selection is a kfont-internal second
+    // glyph set this port has no reader for regardless of asset
+    // availability.
     SCR_SetAltTypeface(enabled) {
       altTypefaceEnabled = enabled;
     },
-    // See drawFontStringFallback's doc comment (top of file) for the
-    // known scale/color/shadow gap in the glyph draw itself; the
-    // position/wrap/align math here is exact.
-    SCR_DrawFontString(str, x, y, scale, _color, _shadow, align) {
-      drawFontStringFallback(str, x, y, scale, align);
+    // drawFontStringDispatch (top of file) -- kfont-aware, with the
+    // conchars-only math/draw (drawConcharLines) as its documented fallback.
+    SCR_DrawFontString(str, x, y, scale, color, shadow, align) {
+      drawFontStringDispatch(str, x, y, scale, color, shadow, align);
     },
-    // Fallback body factored into measureFontStringFallback (top of file);
-    // matches q2repro's CG_SCR_MeasureFontString's own kfont-less branch
-    // line for line (split on '\n', width = maxlen * CONCHAR_WIDTH * scale
-    // per line, height = num_lines * FontLineHeight(scale)).
+    // measureFontStringDispatch (top of file) -- kfont-aware, with the
+    // original conchars-only math (`maxlen * CONCHAR_WIDTH * scale`) as its
+    // documented fallback.
     SCR_MeasureFontString(str, scale) {
-      return measureFontStringFallback(str, scale);
+      return measureFontStringDispatch(ensureKfont(), str, scale);
     },
-    // Matches q2repro's CG_SCR_FontLineHeight's own kfont-less branch
-    // (`return CONCHAR_HEIGHT * scale;`).
+    // fontLineHeightForScale (top of file) -- kfont-aware, with the original
+    // `CONCHAR_HEIGHT * scale` as its documented fallback.
     SCR_FontLineHeight(scale) {
-      return CONCHAR_HEIGHT * scale;
+      return fontLineHeightForScale(ensureKfont(), scale);
     },
 
     // Matches q2repro's own CG_CL_GetTextInput, which is a `// FIXME: Hook
@@ -416,12 +600,16 @@ export function buildCgameImports(): CgameImports {
     // either -- this port has no split-screen support to key it on).
     // Mirrors CG_SCR_DrawBind's composition exactly: "[key] purpose" when
     // bound, "<unbound> purpose" when not, CENTER-aligned, drawn white, no
-    // drop shadow; returns CONCHAR_HEIGHT as the caller's y-advance.
+    // drop shadow, via CG_SCR_DrawFontString (drawFontStringDispatch here --
+    // kfont-aware, same as the real CG_SCR_DrawBind's own call into
+    // CG_SCR_DrawFontString); returns CONCHAR_HEIGHT unconditionally as the
+    // caller's y-advance, matching q2repro's own `return CONCHAR_HEIGHT;`
+    // (not scaled, not kfont.line_height, even when a kfont is loaded).
     SCR_DrawBind(_isplit, binding, purpose, x, y, scale) {
       const key = Key_GetBinding(binding);
       const localizedPurpose = Loc_Localize(purpose, true, [], 0);
       const str = key ? `[${key}] ${localizedPurpose}` : `<unbound> ${localizedPurpose}`;
-      drawFontStringFallback(str, x, y, scale, TextAlignT.CENTER);
+      drawFontStringDispatch(str, x, y, scale, rgba_white, false, TextAlignT.CENTER);
       return CONCHAR_HEIGHT;
     },
 
@@ -755,6 +943,13 @@ export function CG_DrawHUD(): void {
 // cl_view.ts's CL_PrepRefresh path that already calls SCR_TouchPics.
 export function CG_TouchPics(): void {
   ensureActiveCgame().TouchPics();
+  // q2repro's own SCR_LoadKFont call site is inside SCR_Init, right after
+  // `cgame->TouchPics()` -- this is the closest counterpart this port's
+  // architecture has to that timing (see ensureKfont's own doc comment,
+  // top of file, for why the actual load is memoized by `re` identity
+  // rather than needing a true one-shot init hook: this call and every
+  // draw/measure call below it are equally safe to trigger the real load).
+  ensureKfont();
 }
 
 // Exposed for test/cgame_activation.test.ts's ps-view/server-data conversion

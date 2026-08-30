@@ -19,11 +19,35 @@ behavior (an idle dedicated server with nobody connected does not simulate
 the world at all), faithfully ported. A dedicated boot with no connected
 client therefore never advances `level.time` by running frames, no matter
 how many are run; naturally advancing it requires a real spawned player,
-and driving ClientBegin without a genuine network-connected client (tried
-during this unit's investigation) hits an unrelated pre-existing crash
-several layers deep (PutClientInServer -> ClientUserinfoChanged ->
-PF_Configstring -> SV_Multicast -> SZ_Write overflow) that has nothing to
-do with the savegame container and is out of this unit's scope to fix.
+and driving ClientConnect/ClientBegin without a genuine network-connected
+client (tried during this unit's investigation) hits an unrelated
+pre-existing crash several layers deep (ClientUserinfoChanged ->
+PF_Configstring -> SV_Multicast -> SZ_Write overflow).
+
+ROOT CAUSE CONFIRMED (2026-08-30 cleanup sweep, .orch/followups.md
+SWEEP-INVESTIGATE item): this is a TEST-HARNESS gap, not a real
+reliable-buffer sizing bug. `ClientT.netchan.message`/`.datagram`
+(src/qcommon/net_chan.ts / src/server/server.ts) are plain `new SizeBuf()`
+until something calls `SZ_Init` on them (`maxsize=0, allowoverflow=false`
+by default) -- the real connect path (`SVC_DirectConnect` ->
+`Netchan_Setup`, src/qcommon/net_chan.ts:169-174) always does this before
+the game module's `ClientConnect`/`ClientBegin` can ever run. A harness
+that calls `ge.ClientConnect`/`ge.ClientBegin` directly on a `svs.clients`
+slot WITHOUT going through that setup (as this investigation did, and as
+this test itself avoids by never spawning a client at all) skips that
+initialization, so `SV_Multicast`'s reliable write into
+`client.netchan.message` (still `maxsize=0`) throws immediately via
+`SZ_GetSpace`'s `length > buf.maxsize` / `!allowoverflow` checks -- proven
+by reproducing BOTH ways: identical drive-ClientConnect-directly code
+throws with the netchan left uninitialized, and stops throwing entirely
+once `SZ_Init(cl.netchan.message, ...)` /
+`SZ_Init(cl.datagram, ...)` + `allowoverflow = true` are called first
+(test/server_core.test.ts's `makeClient()` helper already does exactly
+this for its own, unrelated suite). Nothing in the shipped server/game
+code needs fixing; a future unit that wants a savegame E2E test with a
+real simulated player should route client setup through that same
+SZ_Init'd-netchan pattern (or a proper loopback connect) rather than
+calling `ClientConnect`/`ClientBegin` on a bare `svs.clients` slot.
 `level.time` is therefore set directly here (a legitimate "fabricated
 world" shortcut, same spirit as the unit-scope container tests) instead of
 earned by running real gameplay frames -- this test's job is to verify the
@@ -139,13 +163,14 @@ describe("kex family save/load -- end-to-end (boot, save, mutate, load, verify)"
     const entityCountAfter = inuseEntityCount();
     const timeAfter = Gtime_milliseconds(level.time);
 
-    // this port's SV_CheckForSavegame (sv_init.ts) does not yet make
-    // save.c's LOAD_NORMAL(frames=2)/LOAD_LEVEL_START(frames=10*framerate)
-    // distinction -- see this unit's report -- so no settle-frames run
-    // after a `sv.loadgame === true` load, and (per this file's header
-    // FINDING) no frame would advance level.time even if they did without a
-    // spawned player. The restored value should therefore match the saved
-    // snapshot exactly, not just "less than the mutated value".
+    // sv_init.ts's SV_CheckForSavegame now makes save.c's LOAD_NORMAL
+    // (frames=2) vs LOAD_LEVEL_START (frames=10*framerate) distinction
+    // (2026-08-30 cleanup sweep); a `load` command sets sv.loadgame=true,
+    // so this reload runs the 2-frame LOAD_NORMAL branch. Per this file's
+    // header FINDING, no frame advances level.time either way without a
+    // spawned player (G_RunFrame's main_loop early-return), so the
+    // restored value should still match the saved snapshot exactly, not
+    // just "less than the mutated value".
     expect(timeAfter).toBe(timeBefore);
     expect(entityCountAfter).toBe(entityCountBefore);
   });

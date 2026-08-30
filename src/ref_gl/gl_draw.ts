@@ -231,6 +231,81 @@ export function Draw_ColorPic(x: number, y: number, w: number, h: number, pic: s
 
 /*
 =============
+Draw_StretchPicRegion
+
+Like Draw_ColorPic, but samples a pixel-space sub-rectangle of the source
+image instead of the whole thing. No classic-engine precedent (same as
+Draw_ColorPic above) -- added for RefExports.DrawStretchPicRegion (see that
+interface member's own doc comment, client/ref.ts). `gl.sl/sh/tl/th` are the
+FULL image's texcoord bounds (0..1 for a normal non-scrap-packed image, a
+sub-range for one packed into the 8-bit scrap atlas -- see GL_LoadPic's own
+scrap-vs-non-scrap branch in gl_image.ts); srcX/srcY/srcW/srcH (source pixel
+coordinates) are mapped into that same bounds range here, so this composes
+correctly with both cases without needing to know which one applies.
+=============
+*/
+export function Draw_StretchPicRegion(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  pic: string,
+  srcX: number,
+  srcY: number,
+  srcW: number,
+  srcH: number,
+  color: { r: number; g: number; b: number; a: number },
+): void {
+  // C declares these parameters int; truncate at the boundary as the
+  // parameter types did (matches ref_soft/r_draw.ts and this file's own
+  // Draw_ColorPic above).
+  x = x | 0;
+  y = y | 0;
+  w = w | 0;
+  h = h | 0;
+  const gl = Draw_FindPic(pic);
+  if (!gl) {
+    ri.Con_Printf(PRINT_ALL, `Can't find pic: ${pic}\n`);
+    return;
+  }
+
+  if (scrap_dirty) Scrap_Upload();
+
+  const disableAlphaTest = mcdOrRenditionAlphaTestQuirk() && !gl.has_alpha;
+  if (disableAlphaTest) qgl.qglDisable(GL_ALPHA_TEST);
+
+  const translucent = color.a < 255;
+  if (translucent) qgl.qglEnable(GL_BLEND);
+
+  qgl.qglColor4f(color.r / 255, color.g / 255, color.b / 255, color.a / 255);
+
+  const uSpan = gl.sh - gl.sl;
+  const vSpan = gl.th - gl.tl;
+  const s0 = gl.sl + (srcX / gl.width) * uSpan;
+  const s1 = gl.sl + ((srcX + srcW) / gl.width) * uSpan;
+  const t0 = gl.tl + (srcY / gl.height) * vSpan;
+  const t1 = gl.tl + ((srcY + srcH) / gl.height) * vSpan;
+
+  GL_Bind(gl.texnum);
+  qgl.qglBegin(GL_QUADS);
+  qgl.qglTexCoord2f(s0, t0);
+  qgl.qglVertex2f(x, y);
+  qgl.qglTexCoord2f(s1, t0);
+  qgl.qglVertex2f(x + w, y);
+  qgl.qglTexCoord2f(s1, t1);
+  qgl.qglVertex2f(x + w, y + h);
+  qgl.qglTexCoord2f(s0, t1);
+  qgl.qglVertex2f(x, y + h);
+  qgl.qglEnd();
+
+  qgl.qglColor4f(1, 1, 1, 1);
+  if (translucent) qgl.qglDisable(GL_BLEND);
+
+  if (disableAlphaTest) qgl.qglEnable(GL_ALPHA_TEST);
+}
+
+/*
+=============
 Draw_Pic
 =============
 */

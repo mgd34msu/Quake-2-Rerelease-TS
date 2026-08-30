@@ -27,12 +27,14 @@ import { TextAlignT } from "../src/kexapi/game";
 function makeFakeRe(): RefExports & {
   drawCharCalls: number[];
   drawColorPicCalls: Array<{ x: number; y: number; w: number; h: number; name: string; color: DrawColorT }>;
+  drawStretchPicRegionCalls: Array<{ x: number; y: number; w: number; h: number; name: string; srcX: number; srcY: number; srcW: number; srcH: number; color: DrawColorT }>;
   registerPicResult: ImageS | null;
   drawGetPicSizeResult: { w: number; h: number };
 } {
   const fake = {
     drawCharCalls: [] as number[],
     drawColorPicCalls: [] as Array<{ x: number; y: number; w: number; h: number; name: string; color: DrawColorT }>,
+    drawStretchPicRegionCalls: [] as Array<{ x: number; y: number; w: number; h: number; name: string; srcX: number; srcY: number; srcW: number; srcH: number; color: DrawColorT }>,
     registerPicResult: null as ImageS | null,
     drawGetPicSizeResult: { w: -1, h: -1 },
 
@@ -55,6 +57,9 @@ function makeFakeRe(): RefExports & {
     DrawStretchPic: () => undefined,
     DrawColorPic(x: number, y: number, w: number, h: number, name: string, color: DrawColorT) {
       fake.drawColorPicCalls.push({ x, y, w, h, name, color });
+    },
+    DrawStretchPicRegion(x: number, y: number, w: number, h: number, name: string, srcX: number, srcY: number, srcW: number, srcH: number, color: DrawColorT) {
+      fake.drawStretchPicRegionCalls.push({ x, y, w, h, name, srcX, srcY, srcW, srcH, color });
     },
     DrawChar(_x: number, _y: number, c: number) {
       fake.drawCharCalls.push(c);

@@ -232,6 +232,26 @@ describe("R_FindImage", () => {
   test("returns null for a name shorter than 5 characters", () => {
     expect(R_FindImage("abcd", ImagetypeT.it_pic)).toBeNull();
   });
+
+  // The software renderer's framebuffer is 8-bit palette indices -- it has
+  // no truecolor decode path at all, matching r_image.c's own real
+  // ".tga" branch (`return NULL; // "can't load %s in software renderer"`,
+  // this file's own header comment on LoadTGA being "ref_soft's dead-code
+  // path"). ".png" (added for the kfont FIDELITY RAZOR sweep,
+  // .orch/preferences.md rule 17 -- q2repro's real fonts/qconfont.png
+  // atlas texture) falls into that exact same "recognized-looking but
+  // unsupported extension" bucket here, via R_FindImage's own generic
+  // `else return null` branch -- no PNG decoder was added to this file,
+  // deliberately: q2repro itself has no software renderer to match
+  // against (see .orch/followups.md's own note on this), so there is no
+  // real behavior to port for this case, only the original engine's own
+  // "software renderer can't do truecolor" precedent to stay consistent
+  // with. This is why host.ts's kfont path gracefully falls back to the
+  // conchars-only draw under ref_soft even with the real rerelease KPF
+  // mounted.
+  test("returns null for a .png file (no truecolor decode path exists in the software renderer, matching the real .tga dead-code branch)", () => {
+    expect(R_FindImage("fonts/qconfont.png", ImagetypeT.it_pic)).toBeNull();
+  });
 });
 
 describe("Draw_Fill", () => {

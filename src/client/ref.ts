@@ -148,6 +148,21 @@ export interface RefExports {
   // instead of full-white. See DrawColorT's doc comment above for why this
   // exists (SCR_DrawColorPic has no classic-engine precedent).
   DrawColorPic(x: number, y: number, w: number, h: number, name: string, color: DrawColorT): void;
+  // Like DrawColorPic, but samples a pixel-space sub-rectangle of the named
+  // image's source texture instead of the whole thing (srcX/srcY/srcW/srcH,
+  // in the SOURCE image's own pixel coordinates, top-down). Added for the
+  // kfont FIDELITY RAZOR sweep (.orch/preferences.md rule 17): q2repro's
+  // kfont glyphs are all packed into one shared atlas texture
+  // (fonts/qconfont.png) with each glyph's rect given in atlas pixel
+  // coordinates (kfont_char_t.x/y/w/h, src/refresh/draw.c's
+  // draw_kfont_char) -- this is that atlas-subrect draw primitive, the one
+  // this port's ref.ts didn't have before (DrawPic/DrawStretchPic/
+  // DrawColorPic all draw the full source image). See gl_draw.ts's
+  // Draw_StretchPicRegion (GL: texcoord subrect, mirrors Draw_ColorPic's
+  // tinting) and r_draw.ts's Draw_StretchPicRegion (software: paletted
+  // source-rect blit, mirrors Draw_ColorPic's remap+dither tinting) for the
+  // two implementations.
+  DrawStretchPicRegion(x: number, y: number, w: number, h: number, name: string, srcX: number, srcY: number, srcW: number, srcH: number, color: DrawColorT): void;
   DrawChar(x: number, y: number, c: number): void;
   DrawTileClear(x: number, y: number, w: number, h: number, name: string): void;
   DrawFill(x: number, y: number, w: number, h: number, c: number): void;

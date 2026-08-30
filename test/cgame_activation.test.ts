@@ -269,6 +269,7 @@ function makeFakeRe(): RefExports & { registerPicCalls: string[] } {
     DrawPic: () => undefined,
     DrawStretchPic: () => undefined,
     DrawColorPic: () => undefined,
+    DrawStretchPicRegion: () => undefined,
     DrawChar: () => undefined,
     DrawTileClear: () => undefined,
     DrawFill: () => undefined,

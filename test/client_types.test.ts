@@ -161,6 +161,7 @@ describe("ref.ts / vid.ts / screen.ts default structs", () => {
       DrawPic: () => undefined,
       DrawStretchPic: () => undefined,
       DrawColorPic: () => undefined,
+      DrawStretchPicRegion: () => undefined,
       DrawChar: () => undefined,
       DrawTileClear: () => undefined,
       DrawFill: () => undefined,

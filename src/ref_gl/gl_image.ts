@@ -88,6 +88,7 @@ deterministically `return false`; reported deviation since a literal
 */
 
 import { ERR_DROP, ERR_FATAL, PRINT_ALL, PRINT_DEVELOPER, MAX_QPATH, LittleShort, LittleLong, Q_stricmp, Com_sprintf } from "../shared/q_shared";
+import { decodePNG } from "../qcommon/png";
 import type { QGL } from "./qgl";
 import {
   ImageT,
@@ -653,6 +654,48 @@ export function LoadTGA(name: string): { pic: Uint8Array | null; width: number; 
 }
 
 /*
+=========================================================
+PNG LOADING
+
+No classic-engine precedent -- see qcommon/png.ts's own header comment for
+why this exists (q2repro's real "fonts/qconfont.png" kfont texture asset,
+truecolor, no .tga/.pcx sibling). Same {pic, width, height} shape and
+top-down RGBA8 orientation as LoadTGA's own result above, so GL_FindImage's
+".png" branch below can call `GL_LoadPic(name, pic, width, height, type,
+32)` identically to its ".tga" branch. "Recognized but unsupported variant"
+(interlaced/16-bit/palette) mirrors LoadTGA's own Sys_Error convention for
+the same kind of failure (`Only type 2 and 10 targa RGB images supported`);
+"not a PNG at all"/corrupt data mirrors LoadPCX/LoadTGA's Con_Printf +
+null-pic convention for a genuinely bad/missing file.
+=========================================================
+*/
+export function LoadPNG(name: string): { pic: Uint8Array | null; width: number; height: number } {
+  const result: { pic: Uint8Array | null; width: number; height: number } = { pic: null, width: 0, height: 0 };
+
+  const { data: buffer } = ri.FS_LoadFile(name);
+  if (!buffer) {
+    ri.Con_Printf(PRINT_DEVELOPER, `Bad png file ${name}\n`);
+    return result;
+  }
+
+  const decoded = decodePNG(buffer);
+  ri.FS_FreeFile(buffer);
+
+  if (!decoded.ok) {
+    if (decoded.reason.startsWith("unsupported") || decoded.reason.startsWith("interlaced") || decoded.reason.startsWith("unknown")) {
+      ri.Sys_Error(ERR_DROP, `LoadPNG: ${name}: ${decoded.reason}\n`);
+    }
+    ri.Con_Printf(PRINT_ALL, `Bad png file ${name}: ${decoded.reason}\n`);
+    return result;
+  }
+
+  result.pic = decoded.image.pixels;
+  result.width = decoded.image.width;
+  result.height = decoded.image.height;
+  return result;
+}
+
+/*
 ====================================================================
 IMAGE FLOOD FILLING
 ====================================================================
@@ -1150,6 +1193,10 @@ export function GL_FindImage(name: string, type: ImagetypeT): ImageT | null {
     image = GL_LoadWal(name);
   } else if (ext === ".tga") {
     const { pic, width, height } = LoadTGA(name);
+    if (!pic) return null;
+    image = GL_LoadPic(name, pic, width, height, type, 32);
+  } else if (ext === ".png") {
+    const { pic, width, height } = LoadPNG(name);
     if (!pic) return null;
     image = GL_LoadPic(name, pic, width, height, type, 32);
   } else {

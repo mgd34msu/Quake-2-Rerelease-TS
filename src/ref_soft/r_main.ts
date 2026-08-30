@@ -159,7 +159,7 @@ import {
   ImagetypeT,
 } from "./r_model";
 import { r_worldmodel, R_DrawSolidClippedSubmodelPolygons, R_DrawSubmodelPolygons, R_RenderWorld, R_RotateBmodel } from "./r_bsp";
-import { Draw_Char, Draw_ColorPic, Draw_FadeScreen, Draw_Fill, Draw_FindPic, Draw_GetPicSize, Draw_InitLocal, Draw_Pic, Draw_StretchPic, Draw_StretchRaw, Draw_TileClear } from "./r_draw";
+import { Draw_Char, Draw_ColorPic, Draw_FadeScreen, Draw_Fill, Draw_FindPic, Draw_GetPicSize, Draw_InitLocal, Draw_Pic, Draw_StretchPic, Draw_StretchPicRegion, Draw_StretchRaw, Draw_TileClear } from "./r_draw";
 import { LoadPCX, R_FindImage, R_ImageList_f, R_InitImages, R_RegisterSkin, R_ShutdownImages } from "./r_image";
 import { R_BeginEdgeFrame, R_ScanEdges, R_SurfacePatch } from "./r_edge";
 import { r_skytexinfo } from "./r_rast";
@@ -1108,6 +1108,8 @@ export function GetRefAPI(imp: RefImports): RefExports {
     DrawPic: (x: number, y: number, name: string) => Draw_Pic(x, y, name),
     DrawStretchPic: (x: number, y: number, w: number, h: number, name: string) => Draw_StretchPic(x, y, w, h, name),
     DrawColorPic: (x: number, y: number, w: number, h: number, name: string, color: DrawColorT) => Draw_ColorPic(x, y, w, h, name, color),
+    DrawStretchPicRegion: (x: number, y: number, w: number, h: number, name: string, srcX: number, srcY: number, srcW: number, srcH: number, color: DrawColorT) =>
+      Draw_StretchPicRegion(x, y, w, h, name, srcX, srcY, srcW, srcH, color),
     DrawChar: (x: number, y: number, c: number) => Draw_Char(x, y, c),
     DrawTileClear: (x: number, y: number, w: number, h: number, name: string) => Draw_TileClear(x, y, w, h, name),
     DrawFill: (x: number, y: number, w: number, h: number, c: number) => Draw_Fill(x, y, w, h, c),

@@ -30,8 +30,8 @@ import { glCvars, SetRefImports, gltextures, ImageT, ImagetypeT, SetNumGltexture
 import type { RefImports } from "../src/client/ref";
 import { CvarT } from "../src/shared/q_shared";
 import { QGLRecording } from "../src/ref_gl/qgl";
-import { SetQGL, GL_Bind, GL_FindImage, GL_Upload8, Scrap_AllocBlock, LoadTGA, GL_TEXTURE_2D, GL_QUADS, GL_RGBA, GL_UNSIGNED_BYTE } from "../src/ref_gl/gl_image";
-import { Draw_InitLocal, Draw_Char } from "../src/ref_gl/gl_draw";
+import { SetQGL, GL_Bind, GL_FindImage, GL_Upload8, Scrap_AllocBlock, LoadTGA, LoadPNG, GL_TEXTURE_2D, GL_QUADS, GL_RGBA, GL_UNSIGNED_BYTE } from "../src/ref_gl/gl_image";
+import { Draw_InitLocal, Draw_Char, Draw_FindPic, Draw_StretchPicRegion } from "../src/ref_gl/gl_draw";
 
 let files: Map<string, Uint8Array>;
 let qgl: QGLRecording;
@@ -135,6 +135,65 @@ function buildTga24(pixelsBottomToTop: [number, number, number][], width: number
   bytes.set(header, 0);
   bytes.set(body, header.length);
   return bytes;
+}
+
+// Minimal, hand-built, non-copyrighted 8-bit RGBA PNG (colortype 6, no
+// interlacing, filter type 0/None on every scanline) -- the exact IHDR
+// shape qcommon/png.ts's decodePNG targets (see that module's own header
+// comment: verified against the real fonts/qconfont.kfont's texture asset,
+// which is 8-bit RGBA non-interlaced too). CRC fields are left zeroed;
+// decodePNG does not validate them (see its own header comment).
+function buildPngChunk(type: string, data: Uint8Array): Uint8Array {
+  const out = new Uint8Array(4 + 4 + data.length + 4);
+  const view = new DataView(out.buffer);
+  view.setUint32(0, data.length, false);
+  for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i);
+  out.set(data, 8);
+  return out;
+}
+
+function buildPngRgba(width: number, height: number, pixelFn: (x: number, y: number) => [number, number, number, number]): Uint8Array {
+  const zlib = require("node:zlib") as typeof import("node:zlib");
+  const rowBytes = width * 4;
+  const raw = new Uint8Array((rowBytes + 1) * height);
+  let o = 0;
+  for (let y = 0; y < height; y++) {
+    raw[o++] = 0; // filter type: None
+    for (let x = 0; x < width; x++) {
+      const [r, g, b, a] = pixelFn(x, y);
+      raw[o++] = r;
+      raw[o++] = g;
+      raw[o++] = b;
+      raw[o++] = a;
+    }
+  }
+  const compressed = new Uint8Array(zlib.deflateSync(raw));
+
+  const ihdr = new Uint8Array(13);
+  const ihdrView = new DataView(ihdr.buffer);
+  ihdrView.setUint32(0, width, false);
+  ihdrView.setUint32(4, height, false);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 6; // color type: RGBA
+  ihdr[10] = 0; // compression method
+  ihdr[11] = 0; // filter method
+  ihdr[12] = 0; // interlace method: none
+
+  const sig = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+  const ihdrChunk = buildPngChunk("IHDR", ihdr);
+  const idatChunk = buildPngChunk("IDAT", compressed);
+  const iendChunk = buildPngChunk("IEND", new Uint8Array(0));
+
+  const out = new Uint8Array(sig.length + ihdrChunk.length + idatChunk.length + iendChunk.length);
+  let pos = 0;
+  out.set(sig, pos);
+  pos += sig.length;
+  out.set(ihdrChunk, pos);
+  pos += ihdrChunk.length;
+  out.set(idatChunk, pos);
+  pos += idatChunk.length;
+  out.set(iendChunk, pos);
+  return out;
 }
 
 beforeEach(() => {
@@ -248,7 +307,53 @@ describe("LoadTGA", () => {
   });
 });
 
+describe("LoadPNG", () => {
+  test("decodes a hand-built 8-bit RGBA PNG exactly (filter type None, no interlacing)", () => {
+    files.set(
+      "fonts/test.png",
+      buildPngRgba(2, 2, (x, y) => {
+        const table: [number, number, number, number][] = [
+          [1, 2, 3, 255],
+          [4, 5, 6, 128],
+          [7, 8, 9, 0],
+          [10, 11, 12, 64],
+        ];
+        return table[y * 2 + x];
+      }),
+    );
+
+    const result = LoadPNG("fonts/test.png");
+
+    expect(result.width).toBe(2);
+    expect(result.height).toBe(2);
+    expect(Array.from(result.pic ?? [])).toEqual([1, 2, 3, 255, 4, 5, 6, 128, 7, 8, 9, 0, 10, 11, 12, 64]);
+  });
+
+  test("returns a null pic for a missing file", () => {
+    const result = LoadPNG("fonts/missing.png");
+    expect(result.pic).toBeNull();
+  });
+});
+
 describe("GL_FindImage", () => {
+  test("dispatches .png through LoadPNG (truecolor atlas assets, e.g. kfont textures) with a full-image 0..1 texcoord range", () => {
+    files.set("fonts/atlas.png", buildPngRgba(2, 2, () => [10, 20, 30, 255]));
+
+    const image = GL_FindImage("fonts/atlas.png", ImagetypeT.it_pic);
+
+    expect(image).not.toBeNull();
+    expect(image?.width).toBe(2);
+    expect(image?.height).toBe(2);
+    // bits=32 (truecolor) images never enter GL_LoadPic's 8-bit scrap-atlas
+    // branch (see gl_image.ts's GL_LoadPic: `bits === 8` is part of that
+    // branch's own condition) -- sl/sh/tl/th stay the full 0..1 range this
+    // suite's own header comment already relies on for LoadTGA-loaded images.
+    expect(image?.sl).toBe(0);
+    expect(image?.sh).toBe(1);
+    expect(image?.tl).toBe(0);
+    expect(image?.th).toBe(1);
+  });
+
   test("caches by name: a second call for the same name returns the same object", () => {
     files.set("textures/cached.pcx", buildPcxBytes(2, 2, () => 3));
 
@@ -303,6 +408,56 @@ describe("Draw_Char", () => {
 
     Draw_Char(0, 0, 32);
 
+    expect(qgl.calls).toHaveLength(0);
+  });
+});
+
+describe("Draw_StretchPicRegion", () => {
+  test("maps a pixel-space source sub-rect into the image's 0..1 texcoord range and applies the tint", () => {
+    // "/fonts/atlas.png" (leading slash) is the exact-path convention
+    // Draw_FindPic gives non-"pics/*.pcx" assets -- see kfont.ts's own
+    // header comment ("/" + textureToken) for why the real kfont loader
+    // uses this same shape for its atlas texture name.
+    files.set("fonts/atlas.png", buildPngRgba(100, 50, () => [1, 2, 3, 255]));
+    Draw_FindPic("/fonts/atlas.png"); // registers + binds once, so GL_Bind below is a redundant no-op (see Draw_Char's own precedent above)
+    qgl.clear();
+
+    Draw_StretchPicRegion(10, 20, 16, 28, "/fonts/atlas.png", 25, 10, 8, 14, { r: 200, g: 100, b: 50, a: 255 });
+
+    const s0 = 25 / 100;
+    const s1 = (25 + 8) / 100;
+    const t0 = 10 / 50;
+    const t1 = (10 + 14) / 50;
+
+    const colorCalls = qgl.calls.filter((c) => c.name === "qglColor4f");
+    expect(colorCalls[0]?.args).toEqual([200 / 255, 100 / 255, 50 / 255, 1]); // a=255 -> opaque, no GL_BLEND toggle
+    expect(colorCalls[1]?.args).toEqual([1, 1, 1, 1]); // reset after the quad, matching Draw_ColorPic's own convention
+
+    const texCoords = qgl.calls.filter((c) => c.name === "qglTexCoord2f").map((c) => c.args);
+    expect(texCoords).toEqual([
+      [s0, t0],
+      [s1, t0],
+      [s1, t1],
+      [s0, t1],
+    ]);
+
+    const vertices = qgl.calls.filter((c) => c.name === "qglVertex2f").map((c) => c.args);
+    expect(vertices).toEqual([
+      [10, 20],
+      [10 + 16, 20],
+      [10 + 16, 20 + 28],
+      [10, 20 + 28],
+    ]);
+
+    // GL_Bind was already current from GL_FindImage's own load-time bind
+    // (2x2 truecolor image, no scrap) -- a redundant re-bind of the same
+    // texnum records nothing, matching GL_Bind's own "only on change" test
+    // above.
+    expect(qgl.calls.filter((c) => c.name === "qglBindTexture")).toHaveLength(0);
+  });
+
+  test("returns without drawing when the named pic can't be found", () => {
+    Draw_StretchPicRegion(0, 0, 1, 1, "fonts/does-not-exist.png", 0, 0, 1, 1, { r: 255, g: 255, b: 255, a: 255 });
     expect(qgl.calls).toHaveLength(0);
   });
 });
