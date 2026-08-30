@@ -138,6 +138,26 @@
 // g_weapon.ts landing does NOT satisfy it.
 //
 // ============================================================================
+// STUB SWAP: FindItemByClassname / Drop_Item -- now real imports from
+// src/kexgame/g_items.ts
+// ============================================================================
+// This file used to carry two local, unexported throwing stubs for these
+// names, cited "pending g_items.ts, see g_items.cpp". g_items.ts has now
+// landed with real, exported implementations of both; this file's own two
+// stub definitions are DELETED and replaced with `import {
+// FindItemByClassname, Drop_Item } from "./g_items"`. FindItemByClassname
+// is still unreachable today via any real call path (see the `st` note
+// above -- `st.item` is always null in this port line); Drop_Item is
+// reached by monster_death_use whenever a dying monster carries an item.
+// g_items.ts itself imports G_FixStuckObject from this file, so this is a
+// two-way (circular) module dependency -- an already-established pattern
+// in this port line (g_monster.ts<->g_phys.ts, g_monster.ts<->m_move.ts,
+// g_monster.ts<->g_utils.ts all do the same), safe here for the same
+// reason: every cross-import is a plain hoisted function declaration only
+// ever CALLED at runtime, long after both modules have finished
+// evaluating, never read at module-top-level-eval time.
+//
+// ============================================================================
 // CROSS-DEPENDENCIES STILL NOT YET PORTED
 // ============================================================================
 // g_monster.cpp calls into several other, not-yet-ported C++ files (grepped
@@ -146,20 +166,16 @@
 //   - fire_flechette                 -> rogue/g_rogue_newweap.cpp:41 (ROGUE
 //     mission pack; out of this port line's current scope -- see the
 //     "STUB SWAP" note just above).
-//   - FindItemByClassname/Drop_Item  -> g_items.cpp (future g_items.ts).
-//     FindItemByClassname is unreachable today (see the `st` note above);
-//     Drop_Item is reached by monster_death_use whenever a dying monster
-//     carries an item.
 //   - cleanupHealTarget              -> m_medic.cpp (ROGUE mission pack;
 //     out of this port line's current scope). Reached only by
 //     M_ProcessPain's AI_MEDIC branch.
-// Each is a local, unexported (fire_flechette/FindItemByClassname/
-// Drop_Item/cleanupHealTarget) throwing stub, naming itself and the file
-// that owns the real implementation, per PORTING.md's "a function you
-// cannot port faithfully is a reported deviation, not a TODO". None of
-// these are exercised by this unit's own test suite (its fixtures stick to
-// M_CheckGround/M_CatagorizePosition/M_WorldEffects/M_droptofloor/
-// M_ProcessPain/M_SetAnimation/monster_death_use, per this unit's brief).
+// Each is a local, unexported (fire_flechette/cleanupHealTarget) throwing
+// stub, naming itself and the file that owns the real implementation, per
+// PORTING.md's "a function you cannot port faithfully is a reported
+// deviation, not a TODO". Neither is exercised by this unit's own test
+// suite (its fixtures stick to M_CheckGround/M_CatagorizePosition/
+// M_WorldEffects/M_droptofloor/M_ProcessPain/M_SetAnimation/
+// monster_death_use, per this unit's brief).
 //
 // FoundTarget/M_CheckAttack: formerly this section's two remaining stubs
 // (g_ai.cpp:484/1093) -- now real imports from src/kexgame/g_ai.ts (that
@@ -343,6 +359,7 @@ import type { StuckObjectTraceFn } from "./bg_local";
 import { RegisterThink, RegisterUse } from "./g_save_registry";
 import { FoundTarget, M_CheckAttack } from "./g_ai";
 import { fire_bullet, fire_shotgun, fire_blaster, fire_grenade, fire_rocket, fire_rail, fire_bfg } from "./g_weapon";
+import { FindItemByClassname, Drop_Item } from "./g_items";
 
 // ---------------------------------------------------------------------------
 // small local helpers -- see file header for each
@@ -2066,14 +2083,6 @@ function fire_flechette(self: EdictT, _start: Vec3, _dir: Vec3, _damage: number,
 // itself now, not here; this file just imports the already-registered
 // function.
 
-
-function FindItemByClassname(classname: string): GitemT | null {
-  throw new Error(`FindItemByClassname: not yet ported (pending g_items.ts, see g_items.cpp) -- looked up "${classname}"`);
-}
-
-function Drop_Item(self: EdictT, _item: GitemT): EdictT {
-  throw new Error(`Drop_Item: not yet ported (pending g_items.ts, see g_items.cpp) -- called against ${self.classname ?? "?"}`);
-}
 
 function cleanupHealTarget(target: EdictT): void {
   throw new Error(`cleanupHealTarget: not yet ported (ROGUE mission pack, pending m_medic.ts, see m_medic.cpp) -- called against ${target.classname ?? "?"}`);

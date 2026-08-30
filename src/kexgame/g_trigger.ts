@@ -47,16 +47,24 @@
 // same local `traceEdict` helper both of those files already established.
 //
 // ============================================================================
-// EXTERNAL DEPENDENCIES NOT YET PORTED (throwing stubs, cited)
+// STUB SWAP: FindItemByClassname / P_ToggleFlashlight -- now real imports
+// from src/kexgame/g_items.ts
 // ============================================================================
-// - FindItemByClassname -> g_items.cpp (future src/kexgame/g_items.ts).
-//   SP_trigger_key's only caller is guarded by `if (!st.item) { print; return; }`
-//   immediately above it; since `st.item` is always null (see above), this
-//   branch is NEVER reached by any real spawn today -- an honest, documented
-//   consequence of the missing upstream global, not a silent behavior change.
-// - P_ToggleFlashlight -> p_hud.cpp (future src/kexgame/p_hud.ts). Reached
-//   only when a player actually touches a trigger_flashlight; narrow enough
-//   (this port line has no player-touch driver yet) to stay a stub.
+// Both used to be local, unexported throwing stubs here. g_items.ts has now
+// landed with real, exported implementations of both; this file's own stub
+// definitions are DELETED and replaced with `import { FindItemByClassname,
+// P_ToggleFlashlight } from "./g_items"`.
+// - FindItemByClassname: SP_trigger_key's only caller is guarded by
+//   `if (!st.item) { print; return; }` immediately above it; since `st.item`
+//   is always null (see above), this branch is still NEVER reached by any
+//   real spawn today -- an honest, documented consequence of the missing
+//   upstream global, not a silent behavior change. Swapped for correctness
+//   anyway (the C++ target is a real function now, not a future one).
+// - P_ToggleFlashlight: this file's own previous citation ("pending
+//   p_hud.ts, see p_hud.cpp") was WRONG -- grepping the real source tree
+//   twice confirms P_ToggleFlashlight is defined in g_items.cpp:1482
+//   (declared in g_local.h:2035), never in p_hud.cpp. Flagged and corrected
+//   here rather than silently fixed with no trace.
 //
 // ============================================================================
 // latched_trigger_filter / trigger_coop_relay_player_filter -- closure
@@ -123,6 +131,7 @@ import { GTIME_ZERO, Gtime_add, Gtime_from_ms, Gtime_from_sec, Gtime_nonzero, Gt
 import { SpawnFlags_from, SpawnFlags_has, type SpawnFlags } from "./spawnflags";
 import { AngleVectors, boxes_intersect, vec3_dot, vec3_muls, vec3_negate, vec3_normalized, vec3_normalized_len, vec3_origin, vec3_scale, vec3_sub } from "./q_vec3";
 import { clamp, frandom, irandom } from "./q_std";
+import { FindItemByClassname, P_ToggleFlashlight } from "./g_items";
 
 // ---------------------------------------------------------------------------
 // `st` placeholder (see file header)
@@ -417,11 +426,6 @@ export function SP_trigger_relay(self: EdictT): void {
 // ---------------------------------------------------------------------------
 // trigger_key
 // ---------------------------------------------------------------------------
-
-/** g_items.cpp (future src/kexgame/g_items.ts) -- see file header. */
-function FindItemByClassname(_classname: string): GitemT | null {
-  throw new Error("FindItemByClassname: not yet ported (pending g_items.ts, see g_items.cpp)");
-}
 
 /** g_trigger.cpp:286-366: `USE(trigger_key_use)`. */
 export const trigger_key_use: UseFn = RegisterUse(
@@ -868,11 +872,6 @@ export function SP_trigger_monsterjump(self: EdictT): void {
 // ---------------------------------------------------------------------------
 
 const SPAWNFLAG_FLASHLIGHT_CLIPPED: SpawnFlags = SpawnFlags_from(1);
-
-/** p_hud.cpp (future src/kexgame/p_hud.ts) -- reached only on a real player touch. */
-function P_ToggleFlashlight(_ent: EdictT, _on: boolean): void {
-  throw new Error("P_ToggleFlashlight: not yet ported (pending p_hud.ts, see p_hud.cpp)");
-}
 
 /** g_trigger.cpp:934-960: `TOUCH(trigger_flashlight_touch)`. */
 export const trigger_flashlight_touch: TouchFn = RegisterTouch(
