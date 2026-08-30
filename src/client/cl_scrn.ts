@@ -73,6 +73,7 @@ import { SCR_DrawCinematic } from "./cl_cin";
 import { V_RenderView } from "./cl_view";
 import { M_Draw } from "./menu";
 import type { EntityT } from "./ref";
+import { CG_DrawHUD } from "./cgame/host";
 
 function atof(s: string): number {
   const n = Number.parseFloat(s);
@@ -1049,7 +1050,7 @@ The status bar is a small layout program that
 is based on the stats array
 ================
 */
-function SCR_DrawStats(): void {
+export function SCR_DrawStats(): void {
   SCR_ExecuteLayoutString(cl.configstrings[CS_STATUSBAR]);
 }
 
@@ -1059,7 +1060,7 @@ SCR_DrawLayout
 
 ================
 */
-function SCR_DrawLayout(): void {
+export function SCR_DrawLayout(): void {
   if (!cl.frame.playerstate.stats[STAT_LAYOUTS]) return;
   SCR_ExecuteLayoutString(cl.layout);
 }
@@ -1148,8 +1149,12 @@ export function SCR_UpdateScreen(): void {
 
       V_RenderView(separation[i]);
 
-      SCR_DrawStats();
-      if (cl.frame.playerstate.stats[STAT_LAYOUTS] & 1) SCR_DrawLayout();
+      // Routed through the cgame host (src/client/cgame/host.ts) rather
+      // than calling SCR_DrawStats/SCR_DrawLayout directly -- the active
+      // cgame's DrawHUD (classic.ts, today) makes those same two calls
+      // under the same condition; see that file for the pass-through.
+      // ARCHITECTURE.md phase 4 ("cgame host, two built-in cgames").
+      CG_DrawHUD();
       if (cl.frame.playerstate.stats[STAT_LAYOUTS] & 2) CL_DrawInventory();
 
       SCR_DrawNet();
