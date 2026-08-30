@@ -37,7 +37,15 @@ export class ServerT {
   attractloop = false; // running cinematics and demos for the local system only
   loadgame = false; // client begins should reuse existing entity
 
-  time = 0; // always sv.framenum * 100 msec
+  // mirrors q2repro's SV_FRAMERATE/SV_FRAMETIME/SV_FRAMEDIV (src/server/server.h
+  // in q2repro, ~line 148) becoming per-server variables instead of a fixed
+  // BASE_FRAMERATE constant. Fixed at 10Hz/100ms/1 until the kex tick-rate
+  // binding lands (ARCHITECTURE.md phase 3); nothing derives sv_tick_rate yet.
+  framerate = 10; // logic ticks per second
+  frametime = 100; // msec per logic tick (1000 / framerate)
+  framediv = 1; // send-rate divisor relative to framerate; framediv > 1 unimplemented
+
+  time = 0; // always sv.framenum * sv.frametime msec
   framenum = 0;
 
   name = ""; // map name, or cinematic name
@@ -60,6 +68,14 @@ export class ServerT {
     this.state = ServerStateT.ss_dead;
     this.attractloop = false;
     this.loadgame = false;
+    // framerate/frametime/framediv are not part of the C `memset(&sv, 0, ...)`
+    // wipe's zeroing in spirit -- q2repro re-derives them via set_frame_time()
+    // right after; we have no such call yet, so re-assert the fixed 10Hz
+    // defaults here rather than zeroing (a 0 frametime would break every
+    // sv.framenum * sv.frametime computation below).
+    this.framerate = 10;
+    this.frametime = 100;
+    this.framediv = 1;
     this.time = 0;
     this.framenum = 0;
     this.name = "";

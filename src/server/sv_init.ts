@@ -150,7 +150,9 @@ export function SV_CheckForSavegame(): void {
     const previousState = sv.state;
     sv.state = ServerStateT.ss_loading;
     const ge = requireGe();
-    for (let i = 0; i < 100; i++) ge.RunFrame();
+    // q2repro's save.c: `frames = 10 * SV_FRAMERATE;` -- run ten seconds'
+    // worth of ticks at the server's logic rate (100 at today's fixed 10Hz).
+    for (let i = 0; i < 10 * sv.framerate; i++) ge.RunFrame();
     sv.state = previousState;
   }
 }

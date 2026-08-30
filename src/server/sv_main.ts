@@ -663,7 +663,7 @@ export function SV_RunGameFrame(): void {
   // compression can get confused when a client
   // has the "current" frame
   sv.framenum++;
-  sv.time = sv.framenum * 100;
+  sv.time = sv.framenum * sv.frametime;
 
   // don't run if paused
   const paused = sv_paused ? sv_paused.value !== 0 : false;
@@ -707,9 +707,9 @@ export function SV_Frame(msec: number): void {
   // move autonomous things around if enough time has passed
   if (!(sv_timedemo && sv_timedemo.value) && svs.realtime < sv.time) {
     // never let the time get too far off
-    if (sv.time - svs.realtime > 100) {
+    if (sv.time - svs.realtime > sv.frametime) {
       if (sv_showclamp && sv_showclamp.value) Com_Printf("sv lowclamp\n");
-      svs.realtime = sv.time - 100;
+      svs.realtime = sv.time - sv.frametime;
     }
     // NET_Sleep(sv.time - svs.realtime) -- omitted: net_udp.ts's NET_Sleep
     // is itself omitted there (it would block the process in select()/
