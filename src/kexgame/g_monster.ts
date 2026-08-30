@@ -315,6 +315,7 @@ import { YAW, clamp, frandom, brandom, irandom } from "./q_std";
 import { G_FreeEdict, G_FindByString, G_PickTarget, G_UseTargets, KillBox } from "./g_utils";
 import { T_Damage } from "./g_combat";
 import { G_GetClipMask } from "./g_phys";
+import { M_walkmove } from "./m_move";
 import { G_FixStuckObject_Generic } from "./p_move";
 import type { StuckObjectTraceFn } from "./bg_local";
 import { RegisterThink, RegisterUse, RegisterMonsterinfoCheckattack } from "./g_save_registry";
@@ -584,7 +585,16 @@ export function M_CheckGround(ent: EdictT, mask: ContentsT): void {
 // M_CatagorizePosition (g_monster.cpp:190-225) -- see file header's ruling
 // ---------------------------------------------------------------------------
 
-export function M_CatagorizePosition(self: EdictT, in_point: Vec3): void {
+// The C++ writes through two reference out-params (waterlevel&, watertype&).
+// Most call sites (g_phys.cpp x3, g_monster.cpp x4) pass the entity's own
+// fields, but m_move.cpp:721 passes LOCALS (end_waterlevel/end_watertype)
+// and must NOT touch the entity -- so the faithful collapse is a
+// value-returning core, with self-aliasing call sites assigning the result
+// back explicitly. (Supersedes this file's earlier mutate-self ruling.)
+export function M_CatagorizePosition(
+  self: EdictT,
+  in_point: Vec3,
+): { waterlevel: WaterLevelT; watertype: ContentsT } {
   const point = vec3(
     in_point[0],
     in_point[1],
@@ -594,21 +604,27 @@ export function M_CatagorizePosition(self: EdictT, in_point: Vec3): void {
   let cont = gi.pointcontents(point);
 
   if ((cont & MASK_WATER) === 0) {
-    self.waterlevel = WaterLevelT.WATER_NONE;
-    self.watertype = ContentsT.CONTENTS_NONE;
-    return;
+    return { waterlevel: WaterLevelT.WATER_NONE, watertype: ContentsT.CONTENTS_NONE };
   }
 
-  self.watertype = cont;
-  self.waterlevel = WaterLevelT.WATER_FEET;
+  const watertype = cont;
+  let waterlevel = WaterLevelT.WATER_FEET;
   point[2] += 26;
   cont = gi.pointcontents(point);
-  if ((cont & MASK_WATER) === 0) return;
+  if ((cont & MASK_WATER) === 0) return { waterlevel, watertype };
 
-  self.waterlevel = WaterLevelT.WATER_WAIST;
+  waterlevel = WaterLevelT.WATER_WAIST;
   point[2] += 22;
   cont = gi.pointcontents(point);
-  if ((cont & MASK_WATER) !== 0) self.waterlevel = WaterLevelT.WATER_UNDER;
+  if ((cont & MASK_WATER) !== 0) waterlevel = WaterLevelT.WATER_UNDER;
+  return { waterlevel, watertype };
+}
+
+/** The self-aliasing form every g_phys/g_monster C++ call site uses. */
+export function M_CatagorizePositionSelf(self: EdictT, in_point: Vec3): void {
+  const r = M_CatagorizePosition(self, in_point);
+  self.waterlevel = r.waterlevel;
+  self.watertype = r.watertype;
 }
 
 // ---------------------------------------------------------------------------
@@ -1407,7 +1423,7 @@ export const monster_think: ThinkFn = RegisterThink("monster_think", (self: Edic
     self.monsterinfo.linkcount = self.linkcount;
     M_CheckGround(self, G_GetClipMask(self));
   }
-  M_CatagorizePosition(self, self.s.origin);
+  M_CatagorizePositionSelf(self, self.s.origin);
   M_WorldEffects(self);
   M_SetEffects(self);
 });
@@ -2073,9 +2089,7 @@ const M_CheckAttack: MonsterinfoCheckattackFn = RegisterMonsterinfoCheckattack("
   throw new Error(`M_CheckAttack: not yet ported (pending g_ai.ts, see g_ai.cpp:1093) -- called against ${self.classname ?? "?"}`);
 });
 
-function M_walkmove(self: EdictT, _yaw: number, _dist: number): boolean {
-  throw new Error(`M_walkmove: not yet ported (pending m_move.ts, see m_move.cpp:1479) -- called against ${self.classname ?? "?"}`);
-}
+
 
 function FindItemByClassname(classname: string): GitemT | null {
   throw new Error(`FindItemByClassname: not yet ported (pending g_items.ts, see g_items.cpp) -- looked up "${classname}"`);

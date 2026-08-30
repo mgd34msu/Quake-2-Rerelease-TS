@@ -274,7 +274,7 @@ import { YAW, clamp, crandom_open, irandom } from "./q_std";
 import { PM_StepSlideMove_Generic } from "./p_move";
 import type { PmTraceFn } from "./bg_local";
 import { G_TouchTriggers, G_TouchProjectiles } from "./g_utils";
-import { M_CheckGround, M_CatagorizePosition, M_WorldEffects } from "./g_monster";
+import { M_CheckGround, M_CatagorizePositionSelf, M_WorldEffects } from "./g_monster";
 import type { CvarT } from "../shared/q_shared";
 
 // ---------------------------------------------------------------------------
@@ -759,7 +759,7 @@ export function SV_Physics_Toss(ent: EdictT): void {
   if (ent.groundentity && ent.gravity > 0.0) {
     // PGM - gravity hack
     if ((ent.svflags & SvflagsT.SVF_MONSTER) !== 0) {
-      M_CatagorizePosition(ent, ent.s.origin);
+      M_CatagorizePositionSelf(ent, ent.s.origin);
       M_WorldEffects(ent);
     }
     return;
@@ -862,7 +862,7 @@ export function SV_Physics_Toss(ent: EdictT): void {
   else ent.waterlevel = WaterLevelT.WATER_NONE;
 
   if ((ent.svflags & SvflagsT.SVF_MONSTER) !== 0) {
-    M_CatagorizePosition(ent, ent.s.origin);
+    M_CatagorizePositionSelf(ent, ent.s.origin);
     M_WorldEffects(ent);
   } else {
     if (!wasinwater && isinwater) {
@@ -1037,7 +1037,7 @@ export function SV_Physics_Step(ent: EdictT): void {
   if (!ent.inuse) return; // PGM g_touchtrigger free problem
 
   if ((ent.svflags & SvflagsT.SVF_MONSTER) !== 0) {
-    M_CatagorizePosition(ent, ent.s.origin);
+    M_CatagorizePositionSelf(ent, ent.s.origin);
     M_WorldEffects(ent);
 
     // [Paril-KEX] last minute hack to fix Stalker upside down gravity

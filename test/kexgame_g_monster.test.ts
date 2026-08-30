@@ -45,7 +45,7 @@ import { defaultEdict, gi, globals, game, level, g_edicts, SetGameImports, SetGa
 import { Gtime_from_ms, Gtime_from_sec, GTIME_ZERO } from "../src/kexgame/gtime";
 import {
   M_CheckGround,
-  M_CatagorizePosition,
+  M_CatagorizePositionSelf,
   M_WorldEffects,
   M_droptofloor,
   M_droptofloor_generic,
@@ -447,7 +447,7 @@ describe("M_CatagorizePosition", () => {
     e.mins = vec3(-16, -16, -24);
     e.maxs = vec3(16, 16, 32);
     pointcontentsImpl = () => 0;
-    M_CatagorizePosition(e, e.s.origin);
+    M_CatagorizePositionSelf(e, e.s.origin);
     expect(e.waterlevel).toBe(WaterLevelT.WATER_NONE);
     expect(e.watertype).toBe(ContentsT.CONTENTS_NONE);
   });
@@ -459,7 +459,7 @@ describe("M_CatagorizePosition", () => {
     e.maxs = vec3(16, 16, 32);
     // base sample = origin.z + mins.z + 1 = -23; +26 = 3 (must NOT be water).
     pointcontentsImpl = (p) => (p[2] < -10 ? ContentsT.CONTENTS_WATER : 0);
-    M_CatagorizePosition(e, e.s.origin);
+    M_CatagorizePositionSelf(e, e.s.origin);
     expect(e.waterlevel).toBe(WaterLevelT.WATER_FEET);
     expect(e.watertype).toBe(ContentsT.CONTENTS_WATER);
   });
@@ -471,7 +471,7 @@ describe("M_CatagorizePosition", () => {
     e.maxs = vec3(16, 16, 32);
     // base sample = origin.z + mins.z + 1 = -23; +26 = 3; +22 = 25
     pointcontentsImpl = (p) => (p[2] < 10 ? ContentsT.CONTENTS_WATER : 0);
-    M_CatagorizePosition(e, e.s.origin);
+    M_CatagorizePositionSelf(e, e.s.origin);
     expect(e.waterlevel).toBe(WaterLevelT.WATER_WAIST);
   });
 
@@ -481,7 +481,7 @@ describe("M_CatagorizePosition", () => {
     e.mins = vec3(-16, -16, -24);
     e.maxs = vec3(16, 16, 32);
     pointcontentsImpl = () => ContentsT.CONTENTS_WATER; // fully submerged everywhere
-    M_CatagorizePosition(e, e.s.origin);
+    M_CatagorizePositionSelf(e, e.s.origin);
     expect(e.waterlevel).toBe(WaterLevelT.WATER_UNDER);
   });
 });
