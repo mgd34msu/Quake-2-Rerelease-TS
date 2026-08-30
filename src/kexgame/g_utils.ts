@@ -58,23 +58,37 @@
 // ============================================================================
 // EXTERNAL DEPENDENCIES NOT YET PORTED
 // ============================================================================
-// g_utils.cpp calls four functions defined in OTHER, not-yet-ported C++
-// files (verified by grepping quake2-rerelease-dll/rerelease/*.cpp for each
-// symbol's real definition, not just its g_local.h declaration):
-//   - T_Damage            -> g_combat.cpp:527  (future src/kexgame/g_combat.ts)
+// g_utils.cpp calls five functions defined in OTHER C++ files (verified by
+// grepping quake2-rerelease-dll/rerelease/*.cpp for each symbol's real
+// definition, not just its g_local.h declaration):
+//   - T_Damage            -> g_combat.cpp:527  (src/kexgame/g_combat.ts -- LANDED, real import)
 //   - G_MonsterKilled     -> g_monster.cpp:613 (future src/kexgame/g_monster.ts)
-//   - G_Impact            -> g_phys.cpp:122    (future src/kexgame/g_phys.ts)
-//   - G_GetClipMask       -> g_phys.cpp:30     (future src/kexgame/g_phys.ts)
+//   - G_Impact            -> g_phys.cpp:122    (src/kexgame/g_phys.ts -- LANDED, real import)
+//   - G_GetClipMask       -> g_phys.cpp:30     (src/kexgame/g_phys.ts -- LANDED, real import)
 //   - G_ShouldPlayersCollide -> p_client.cpp:2996 (future src/kexgame/p_client.ts)
-// None of those files exist yet in src/kexgame/ (only g_local.ts/
-// g_local_types.ts/g_save_registry.ts/g_main_globals.ts and the foundation
-// value types have landed). Per PORTING.md's "a function you cannot port
-// faithfully is a reported deviation, not a TODO", each is a local,
-// unexported stub that throws, naming itself and the file that owns the
-// real implementation. Reached only by KillBox, G_TouchProjectiles, and
-// G_UseTargets's killtarget-vs-live-monster branch -- none of which this
-// unit's own test suite exercises. Replace each with a real import once its
-// owning file lands.
+// G_MonsterKilled/G_ShouldPlayersCollide's owning files still don't exist in
+// src/kexgame/. Per PORTING.md's "a function you cannot port faithfully is a
+// reported deviation, not a TODO", each of those two is still a local,
+// unexported stub that throws, naming itself and the file that owns the real
+// implementation. Reached only by G_UseTargets's killtarget-vs-live-monster
+// branch and KillBox's coop-collision branch -- neither of which this unit's
+// own test suite exercises. Replace each with a real import once its owning
+// file lands.
+//
+// T_Damage/G_Impact/G_GetClipMask are DIFFERENT: their owning files
+// (src/kexgame/g_combat.ts, src/kexgame/g_phys.ts) have landed and export
+// real implementations, so this file now imports all three directly instead
+// of stubbing them. G_Impact/G_GetClipMask close a real, two-way import
+// cycle with g_phys.ts (which imports G_TouchTriggers/G_TouchProjectiles
+// from THIS file) -- see g_phys.ts's own file header ("g_utils.ts <->
+// g_phys.ts: a real, sanctioned import cycle") for why that's safe. T_Damage
+// closes an analogous cycle with g_combat.ts (which imports `findradius`
+// from this file for T_RadiusDamage) -- see g_combat.ts's own file header
+// ("IMPORT CYCLE: g_utils.ts <-> g_combat.ts"). All four cycle-facing
+// exports on both sides of both cycles are hoisted `export function`
+// declarations, never a top-level `const` evaluated at module-init time, so
+// there is no TDZ hazard for PORTING.md's require()-workaround rule to apply
+// to.
 //
 // ============================================================================
 // OTHER NOTED DEVIATIONS
@@ -135,6 +149,8 @@ import {
 } from "./g_local";
 import { RegisterThink } from "./g_save_registry";
 import { gi, globals, g_edicts, game, level, defaultEdict } from "./g_main_globals";
+import { G_Impact, G_GetClipMask } from "./g_phys";
+import { T_Damage } from "./g_combat";
 import { GTIME_ZERO, Gtime_add, Gtime_from_ms, Gtime_from_sec, Gtime_nonzero, Gtime_subtract } from "./gtime";
 import { SpawnFlags_has } from "./spawnflags";
 import { AngleVectors, vec3_equals, vec3_length, vec3_origin } from "./q_vec3";
@@ -144,32 +160,18 @@ import { irandom } from "./q_std";
 // EXTERNAL DEPENDENCIES NOT YET PORTED (see file header)
 // ---------------------------------------------------------------------------
 
-function T_Damage(
-  targ: EdictT,
-  _inflictor: EdictT,
-  _attacker: EdictT,
-  _dir: Vec3,
-  _point: Vec3,
-  _normal: Vec3,
-  _damage: number,
-  _knockback: number,
-  _dflags: DamageflagsT,
-  _mod: ModT,
-): void {
-  throw new Error(`T_Damage: not yet ported (pending g_combat.ts, see g_combat.cpp:527) -- called against ${targ.classname ?? "?"}`);
-}
-
 function G_MonsterKilled(self: EdictT): void {
   throw new Error(`G_MonsterKilled: not yet ported (pending g_monster.ts, see g_monster.cpp:613) -- called against ${self.classname ?? "?"}`);
 }
 
-function G_Impact(_e1: EdictT, _trace: KexTraceT): void {
-  throw new Error("G_Impact: not yet ported (pending g_phys.ts, see g_phys.cpp:122)");
-}
-
-function G_GetClipMask(_ent: EdictT): ContentsT {
-  throw new Error("G_GetClipMask: not yet ported (pending g_phys.ts, see g_phys.cpp:30)");
-}
+// G_Impact/G_GetClipMask: formerly local throwing stubs here (see this
+// file's own header, "EXTERNAL DEPENDENCIES NOT YET PORTED"), now real
+// imports -- src/kexgame/g_phys.ts has landed. This closes a real,
+// sanctioned import cycle (g_phys.ts imports G_TouchTriggers/
+// G_TouchProjectiles from this file); see g_phys.ts's own file header
+// ("g_utils.ts <-> g_phys.ts: a real, sanctioned import cycle") for why that
+// is safe here (both sides are hoisted `export function` declarations, no
+// top-level cross-module value access at module-init time).
 
 function G_ShouldPlayersCollide(_weaponry: boolean): boolean {
   throw new Error("G_ShouldPlayersCollide: not yet ported (pending p_client.ts, see p_client.cpp:2996)");
