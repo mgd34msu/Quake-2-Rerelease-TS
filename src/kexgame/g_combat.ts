@@ -46,9 +46,23 @@
 //     src/kexgame/g_rogue_newai.ts) -- reached only when `inflictor.classname
 //     === "tesla_mine"`; no tesla_mine spawn function exists in this port
 //     line yet, so this is unreachable outside a deliberately-crafted test.
-//   - cleanupHealTarget     -> rogue/g_rogue_combat.cpp:13 (future
-//     src/kexgame/g_rogue_combat.ts) -- reached only for an AI_MEDIC monster
-//     with a live monster `.enemy`; narrow enough to leave as a stub.
+//
+// ============================================================================
+// STUB SWAP: cleanupHealTarget is now a real import from m_medic.ts
+// ============================================================================
+// `cleanupHealTarget` (rogue/g_rogue_combat.cpp:13, reached from Killed's
+// AI_MEDIC-cleanup branch whenever a monster with a live `.enemy` dies while
+// AI_MEDIC is set) was formerly a local throwing stub here -- it is now a
+// real import from src/kexgame/m_medic.ts (that unit has landed). This
+// creates a real, sanctioned, TWO-WAY import cycle: this file imports
+// `cleanupHealTarget` from m_medic.ts, while m_medic.ts imports `T_Damage`
+// back from here (abortHeal's gib-damage branch). Both cross-module symbols
+// are hoisted `export function` declarations, and both uses are inside
+// function bodies (`Killed`/`abortHeal`), never read at module-evaluation
+// time -- no TDZ hazard, matching the shape and safety argument of every
+// other sanctioned cycle in this port line (g_utils.ts<->g_phys.ts,
+// g_utils.ts<->g_combat.ts, g_phys.ts<->g_monster.ts). Verified end-to-end
+// by `bunx tsc --noEmit` actually importing both files together.
 //
 // ============================================================================
 // ArmorIndex / PowerArmorType / G_CheckPowerArmor -- ported here, not g_items.ts
@@ -154,6 +168,7 @@ import { findradius } from "./g_utils";
 import { AngleVectors, closest_point_to_box, vec3_add, vec3_addEq, vec3_dot, vec3_length, vec3_muls, vec3_normalized, vec3_sub } from "./q_vec3";
 import { brandom } from "./q_std";
 import { visible, FoundTarget } from "./g_ai";
+import { cleanupHealTarget } from "./m_medic";
 
 // ---------------------------------------------------------------------------
 // cvar-read helpers (see g_utils.ts's own `coopEnabled()` precedent for the
@@ -180,10 +195,6 @@ function MarkTeslaArea(_self: EdictT, _tesla: EdictT): boolean {
 
 function TargetTesla(_self: EdictT, _tesla: EdictT): void {
   throw new Error("TargetTesla: not yet ported (pending g_rogue_newai.ts, see rogue/g_rogue_newai.cpp:1472)");
-}
-
-function cleanupHealTarget(_ent: EdictT): void {
-  throw new Error("cleanupHealTarget: not yet ported (pending g_rogue_combat.ts, see rogue/g_rogue_combat.cpp:13)");
 }
 
 // ---------------------------------------------------------------------------

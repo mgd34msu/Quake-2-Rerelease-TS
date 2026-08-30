@@ -171,16 +171,31 @@
 //   - fire_flechette                 -> rogue/g_rogue_newweap.cpp:41 (ROGUE
 //     mission pack; out of this port line's current scope -- see the
 //     "STUB SWAP" note just above).
-//   - cleanupHealTarget              -> m_medic.cpp (ROGUE mission pack;
-//     out of this port line's current scope). Reached only by
-//     M_ProcessPain's AI_MEDIC branch.
-// Each is a local, unexported (fire_flechette/cleanupHealTarget) throwing
-// stub, naming itself and the file that owns the real implementation, per
-// PORTING.md's "a function you cannot port faithfully is a reported
-// deviation, not a TODO". Neither is exercised by this unit's own test
-// suite (its fixtures stick to M_CheckGround/M_CatagorizePosition/
-// M_WorldEffects/M_droptofloor/M_ProcessPain/M_SetAnimation/
-// monster_death_use, per this unit's brief).
+// `fire_flechette` is a local, unexported throwing stub, naming itself and
+// the file that owns the real implementation, per PORTING.md's "a function
+// you cannot port faithfully is a reported deviation, not a TODO". Not
+// exercised by this unit's own test suite (its fixtures stick to
+// M_CheckGround/M_CatagorizePosition/M_WorldEffects/M_droptofloor/
+// M_ProcessPain/M_SetAnimation/monster_death_use, per this unit's brief).
+//
+// ============================================================================
+// STUB SWAP: cleanupHealTarget is now a real import from m_medic.ts
+// ============================================================================
+// `cleanupHealTarget` (rogue/g_rogue_combat.cpp:13, reached only by
+// M_ProcessPain's AI_MEDIC branch when a dying AI_MEDIC monster has a live
+// monster `.enemy`) was formerly a local throwing stub here -- it is now a
+// real import from src/kexgame/m_medic.ts (that unit has landed). This
+// creates a real, sanctioned, TWO-WAY import cycle: this file imports
+// `cleanupHealTarget` from m_medic.ts, while m_medic.ts imports several
+// symbols back from here (M_ProjectFlashSource, M_SetAnimation,
+// M_AllowSpawn, M_SetEffects, M_ShouldReactToPain, monster_dead,
+// monster_dead_think, walkmonster_start, M_droptofloor_generic). Every
+// cross-module symbol on both sides is a hoisted `export function`/`export
+// const` declaration, and every use is inside a function body (never at
+// module-evaluation time) -- no TDZ hazard, matching the shape and safety
+// argument of every other sanctioned cycle in this file (g_phys.ts,
+// m_move.ts, g_utils.ts, g_items.ts, above). Verified end-to-end by `bunx
+// tsc --noEmit` actually importing both files together.
 //
 // FoundTarget/M_CheckAttack: formerly this section's two remaining stubs
 // (g_ai.cpp:484/1093) -- now real imports from src/kexgame/g_ai.ts (that
@@ -366,6 +381,7 @@ import { FoundTarget, M_CheckAttack } from "./g_ai";
 import { fire_bullet, fire_shotgun, fire_blaster, fire_grenade, fire_rocket, fire_rail, fire_bfg } from "./g_weapon";
 import { FindItemByClassname, Drop_Item } from "./g_items";
 import { st } from "./g_spawn";
+import { cleanupHealTarget } from "./m_medic";
 
 // ---------------------------------------------------------------------------
 // small local helpers -- see file header for each
@@ -2086,7 +2102,3 @@ function fire_flechette(self: EdictT, _start: Vec3, _dir: Vec3, _damage: number,
 // itself now, not here; this file just imports the already-registered
 // function.
 
-
-function cleanupHealTarget(target: EdictT): void {
-  throw new Error(`cleanupHealTarget: not yet ported (ROGUE mission pack, pending m_medic.ts, see m_medic.cpp) -- called against ${target.classname ?? "?"}`);
-}

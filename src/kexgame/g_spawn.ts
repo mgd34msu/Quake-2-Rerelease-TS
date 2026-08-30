@@ -440,6 +440,11 @@ import { SP_monster_boss5, SP_monster_supertank } from "./m_supertank";
 import { SP_monster_tank, SP_monster_tank_stand } from "./m_tank";
 import { SP_misc_actor, SP_target_actor } from "./m_actor";
 import { SP_monster_arachnid } from "./m_arachnid";
+import { SP_monster_brain } from "./m_brain";
+import { SP_monster_flyer, SP_monster_kamikaze } from "./m_flyer";
+import { SP_monster_hover } from "./m_hover";
+import { SP_monster_medic } from "./m_medic";
+import { SP_monster_floater } from "./m_float";
 import { SP_monster_guardian } from "./m_guardian";
 import { SP_misc_insane } from "./m_insane";
 import { SP_monster_shambler } from "./m_shambler";
@@ -970,8 +975,6 @@ function DoRandomRespawn(ent: EdictT): ItemIdT {
   throw new Error(`DoRandomRespawn: not yet ported (pending g_rogue_newdm.ts, see rogue/g_rogue_newdm.cpp:126) -- classname "${ent.classname ?? "?"}"`);
 }
 
-const SP_monster_hover = unported("SP_monster_hover", "m_hover.cpp (future src/kexgame/m_hover.ts)");
-const SP_monster_medic = unported("SP_monster_medic", "m_medic.cpp (future src/kexgame/m_medic.ts)");
 
 export const spawns: readonly SpawnEntry[] = [
   { name: "info_player_start", spawn: SP_info_player_start },
@@ -1100,9 +1103,9 @@ export const spawns: readonly SpawnEntry[] = [
   { name: "monster_flipper", spawn: SP_monster_flipper },
   { name: "monster_chick", spawn: SP_monster_chick },
   { name: "monster_parasite", spawn: SP_monster_parasite },
-  { name: "monster_flyer", spawn: unported("SP_monster_flyer", "m_flyer.cpp (future src/kexgame/m_flyer.ts)") },
-  { name: "monster_brain", spawn: unported("SP_monster_brain", "m_brain.cpp (future src/kexgame/m_brain.ts)") },
-  { name: "monster_floater", spawn: unported("SP_monster_floater", "m_float.cpp (future src/kexgame/m_float.ts)") },
+  { name: "monster_flyer", spawn: SP_monster_flyer },
+  { name: "monster_brain", spawn: SP_monster_brain },
+  { name: "monster_floater", spawn: SP_monster_floater },
   { name: "monster_hover", spawn: SP_monster_hover },
   { name: "monster_mutant", spawn: SP_monster_mutant },
   { name: "monster_supertank", spawn: SP_monster_supertank },
@@ -1165,7 +1168,7 @@ export const spawns: readonly SpawnEntry[] = [
   { name: "dm_dball_team2_start", spawn: unported("SP_dm_dball_team2_start", "rogue/rogue_dm_ball.cpp (future src/rogue/rogue_dm_ball.ts)") },
   { name: "dm_dball_ball_start", spawn: unported("SP_dm_dball_ball_start", "rogue/rogue_dm_ball.cpp (future src/rogue/rogue_dm_ball.ts)") },
   { name: "dm_dball_speed_change", spawn: unported("SP_dm_dball_speed_change", "rogue/rogue_dm_ball.cpp (future src/rogue/rogue_dm_ball.ts)") },
-  { name: "monster_kamikaze", spawn: unported("SP_monster_kamikaze", "m_flyer.cpp (future src/kexgame/m_flyer.ts)") },
+  { name: "monster_kamikaze", spawn: SP_monster_kamikaze },
   { name: "turret_invisible_brain", spawn: SP_turret_invisible_brain },
   { name: "misc_nuke_core", spawn: unported("SP_misc_nuke_core", "rogue/g_rogue_misc.cpp (future src/rogue/g_rogue_misc.ts)") },
 
