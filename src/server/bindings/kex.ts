@@ -190,13 +190,25 @@
 //   portal-only visibility either, matching q2repro's own PF_inVIS
 //   (`portals` there is likewise a newer distinction the legacy PVS/PHS path
 //   never had). TODO(phase 7).
-// - `local_sound`'s `target`/`dupe_key` (splitscreen per-player delivery and
-//   duplicate-send dedup): forwarded to the ordinary broadcast sound path
-//   per this unit's brief ("local_sound can forward to sound + TODO
-//   dupe_key") -- real per-target unicast needs SV_StartSound split into
-//   build/send phases, and MAX_SPLIT_PLAYERS dedup, both ARCHITECTURE.md's
-//   "Splitscreen" (phase 7).
-// - `unicast`'s `dupe_key`: same splitscreen-dedup gap, ignored.
+// - `local_sound`'s `target` delivery is real: PF_LocalSound (sv_game.ts)
+//   unicasts a channel-only svc_sound (no position, matching q2repro's own
+//   PF_LocalSound never reading its `origin` parameter) to `target` alone,
+//   NOT the ordinary broadcast/PHS sound path -- fixed as part of the
+//   phase-7 splitscreen scope ruling (.orch/ decisions), which also found
+//   this had been mis-wired to SV_StartSound (broadcasting a "private" cue
+//   to everyone in the source entity's PVS) before that unit landed.
+// - `local_sound`'s and `unicast`'s `dupe_key` (splitscreen duplicate-send
+//   dedup across a group of unicast calls sharing one physical connection):
+//   accepted, never enforced. Ruling: q2repro (the PC engine this port
+//   otherwise matches bug-for-bug) accepts the exact same `dupe_key`
+//   parameter on both PF_Unicast and PF_LocalSound (server/game.c:100,638)
+//   and never reads it in either body -- q2repro has no local splitscreen
+//   (cgame_classic.c:858: "isplit is ignored, due to missing split screen
+//   support") and dedup only matters when multiple local players share one
+//   physical connection, which never happens on a PC engine (every
+//   splitscreen-shaped player here is instead an ordinary distinct network
+//   client, each with its own connection, needing no dedup). Ignoring
+//   `dupe_key` IS matching the reference, not a gap relative to it.
 // - `BoxEdicts`'s filter callback: `SV_AreaEdicts` has no filter concept of
 //   its own; applied here in TS after the fact against the engine's own
 //   internal buffer ceiling (`shared/q_shared.ts`'s legacy `MAX_EDICTS`,
@@ -322,6 +334,7 @@ import {
 import {
   PF_Configstring,
   PF_Unicast,
+  PF_LocalSound,
   PF_cprintf,
   PF_centerprintf,
   PF_error,
@@ -760,11 +773,15 @@ export function BuildKexImports(): KexGameImports {
       const target = ent ? mustResolveEngineView(ent, "positioned_sound") : engineViewForIndex(0);
       SV_StartSound(origin, target, channel, soundindex, volume, attenuation, timeofs);
     },
-    // [Paril-KEX] splitscreen per-target sound -- forwarded to the ordinary
-    // broadcast sound path; `dupe_key` ignored. See file header.
-    local_sound: (_target, origin, ent, channel, soundindex, volume, attenuation, timeofs, _dupe_key) => {
-      const target = ent ? mustResolveEngineView(ent, "local_sound") : engineViewForIndex(0);
-      SV_StartSound(origin, target, channel, soundindex, volume, attenuation, timeofs);
+    // [Paril-KEX] splitscreen per-target sound -- unicast to `target` alone
+    // via PF_LocalSound (sv_game.ts), matching q2repro's PF_LocalSound
+    // (server/game.c:638-673): `origin` is never sent (q2repro never reads
+    // it either) and `dupe_key` is accepted but ignored, same as `unicast`
+    // below -- see file header and PF_LocalSound's own doc comment.
+    local_sound: (target, _origin, ent, channel, soundindex, volume, attenuation, timeofs, _dupe_key) => {
+      const resolvedTarget = mustResolveEngineView(target, "local_sound");
+      const entity = ent ? mustResolveEngineView(ent, "local_sound") : engineViewForIndex(0);
+      PF_LocalSound(resolvedTarget, entity, channel, soundindex, volume, attenuation, timeofs);
     },
 
     configstring: (num, str) => PF_Configstring(num, str),

@@ -20,13 +20,18 @@ import { SV_Nextserver } from "./sv_user";
 // callers needed; sv_send.c is the first consumer of these). qcommon.ts is
 // outside this unit's SCOPE, so they are defined locally here instead --
 // report for qcommon.ts's owner to relocate.
-const SND_VOLUME = 1 << 0; // a byte
-const SND_ATTENUATION = 1 << 1; // a byte
-const SND_POS = 1 << 2; // three coordinates
-const SND_ENT = 1 << 3; // a short 0-2: channel, 3-12: entity
-const SND_OFFSET = 1 << 4; // a byte, msec offset from frame start
-const DEFAULT_SOUND_PACKET_VOLUME = 1.0;
-const DEFAULT_SOUND_PACKET_ATTENUATION = 1.0;
+// Exported: sv_game.ts's PF_LocalSound (game.c's gi.local_sound, the
+// [Paril-KEX] per-target sound import) needs the same flag bits and
+// defaults to build an equivalent svc_sound payload without going through
+// SV_Multicast -- see that function's own header for why it cannot just
+// call SV_StartSound.
+export const SND_VOLUME = 1 << 0; // a byte
+export const SND_ATTENUATION = 1 << 1; // a byte
+export const SND_POS = 1 << 2; // three coordinates
+export const SND_ENT = 1 << 3; // a short 0-2: channel, 3-12: entity
+export const SND_OFFSET = 1 << 4; // a byte, msec offset from frame start
+export const DEFAULT_SOUND_PACKET_VOLUME = 1.0;
+export const DEFAULT_SOUND_PACKET_ATTENUATION = 1.0;
 
 function requireSvClient(): ClientT {
   const cl = svClientHolder.sv_client;

@@ -20,7 +20,7 @@
 // it -- a dead declaration, dropped here along with it (see report).
 
 import { type Vec3, VectorCopy, vec3_origin } from "../shared/math";
-import { MulticastT } from "../shared/q_shared";
+import { MulticastT, CHAN_RELIABLE } from "../shared/q_shared";
 import { ERR_DROP, SvcOpsT } from "../qcommon/qcommon";
 import { Com_Error, Com_Printf } from "../qcommon/common";
 import {
@@ -41,7 +41,17 @@ import { CM_InlineModel, CM_PointLeafnum, CM_LeafArea, CM_LeafCluster, CM_Cluste
 import type { GameExports, Edict } from "../game/game";
 import { GAME_API_VERSION } from "../game/game";
 import { sv, svs, ServerStateT, maxclients } from "./server";
-import { SV_Multicast, SV_ClientPrintf, SV_StartSound } from "./sv_send";
+import {
+  SV_Multicast,
+  SV_ClientPrintf,
+  SV_StartSound,
+  SND_VOLUME,
+  SND_ATTENUATION,
+  SND_ENT,
+  SND_OFFSET,
+  DEFAULT_SOUND_PACKET_VOLUME,
+  DEFAULT_SOUND_PACKET_ATTENUATION,
+} from "./sv_send";
 import { SV_ModelIndex } from "./sv_init";
 import { SV_LinkEdict } from "./sv_world";
 import { LoadLegacyGame } from "./bindings/legacy";
@@ -93,6 +103,71 @@ export function PF_Unicast(ent: Edict | null, reliable: boolean): void {
   else SZ_Write(client.datagram, sv.multicast.data, sv.multicast.cursize);
 
   SZ_Clear(sv.multicast);
+}
+
+/*
+===============
+PF_LocalSound
+
+[Paril-KEX] gi.local_sound (game.h:1897's `local_sound` import) -- like
+`sound`, but ONLY the `target` client ever receives it, matching q2repro's
+own PF_LocalSound (server/game.c:638-673). q2repro's implementation:
+
+  - never touches `origin` (the parameter is declared but never read in the
+    reference body) -- a local_sound is a purely channel-based cue (pickup
+    jingles, low-ammo warnings, help markers), never a positioned/PVS-culled
+    one, so no SND_POS is ever written here either.
+  - never touches `entity` for the message's own entity/channel-override
+    number: `entnum = NUM_FOR_EDICT(target)`, i.e. the encoded channel slot
+    is always the RECEIVING client's own player entity, regardless of which
+    logical "source" entity (frequently `world`) was passed as `entity`.
+    Real callers do pass a distinct target/entity pair (rerelease's
+    g_items.cpp:1533: `gi.local_sound(ent, points[...], world, ...)`).
+  - unicasts the built message to `target` alone via PF_Unicast (reliable
+    iff `channel & CHAN_RELIABLE`), never through SV_Multicast/PVS.
+
+This is NOT the same code path as SV_StartSound (broadcast/PHS multicast):
+before this function existed, the kex binding forwarded local_sound straight
+into SV_StartSound, which sent the "private" cue to every client in the
+source entity's PVS -- see src/server/bindings/kex.ts's OTHER DOCUMENTED GAPS
+header, "local_sound's target/dupe_key", now fixed by wiring to this
+function instead. `dupe_key` (splitscreen duplicate-send dedup) is still
+accepted by the binding and dropped here, matching q2repro's own PF_Unicast
+(server/game.c:100), which accepts a `dupe_key` parameter it never reads
+either -- q2repro is a PC engine with no local splitscreen to dedupe for,
+same as this port (see .orch/ splitscreen scope ruling).
+===============
+*/
+export function PF_LocalSound(target: Edict, entity: Edict, channel: number, soundindex: number, volume: number, attenuation: number, timeofs: number): void {
+  const p = target.s.number; // NUM_FOR_EDICT(target)
+  const maxc = maxclients ? maxclients.value : 0;
+  if (p < 1 || p > maxc) return;
+
+  // `entity` carries no message content of its own here -- see header. The
+  // parameter still exists so this signature stays index-aligned with
+  // KexGameImports.local_sound's (target, origin, entity, ...) shape.
+  void entity;
+
+  let flags = 0;
+  if (volume !== DEFAULT_SOUND_PACKET_VOLUME) flags |= SND_VOLUME;
+  if (attenuation !== DEFAULT_SOUND_PACKET_ATTENUATION) flags |= SND_ATTENUATION;
+  // always send the entity number for channel overrides
+  flags |= SND_ENT;
+  if (timeofs) flags |= SND_OFFSET;
+
+  const sendchan = (p << 3) | (channel & 7);
+
+  MSG_WriteByte(sv.multicast, SvcOpsT.svc_sound);
+  MSG_WriteByte(sv.multicast, flags);
+  MSG_WriteByte(sv.multicast, soundindex);
+
+  if (flags & SND_VOLUME) MSG_WriteByte(sv.multicast, (volume * 255) | 0);
+  if (flags & SND_ATTENUATION) MSG_WriteByte(sv.multicast, (attenuation * 64) | 0);
+  if (flags & SND_OFFSET) MSG_WriteByte(sv.multicast, (timeofs * 1000) | 0);
+
+  MSG_WriteShort(sv.multicast, sendchan);
+
+  PF_Unicast(target, !!(channel & CHAN_RELIABLE));
 }
 
 /*
