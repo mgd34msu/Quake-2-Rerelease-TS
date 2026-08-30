@@ -53,6 +53,22 @@
 // -> SP_monster_hover (m_hover.cpp), "monster_medic"/"monster_medic_commander"
 // both -> SP_monster_medic (m_medic.cpp).
 //
+// UPDATE (bots/ unit): the "82 stubs" count above is now STALE -- a series
+// of concurrent units (not this one) landed real content for nearly all of
+// them without updating this header's own tally. Measured at the time this
+// note was written (`grep -c 'spawn: unported('` over this file): exactly
+// ONE remaining stub, "info_nav_lock". This unit's own brief named it "the
+// last registry stub" and had this unit swap it for the real
+// `SP_info_nav_lock` import from the new `src/kexgame/bots/bot_utils.ts`
+// (bots/bot_utils.cpp) -- so as of this diff, the local `unported()`
+// factory below has ZERO remaining call sites in the registry. Left
+// defined (this unit's scope is "swap the info_nav_lock entry only," not a
+// broader g_spawn.ts cleanup pass) but genuinely dead code; a future unit
+// that touches this file's registry section should consider removing it.
+// test/kexgame_g_spawn.test.ts's own sentinel test was repointed to assert
+// this directly (zero `spawn: unported(` occurrences in this file's own
+// source) instead of asserting "info_nav_lock throws."
+//
 // ============================================================================
 // `st` (spawn_temp_t) -- now real, and TWO latent default-value bugs fixed
 // ============================================================================
@@ -427,6 +443,7 @@ import { SP_trigger_health_relay } from "./g_monster";
 // g_turret.ts landed concurrently with this unit (704 lines, all four
 // SP_turret_* real) -- see file header "REGISTRY COMPLETENESS" update.
 import { SP_turret_breach, SP_turret_base, SP_turret_driver, SP_turret_invisible_brain } from "./g_turret";
+import { SP_info_nav_lock } from "./bots/bot_utils";
 import { SP_monster_berserk } from "./m_berserk";
 import { SP_monster_gladb, SP_monster_gladiator } from "./m_gladiator";
 import { SP_monster_gunner } from "./m_gunner";
@@ -1087,7 +1104,7 @@ export const spawns: readonly SpawnEntry[] = [
   { name: "info_world_text", spawn: SP_info_world_text },
   { name: "path_corner", spawn: SP_path_corner },
   { name: "point_combat", spawn: SP_point_combat },
-  { name: "info_nav_lock", spawn: unported("SP_info_nav_lock", "bots/bot_utils.cpp (future src/kexgame/bots/bot_utils.ts)") },
+  { name: "info_nav_lock", spawn: SP_info_nav_lock },
 
   { name: "misc_explobox", spawn: SP_misc_explobox },
   { name: "misc_banner", spawn: SP_misc_banner },

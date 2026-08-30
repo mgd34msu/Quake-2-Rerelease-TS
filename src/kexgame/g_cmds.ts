@@ -412,7 +412,7 @@ export function SelectPrevItem(ent: EdictT, itflags: ItemFlagsT): void {
 // ---------------------------------------------------------------------------
 
 function G_CheatCheck(ent: EdictT): boolean {
-  if (game.maxclients > 1 && cvarInt("sv_cheats", "0") === 0) {
+  if (game.maxclients > 1 && cvarInt("cheats", "0") === 0) {
     giLocClientPrint(ent, PrintTypeT.PRINT_HIGH, "$g_need_cheats");
     return false;
   }
@@ -1079,7 +1079,7 @@ export function Cmd_Kill_f(ent: EdictT): void {
 // ---------------------------------------------------------------------------
 
 export function Cmd_Kill_AI_f(ent: EdictT): void {
-  if (cvarInt("sv_cheats", "0") === 0) {
+  if (cvarInt("cheats", "0") === 0) {
     giClientPrint(ent, PrintTypeT.PRINT_HIGH, "Kill_AI: Cheats Must Be Enabled!\n");
     return;
   }
@@ -1122,7 +1122,7 @@ export function Cmd_Where_f(ent: EdictT | null): void {
 // ---------------------------------------------------------------------------
 
 export function Cmd_Clear_AI_Enemy_f(ent: EdictT): void {
-  if (cvarInt("sv_cheats", "0") === 0) {
+  if (cvarInt("cheats", "0") === 0) {
     giClientPrint(ent, PrintTypeT.PRINT_HIGH, "Cmd_Clear_AI_Enemy: Cheats Must Be Enabled!\n");
     return;
   }

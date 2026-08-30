@@ -29,6 +29,7 @@ import { ERR_DROP } from "../../qcommon/qcommon";
 import { Cvar_Get, Cvar_Set, Cvar_ForceSet } from "../../qcommon/cvar";
 import type { KexCgameImports } from "../../kexapi/game";
 import { GetClassicCgameAPI } from "./classic";
+import { GetCGameAPI as GetKexCgameAPI } from "../../kexgame/cgame/cg_main";
 
 // ---------------------------------------------------------------------------
 // Import table (engine -> cgame)
@@ -268,9 +269,71 @@ export interface CgameExports {
 export const CGAME_API_VERSION = 1;
 
 // ---------------------------------------------------------------------------
+// Kex cgame adapter -- ARCHITECTURE.md phase 6 ("Kex game module port ...
+// then the kex cgame"). DIFF vs. the phase-4-step-1 shape documented at the
+// top of this file: this is the first thing to register a SECOND built-in
+// cgame with the host.
+// ---------------------------------------------------------------------------
+//
+// src/kexgame/cgame/cg_main.ts's GetCGameAPI returns the full KexCgameExports
+// shape (DrawHUD(isplit, data, hud_vrect, hud_safe, scale, playernum, ps),
+// plus the weapon-wheel/centerprint/notify/Pmove members) -- richer than
+// this file's own minimal CgameExports (DrawHUD(): void, no parameters).
+// Registering the kex cgame in ensureActiveCgame()'s registry alongside
+// GetClassicCgameAPI means adapting that richer shape down to CgameExports's
+// narrower one; this function is that adapter.
+//
+// DrawHUD is the one member the adapter cannot make real yet: KexPlayerStateT
+// (64 stats, weapon-wheel/coop-respawn/hit-marker fields) and the classic
+// PlayerStateT that `cl.frame.playerstate` actually holds are DIFFERENT
+// TYPES with no conversion function anywhere in this port line -- that
+// conversion is protocol-layer work (ARCHITECTURE.md phase 5; see
+// buildCgameImports()'s own CL_ServerProtocol/CL_FrameValid stubs above,
+// which are TODO'd to the identical phase for the identical reason).
+// Fabricating a placeholder KexPlayerStateT out of the classic one would
+// silently draw a WRONG hud rather than no hud, so this adapter's DrawHUD is
+// a documented no-op instead -- degrades visually, does not crash. Init/
+// Shutdown/apiversion need none of that missing state and are wired for
+// real. This is exactly the "kex cgame becomes active only when the kex
+// binding drives the client, future wiring" boundary from this unit's brief.
+function GetKexCgameAsClassicShape(imports: CgameImports): CgameExports {
+  const kex = GetKexCgameAPI(imports);
+  return {
+    // This seam's own minimal-shape versioning (see CGAME_API_VERSION's own
+    // doc comment below), NOT kex's real apiversion (KexCgameExports.apiversion
+    // is 2022, kexapi/game.ts's CGAME_API_VERSION) -- the adapter is still
+    // fulfilling the CgameExports CONTRACT, not exposing the richer kex API
+    // surface through this narrow shape.
+    apiversion: CGAME_API_VERSION,
+    Init: kex.Init,
+    Shutdown: kex.Shutdown,
+    DrawHUD() {
+      // TODO(phase 5, protocol layer): no KexPlayerStateT / CgServerDataT /
+      // per-split hud_vrect/hud_safe/scale/playernum is derivable from the
+      // classic client state yet -- see comment above. Intentionally not
+      // wired; kex's real CG_DrawHUD (src/kexgame/cgame/cg_screen.ts) is
+      // fully implemented and unit-tested (test/kexgame_cgame.test.ts), it
+      // just has nothing valid to call it with here yet.
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Active cgame registry
 // ---------------------------------------------------------------------------
 
+/** Which built-in cgame ensureActiveCgame() constructs. Defaults to
+ *  "classic": nothing in today's client wiring ever calls
+ *  CG_SetActiveCgameKind, so this seam's mere existence does not change any
+ *  current behavior. */
+export type CgameKind = "classic" | "kex";
+
+const cgameFactories: Record<CgameKind, (imports: CgameImports) => CgameExports> = {
+  classic: GetClassicCgameAPI,
+  kex: GetKexCgameAsClassicShape,
+};
+
+let activeCgameKind: CgameKind = "classic";
 let activeCgame: CgameExports | null = null;
 
 // Lazy singleton rather than an eager module-scope construction: host.ts,
@@ -283,7 +346,7 @@ let activeCgame: CgameExports | null = null;
 // module-initialization order at all.
 function ensureActiveCgame(): CgameExports {
   if (!activeCgame) {
-    activeCgame = GetClassicCgameAPI(buildCgameImports());
+    activeCgame = cgameFactories[activeCgameKind](buildCgameImports());
     activeCgame.Init();
   }
   return activeCgame;
@@ -298,6 +361,22 @@ export function CG_GetActiveCgame(): CgameExports {
 
 export function CG_SetActiveCgame(cgame: CgameExports): void {
   activeCgame = cgame;
+}
+
+// Selection seam: picks which of the two registered factories
+// ensureActiveCgame() builds NEXT time it needs to (i.e. after this call, or
+// before the first-ever draw). This is the "registry + setActiveCgame"
+// extension point the task brief asked for -- q2repro's CG_Load (deciding
+// classic vs. kex from the connected server's declared ruleset) is the real
+// caller this seam is waiting on; nothing calls it yet, so default behavior
+// is unchanged.
+export function CG_SetActiveCgameKind(kind: CgameKind): void {
+  activeCgameKind = kind;
+  activeCgame = null; // force ensureActiveCgame() to rebuild under the new kind
+}
+
+export function CG_GetActiveCgameKind(): CgameKind {
+  return activeCgameKind;
 }
 
 // The single entry point cl_scrn.ts's SCR_UpdateScreen calls in place of

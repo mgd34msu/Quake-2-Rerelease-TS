@@ -55,8 +55,9 @@
 //     "CTFMatchSetup/DMGame -- concrete faithful values" precedent in
 //     g_combat.ts), NOT a throw: reached only if IT_FLAG1/IT_FLAG2 inventory
 //     is ever nonzero, which nothing in this port line's spawn code can do yet.
-//   - Bot_EndFrame -> bots/bot_includes.h (future src/kexgame/bots/) --
-//     reached only when `ent.svflags & SVF_BOT`.
+//   - Bot_EndFrame -> now REAL (src/kexgame/bots/bot_think.ts landed;
+//     imported above, swapped in at its call site below). Its real C++
+//     body is empty, so this was always going to be a no-op once ported.
 //   - PMenu_Do_Update -> ctf/p_ctf_menu.cpp (future) -- reached only when
 //     `ent.client.menu !== null` (always null; no CTF menu spawn code exists).
 //   - G_ShouldPlayersCollide -> p_client.cpp:2996 (future src/kexgame/p_client.ts)
@@ -177,6 +178,7 @@ import { DeathmatchScoreboardMessage, G_CheckChaseStats, G_SetCoopStats, G_SetSp
 import { P_CurrentKickAngles, P_CurrentKickOrigin, PlayerNoise } from "./p_weapon";
 import { CTF_GRAPPLE_STATE_FLY, CTF_GRAPPLE_STATE_HANG, CTF_GRAPPLE_STATE_PULL, CTFApplyRegeneration, CTFEffects, CTFSetPowerUpEffect } from "./ctf/g_ctf";
 import { PMenu_Do_Update } from "./ctf/p_ctf_menu";
+import { Bot_EndFrame } from "./bots/bot_think";
 
 // ---------------------------------------------------------------------------
 // cvar-read helpers (see g_combat.ts's own precedent for this exact idiom)
@@ -227,9 +229,10 @@ let bobfracsin = 0;
 // unported cross-deps (narrow throwing stubs) -- see file header
 // ---------------------------------------------------------------------------
 
-function Bot_EndFrame(_ent: EdictT): void {
-  throw new Error("Bot_EndFrame: not yet ported (pending bots/, see bots/bot_includes.h)");
-}
+// Bot_EndFrame: formerly a local throwing stub here -- src/kexgame/bots/
+// bot_think.ts has landed with a real (empty-bodied, per the real C++)
+// export; see this file's own header for the stub-swap note (imported
+// above).
 
 // PMenu_Do_Update: formerly a local throwing stub here -- src/kexgame/ctf/
 // p_ctf_menu.ts has landed with a real export (imported below). Reached by

@@ -114,9 +114,9 @@
 //     coop/SP case) for a live, non-respawning client -- also unconditionally
 //     reached on the ordinary alive-player path, same accepted-break shape as
 //     ChangeWeapon/Think_Weapon above.
-//   - Bot_BeginFrame -> bots/bot_includes.h (future src/kexgame/bots/).
-//     Reached only when `ent.svflags & SVF_BOT` (never set by any spawn path
-//     in this port line's own fixtures).
+//   - Bot_BeginFrame -> now REAL (src/kexgame/bots/bot_think.ts landed;
+//     imported above, swapped in at its call site below). Its real C++
+//     body is empty, so this was always going to be a no-op once ported.
 //
 // ctf/g_ctf.cpp cross-deps (no g_ctf.ts anywhere in this port line yet).
 // Every one of these is called from a site this port line's real cvar/state
@@ -399,6 +399,7 @@ function* active_players(): Generator<EdictT> {
 // file's original narrow signatures where the C++ would null-deref.)
 import { ChangeWeapon, Think_Weapon, NoAmmoWeaponChange } from "./p_weapon";
 import { PlayerTrail_Add } from "./p_trail";
+import { Bot_BeginFrame } from "./bots/bot_think";
 import {
   FindItemByClassname as G_FindItemByClassname,
   GetItemByIndex as G_GetItemByIndex,
@@ -426,9 +427,10 @@ function Touch_Item(ent: EdictT, other: EdictT, tr: KexTraceT, otherTouchingSelf
 
 
 
-function Bot_BeginFrame(_ent: EdictT): void {
-  throw new Error("Bot_BeginFrame: not yet ported (pending bots module, see bots/bot_includes.h)");
-}
+// Bot_BeginFrame: formerly a local throwing stub here -- src/kexgame/bots/
+// bot_think.ts has landed with a real (empty-bodied, per the real C++)
+// export; see this file's own header for the stub-swap note (imported
+// above).
 
 // PMenu_Prev/PMenu_Next/PMenu_Select: formerly local throwing stubs here --
 // src/kexgame/ctf/p_ctf_menu.ts has landed with real exports; see this

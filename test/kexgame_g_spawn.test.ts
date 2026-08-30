@@ -48,6 +48,8 @@ Scope (16 cases, each citing the exact C++ line range it exercises):
 */
 
 import { describe, test, expect, beforeEach } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { vec3, type Vec3, type ComParseState } from "../src/shared/math";
 import { CplaneT, CvarT } from "../src/shared/q_shared";
 import type { KexEdictT, KexGameExports, KexGameImports, KexTraceT } from "../src/kexapi/game";
@@ -372,13 +374,29 @@ describe("spawn registry (g_spawn.cpp:221-437)", () => {
     expect(() => entry!.spawn(ent)).not.toThrow();
   });
 
-  test("not-yet-ported classnames resolve to a throwing, cited stub", () => {
-    // monster_berserk landed; monster_guardian is still an honest stub.
+  // Formerly: "not-yet-ported classnames resolve to a throwing, cited stub"
+  // -- asserted against "info_nav_lock", the registry's last remaining
+  // `unported()` entry. Repointed now that src/kexgame/bots/bot_utils.ts has
+  // landed with a real `SP_info_nav_lock` and g_spawn.ts's own registry
+  // entry was swapped to import it (see that file's own updated header,
+  // "UPDATE (bots/ unit)"): the registry has NO unported entries left, so
+  // `unported()` itself is now unused dead code.
+  test("info_nav_lock is real -- no unported registry entries remain", () => {
+    const source = readFileSync(join(__dirname, "..", "src", "kexgame", "g_spawn.ts"), "utf8");
+    // Matches the actual registry-entry object-literal shape (`{ name:
+    // "...", spawn: unported(...) }`), not this file's own header prose
+    // about `unported(` -- see g_spawn.ts's own "UPDATE (bots/ unit)" note.
+    const unportedRegistryEntries = source.match(/\{\s*name:\s*"[^"]+",\s*spawn:\s*unported\(/g) ?? [];
+    expect(unportedRegistryEntries).toHaveLength(0);
+
     const ent = defaultEdict();
     ent.classname = "info_nav_lock";
+    ent.targetname = "lock1";
+    ent.target = "door1";
     const entry = spawns.find((s) => s.name === "info_nav_lock");
     expect(entry).toBeDefined();
-    expect(() => entry!.spawn(ent)).toThrow(/bot_utils\.cpp/);
+    expect(() => entry!.spawn(ent)).not.toThrow();
+    expect(ent.use).not.toBeNull();
   });
 
   test("func_group reuses SP_info_null, exactly like the C++ table", () => {

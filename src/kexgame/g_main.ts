@@ -54,15 +54,16 @@
 //
 // ============================================================================
 // Bot_SetWeapon / Bot_TriggerEdict / Bot_UseItem / Bot_GetItemID /
-// Bot_PickedUpItem / Edict_ForceLookAtPoint -- throwing stubs (bots/ subsystem)
+// Bot_PickedUpItem / Edict_ForceLookAtPoint -- REAL, from bots/bot_exports.ts
 // ============================================================================
-// These six `KexGameExports` slots are implemented in the real DLL's
-// `bots/` directory (bot_commands.cpp et al.), a subsystem with no
-// src/kexgame/ port anywhere in this codebase (confirmed by directory
-// listing -- no bot_*.ts file exists). Cited throwing stubs, matching this
-// port line's established treatment of the equally-unported CTF subsystem
-// (g_cmds.ts's own header: "not yet ported anywhere in this port line...
-// reported as a real, standing gap").
+// These six `KexGameExports` slots used to be throwing stubs, cited to the
+// then-unported `bots/` directory (bot_exports.cpp). That directory now has
+// a real src/kexgame/bots/ port (bot_utils.ts/bot_exports.ts/bot_think.ts/
+// bot_debug.ts); each slot below is a thin `mustResolveEdict` wrapper
+// around the real `bots/bot_exports.ts` function of the same name, matching
+// every other export slot in this table. `Bot_UpdateDebug` (bot_debug.ts)
+// is also wired into `G_RunFrame_` below, at its real g_main.cpp:829 call
+// site (see that function's own updated comment).
 //
 // ============================================================================
 // Entity_UpdateState family -- REAL port, despite living in bots/bot_utils.cpp
@@ -88,6 +89,26 @@
 // unported) bot subsystem itself, so this is inert bookkeeping from the
 // perspective of every other landed kexgame module, but it is real,
 // faithful bookkeeping, not a placeholder.
+//
+// REVISITED once src/kexgame/bots/ landed (bot_utils.ts/bot_exports.ts/
+// bot_think.ts/bot_debug.ts): this unit's brief explicitly asked whether to
+// MOVE this family into bots/bot_utils.ts, their true C++-file-location
+// home, now that a real home exists. Ruling: NOT moved, and the rationale
+// above still holds verbatim -- Entity_UpdateState's only call site
+// anywhere in this port line is G_RunFrame_, three lines below, inside
+// THIS file. None of the four bots/ files need to call it (verified: no
+// bots/*.ts file references Entity_UpdateState or any of its five
+// children). Moving it would require re-threading roughly a dozen
+// otherwise-unrelated imports into bot_utils.ts (SvEntFlagsT, PmflagsT,
+// AnimPriorityT, MonsterAiFlagsT, RenderfxT, ArmorIndex from g_combat.ts,
+// bodyarmor_info/combatarmor_info/jacketarmor_info, P_GetLobbyUserNum, the
+// FRAME_* gesture constants, GTIME_ZERO/Gtime_subtract, MAX_NETNAME) for a
+// pure file-location purity win with a real regression surface and zero
+// behavioral benefit -- and this port line already has a live precedent for
+// preferring a small local duplicate over a cross-file import when the
+// consumer is local (g_spawn.ts keeps its own module-scope `coop` cvar
+// handle rather than importing g_main.ts's, exactly this same tradeoff).
+// bots/bot_utils.ts's own file header cites this same ruling from its side.
 //
 // ============================================================================
 // CTF / teamplay / gamerules(DMGame) -- concrete faithful values, not stubs
@@ -237,6 +258,8 @@ import { G_GetClipMask, G_RunEntity } from "./g_phys";
 import { M_CheckGround, M_ProcessPain } from "./g_monster";
 import { ClientEndServerFrame } from "./p_view";
 import { BeginIntermission, G_ReportMatchDetails } from "./p_hud";
+import { Bot_SetWeapon, Bot_TriggerEdict, Bot_UseItem, Bot_GetItemID, Edict_ForceLookAtPoint, Bot_PickedUpItem } from "./bots/bot_exports";
+import { Bot_UpdateDebug } from "./bots/bot_debug";
 import {
   ClientBegin,
   ClientUserinfoChanged,
@@ -1167,8 +1190,7 @@ function G_RunFrame_(_main_loop: boolean): void {
 
   G_CheckCvars();
 
-  // Bot_UpdateDebug() -- bots subsystem not ported (no src/kexgame/ home);
-  // genuine no-op, matching the six Bot_* KexGameExports stubs' citation.
+  Bot_UpdateDebug();
 
   level.time = Gtime_add(level.time, frameTimeAsGtime());
 
@@ -1433,23 +1455,23 @@ export function GetGameAPI(imports: KexGameImports): KexGameExports {
 
     GetExtension: G_GetExtension,
 
-    Bot_SetWeapon: (_botEdict: KexEdictT | null, _weaponIndex: number, _instantSwitch: boolean): void => {
-      throw new Error("Bot_SetWeapon: not yet ported (bots/ subsystem, no src/kexgame/ home)");
+    Bot_SetWeapon: (botEdict: KexEdictT | null, weaponIndex: number, instantSwitch: boolean): void => {
+      Bot_SetWeapon(mustResolveEdict(botEdict, "Bot_SetWeapon"), weaponIndex, instantSwitch);
     },
-    Bot_TriggerEdict: (_botEdict: KexEdictT | null, _edict: KexEdictT | null): void => {
-      throw new Error("Bot_TriggerEdict: not yet ported (bots/ subsystem, no src/kexgame/ home)");
+    Bot_TriggerEdict: (botEdict: KexEdictT | null, edict: KexEdictT | null): void => {
+      Bot_TriggerEdict(mustResolveEdict(botEdict, "Bot_TriggerEdict"), mustResolveEdict(edict, "Bot_TriggerEdict"));
     },
-    Bot_UseItem: (_botEdict: KexEdictT | null, _itemID: number): void => {
-      throw new Error("Bot_UseItem: not yet ported (bots/ subsystem, no src/kexgame/ home)");
+    Bot_UseItem: (botEdict: KexEdictT | null, itemID: number): void => {
+      Bot_UseItem(mustResolveEdict(botEdict, "Bot_UseItem"), itemID);
     },
-    Bot_GetItemID: (_classname: string): number => {
-      throw new Error("Bot_GetItemID: not yet ported (bots/ subsystem, no src/kexgame/ home)");
+    Bot_GetItemID: (classname: string): number => {
+      return Bot_GetItemID(classname);
     },
-    Edict_ForceLookAtPoint: (_edict: KexEdictT | null, _point: Vec3): void => {
-      throw new Error("Edict_ForceLookAtPoint: not yet ported (bots/ subsystem, no src/kexgame/ home)");
+    Edict_ForceLookAtPoint: (edict: KexEdictT | null, point: Vec3): void => {
+      Edict_ForceLookAtPoint(mustResolveEdict(edict, "Edict_ForceLookAtPoint"), point);
     },
-    Bot_PickedUpItem: (_botEdict: KexEdictT | null, _itemEdict: KexEdictT | null): boolean => {
-      throw new Error("Bot_PickedUpItem: not yet ported (bots/ subsystem, no src/kexgame/ home)");
+    Bot_PickedUpItem: (botEdict: KexEdictT | null, itemEdict: KexEdictT | null): boolean => {
+      return Bot_PickedUpItem(mustResolveEdict(botEdict, "Bot_PickedUpItem"), mustResolveEdict(itemEdict, "Bot_PickedUpItem"));
     },
 
     Entity_IsVisibleToPlayer: (ent: KexEdictT | null, player: KexEdictT | null): boolean => {

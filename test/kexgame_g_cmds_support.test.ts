@@ -623,7 +623,7 @@ afterEach(() => {
 describe("Cmd_Give_f", () => {
   test("G_CheatCheck blocks give when maxclients > 1 and sv_cheats is 0 (g_cmds.cpp:104-113)", () => {
     const { edicts, cvars } = setupWorld(4, 4);
-    setCvar(cvars, "sv_cheats", "0");
+    setCvar(cvars, "cheats", "0");
     const p = makePlayerEdict(edicts, 1);
     setArgv("give", "health", "50");
 
@@ -634,7 +634,7 @@ describe("Cmd_Give_f", () => {
 
   test("G_CheatCheck allows give when sv_cheats is 1 even with maxclients > 1 (g_cmds.cpp:104-113)", () => {
     const { edicts, cvars } = setupWorld(4, 4);
-    setCvar(cvars, "sv_cheats", "1");
+    setCvar(cvars, "cheats", "1");
     const p = makePlayerEdict(edicts, 1);
     p.health = 10;
     setArgv("give", "health", "50");

@@ -15,8 +15,11 @@ Scope (14 cases, each citing the exact C++ line range it exercises):
     same objects), and every one of the 34 KexGameExports slots present.
   - GetGameAPI's SpawnEntities/WriteGameJson/ReadGameJson/WriteLevelJson/
     ReadLevelJson/CanSave slots: throwing stubs citing g_spawn.ts/g_save.ts.
-  - GetGameAPI's Bot_* / Edict_ForceLookAtPoint slots: throwing stubs citing
-    the unported bots/ subsystem.
+  - GetGameAPI's Bot_* / Edict_ForceLookAtPoint slots: real, wired to
+    src/kexgame/bots/bot_exports.ts (formerly throwing stubs citing the
+    then-unported bots/ subsystem) -- null edicts now throw the same
+    mustResolveEdict message every other slot uses, and Bot_PickedUpItem is
+    exercised end-to-end through the real g_edicts[ent.s.number] resolution.
   - GetGameAPI's KexEdictT -> EdictT resolution (PORTING.md's EDICT_NUM
     idiom): ClientBegin/Entity_IsVisibleToPlayer wrapper resolves via
     g_edicts[ent.s.number], and throws on a null edict.
@@ -342,16 +345,38 @@ describe("GetGameAPI", () => {
     expect(typeof exportsTable.CanSave()).toBe("boolean");
   });
 
-  test("Bot_* / Edict_ForceLookAtPoint slots throw, citing the unported bots/ subsystem", () => {
+  test("Bot_* / Edict_ForceLookAtPoint slots are real (src/kexgame/bots/ landed): null edicts throw the same mustResolveEdict message every other slot uses, not the old 'not yet ported' citation", () => {
     resetWorld();
     const exportsTable = GetGameAPI(makeFakeGameImports());
 
-    expect(() => exportsTable.Bot_SetWeapon(null, 0, false)).toThrow(/bots\//);
-    expect(() => exportsTable.Bot_TriggerEdict(null, null)).toThrow(/bots\//);
-    expect(() => exportsTable.Bot_UseItem(null, 0)).toThrow(/bots\//);
-    expect(() => exportsTable.Bot_GetItemID("item_health")).toThrow(/bots\//);
-    expect(() => exportsTable.Edict_ForceLookAtPoint(null, vec3())).toThrow(/bots\//);
-    expect(() => exportsTable.Bot_PickedUpItem(null, null)).toThrow(/bots\//);
+    expect(() => exportsTable.Bot_SetWeapon(null, 0, false)).toThrow(/null edict/);
+    expect(() => exportsTable.Bot_TriggerEdict(null, null)).toThrow(/null edict/);
+    expect(() => exportsTable.Bot_UseItem(null, 0)).toThrow(/null edict/);
+    expect(() => exportsTable.Edict_ForceLookAtPoint(null, vec3())).toThrow(/null edict/);
+    expect(() => exportsTable.Bot_PickedUpItem(null, null)).toThrow(/null edict/);
+
+    // Bot_GetItemID takes a plain classname, not an edict -- it's real and
+    // non-throwing regardless of world state.
+    expect(exportsTable.Bot_GetItemID("none")).toBe(0);
+    expect(exportsTable.Bot_GetItemID("not_a_real_item")).toBe(-1);
+  });
+
+  test("Bot_PickedUpItem resolves both KexEdictT params -> EdictT via g_edicts[ent.s.number] (real end-to-end dispatch)", () => {
+    resetWorld();
+    const exportsTable = GetGameAPI(makeFakeGameImports());
+
+    const world = defaultEdict();
+    world.s.number = 0;
+    const bot = defaultEdict();
+    bot.s.number = 1;
+    const item = defaultEdict();
+    item.s.number = 2;
+    item.item_picked_up_by[0] = true; // bot.s.number(1) - 1 === 0
+    SetGEdicts([world, bot, item]);
+
+    const kexBot: KexEdictT = bot;
+    const kexItem: KexEdictT = item;
+    expect(exportsTable.Bot_PickedUpItem(kexBot, kexItem)).toBe(true);
   });
 
   test("Pmove wrapper throws on a null pmove (unconditional dereference)", () => {
