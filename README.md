@@ -13,15 +13,13 @@ ThreeWave CTF, The Reckoning, Ground Zero) inherited from
 `ARCHITECTURE.md` for the full design, `PORTING.md` for the inherited
 3.21 port's C-to-TS mapping.
 
-**Status: early.** The repo is seeded with the complete, working
-Quake-2-TS v1.1.0 tree (810 tests, four playable games) and is being
-transformed in place toward the target architecture.
-
-The long-horizon goal, recorded in `ARCHITECTURE.md`, is one engine for
-the id-tech family: Quake 1 (original + 2021 re-release, via a
-TypeScript QuakeC VM), Quake 2 (3.21 + 2023 re-release), and Quake 3,
-with a crossover module for cross-game content play. The peer-binding
-core exists to make each family additive.
+**Status: pre-release.** The complete 2023 re-release game module
+(~103k lines of C++) is ported and coverage-audited, running at its
+native 40Hz over the re-release wire protocol against retail game
+data, alongside the four classic games (baseq2, The Reckoning, Ground
+Zero, ThreeWave CTF) preserved bug-for-bug from Quake-2-TS. This repo
+is scoped to Quake 2; the broader multi-game unification continues as
+a separate project seeded from this source.
 
 ## Lineage and attribution
 
