@@ -4,7 +4,7 @@
 // structure (PVS/PHS visibility culling); record unmerged demo messages.
 
 import { FS_Write } from "../qcommon/files";
-import { type Vec3, vec3, VectorSubtract, VectorLength, VectorCopy } from "../shared/math";
+import { type Vec3, vec3, VectorSubtract, VectorLength } from "../shared/math";
 import { EntityStateT, PlayerStateT, MAX_STATS, RF_BEAM } from "../shared/q_shared";
 import {
   SizeBuf,
@@ -18,7 +18,30 @@ import {
   MSG_WriteAngle16,
   MSG_WriteDeltaEntity,
 } from "../qcommon/sizebuf";
-import { SvcOpsT, U_REMOVE, U_NUMBER16, U_MOREBITS1, UPDATE_MASK, UPDATE_BACKUP, ERR_FATAL } from "../qcommon/qcommon";
+import {
+  SvcOpsT,
+  U_REMOVE,
+  U_NUMBER16,
+  U_MOREBITS1,
+  UPDATE_MASK,
+  UPDATE_BACKUP,
+  ERR_FATAL,
+  PS_M_TYPE,
+  PS_M_ORIGIN,
+  PS_M_VELOCITY,
+  PS_M_TIME,
+  PS_M_FLAGS,
+  PS_M_GRAVITY,
+  PS_M_DELTA_ANGLES,
+  PS_VIEWOFFSET,
+  PS_VIEWANGLES,
+  PS_KICKANGLES,
+  PS_BLEND,
+  PS_FOV,
+  PS_WEAPONINDEX,
+  PS_WEAPONFRAME,
+  PS_RDFLAGS,
+} from "../qcommon/qcommon";
 import { MAX_MAP_LEAFS } from "../qcommon/qfiles";
 import {
   CM_BoxLeafnums,
@@ -36,26 +59,7 @@ import { type ClientT, type ClientFrameT, sv, svs, maxclients } from "./server";
 import { geHolder } from "./sv_game";
 import { SVF_NOCLIENT } from "../game/game";
 import { Com_DPrintf, Com_Error } from "../qcommon/common";
-
-// qcommon.h's PS_* delta-playerstate flags. Absent from src/qcommon/qcommon.ts
-// (grepped: no PS_* constants exist anywhere under src/ as of this port) --
-// reported per the brief; qcommon.ts is this protocol's true home and should
-// grow these instead of sv_ents.ts owning them long term.
-const PS_M_TYPE = 1 << 0;
-const PS_M_ORIGIN = 1 << 1;
-const PS_M_VELOCITY = 1 << 2;
-const PS_M_TIME = 1 << 3;
-const PS_M_FLAGS = 1 << 4;
-const PS_M_GRAVITY = 1 << 5;
-const PS_M_DELTA_ANGLES = 1 << 6;
-const PS_VIEWOFFSET = 1 << 7;
-const PS_VIEWANGLES = 1 << 8;
-const PS_KICKANGLES = 1 << 9;
-const PS_BLEND = 1 << 10;
-const PS_FOV = 1 << 11;
-const PS_WEAPONINDEX = 1 << 12;
-const PS_WEAPONFRAME = 1 << 13;
-const PS_RDFLAGS = 1 << 14;
+import { cloneEntityStateInto, clonePlayerState } from "../shared/state_copy";
 
 /*
 =============================================================================
@@ -77,50 +81,6 @@ function hasPlayerState(client: unknown): client is EdictClientPs {
   if (typeof client !== "object" || client === null) return false;
   if (!("ps" in client)) return false;
   return client.ps instanceof PlayerStateT;
-}
-
-// struct-copy helpers (PORTING.md: "struct copies need explicit clone
-// helpers"). sv_init.ts has a private (unexported) cloneEntityState with the
-// same field set; duplicated here locally since it isn't exported.
-function cloneEntityStateInto(src: EntityStateT, dst: EntityStateT): void {
-  dst.number = src.number;
-  VectorCopy(src.origin, dst.origin);
-  VectorCopy(src.angles, dst.angles);
-  VectorCopy(src.old_origin, dst.old_origin);
-  dst.modelindex = src.modelindex;
-  dst.modelindex2 = src.modelindex2;
-  dst.modelindex3 = src.modelindex3;
-  dst.modelindex4 = src.modelindex4;
-  dst.frame = src.frame;
-  dst.skinnum = src.skinnum;
-  dst.effects = src.effects;
-  dst.renderfx = src.renderfx;
-  dst.solid = src.solid;
-  dst.sound = src.sound;
-  dst.event = src.event;
-}
-
-function clonePlayerState(ps: PlayerStateT): PlayerStateT {
-  const c = new PlayerStateT();
-  c.pmove.pm_type = ps.pmove.pm_type;
-  c.pmove.origin.set(ps.pmove.origin);
-  c.pmove.velocity.set(ps.pmove.velocity);
-  c.pmove.pm_flags = ps.pmove.pm_flags;
-  c.pmove.pm_time = ps.pmove.pm_time;
-  c.pmove.gravity = ps.pmove.gravity;
-  c.pmove.delta_angles.set(ps.pmove.delta_angles);
-  VectorCopy(ps.viewangles, c.viewangles);
-  VectorCopy(ps.viewoffset, c.viewoffset);
-  VectorCopy(ps.kick_angles, c.kick_angles);
-  VectorCopy(ps.gunangles, c.gunangles);
-  VectorCopy(ps.gunoffset, c.gunoffset);
-  c.gunindex = ps.gunindex;
-  c.gunframe = ps.gunframe;
-  c.blend.set(ps.blend);
-  c.fov = ps.fov;
-  c.rdflags = ps.rdflags;
-  c.stats.set(ps.stats);
-  return c;
 }
 
 /*

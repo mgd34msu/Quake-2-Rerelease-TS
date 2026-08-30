@@ -94,6 +94,21 @@ import {
   U_EVENT,
   U_SOLID,
   U_REMOVE,
+  PS_M_TYPE,
+  PS_M_ORIGIN,
+  PS_M_VELOCITY,
+  PS_M_TIME,
+  PS_M_FLAGS,
+  PS_M_GRAVITY,
+  PS_M_DELTA_ANGLES,
+  PS_VIEWOFFSET,
+  PS_VIEWANGLES,
+  PS_KICKANGLES,
+  PS_BLEND,
+  PS_FOV,
+  PS_WEAPONINDEX,
+  PS_WEAPONFRAME,
+  PS_RDFLAGS,
 } from "../qcommon/qcommon";
 import { Com_Error, Com_Printf } from "../qcommon/common";
 import { SHOWNET } from "./cl_parse";
@@ -118,25 +133,6 @@ import { CL_CheckPredictionError } from "./cl_pred";
 import { V_AddEntity, V_AddLight } from "./cl_view";
 import { SCR_EndLoadingPlaque } from "./cl_scrn";
 import { Developer_searchpath } from "../qcommon/files";
-
-// qcommon.h's PS_* delta-playerstate flags. Absent from src/qcommon/qcommon.ts
-// (see sv_ents.ts's identical note); duplicated locally here for the same
-// reason -- that file's copy is unexported.
-const PS_M_TYPE = 1 << 0;
-const PS_M_ORIGIN = 1 << 1;
-const PS_M_VELOCITY = 1 << 2;
-const PS_M_TIME = 1 << 3;
-const PS_M_FLAGS = 1 << 4;
-const PS_M_GRAVITY = 1 << 5;
-const PS_M_DELTA_ANGLES = 1 << 6;
-const PS_VIEWOFFSET = 1 << 7;
-const PS_VIEWANGLES = 1 << 8;
-const PS_KICKANGLES = 1 << 9;
-const PS_BLEND = 1 << 10;
-const PS_FOV = 1 << 11;
-const PS_WEAPONINDEX = 1 << 12;
-const PS_WEAPONFRAME = 1 << 13;
-const PS_RDFLAGS = 1 << 14;
 
 //PGM -- extern in game/q_shared.h, defined here (confirmed by grep of the
 // full v3.19 tree); set by win32/vid_dll.c, which per PORTING.md's platform

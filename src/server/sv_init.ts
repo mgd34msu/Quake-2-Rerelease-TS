@@ -30,6 +30,7 @@ import {
   Q_stricmp,
 } from "../shared/q_shared";
 import { vec3_origin, VectorCopy } from "../shared/math";
+import { cloneEntityState } from "../shared/state_copy";
 import type { GameExports } from "../game/game";
 import { sv, svs, master_adr, ServerStateT, ClientStateT, ClientT, sv_airaccelerate, sv_noreload, maxclients } from "./server";
 import { SV_Shutdown } from "./sv_main";
@@ -87,26 +88,6 @@ export function SV_SoundIndex(name: string): number {
 
 export function SV_ImageIndex(name: string): number {
   return SV_FindIndex(name, CS_IMAGES, MAX_IMAGES, true);
-}
-
-function cloneEntityState(s: EntityStateT): EntityStateT {
-  const c = new EntityStateT();
-  c.number = s.number;
-  VectorCopy(s.origin, c.origin);
-  VectorCopy(s.angles, c.angles);
-  VectorCopy(s.old_origin, c.old_origin);
-  c.modelindex = s.modelindex;
-  c.modelindex2 = s.modelindex2;
-  c.modelindex3 = s.modelindex3;
-  c.modelindex4 = s.modelindex4;
-  c.frame = s.frame;
-  c.skinnum = s.skinnum;
-  c.effects = s.effects;
-  c.renderfx = s.renderfx;
-  c.solid = s.solid;
-  c.sound = s.sound;
-  c.event = s.event;
-  return c;
 }
 
 /*

@@ -114,6 +114,26 @@ export const U_SKIN16 = 1 << 25;
 export const U_SOUND = 1 << 26;
 export const U_SOLID = 1 << 27;
 
+// player_state_t communication -- delta flags for the playerstate portion of
+// svc_playerinfo. Was hand-duplicated as file-local consts in
+// src/server/sv_ents.ts and src/client/cl_ents.ts; consolidated here per
+// Phase-2 sequencing item 4.
+export const PS_M_TYPE = 1 << 0;
+export const PS_M_ORIGIN = 1 << 1;
+export const PS_M_VELOCITY = 1 << 2;
+export const PS_M_TIME = 1 << 3;
+export const PS_M_FLAGS = 1 << 4;
+export const PS_M_GRAVITY = 1 << 5;
+export const PS_M_DELTA_ANGLES = 1 << 6;
+export const PS_VIEWOFFSET = 1 << 7;
+export const PS_VIEWANGLES = 1 << 8;
+export const PS_KICKANGLES = 1 << 9;
+export const PS_BLEND = 1 << 10;
+export const PS_FOV = 1 << 11;
+export const PS_WEAPONINDEX = 1 << 12;
+export const PS_WEAPONFRAME = 1 << 13;
+export const PS_RDFLAGS = 1 << 14;
+
 //==============================================================
 // CMD
 
