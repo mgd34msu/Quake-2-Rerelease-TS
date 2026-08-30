@@ -54,6 +54,7 @@ import { SV_ExecuteClientMessage } from "./sv_user";
 import { SV_RecordDemoMessage } from "./sv_ents";
 import { SV_InitOperatorCommands } from "./sv_ccmds";
 import { Nav_Init, Nav_Unload, Nav_Frame } from "./nav";
+import { SV_MvdRegister, SV_MvdBeginFrame, SV_MvdEndFrame } from "./sv_mvd";
 
 //============================================================================
 
@@ -734,8 +735,16 @@ export function SV_Frame(msec: number): void {
   // give the clients some timeslices
   SV_GiveMsec();
 
+  // mvd.c's SV_MvdBeginFrame (see sv_mvd.ts for scope)
+  SV_MvdBeginFrame();
+
   // let everything in the world think and move
   SV_RunGameFrame();
+
+  // capture this frame's entity/player state into the MVD stream (mvd.c's
+  // SV_MvdEndFrame), before SV_SendClientMessages/SV_RecordDemoMessage below
+  // clear/reuse any per-frame scratch buffers they share with it
+  SV_MvdEndFrame();
 
   // send messages back to the clients that had packets read this frame
   SV_SendClientMessages();
@@ -858,6 +867,7 @@ Only called at quake2.exe startup, not for each game
 */
 export function SV_Init(): void {
   SV_InitOperatorCommands();
+  SV_MvdRegister();
 
   rcon_password = Cvar_Get("rcon_password", "", 0);
   Cvar_Get("skill", "1", 0);

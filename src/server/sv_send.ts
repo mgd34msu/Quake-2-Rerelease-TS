@@ -14,6 +14,7 @@ import { sv, svs, ServerStateT, ClientStateT, RedirectT, type ClientT, svClientH
 import { SV_DropClient } from "./sv_main";
 import { SV_BuildClientFrame, SV_WriteFrameToClient } from "./sv_ents";
 import { SV_Nextserver } from "./sv_user";
+import { SV_MvdBroadcastPrint } from "./sv_mvd";
 
 // qcommon.h's SND_*/DEFAULT_SOUND_PACKET_* constants are not yet ported to
 // qcommon.ts (that module's own brief only ports the pieces its landed
@@ -80,6 +81,9 @@ export function SV_ClientPrintf(cl: ClientT, level: number, fmt: string, ...args
 // Sends text to all active clients
 export function SV_BroadcastPrintf(level: number, fmt: string, ...args: Array<string | number>): void {
   const string = Com_sprintf(fmt, ...args);
+
+  // mvd.c's SV_MvdBroadcastPrint hook (see sv_mvd.ts's header for scope)
+  SV_MvdBroadcastPrint(level, string);
 
   // echo to console
   if (dedicated && dedicated.value) {
