@@ -66,35 +66,49 @@
 // gap" pattern for everything except one deliberate documentation case).
 //
 // ============================================================================
-// EXTERNAL DEPENDENCIES NOT YET PORTED
+// STUB SWAP: hintpath_stop / monsterlost_checkhint are now real imports;
+// monster_done_dodge is a local duplicate, NOT an import (see IMPORT CYCLE
+// note below)
 // ============================================================================
-// g_ai.cpp calls a handful of functions this port line hasn't ported yet.
-// Each is a local, unexported, cited throwing stub, EXCEPT
-// `monsterlost_checkhint`, ported narrowly as real logic -- see its own
-// comment below for why (the "unconditionally reachable" rule g_combat.ts's
-// header already established: a stub that breaks every caller isn't a
-// stub, it's a landmine).
-//   - `hintpath_stop(self)` -> rogue/g_rogue_newai.cpp:379 (future
-//     g_rogue_newai.ts). Reached only when `AI_HINT_PATH` is set; nothing in
-//     this port line can ever set that flag (no `hint_path` spawn function
-//     exists -- SP_hint_path lives in the same unported rogue file), so this
-//     is genuinely unreachable outside a deliberately-crafted test.
-//   - `monster_done_dodge(self)` -> rogue/g_rogue_monster.cpp:98 (future
-//     g_rogue_monster.ts). Reached only when `AI_DODGING` is set inside
-//     `ai_run_slide`; nothing in this port line sets that flag yet either.
+// This file previously carried three local throwing stubs (`hintpath_stop`,
+// `monster_done_dodge`) plus one narrowly-pinned partial port
+// (`monsterlost_checkhint`, hard-coded to its own first line's early
+// return since no `hint_path` entity could ever exist in this port line).
+//   - `hintpath_stop`/`monsterlost_checkhint` (rogue/g_rogue_newai.cpp:379,
+//     414) -> real imports from "./rogue/g_rogue_newai", now landed.
+//   - `monster_done_dodge` (rogue/g_rogue_monster.cpp:98) -> a local,
+//     trivial two-line duplicate (see below), NOT an import. It IS ported
+//     for real elsewhere (m_soldier.ts, re-exported by g_rogue_monster.ts),
+//     but importing it here would close a THREE-module import cycle
+//     (g_ai.ts -> m_soldier.ts -> g_ai.ts) through m_soldier.ts's top-level
+//     frame-table construction (`const soldier_frames_stand1: MframeT[] =
+//     [...]`, which reads this file's `export const ai_stand`/`ai_walk`/etc
+//     directly at module-evaluation time, not from inside a function body)
+//     -- see "IMPORT CYCLE" note immediately below for why that specific
+//     shape breaks at load time, unlike the sanctioned cycles this file
+//     already carries.
 //
-// `monsterlost_checkhint` (rogue/g_rogue_newai.cpp:414) is reached
-// UNCONDITIONALLY from `ai_run` whenever a monster has been out of contact
-// with its enemy for 5+ seconds AND hasn't hint-checked in the last 10 --
-// not gated behind AI_HINT_PATH at all. The real function's very first line
-// is `if (!hint_paths_present) return false;`, reading a rogue-file-local
-// global set only by `SP_hint_path` (same unported file as `hintpath_stop`
-// above). Since no `hint_path` entity can be spawned anywhere in this port
-// line, that condition is always true today -- so `false` is the exact,
-// faithful return value, not a guess. Ported as exactly that one-line
-// early-out; the rest of the real function (hint-chain search over
-// `MAX_HINT_CHAINS` chains) is unreachable dead code here until a future
-// g_rogue_newai.ts lands with a real `hint_paths_present` global.
+// `monsterlost_checkhint`'s real body's very first line is exactly the
+// pinned early return this file used to hard-code
+// (`if (!hint_paths_present) return false;`), reading g_rogue_newai.ts's
+// own mutable `hint_paths_present` (set true by `InitHintPaths`, which
+// itself is exported but not yet wired into any caller -- see
+// g_rogue_newai.ts's own "SP LIST" header section for the pending
+// g_spawn.ts integration point). Until that wiring lands, this stays
+// behaviorally identical to the old pin; once it lands, the rest of the
+// hint-chain search activates with zero further changes in this file.
+//
+// This creates one new two-way import cycle: g_ai.ts <-> rogue/g_rogue_newai.ts.
+// Safe by the same argument as the p_trail.ts cycle documented above: every
+// cross-imported symbol on both sides is a hoisted `export function`
+// declaration, never a top-level `const` evaluated at module-init time, and
+// every call site reads them from inside another function's body at real
+// game-frame time. Verified end-to-end: `bun test` actually loading this
+// file, rogue/g_rogue_newai.ts, and a monster file together (a prior draft
+// of this swap DID import `monster_done_dodge` from "./m_soldier" directly
+// and crashed at load with `ReferenceError: Cannot access 'ai_stand' before
+// initialization` -- the three-module cycle above; caught by running the
+// actual test suite, not just `tsc`, which is silent on this class of bug).
 //
 // ============================================================================
 // KEX PATHING HOOKS -- none exist in this file
@@ -216,6 +230,24 @@ import { G_Spawn, G_FreeEdict, G_PickTarget } from "./g_utils";
 import { M_walkmove, M_ChangeYaw, M_MoveToGoal, SV_CloseEnough } from "./m_move";
 import { RegisterMonsterinfoCheckattack } from "./g_save_registry";
 import { PlayerTrail_Pick } from "./p_trail";
+import type * as GRogueNewaiModule from "./rogue/g_rogue_newai";
+
+// rogue/g_rogue_newai.ts is reached lazily (via Bun's synchronous require,
+// not a static top-level import) -- see this file's own "IMPORT CYCLE"
+// header note: a static import here closes a cycle through m_medic.ts
+// (which g_rogue_newai.ts needs for realrange/PickCoopTarget/
+// cleanupHealTarget) into m_supertank.ts, which reads this file's
+// `export const ai_stand`/etc directly at ITS OWN module top level
+// (`const supertank_frames_stand: MframeT[] = Array.from(..., () =>
+// frame(ai_stand))`) -- a `ReferenceError: Cannot access 'ai_stand' before
+// initialization` at load, caught by running `bun test`, not `tsc`.
+// `import type` above is compile-time only (erased), so it adds no runtime
+// edge. Matches src/qcommon/files.ts's own `cvarMod()`/`cmdMod()` precedent
+// exactly (PORTING.md's sanctioned require() escape hatch for cycles that
+// break module init).
+function rogueNewaiMod(): typeof GRogueNewaiModule {
+  return require("./rogue/g_rogue_newai");
+}
 
 // ---------------------------------------------------------------------------
 // module-scope statics (g_ai.cpp:10-16: `bool enemy_vis; bool
@@ -305,21 +337,23 @@ function formatEdictForPrint(e: EdictT): string {
 }
 
 // ---------------------------------------------------------------------------
-// unported cross-deps (throwing stubs, except monsterlost_checkhint) --
-// see file header
+// hintpath_stop / monsterlost_checkhint are now real imports -- see file
+// header's "STUB SWAP" section (top of file). monster_done_dodge is a
+// local, trivial two-line duplicate (see below) rather than an import --
+// see file header's "IMPORT CYCLE" note.
 // ---------------------------------------------------------------------------
 
-function hintpath_stop(_self: EdictT): void {
-  throw new Error("hintpath_stop: not yet ported (pending g_rogue_newai.ts, see rogue/g_rogue_newai.cpp:379)");
-}
-
-/** [PARTIAL PORT] see file header's "monsterlost_checkhint" section. */
-function monsterlost_checkhint(_self: EdictT): boolean {
-  return false;
-}
-
-function monster_done_dodge(_self: EdictT): void {
-  throw new Error("monster_done_dodge: not yet ported (pending g_rogue_monster.ts, see rogue/g_rogue_monster.cpp:98)");
+/** rogue/g_rogue_monster.cpp:98-103 `void monster_done_dodge(edict_t
+ *  *self)`. Real home is m_soldier.ts's re-export of g_rogue_monster.ts's
+ *  version -- duplicated locally here (not imported) purely to avoid a
+ *  three-module import cycle through m_soldier.ts's top-level frame-table
+ *  construction (see file header's "IMPORT CYCLE" note); identical
+ *  two-line body, no behavioral difference. */
+function monster_done_dodge(self: EdictT): void {
+  self.monsterinfo.aiflags &= ~MonsterAiFlagsT.AI_DODGING;
+  if (self.monsterinfo.attack_state === MonsterAttackStateT.AS_SLIDING) {
+    self.monsterinfo.attack_state = MonsterAttackStateT.AS_STRAIGHT;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -356,11 +390,17 @@ export function AI_GetSightClient(self: EdictT): EdictT | null {
 // ai_move / ai_stand / ai_walk / ai_charge / ai_turn (g_ai.cpp:60-340)
 // ---------------------------------------------------------------------------
 
-export const ai_move: MframeAifuncFn = (self, dist) => {
+// hoisted `function` (not const arrow): monster frame tables read these
+// at module top level inside import cycles -- function declarations are
+// TDZ-immune regardless of evaluation order (satisfies MframeAifuncFn).
+export function ai_move(self: EdictT, dist: number): void {
   M_walkmove(self, self.s.angles[YAW], dist);
-};
+}
 
-export const ai_stand: MframeAifuncFn = (self, dist) => {
+// hoisted `function` (not const arrow): monster frame tables read these
+// at module top level inside import cycles -- function declarations are
+// TDZ-immune regardless of evaluation order (satisfies MframeAifuncFn).
+export function ai_stand(self: EdictT, dist: number): void {
   if (dist !== 0 || (self.monsterinfo.aiflags & MonsterAiFlagsT.AI_ALTERNATE_FLY) !== 0n) {
     M_walkmove(self, self.s.angles[YAW], dist);
   }
@@ -455,9 +495,12 @@ export const ai_stand: MframeAifuncFn = (self, dist) => {
       self.monsterinfo.idle_time = Gtime_add(level.time, random_time(Gtime_from_sec(15)));
     }
   }
-};
+}
 
-export const ai_walk: MframeAifuncFn = (self, dist) => {
+// hoisted `function` (not const arrow): monster frame tables read these
+// at module top level inside import cycles -- function declarations are
+// TDZ-immune regardless of evaluation order (satisfies MframeAifuncFn).
+export function ai_walk(self: EdictT, dist: number): void {
   let temp_goal: EdictT | null = null;
 
   if (self.goalentity === null && (self.monsterinfo.aiflags & MonsterAiFlagsT.AI_GOOD_GUY) !== 0n) {
@@ -487,9 +530,12 @@ export const ai_walk: MframeAifuncFn = (self, dist) => {
       self.monsterinfo.idle_time = Gtime_add(level.time, random_time(Gtime_from_sec(15)));
     }
   }
-};
+}
 
-export const ai_charge: MframeAifuncFn = (self, distArg) => {
+// hoisted `function` (not const arrow): monster frame tables read these
+// at module top level inside import cycles -- function declarations are
+// TDZ-immune regardless of evaluation order (satisfies MframeAifuncFn).
+export function ai_charge(self: EdictT, distArg: number): void {
   let dist = distArg;
 
   // This is put in there so monsters won't move towards the origin after
@@ -540,9 +586,12 @@ export const ai_charge: MframeAifuncFn = (self, distArg) => {
   // [Paril-KEX] if our enemy is literally right next to us, give us more
   // rotational speed so we don't get circled
   if (range_to(self, self.enemy) <= RANGE_MELEE * 2.5) M_ChangeYaw(self);
-};
+}
 
-export const ai_turn: MframeAifuncFn = (self, dist) => {
+// hoisted `function` (not const arrow): monster frame tables read these
+// at module top level inside import cycles -- function declarations are
+// TDZ-immune regardless of evaluation order (satisfies MframeAifuncFn).
+export function ai_turn(self: EdictT, dist: number): void {
   if (dist !== 0 || (self.monsterinfo.aiflags & MonsterAiFlagsT.AI_ALTERNATE_FLY) !== 0n) {
     M_walkmove(self, self.s.angles[YAW], dist);
   }
@@ -550,7 +599,7 @@ export const ai_turn: MframeAifuncFn = (self, dist) => {
   if (FindTarget(self)) return;
 
   if ((self.monsterinfo.aiflags & MonsterAiFlagsT.AI_MANUAL_STEERING) === 0n) M_ChangeYaw(self);
-};
+}
 
 // ---------------------------------------------------------------------------
 // range_to / visible / infront (g_ai.cpp:368-464)
@@ -945,7 +994,7 @@ export function FindTarget(self: EdictT): boolean {
   // ROGUE - if we got an enemy, we need to bail out of hint paths, so take
   // over here
   if ((self.monsterinfo.aiflags & MonsterAiFlagsT.AI_HINT_PATH) !== 0n) {
-    hintpath_stop(self); // this calls foundtarget for us
+    rogueNewaiMod().hintpath_stop(self); // this calls foundtarget for us
   } else {
     FoundTarget(self);
   }
@@ -1202,7 +1251,10 @@ export function ai_run_missile(self: EdictT): void {
 }
 
 // ROGUE
-export const ai_run_slide: MframeAifuncFn = (self, distance) => {
+// hoisted `function` (not const arrow): monster frame tables read these
+// at module top level inside import cycles -- function declarations are
+// TDZ-immune regardless of evaluation order (satisfies MframeAifuncFn).
+export function ai_run_slide(self: EdictT, distance: number): void {
   let dist = distance;
 
   self.ideal_yaw = enemy_yaw;
@@ -1234,7 +1286,7 @@ export const ai_run_slide: MframeAifuncFn = (self, distance) => {
   // PMM - the move failed, so signal the caller (ai_run) to try going
   // straight
   self.monsterinfo.attack_state = MonsterAttackStateT.AS_STRAIGHT;
-};
+}
 // ROGUE
 
 /** `dist` is genuinely unused in the C++ body -- see file header. */
@@ -1403,7 +1455,10 @@ export function ai_checkattack(self: EdictT, _dist: number): boolean {
   // PMM
 }
 
-export const ai_run: MframeAifuncFn = (self, distArg) => {
+// hoisted `function` (not const arrow): monster frame tables read these
+// at module top level inside import cycles -- function declarations are
+// TDZ-immune regardless of evaluation order (satisfies MframeAifuncFn).
+export function ai_run(self: EdictT, distArg: number): void {
   let dist = distArg;
   let alreadyMoved = false;
   let gotcha = false;
@@ -1462,16 +1517,16 @@ export const ai_run: MframeAifuncFn = (self, distArg) => {
         } else {
           // uh oh, can't figure out enemy, bail
           self.enemy = null;
-          hintpath_stop(self);
+          rogueNewaiMod().hintpath_stop(self);
           return;
         }
       } else {
         self.enemy = null;
-        hintpath_stop(self);
+        rogueNewaiMod().hintpath_stop(self);
         return;
       }
     } else {
-      hintpath_stop(self);
+      rogueNewaiMod().hintpath_stop(self);
       return;
     }
 
@@ -1492,7 +1547,7 @@ export const ai_run: MframeAifuncFn = (self, distArg) => {
     // if we see the player, stop following hintpaths.
     if (gotcha) {
       // disconnect from hintpaths and start looking normally for players.
-      hintpath_stop(self);
+      rogueNewaiMod().hintpath_stop(self);
     }
 
     return;
@@ -1637,7 +1692,7 @@ export const ai_run: MframeAifuncFn = (self, distArg) => {
     if (Gtime_add(self.monsterinfo.last_hint_time, Gtime_from_sec(10)) <= level.time) {
       // check for hint_paths.
       self.monsterinfo.last_hint_time = level.time;
-      if (monsterlost_checkhint(self)) return;
+      if (rogueNewaiMod().monsterlost_checkhint(self)) return;
     }
   }
   // PGM
@@ -1780,4 +1835,4 @@ export const ai_run: MframeAifuncFn = (self, distArg) => {
   // true here; dropped as dead, per PORTING.md's "meaningless C idiom when
   // semantically identical" precedent.
   self.goalentity = save;
-};
+}

@@ -132,15 +132,16 @@
 // monster_fire_* helper calls, not THINK/TOUCH/USE handlers), so there is
 // no registry duplicate-name collision to resolve.
 //
-// `fire_flechette` is DIFFERENT and stays a local, unexported throwing
-// stub here: g_weapon.ts's own file header confirms `fire_flechette`'s
-// real body is NOT in g_weapon.cpp at all (grepped the whole 1,216-line
-// file -- zero matches) -- it lives in the ROGUE mission pack's
-// rogue/g_rogue_newweap.cpp:41, out of this port line's current scope,
-// same treatment as this file's own `cleanupHealTarget` stub below. This
-// file's citation is corrected from the old (inaccurate) "pending
-// g_weapon.ts, see g_local.h:2530" to the real ROGUE owner, since
-// g_weapon.ts landing does NOT satisfy it.
+// `fire_flechette` was DIFFERENT and stayed a local, unexported throwing
+// stub here for a while: g_weapon.ts's own file header confirmed
+// `fire_flechette`'s real body is NOT in g_weapon.cpp at all (grepped the
+// whole 1,216-line file -- zero matches) -- it lives in the ROGUE mission
+// pack's rogue/g_rogue_newweap.cpp:41, same treatment as this file's own
+// `cleanupHealTarget` stub below. Now that rogue/g_rogue_newweap.ts has
+// landed with a real, exported `fire_flechette`, this file's local stub is
+// DELETED and replaced with `import { fire_flechette } from
+// "./rogue/g_rogue_newweap"` -- reached via this file's own already-real
+// `monster_fire_flechette` wrapper, unchanged.
 //
 // ============================================================================
 // STUB SWAP: FindItemByClassname / Drop_Item -- now real imports from
@@ -163,20 +164,11 @@
 // evaluating, never read at module-top-level-eval time.
 //
 // ============================================================================
-// CROSS-DEPENDENCIES STILL NOT YET PORTED
+// CROSS-DEPENDENCIES -- now all landed
 // ============================================================================
-// g_monster.cpp calls into several other, not-yet-ported C++ files (grepped
-// quake2-rerelease-dll/rerelease/*.cpp for each symbol's real definition,
-// not just its g_local.h declaration):
-//   - fire_flechette                 -> rogue/g_rogue_newweap.cpp:41 (ROGUE
-//     mission pack; out of this port line's current scope -- see the
-//     "STUB SWAP" note just above).
-// `fire_flechette` is a local, unexported throwing stub, naming itself and
-// the file that owns the real implementation, per PORTING.md's "a function
-// you cannot port faithfully is a reported deviation, not a TODO". Not
-// exercised by this unit's own test suite (its fixtures stick to
-// M_CheckGround/M_CatagorizePosition/M_WorldEffects/M_droptofloor/
-// M_ProcessPain/M_SetAnimation/monster_death_use, per this unit's brief).
+// `fire_flechette` (rogue/g_rogue_newweap.cpp:41, ROGUE mission pack) was
+// the last of this file's cross-dependencies still stubbed; see the
+// "STUB SWAP" note just above -- now a real import.
 //
 // ============================================================================
 // STUB SWAP: cleanupHealTarget is now a real import from m_medic.ts
@@ -379,6 +371,7 @@ import type { StuckObjectTraceFn } from "./bg_local";
 import { RegisterThink, RegisterUse } from "./g_save_registry";
 import { FoundTarget, M_CheckAttack } from "./g_ai";
 import { fire_bullet, fire_shotgun, fire_blaster, fire_grenade, fire_rocket, fire_rail, fire_bfg } from "./g_weapon";
+import { fire_flechette } from "./rogue/g_rogue_newweap";
 import { FindItemByClassname, Drop_Item } from "./g_items";
 import { st } from "./g_spawn";
 import { cleanupHealTarget } from "./m_medic";
@@ -2089,10 +2082,11 @@ export function stationarymonster_start(self: EdictT): void {
 // fire_bullet/fire_shotgun/fire_blaster/fire_grenade/fire_rocket/fire_rail/
 // fire_bfg: formerly seven local throwing stubs here -- now real imports
 // from src/kexgame/g_weapon.ts (see this file's own header, "STUB SWAP").
-
-function fire_flechette(self: EdictT, _start: Vec3, _dir: Vec3, _damage: number, _speed: number, _kick: number): void {
-  throw new Error(`fire_flechette: not yet ported (ROGUE mission pack, see rogue/g_rogue_newweap.cpp:41 -- not g_weapon.cpp, which has no definition of this symbol) -- called against ${self.classname ?? "?"}`);
-}
+//
+// fire_flechette: formerly a local, unexported throwing stub here (see this
+// file's own header, "STUB SWAP" -- ROGUE mission pack, rogue/
+// g_rogue_newweap.cpp:41) -- now a real import from
+// src/kexgame/rogue/g_rogue_newweap.ts, which has landed.
 
 // FoundTarget/M_CheckAttack: formerly local throwing stubs here (see this
 // file's own header, "CROSS-DEPENDENCIES NOT YET PORTED" / "STUB SWAP" in

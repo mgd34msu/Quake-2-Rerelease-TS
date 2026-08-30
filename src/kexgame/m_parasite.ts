@@ -116,6 +116,7 @@ import { M_SetAnimation, M_AllowSpawn, M_ShouldReactToPain, M_ProjectFlashSource
 import { T_Damage } from "./g_combat";
 import { ThrowGibs, type GibDefT } from "./g_misc";
 import { PredictAim, blocked_checkplat } from "./m_supertank";
+import { blocked_checkjump } from "./rogue/g_rogue_newai";
 import {
   RegisterThink,
   RegisterDie,
@@ -295,11 +296,8 @@ function monster_jump_finished(self: EdictT): boolean {
   return self.monsterinfo.jump_time < level.time;
 }
 
-/** `blocked_jump_result_t blocked_checkjump(edict_t*, float)` -- see file
- *  header's "EXTERNAL DEPENDENCY NOT YET PORTED" section. */
-function blocked_checkjump(_self: EdictT, _dist: number): BlockedJumpResultT {
-  throw new Error("blocked_checkjump: not yet ported (rogue mission-pack content, see rogue/g_rogue_newai.cpp:123)");
-}
+// blocked_checkjump is now a real import from "./rogue/g_rogue_newai" --
+// see file header for the swap note.
 
 // ---------------------------------------------------------------------------
 // local mframe_t / mmove_t helpers (see m_flipper.ts for rationale)

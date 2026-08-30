@@ -445,6 +445,25 @@ import { SP_monster_flyer, SP_monster_kamikaze } from "./m_flyer";
 import { SP_monster_hover } from "./m_hover";
 import { SP_monster_medic } from "./m_medic";
 import { SP_monster_floater } from "./m_float";
+import { SP_info_ctf_teleport_destination, SP_info_player_team1, SP_info_player_team2, SP_misc_ctf_banner, SP_misc_ctf_small_banner, SP_trigger_ctf_teleport } from "./ctf/g_ctf";
+import { SP_object_repair, SP_rotating_light } from "./g_xatrix_func";
+import { SP_misc_amb4, SP_misc_crashviper, SP_misc_nuke, SP_misc_transport, SP_misc_viper_missile } from "./g_xatrix_misc";
+import { SP_target_mal_laser } from "./g_xatrix_target";
+import { SP_monster_carrier } from "./m_rogue_carrier";
+import { SP_monster_stalker } from "./m_rogue_stalker";
+import { SP_monster_turret } from "./m_rogue_turret";
+import { SP_monster_widow } from "./m_rogue_widow";
+import { SP_monster_widow2 } from "./m_rogue_widow2";
+import { SP_monster_fixbot } from "./m_xatrix_fixbot";
+import { SP_monster_gekk } from "./m_xatrix_gekk";
+import { SP_func_plat2 } from "./rogue/g_rogue_func";
+import { SP_misc_nuke_core } from "./rogue/g_rogue_misc";
+import { SP_hint_path } from "./rogue/g_rogue_newai";
+import { SP_func_door_secret2, SP_func_force_wall } from "./rogue/g_rogue_newfnc";
+import { SP_target_anger, SP_target_blacklight, SP_target_killplayers, SP_target_orb, SP_target_steam } from "./rogue/g_rogue_newtarg";
+import { SP_info_teleport_destination, SP_trigger_disguise, SP_trigger_teleport } from "./rogue/g_rogue_newtrig";
+import { SP_dm_dball_ball, SP_dm_dball_ball_start, SP_dm_dball_goal, SP_dm_dball_speed_change, SP_dm_dball_team1_start, SP_dm_dball_team2_start } from "./rogue/rogue_dm_ball";
+import { SP_dm_tag_token } from "./rogue/rogue_dm_tag";
 import { SP_monster_boss2 } from "./m_boss2";
 import { SP_monster_boss3_stand } from "./m_boss3";
 import { SP_monster_jorg } from "./m_boss31";
@@ -1129,60 +1148,60 @@ export const spawns: readonly SpawnEntry[] = [
   { name: "turret_base", spawn: SP_turret_base },
   { name: "turret_driver", spawn: SP_turret_driver },
 
-  { name: "func_object_repair", spawn: unported("SP_object_repair", "xatrix/g_xatrix_func.cpp (future src/xatrix/g_xatrix_func.ts)") },
-  { name: "rotating_light", spawn: unported("SP_rotating_light", "xatrix/g_xatrix_func.cpp (future src/xatrix/g_xatrix_func.ts)") },
-  { name: "target_mal_laser", spawn: unported("SP_target_mal_laser", "xatrix/g_xatrix_target.cpp (future src/xatrix/g_xatrix_target.ts)") },
-  { name: "misc_crashviper", spawn: unported("SP_misc_crashviper", "xatrix/g_xatrix_misc.cpp (future src/xatrix/g_xatrix_misc.ts)") },
-  { name: "misc_viper_missile", spawn: unported("SP_misc_viper_missile", "xatrix/g_xatrix_misc.cpp (future src/xatrix/g_xatrix_misc.ts)") },
-  { name: "misc_amb4", spawn: unported("SP_misc_amb4", "xatrix/g_xatrix_misc.cpp (future src/xatrix/g_xatrix_misc.ts)") },
-  { name: "misc_transport", spawn: unported("SP_misc_transport", "xatrix/g_xatrix_misc.cpp (future src/xatrix/g_xatrix_misc.ts)") },
-  { name: "misc_nuke", spawn: unported("SP_misc_nuke", "xatrix/g_xatrix_misc.cpp (future src/xatrix/g_xatrix_misc.ts)") },
+  { name: "func_object_repair", spawn: SP_object_repair },
+  { name: "rotating_light", spawn: SP_rotating_light },
+  { name: "target_mal_laser", spawn: SP_target_mal_laser },
+  { name: "misc_crashviper", spawn: SP_misc_crashviper },
+  { name: "misc_viper_missile", spawn: SP_misc_viper_missile },
+  { name: "misc_amb4", spawn: SP_misc_amb4 },
+  { name: "misc_transport", spawn: SP_misc_transport },
+  { name: "misc_nuke", spawn: SP_misc_nuke },
   { name: "monster_soldier_hypergun", spawn: SP_monster_soldier_hypergun },
   { name: "monster_soldier_lasergun", spawn: SP_monster_soldier_lasergun },
   { name: "monster_soldier_ripper", spawn: SP_monster_soldier_ripper },
-  { name: "monster_fixbot", spawn: unported("SP_monster_fixbot", "xatrix/m_xatrix_fixbot.cpp (future src/xatrix/m_xatrix_fixbot.ts)") },
-  { name: "monster_gekk", spawn: unported("SP_monster_gekk", "xatrix/m_xatrix_gekk.cpp (future src/xatrix/m_xatrix_gekk.ts)") },
+  { name: "monster_fixbot", spawn: SP_monster_fixbot },
+  { name: "monster_gekk", spawn: SP_monster_gekk },
   { name: "monster_chick_heat", spawn: SP_monster_chick_heat },
   { name: "monster_gladb", spawn: SP_monster_gladb },
   { name: "monster_boss5", spawn: SP_monster_boss5 },
 
-  { name: "func_plat2", spawn: unported("SP_func_plat2", "rogue/g_rogue_func.cpp (future src/rogue/g_rogue_func.ts)") },
-  { name: "func_door_secret2", spawn: unported("SP_func_door_secret2", "rogue/g_rogue_newfnc.cpp (future src/rogue/g_rogue_newfnc.ts)") },
-  { name: "func_force_wall", spawn: unported("SP_func_force_wall", "rogue/g_rogue_newfnc.cpp (future src/rogue/g_rogue_newfnc.ts)") },
-  { name: "trigger_teleport", spawn: unported("SP_trigger_teleport", "rogue/g_rogue_newtrig.cpp (future src/rogue/g_rogue_newtrig.ts)") },
-  { name: "trigger_disguise", spawn: unported("SP_trigger_disguise", "rogue/g_rogue_newtrig.cpp (future src/rogue/g_rogue_newtrig.ts)") },
-  { name: "info_teleport_destination", spawn: unported("SP_info_teleport_destination", "rogue/g_rogue_newtrig.cpp (future src/rogue/g_rogue_newtrig.ts)") },
+  { name: "func_plat2", spawn: SP_func_plat2 },
+  { name: "func_door_secret2", spawn: SP_func_door_secret2 },
+  { name: "func_force_wall", spawn: SP_func_force_wall },
+  { name: "trigger_teleport", spawn: SP_trigger_teleport },
+  { name: "trigger_disguise", spawn: SP_trigger_disguise },
+  { name: "info_teleport_destination", spawn: SP_info_teleport_destination },
   { name: "info_player_coop_lava", spawn: SP_info_player_coop_lava },
-  { name: "monster_stalker", spawn: unported("SP_monster_stalker", "rogue/m_rogue_stalker.cpp (future src/rogue/m_rogue_stalker.ts)") },
-  { name: "monster_turret", spawn: unported("SP_monster_turret", "rogue/m_rogue_turret.cpp (future src/rogue/m_rogue_turret.ts)") },
-  { name: "target_steam", spawn: unported("SP_target_steam", "rogue/g_rogue_newtarg.cpp (future src/rogue/g_rogue_newtarg.ts)") },
-  { name: "target_anger", spawn: unported("SP_target_anger", "rogue/g_rogue_newtarg.cpp (future src/rogue/g_rogue_newtarg.ts)") },
-  { name: "target_killplayers", spawn: unported("SP_target_killplayers", "rogue/g_rogue_newtarg.cpp (future src/rogue/g_rogue_newtarg.ts)") },
-  { name: "target_blacklight", spawn: unported("SP_target_blacklight", "rogue/g_rogue_newtarg.cpp (future src/rogue/g_rogue_newtarg.ts)") },
-  { name: "target_orb", spawn: unported("SP_target_orb", "rogue/g_rogue_newtarg.cpp (future src/rogue/g_rogue_newtarg.ts)") },
+  { name: "monster_stalker", spawn: SP_monster_stalker },
+  { name: "monster_turret", spawn: SP_monster_turret },
+  { name: "target_steam", spawn: SP_target_steam },
+  { name: "target_anger", spawn: SP_target_anger },
+  { name: "target_killplayers", spawn: SP_target_killplayers },
+  { name: "target_blacklight", spawn: SP_target_blacklight },
+  { name: "target_orb", spawn: SP_target_orb },
   { name: "monster_daedalus", spawn: SP_monster_hover },
-  { name: "hint_path", spawn: unported("SP_hint_path", "rogue/g_rogue_newai.cpp (future src/rogue/g_rogue_newai.ts)") },
-  { name: "monster_carrier", spawn: unported("SP_monster_carrier", "rogue/m_rogue_carrier.cpp (future src/rogue/m_rogue_carrier.ts)") },
-  { name: "monster_widow", spawn: unported("SP_monster_widow", "rogue/m_rogue_widow.cpp (future src/rogue/m_rogue_widow.ts)") },
-  { name: "monster_widow2", spawn: unported("SP_monster_widow2", "rogue/m_rogue_widow2.cpp (future src/rogue/m_rogue_widow2.ts)") },
+  { name: "hint_path", spawn: SP_hint_path },
+  { name: "monster_carrier", spawn: SP_monster_carrier },
+  { name: "monster_widow", spawn: SP_monster_widow },
+  { name: "monster_widow2", spawn: SP_monster_widow2 },
   { name: "monster_medic_commander", spawn: SP_monster_medic },
-  { name: "dm_tag_token", spawn: unported("SP_dm_tag_token", "rogue/rogue_dm_tag.cpp (future src/rogue/rogue_dm_tag.ts)") },
-  { name: "dm_dball_goal", spawn: unported("SP_dm_dball_goal", "rogue/rogue_dm_ball.cpp (future src/rogue/rogue_dm_ball.ts)") },
-  { name: "dm_dball_ball", spawn: unported("SP_dm_dball_ball", "rogue/rogue_dm_ball.cpp (future src/rogue/rogue_dm_ball.ts)") },
-  { name: "dm_dball_team1_start", spawn: unported("SP_dm_dball_team1_start", "rogue/rogue_dm_ball.cpp (future src/rogue/rogue_dm_ball.ts)") },
-  { name: "dm_dball_team2_start", spawn: unported("SP_dm_dball_team2_start", "rogue/rogue_dm_ball.cpp (future src/rogue/rogue_dm_ball.ts)") },
-  { name: "dm_dball_ball_start", spawn: unported("SP_dm_dball_ball_start", "rogue/rogue_dm_ball.cpp (future src/rogue/rogue_dm_ball.ts)") },
-  { name: "dm_dball_speed_change", spawn: unported("SP_dm_dball_speed_change", "rogue/rogue_dm_ball.cpp (future src/rogue/rogue_dm_ball.ts)") },
+  { name: "dm_tag_token", spawn: SP_dm_tag_token },
+  { name: "dm_dball_goal", spawn: SP_dm_dball_goal },
+  { name: "dm_dball_ball", spawn: SP_dm_dball_ball },
+  { name: "dm_dball_team1_start", spawn: SP_dm_dball_team1_start },
+  { name: "dm_dball_team2_start", spawn: SP_dm_dball_team2_start },
+  { name: "dm_dball_ball_start", spawn: SP_dm_dball_ball_start },
+  { name: "dm_dball_speed_change", spawn: SP_dm_dball_speed_change },
   { name: "monster_kamikaze", spawn: SP_monster_kamikaze },
   { name: "turret_invisible_brain", spawn: SP_turret_invisible_brain },
-  { name: "misc_nuke_core", spawn: unported("SP_misc_nuke_core", "rogue/g_rogue_misc.cpp (future src/rogue/g_rogue_misc.ts)") },
+  { name: "misc_nuke_core", spawn: SP_misc_nuke_core },
 
-  { name: "trigger_ctf_teleport", spawn: unported("SP_trigger_ctf_teleport", "ctf/g_ctf.cpp (future src/ctf/g_ctf.ts)") },
-  { name: "info_ctf_teleport_destination", spawn: unported("SP_info_ctf_teleport_destination", "ctf/g_ctf.cpp (future src/ctf/g_ctf.ts)") },
-  { name: "misc_ctf_banner", spawn: unported("SP_misc_ctf_banner", "ctf/g_ctf.cpp (future src/ctf/g_ctf.ts)") },
-  { name: "misc_ctf_small_banner", spawn: unported("SP_misc_ctf_small_banner", "ctf/g_ctf.cpp (future src/ctf/g_ctf.ts)") },
-  { name: "info_player_team1", spawn: unported("SP_info_player_team1", "ctf/g_ctf.cpp (future src/ctf/g_ctf.ts)") },
-  { name: "info_player_team2", spawn: unported("SP_info_player_team2", "ctf/g_ctf.cpp (future src/ctf/g_ctf.ts)") },
+  { name: "trigger_ctf_teleport", spawn: SP_trigger_ctf_teleport },
+  { name: "info_ctf_teleport_destination", spawn: SP_info_ctf_teleport_destination },
+  { name: "misc_ctf_banner", spawn: SP_misc_ctf_banner },
+  { name: "misc_ctf_small_banner", spawn: SP_misc_ctf_small_banner },
+  { name: "info_player_team1", spawn: SP_info_player_team1 },
+  { name: "info_player_team2", spawn: SP_info_player_team2 },
 
   { name: "monster_shambler", spawn: SP_monster_shambler },
 ];

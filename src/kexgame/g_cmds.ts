@@ -223,6 +223,28 @@ import { vec3, type Vec3 } from "../shared/math";
 import { CplaneT } from "../shared/q_shared";
 import { G_FreeEdict, G_Spawn, G_UseTargets, findradius } from "./g_utils";
 import { OnSameTeam } from "./g_combat";
+import {
+  CTFAdmin,
+  CTFAssignSkin,
+  CTFBoot,
+  CTFDirtyTeamMenu,
+  CTFGhost,
+  CTFID_f,
+  CTFNotReady,
+  CTFObserver,
+  CTFOpenJoinMenu,
+  CTFPlayerList,
+  CTFReady,
+  CTFSay_Team,
+  CTFStats,
+  CTFTeamName,
+  CTFTeam_f,
+  CTFVoteNo,
+  CTFVoteYes,
+  CTFWarp,
+  CTFWhat_Tech,
+} from "./ctf/g_ctf";
+import { PMenu_Close, PMenu_Prev, PMenu_Select } from "./ctf/p_ctf_menu";
 import { FoundTarget } from "./g_ai";
 import { GetUnicastKey } from "./g_weapon";
 import { G_TeamplayEnabled } from "./p_view";
@@ -242,6 +264,7 @@ import {
 import { ChaseNext, ChasePrev } from "./g_chase";
 import {
   Add_Ammo,
+  CTFPickup_Flag,
   FindItem,
   FindItemByClassname,
   G_CheckPowerArmor,
@@ -345,69 +368,12 @@ function* active_players(): Generator<EdictT> {
 // with real exports of all three; see this file's own header, "STUB SWAP:
 // ED_ParseField/ED_CallSpawn/`st`".
 
-// ctf/p_ctf_menu.cpp -- see file header
-function PMenu_Prev(_ent: EdictT): void {
-  throw new Error("PMenu_Prev: not yet ported (pending p_ctf_menu.ts, see ctf/p_ctf_menu.cpp:222)");
-}
-
-// ctf/g_ctf.cpp -- see file header
-function CTFWhat_Tech(_ent: EdictT): GitemT | null {
-  throw new Error("CTFWhat_Tech: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:1823)");
-}
-function CTFOpenJoinMenu(_ent: EdictT): void {
-  throw new Error("CTFOpenJoinMenu: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:2941)");
-}
-function CTFAssignSkin(_ent: EdictT, _s: string): void {
-  throw new Error("CTFAssignSkin: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:280)");
-}
-function CTFDirtyTeamMenu(): void {
-  throw new Error("CTFDirtyTeamMenu: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:1507)");
-}
-function CTFTeamName(_team: CtfteamT): string {
-  throw new Error("CTFTeamName: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:237)");
-}
-function CTFObserver(_ent: EdictT): void {
-  throw new Error("CTFObserver: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:2991)");
-}
-function CTFTeam_f(_ent: EdictT): void {
-  throw new Error("CTFTeam_f: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:1517)");
-}
-function CTFID_f(_ent: EdictT): void {
-  throw new Error("CTFID_f: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:932)");
-}
-function CTFVoteYes(_ent: EdictT): void {
-  throw new Error("CTFVoteYes: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:2480)");
-}
-function CTFVoteNo(_ent: EdictT): void {
-  throw new Error("CTFVoteNo: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:2512)");
-}
-function CTFReady(_ent: EdictT): void {
-  throw new Error("CTFReady: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:2537)");
-}
-function CTFNotReady(_ent: EdictT): void {
-  throw new Error("CTFNotReady: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:2588)");
-}
-function CTFGhost(_ent: EdictT): void {
-  throw new Error("CTFGhost: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:2619)");
-}
-function CTFAdmin(_ent: EdictT): void {
-  throw new Error("CTFAdmin: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:3630)");
-}
-function CTFStats(_ent: EdictT): void {
-  throw new Error("CTFStats: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:3661)");
-}
-function CTFWarp(_ent: EdictT): void {
-  throw new Error("CTFWarp: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:3775)");
-}
-function CTFBoot(_ent: EdictT): void {
-  throw new Error("CTFBoot: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:3815)");
-}
-function CTFPlayerList(_ent: EdictT): void {
-  throw new Error("CTFPlayerList: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:3738)");
-}
-function CTFSay_Team(_who: EdictT, _msg: string): void {
-  throw new Error("CTFSay_Team: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:2133)");
-}
+// ctf/p_ctf_menu.cpp + ctf/g_ctf.cpp -- REAL imports from
+// src/kexgame/ctf/p_ctf_menu.ts and src/kexgame/ctf/g_ctf.ts (this file's
+// former throwing stubs for the entire CTF subcommand family and
+// PMenu_Prev/Close/Select are gone; see ctf/g_ctf.ts's own header for the
+// full consolidation inventory, including this file's own
+// `CTFPickup_Flag`-as-sentinel note below).
 
 // ---------------------------------------------------------------------------
 // SelectPrevItem (g_cmds.cpp:48-88) -- see file header, genuinely new here
@@ -578,19 +544,15 @@ export function Cmd_Give_f(ent: EdictT): void {
   }
 }
 
-/** `CTFPickup_Flag` is referenced by pointer-identity in `Cmd_Give_f`'s
- *  "give all" branch (`it->pickup == CTFPickup_Flag`) -- this port line has
- *  no ported `CTFPickup_Flag` anywhere (ctf/g_ctf.cpp, unported, see file
- *  header). A stable, never-registered sentinel function is used purely for
- *  the identity comparison: since no real `itemlist` entry's `.pickup` can
- *  ever equal it (nothing assigns this exact reference anywhere), the
- *  branch's `continue` is simply never taken for that reason today -- an
- *  honest consequence of CTF being unported, not a silent behavior change
- *  (the flags are also excluded via `IF_NOT_GIVEABLE`/similar in the real
- *  itemlist for the flag items, so this is not the only guard). */
-function CTFPickup_Flag(_ent: EdictT, _other: EdictT): boolean {
-  throw new Error("CTFPickup_Flag: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:640) -- sentinel identity only, never actually invoked");
-}
+// `CTFPickup_Flag` is referenced by pointer-identity in `Cmd_Give_f`'s "give
+// all" branch (`it->pickup == CTFPickup_Flag`) below. Imported from
+// g_items.ts (NOT directly from ctf/g_ctf.ts) -- g_items.ts's real
+// itemlist[] wires IT_FLAG1/IT_FLAG2's `.pickup` to g_items.ts's own
+// same-named wrapper export (see that file's own header for why: a
+// temporal-dead-zone hazard in the g_items.ts<->ctf/g_ctf.ts cycle means
+// the itemlist entries can't embed ctf/g_ctf.ts's raw export directly), so
+// this identity comparison must use that exact same wrapper reference to
+// still match.
 
 // ---------------------------------------------------------------------------
 // Cmd_SetPOI_f / Cmd_CheckPOI_f (g_cmds.cpp:297-320)
@@ -955,19 +917,15 @@ export function Cmd_Inven_f(ent: EdictT): void {
   gi.unicast(ent, true, GetUnicastKey());
 }
 
-/** ctf/p_ctf_menu.cpp:63 -- see file header. */
-function PMenu_Close(_ent: EdictT): void {
-  throw new Error("PMenu_Close: not yet ported (pending p_ctf_menu.ts, see ctf/p_ctf_menu.cpp:63)");
-}
+// PMenu_Close: formerly a local throwing stub here -- see file header
+// (imported below from ctf/p_ctf_menu.ts).
 
 // ---------------------------------------------------------------------------
 // Cmd_InvUse_f (g_cmds.cpp:780-815)
 // ---------------------------------------------------------------------------
 
-/** ctf/p_ctf_menu.cpp:262 -- see file header. */
-function PMenu_Select(_ent: EdictT): void {
-  throw new Error("PMenu_Select: not yet ported (pending p_ctf_menu.ts, see ctf/p_ctf_menu.cpp:262)");
-}
+// PMenu_Select: formerly a local throwing stub here -- see file header
+// (imported below from ctf/p_ctf_menu.ts).
 
 export function Cmd_InvUse_f(ent: EdictT): void {
   const client = ent.client;

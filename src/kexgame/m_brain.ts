@@ -16,21 +16,14 @@
 // EXTERNAL DEPENDENCIES NOT YET PORTED, AND HOW EACH IS HANDLED
 // ============================================================================
 // - `monster_fire_dabeam`/`dabeam_update` (xatrix/g_xatrix_monster.cpp:112/84):
-//   the RAFAEL/xatrix dual-eye laser primitives `brain_laserbeam` calls.
-//   Genuinely out-of-scope mission-pack content (no xatrix/*.ts exists in
-//   this port line) -- identical citation and identical treatment to
-//   m_soldier.ts's own `monster_fire_dabeam`/`dabeam_update` stubs (ported
-//   there for its xatrix ionripper/hyperblaster/laserbeam weapon variants).
-//   m_soldier.ts does NOT export these two (they're file-local there), so
-//   this file duplicates the same two throwing stubs locally rather than
-//   importing -- matching this porting batch's "duplicate a small unexported
-//   helper per file" convention (see m_gunner.ts's own `blocked_checkplat`
-//   stub precedent for the identical shape of citation). Reachable whenever
-//   `brain_attack` picks the laser branch (`brain_move_attack4`), which by
-//   default (no SPAWNFLAG_BRAIN_NO_LASERS) fires at long range or on a 50%
-//   coin flip at close range -- a real behavior gap, honestly stubbed rather
-//   than silently changed, exactly mirroring m_soldier.ts's own reasoning for
-//   the identical function pair.
+//   STUB SWAP (xatrix unit) -- g_xatrix_monster.ts has now landed as the real
+//   home of both. The local throwing stubs that used to live here are
+//   DELETED and replaced with `import { dabeam_update, monster_fire_dabeam }
+//   from "./g_xatrix_monster"`. `brain_attack`'s laser branch
+//   (`brain_move_attack4`, reached at long range or on a 50% coin flip at
+//   close range whenever `!SPAWNFLAG_BRAIN_NO_LASERS`) now genuinely fires:
+//   `brain_left_eye_laser_update`/`brain_right_eye_laser_update` (already
+//   ported for real below, unchanged) are no longer dead code.
 // - `brain_right_eye_laser_update`/`brain_left_eye_laser_update` (the two
 //   PRETHINK callbacks passed to `monster_fire_dabeam`) ARE ported for real
 //   below, even though the stub above means `monster_fire_dabeam` never
@@ -124,6 +117,7 @@ import { fire_hit } from "./g_weapon";
 import { T_Damage } from "./g_combat";
 import { AngleVectors_destructured, vec3_add, vec3_length, vec3_muls, vec3_sub, vectoangles } from "./q_vec3";
 import { vec3_origin } from "../shared/math";
+import { dabeam_update, monster_fire_dabeam } from "./g_xatrix_monster";
 import { G_FreeEdict } from "./g_utils";
 import { frandom, irandom } from "./q_std";
 import { Gtime_add, Gtime_from_sec, type GTime } from "./gtime";
@@ -167,17 +161,8 @@ const MODEL_SCALE = 1.0;
 
 const SPAWNFLAG_BRAIN_NO_LASERS = 8;
 
-// ---------------------------------------------------------------------------
-// EXTERNAL DEPENDENCIES NOT YET PORTED -- see file header
-// ---------------------------------------------------------------------------
-
-function dabeam_update(_laser: EdictT, _damage: boolean): void {
-  throw new Error("dabeam_update: not yet ported (xatrix mission pack, see xatrix/g_xatrix_monster.cpp:84)");
-}
-
-function monster_fire_dabeam(self: EdictT, _damage: number, _secondary: boolean, _update_func: PrethinkFn): void {
-  throw new Error(`monster_fire_dabeam: not yet ported (xatrix mission pack, see xatrix/g_xatrix_monster.cpp:112) -- called against ${self.classname ?? "?"}`);
-}
+// dabeam_update / monster_fire_dabeam: real imports from g_xatrix_monster.ts
+// -- see file header "STUB SWAP (xatrix unit)".
 
 // ---------------------------------------------------------------------------
 // PLACEMENT-MISMATCH FUNCTIONS PORTED LOCALLY -- see file header

@@ -375,10 +375,10 @@ describe("spawn registry (g_spawn.cpp:221-437)", () => {
   test("not-yet-ported classnames resolve to a throwing, cited stub", () => {
     // monster_berserk landed; monster_guardian is still an honest stub.
     const ent = defaultEdict();
-    ent.classname = "monster_stalker";
-    const entry = spawns.find((s) => s.name === "monster_stalker");
+    ent.classname = "info_nav_lock";
+    const entry = spawns.find((s) => s.name === "info_nav_lock");
     expect(entry).toBeDefined();
-    expect(() => entry!.spawn(ent)).toThrow(/m_rogue_stalker\.cpp/);
+    expect(() => entry!.spawn(ent)).toThrow(/bot_utils\.cpp/);
   });
 
   test("func_group reuses SP_info_null, exactly like the C++ table", () => {

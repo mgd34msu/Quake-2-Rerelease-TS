@@ -87,16 +87,16 @@
 //   IS ported for real (matching m_parasite.ts's/m_mutant.ts's identical
 //   choice), since `guncmdr_jump_wait_land` calls it directly.
 // - `fire_ionripper(edict_t*, const vec3_t&, const vec3_t&, int, int,
-//   effects_t)`: declared in g_local.h:2334, but its only body is
-//   xatrix/g_xatrix_weapon.cpp:91 -- xatrix mission-pack content, the same
-//   kind of gap m_soldier.ts's header already documents for the sibling
-//   `monster_fire_ionripper` (xatrix/g_xatrix_monster.cpp:14). Distinct
-//   function: this is the raw player-weapon-shaped primitive `guncmdr`'s
-//   crouched grenade pattern calls directly (three-shot burst), not the
-//   `monster_fire_*` wrapper soldier stubs. A narrow gap, not a landmine:
-//   only `GunnerCmdrGrenade`'s `MZ2_GUNCMDR_GRENADE_CROUCH_1..3` branch
-//   (one of guncmdr's three grenade patterns) is affected; the chaingun,
-//   mortar, and front-grenade attacks are untouched.
+//   effects_t)`: STUB SWAP (xatrix unit) -- g_xatrix_weapon.ts has now
+//   landed as the real home. The local throwing stub that used to live here
+//   is DELETED and replaced with `import { fire_ionripper } from
+//   "./g_xatrix_weapon"`. Distinct function from the sibling
+//   `monster_fire_ionripper` (xatrix/g_xatrix_monster.cpp:14, swapped
+//   separately in m_soldier.ts): this is the raw player-weapon-shaped
+//   primitive `guncmdr`'s crouched grenade pattern calls directly (a
+//   three-shot burst), not a `monster_fire_*` wrapper.
+//   `GunnerCmdrGrenade`'s `MZ2_GUNCMDR_GRENADE_CROUCH_1..3` branch (one of
+//   guncmdr's three grenade patterns) now genuinely fires.
 //
 // ============================================================================
 // T_SlamRadiusDamage -- duplicated locally from m_berserk.ts, not imported
@@ -219,11 +219,13 @@ import { ai_check_move } from "./m_move";
 import { monster_fire_flechette, monster_fire_grenade, M_ProjectFlashSource, M_CheckClearShot, M_ShouldReactToPain, M_SetAnimation, M_AllowSpawn, monster_dead, walkmonster_start } from "./g_monster";
 import { monsterFlashOffset } from "./m_flash";
 import { PredictAim, M_CalculatePitchToFire } from "./m_supertank";
+import { blocked_checkjump } from "./rogue/g_rogue_newai";
 import { M_MonsterDodge, monster_duck_down, monster_duck_hold, monster_duck_up, monster_done_dodge } from "./m_soldier";
 import { ThrowGib, ThrowGibs } from "./g_misc";
 import { G_FreeEdict, findradius } from "./g_utils";
 import { T_Damage, CanDamage } from "./g_combat";
 import { fire_hit } from "./g_weapon";
+import { fire_ionripper } from "./g_xatrix_weapon";
 import { frandom, brandom, irandom, crandom_open } from "./q_std";
 import { Gtime_add, Gtime_from_sec, Gtime_from_ms, type GTime } from "./gtime";
 
@@ -431,15 +433,11 @@ function monster_jump_finished(self: EdictT): boolean {
   return self.monsterinfo.jump_time < level.time;
 }
 
-/** `blocked_jump_result_t blocked_checkjump(edict_t*, float)` -- see file header. */
-function blocked_checkjump(_self: EdictT, _dist: number): BlockedJumpResultT {
-  throw new Error("blocked_checkjump: not yet ported (rogue mission-pack content, see rogue/g_rogue_newai.cpp:123)");
-}
+// blocked_checkjump is now a real import from "./rogue/g_rogue_newai" --
+// see file header for the swap note.
 
-/** `void fire_ionripper(edict_t*, const vec3_t&, const vec3_t&, int, int, effects_t)` -- see file header. */
-function fire_ionripper(self: EdictT, _start: Vec3, _aimdir: Vec3, _damage: number, _speed: number, _effect: EffectsT): void {
-  throw new Error(`fire_ionripper: not yet ported (xatrix mission pack, see xatrix/g_xatrix_weapon.cpp:91) -- called against ${self.classname ?? "?"}`);
-}
+// fire_ionripper is now a real import from "./g_xatrix_weapon" -- see file
+// header "STUB SWAP (xatrix unit)".
 
 /** m_berserk.cpp:212-255, forward-declared by guncmdr.cpp:1272. See file header. */
 function T_SlamRadiusDamage(pointIn: Vec3, inflictor: EdictT, attacker: EdictT, damage: number, kick: number, ignore: EdictT, radius: number, mod: ModT): void {

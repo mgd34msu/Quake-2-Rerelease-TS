@@ -31,6 +31,33 @@
 // g_trigger.ts with the citation corrected.
 //
 // ============================================================================
+// STUB SWAP (xatrix unit): Weapon_Ionripper / Weapon_Phalanx / Weapon_Trap
+// ============================================================================
+// All three were local, unexported, cited throwing stubs (pending
+// p_xatrix_weapon.ts). That file has now landed; this unit deletes the three
+// local stubs below and imports the real implementations instead. Every
+// other `Weapon_*`/`Pickup_Weapon`/`Use_Weapon`/`Drop_Weapon` stub in this
+// same block is UNCHANGED (still pending a future p_weapon.ts wiring unit --
+// p_weapon.ts itself exists and is real, but nothing in THIS unit's scope
+// wires its base-game Weapon_* exports into this itemlist; only the three
+// xatrix-cited ones are in scope here).
+//
+// ============================================================================
+// STUB SWAP (rogue DEATHMATCH-MODES/ITEMS unit): DoRandomRespawn / Tag_PickupToken
+// ============================================================================
+// Both were local, unexported, cited throwing stubs (pending
+// rogue/g_rogue_newdm.ts / rogue/rogue_dm_tag.ts). Both files have now
+// landed; this unit deletes the local `throw` bodies and replaces them
+// with hoisted wrappers around real imports (see the "STUB SWAP" import
+// comment just above `DoRandomRespawn_real`/`Tag_PickupToken_real`'s
+// import statements, and each wrapper's own comment, for why a plain
+// re-export isn't safe here -- the same import-cycle temporal-dead-zone
+// hazard as this file's existing CTFPickup_Flag/etc. wrappers). g_spawn.ts
+// carries its OWN separate local `DoRandomRespawn` stub, NOT swapped by
+// this unit (g_spawn.ts is off-limits -- see rogue/g_rogue_newdm.ts's own
+// header for the coordinator note on that pending swap).
+//
+// ============================================================================
 // CROSS-DEPENDENCIES ALREADY LANDED ELSEWHERE -- imported, not duplicated
 // ============================================================================
 // - ArmorIndex / PowerArmorType (g_items.cpp:726 / 827): g_combat.ts already
@@ -107,15 +134,19 @@
 // Weapon_Disintegrator, Weapon_ETF_Rifle, Weapon_Heatbeam, Weapon_Tesla,
 // Weapon_ProxLauncher, Weapon_Ionripper, Weapon_Phalanx, Weapon_Trap,
 // CTFWeapon_Grapple (ctf/g_ctf.cpp:1453).
-// Rogue spawning/effects (genuinely complex, not ported anywhere yet):
+// Rogue spawning/effects (genuinely complex; the WEAPONS and
+// FUNC/TRIG/TARG/SPAWN clusters' dependencies are not landed yet -- see
+// rogue/g_rogue_items.ts's own header for the current state): Use_Nuke and
+// Use_Doppleganger are THIS FILE'S local throwing stubs, cited below --
+// SEPARATE from rogue/g_rogue_items.ts's own real, exported copies (not
+// swapped in here; that file's header explains why and what the
+// coordinator needs to decide once their remaining deps land).
 // Use_Nuke (needs rogue/g_rogue_newweap.cpp:770 fire_nuke), Use_Doppleganger
 // (needs rogue/g_rogue_spawn.cpp FindSpawnPoint/CheckGroundSpawnPoint/
 // SpawnGrow_Spawn + rogue/g_rogue_newdm.cpp:242 fire_doppleganger),
 // Defender_Launch/Hunter_Launch/Vengeance_Launch (rogue/g_rogue_sphere.cpp).
 // CTF (ctf/g_ctf.cpp, not ported anywhere yet): CTFPickup_Flag, CTFDrop_Flag,
 // CTFPickup_Tech, CTFDrop_Tech, CTFFlagSetup.
-// Rogue misc: Tag_PickupToken (rogue/rogue_dm_tag.cpp:113), DoRandomRespawn
-// (rogue/g_rogue_newdm.cpp:126, guarded by g_dm_random_items, default off).
 // Established precedent (matches p_hud.ts's/g_target.ts's own copies):
 // P_UseCoopInstancedItems (p_client.cpp:90, guarded by coop, default off).
 // Menu/chase (guarded unreachable from this file, see above): PMenu_Next,
@@ -242,8 +273,74 @@ import { G_Spawn, G_FreeEdict, G_UseTargets, G_PrintActivationMessage } from "./
 import { AngleVectors, G_ProjectSource, vec3_add, vec3_muls } from "./q_vec3";
 import { RegisterThink, RegisterTouch, RegisterUse, type ThinkFn, type TouchFn, type UseFn } from "./g_save_registry";
 import { ArmorIndex, PowerArmorType } from "./g_combat";
+import {
+  CTFDrop_Flag as CTFDrop_Flag_real,
+  CTFDrop_Tech as CTFDrop_Tech_real,
+  CTFFlagSetup,
+  CTFHasRegeneration,
+  CTFMatchSetup,
+  CTFPickup_Flag as CTFPickup_Flag_real,
+  CTFPickup_Tech as CTFPickup_Tech_real,
+  CTFWeapon_Grapple as CTFWeapon_Grapple_real,
+} from "./ctf/g_ctf";
+// STUB SWAP (rogue DEATHMATCH-MODES/ITEMS unit): real DoRandomRespawn/
+// Tag_PickupToken -- see file header "Rogue misc" note. Aliased + wrapped
+// below, NOT imported as plain top-level bindings, for the exact same
+// reason as the CTF imports just above (this file's own comment: "a
+// top-level `const X = imported` binding inside an import cycle is a
+// temporal-dead-zone crash for any entry point that loads g_items first").
+// rogue/g_rogue_newdm.ts and rogue/rogue_dm_tag.ts both import
+// GetItemByIndex/Touch_Item/SpawnItem/PrecacheItem back from THIS file, so
+// the cycle is real, not hypothetical.
+import { DoRandomRespawn as DoRandomRespawn_real } from "./rogue/g_rogue_newdm";
+import { Tag_PickupToken as Tag_PickupToken_real } from "./rogue/rogue_dm_tag";
+
+// Hoisted wrappers, NOT const aliases -- see p_client.ts's identical
+// `Touch_Item` precedent (its own header: "a top-level `const X = imported`
+// binding inside the g_utils<->p_client<->g_items import cycle is a
+// temporal-dead-zone crash for any entry point that loads g_items first").
+// This file's own `itemlist` (below) is a top-level ARRAY LITERAL that
+// embeds these four functions as `pickup`/`drop`/`weaponthink` values --
+// unlike a function body, an object-literal property value is evaluated
+// EAGERLY, at module-evaluation time. Confirmed experimentally: importing
+// ctf/g_ctf.ts before this file crashes with "Cannot access
+// 'CTFPickup_Flag' before initialization", because ctf/g_ctf.ts's own
+// import of THIS file (for GetItemByIndex/itemlist/etc.) runs before
+// ctf/g_ctf.ts has reached its own `export const CTFPickup_Flag = ...`
+// line. Each wrapper only reads the real import inside its own function
+// body, deferred until first actually called -- long after both modules
+// have finished evaluating. `CTFPickup_Flag`/`CTFDrop_Flag` also preserve
+// g_cmds.ts's pointer-identity comparison (`it.pickup === CTFPickup_Flag`,
+// its own "give all" sentinel): g_cmds.ts now imports these SAME wrapper
+// exports from this file instead of ctf/g_ctf.ts's raw exports, so the
+// identity check still matches the real itemlist entries.
+export function CTFPickup_Flag(ent: EdictT, other: EdictT): boolean {
+  return CTFPickup_Flag_real(ent, other);
+}
+export function CTFDrop_Flag(ent: EdictT, item: GitemT): void {
+  CTFDrop_Flag_real(ent, item);
+}
+export function CTFPickup_Tech(ent: EdictT, other: EdictT): boolean {
+  return CTFPickup_Tech_real(ent, other);
+}
+export function CTFDrop_Tech(ent: EdictT, item: GitemT): void {
+  CTFDrop_Tech_real(ent, item);
+}
+export function CTFWeapon_Grapple(ent: EdictT): void {
+  CTFWeapon_Grapple_real(ent);
+}
+import { PMenu_Next } from "./ctf/p_ctf_menu";
 import { G_FixStuckObject } from "./g_monster";
 import { irandom } from "./q_std";
+// STUB SWAP (xatrix unit): real Weapon_Ionripper/Weapon_Phalanx/Weapon_Trap.
+// NOTE: this closes a real import cycle (p_xatrix_weapon.ts ->
+// g_xatrix_weapon.ts -> g_xatrix_items.ts -> back to this file's own
+// SpawnItem/GetItemByIndex). Every symbol crossing the cycle on both sides
+// is a hoisted `export function` declaration (never a top-level-evaluated
+// `const`), so nothing here is read before it's initialized -- same
+// "real, sanctioned import cycle" shape g_misc.ts's/g_func.ts's own headers
+// already document for train_use/func_train_find.
+import { Weapon_Ionripper, Weapon_Phalanx, Weapon_Trap } from "./p_xatrix_weapon";
 
 export { ArmorIndex, PowerArmorType };
 
@@ -383,18 +480,10 @@ function Weapon_Tesla(_ent: EdictT): void {
 function Weapon_ProxLauncher(_ent: EdictT): void {
   throw new Error("Weapon_ProxLauncher: not yet ported (pending p_rogue_weapon.ts, see rogue/p_rogue_weapon.cpp:28)");
 }
-function Weapon_Ionripper(_ent: EdictT): void {
-  throw new Error("Weapon_Ionripper: not yet ported (pending p_xatrix_weapon.ts, see xatrix/p_xatrix_weapon.cpp:45)");
-}
-function Weapon_Phalanx(_ent: EdictT): void {
-  throw new Error("Weapon_Phalanx: not yet ported (pending p_xatrix_weapon.ts, see xatrix/p_xatrix_weapon.cpp:121)");
-}
-function Weapon_Trap(_ent: EdictT): void {
-  throw new Error("Weapon_Trap: not yet ported (pending p_xatrix_weapon.ts, see xatrix/p_xatrix_weapon.cpp:160)");
-}
-function CTFWeapon_Grapple(_ent: EdictT): void {
-  throw new Error("CTFWeapon_Grapple: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:1453)");
-}
+// Weapon_Ionripper / Weapon_Phalanx / Weapon_Trap: real imports from
+// p_xatrix_weapon.ts -- see file header "STUB SWAP (xatrix unit)".
+// CTFWeapon_Grapple: formerly a local throwing stub here -- see file header
+// (imported below from ctf/g_ctf.ts).
 
 // ---------------------------------------------------------------------------
 // throwing stubs -- rogue spawning/effects, CTF, misc -- see file header
@@ -420,49 +509,40 @@ function Hunter_Launch(_self: EdictT): void {
 function Vengeance_Launch(_self: EdictT): void {
   throw new Error("Vengeance_Launch: not yet ported (pending g_rogue_sphere.ts, see rogue/g_rogue_sphere.cpp:704)");
 }
-function Tag_PickupToken(_ent: EdictT, _other: EdictT): boolean {
-  throw new Error("Tag_PickupToken: not yet ported (pending g_rogue_dm_tag.ts, see rogue/rogue_dm_tag.cpp:113)");
+// Tag_PickupToken: formerly a local throwing stub here -- see file header
+// "Rogue misc" note. Hoisted wrapper, not a plain re-export -- see the
+// "STUB SWAP (rogue DEATHMATCH-MODES/ITEMS unit)" import comment above for
+// why (the same reasoning as the CTFPickup_Flag/etc. wrappers just below
+// this one used to sit above). Preserves the itemlist's pointer identity
+// for this function's name (`Tag_PickupToken`), not its runtime object
+// identity -- nothing in this port line compares against it by reference.
+function Tag_PickupToken(ent: EdictT, other: EdictT): boolean {
+  return Tag_PickupToken_real(ent, other);
 }
-function CTFPickup_Flag(_ent: EdictT, _other: EdictT): boolean {
-  throw new Error("CTFPickup_Flag: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:640)");
-}
-function CTFDrop_Flag(_ent: EdictT, _item: GitemT): void {
-  throw new Error("CTFDrop_Flag: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:818)");
-}
-function CTFPickup_Tech(_ent: EdictT, _other: EdictT): boolean {
-  throw new Error("CTFPickup_Tech: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:1838)");
-}
-function CTFDrop_Tech(_ent: EdictT, _item: GitemT): void {
-  throw new Error("CTFDrop_Tech: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:1881)");
-}
-function CTFFlagSetup(self: EdictT): void {
-  throw new Error(`CTFFlagSetup: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:833) -- called against ${self.classname ?? "?"}`);
-}
-function DoRandomRespawn(_ent: EdictT): ItemIdT {
-  throw new Error("DoRandomRespawn: not yet ported (pending g_rogue_newdm.ts, see rogue/g_rogue_newdm.cpp:126) -- only reached when g_dm_random_items is set (default off)");
+// CTFPickup_Flag / CTFDrop_Flag / CTFPickup_Tech / CTFDrop_Tech /
+// CTFFlagSetup: formerly local throwing stubs here -- see file header
+// (imported below from ctf/g_ctf.ts).
+// DoRandomRespawn: formerly a local throwing stub here -- see file header
+// "Rogue misc" note and the "STUB SWAP" import comment above. Hoisted
+// wrapper, same reasoning as `Tag_PickupToken` just above.
+function DoRandomRespawn(ent: EdictT): ItemIdT {
+  return DoRandomRespawn_real(ent);
 }
 function P_UseCoopInstancedItems(): boolean {
   throw new Error("P_UseCoopInstancedItems: not yet ported (pending p_client.ts, see p_client.cpp:90) -- only reached when coop is set (default off)");
 }
-function PMenu_Next(_ent: EdictT): void {
-  throw new Error(
-    "PMenu_Next: not yet ported (pending p_ctf_menu.ts, see ctf/p_ctf_menu.cpp) -- only reached when SelectNextItem/SelectPrevItem is called with menu=true and the client has an open menu; ValidateSelectedItem (this file's only caller) always passes menu=false, so this is unreachable from here",
-  );
-}
+// PMenu_Next: formerly a local throwing stub here -- see file header
+// (imported below from ctf/p_ctf_menu.ts). This is genuinely reachable now
+// (SelectNextItem/SelectPrevItem's menu=true branch, whenever the client has
+// an open menu), not just a formerly-unreachable-from-here guard.
 function ChaseNext(_ent: EdictT): void {
   throw new Error("ChaseNext: not yet ported (pending p_hud.ts/g_chase.cpp) -- same unreachable-from-here guard as PMenu_Next above");
 }
 
-/** ctf/g_ctf.h's `extern ctfgame_t ctfgame;`-backed match-setup gate, read
- *  unconditionally by Touch_Item. Matches g_combat.ts's own identical
- *  `CTFMatchSetup` (same reasoning: a rogue/CTF match-setup controller that
- *  only sets this true during its own pre-round setup; no server this port
- *  line can currently simulate ever reaches that controller, so `false` is
- *  the faithful, always-correct answer). Not a stub -- a concrete, correct
- *  value for every server this port line can run today. */
-function CTFMatchSetup(): boolean {
-  return false;
-}
+// CTFMatchSetup: formerly pinned `return false` here (a full CTF match-flow
+// port was out of scope for whichever unit landed it first) -- see file
+// header (imported below from ctf/g_ctf.ts, which owns the real `ctfgame`
+// match-state global).
 
 /** g_items.cpp:1499-1624 -- see file header "Compass_Update / Use_Compass". */
 export function Compass_Update(_ent: EdictT, _first: boolean): void {
@@ -521,10 +601,8 @@ function G_CheckInfiniteAmmo(item: GitemT): boolean {
   return cvarBool("g_infinite_ammo", "0", CvarFlagsT.CVAR_LATCH) || (cvarBool("deathmatch", "0", CvarFlagsT.CVAR_LATCH) && cvarBool("g_instagib", "0", CvarFlagsT.CVAR_NOFLAGS));
 }
 
-/** ctf/g_ctf.cpp:2125: `bool CTFHasRegeneration(edict_t *ent)`. */
-export function CTFHasRegeneration(ent: EdictT): boolean {
-  return ent.client !== null && ent.client.pers.inventory[ItemIdT.IT_TECH_REGENERATION] !== 0;
-}
+// CTFHasRegeneration: formerly a real, local export here -- moved to
+// ctf/g_ctf.ts as part of that unit's consolidation (imported below).
 
 /** g_cmds.cpp:6: `void SelectNextItem(edict_t *ent, item_flags_t itflags, bool menu = true)`. */
 export function SelectNextItem(ent: EdictT, itflags: ItemFlagsT, menu = true): void {

@@ -171,10 +171,12 @@ import {
   FRAME_stand01,
   FRAME_stand40,
 } from "./m_player";
-import { ArmorIndex, PowerArmorType, T_Damage } from "./g_combat";
+import { PowerArmorType, T_Damage } from "./g_combat";
 import { G_PlayerNotifyGoal } from "./g_target";
 import { DeathmatchScoreboardMessage, G_CheckChaseStats, G_SetCoopStats, G_SetSpectatorStats, G_SetStats, PlayerStatT } from "./p_hud";
 import { P_CurrentKickAngles, P_CurrentKickOrigin, PlayerNoise } from "./p_weapon";
+import { CTF_GRAPPLE_STATE_FLY, CTF_GRAPPLE_STATE_HANG, CTF_GRAPPLE_STATE_PULL, CTFApplyRegeneration, CTFEffects, CTFSetPowerUpEffect } from "./ctf/g_ctf";
+import { PMenu_Do_Update } from "./ctf/p_ctf_menu";
 
 // ---------------------------------------------------------------------------
 // cvar-read helpers (see g_combat.ts's own precedent for this exact idiom)
@@ -204,9 +206,6 @@ export function G_TeamplayEnabled(): boolean {
   );
 }
 
-/** ctf/g_ctf.h:16-20 `enum ctfteam_grapple_state_t` -- see file header. */
-const CTF_GRAPPLE_STATE_FLY = 0;
-
 // ---------------------------------------------------------------------------
 // module-scope statics (see file header)
 // ---------------------------------------------------------------------------
@@ -232,9 +231,10 @@ function Bot_EndFrame(_ent: EdictT): void {
   throw new Error("Bot_EndFrame: not yet ported (pending bots/, see bots/bot_includes.h)");
 }
 
-function PMenu_Do_Update(_ent: EdictT): void {
-  throw new Error("PMenu_Do_Update: not yet ported (pending p_ctf_menu.ts, see ctf/p_ctf_menu.cpp)");
-}
+// PMenu_Do_Update: formerly a local throwing stub here -- src/kexgame/ctf/
+// p_ctf_menu.ts has landed with a real export (imported below). Reached by
+// ClientEndServerFrame whenever a client has an open menu (e.g. after
+// CTFOpenJoinMenu/CTFAdmin) -- not gated behind ctf/teamplay cvars at all.
 
 /** Same stub g_utils.ts carries under this exact name; see that file's own
  *  "local, unexported stub" precedent and this file's header. */
@@ -348,76 +348,11 @@ function activePlayers(): EdictT[] {
 }
 
 // ---------------------------------------------------------------------------
-// CTFEffects / CTFSetPowerUpEffect / CTFApplyRegeneration -- ported here,
-// not stubs (see file header)
+// CTFEffects / CTFSetPowerUpEffect / CTFApplyRegeneration -- REAL imports
+// from ctf/g_ctf.ts (this file's own former real, local copies -- including
+// modelindex_flag1/2, now set for real by CTFPrecache -- moved there as
+// part of that unit's consolidation; see ctf/g_ctf.ts's own header).
 // ---------------------------------------------------------------------------
-
-/** ctf/g_ctf.cpp:868-888: CTF module globals set by PrecacheItem (not
- *  ported); concrete default 0, see file header. */
-let modelindex_flag1 = 0;
-let modelindex_flag2 = 0;
-
-/** ctf/g_ctf.cpp:868-888: `void CTFEffects(edict_t *player)`. */
-function CTFEffects(player: EdictT): void {
-  const client = player.client;
-  if (client === null) return;
-
-  player.s.effects &= ~(EffectsT.EF_FLAG1 | EffectsT.EF_FLAG2);
-  if (player.health > 0) {
-    if (client.pers.inventory[ItemIdT.IT_FLAG1]) player.s.effects |= EffectsT.EF_FLAG1;
-    if (client.pers.inventory[ItemIdT.IT_FLAG2]) player.s.effects |= EffectsT.EF_FLAG2;
-  }
-
-  if (client.pers.inventory[ItemIdT.IT_FLAG1]) player.s.modelindex3 = modelindex_flag1;
-  else if (client.pers.inventory[ItemIdT.IT_FLAG2]) player.s.modelindex3 = modelindex_flag2;
-  else player.s.modelindex3 = 0;
-}
-
-/** ctf/g_ctf.cpp:3854-3862: `void CTFSetPowerUpEffect(edict_t *ent, effects_t def)`. */
-function CTFSetPowerUpEffect(ent: EdictT, def: bigint): void {
-  const client = ent.client;
-  if (client !== null && client.resp.ctf_team === CtfteamT.CTF_TEAM1 && def === EffectsT.EF_QUAD) {
-    ent.s.effects |= EffectsT.EF_PENT; // red
-  } else if (client !== null && client.resp.ctf_team === CtfteamT.CTF_TEAM2 && def === EffectsT.EF_PENT) {
-    ent.s.effects |= EffectsT.EF_QUAD; // blue
-  } else {
-    ent.s.effects |= def;
-  }
-}
-
-/** ctf/g_ctf.cpp:2080-2119: `void CTFApplyRegeneration(edict_t *ent)`. */
-function CTFApplyRegeneration(ent: EdictT): void {
-  const client = ent.client;
-  if (client === null) return;
-
-  let noise = false;
-  let volume = 1.0;
-
-  if (client.silencer_shots) volume = 0.2;
-
-  if (client.pers.inventory[ItemIdT.IT_TECH_REGENERATION]) {
-    if (client.ctf_regentime < level.time) {
-      client.ctf_regentime = level.time;
-      if (ent.health < 150) {
-        ent.health += 5;
-        if (ent.health > 150) ent.health = 150;
-        client.ctf_regentime = Gtime_add(client.ctf_regentime, Gtime_from_ms(500));
-        noise = true;
-      }
-      const index = ArmorIndex(ent);
-      if (index !== ItemIdT.IT_NULL && client.pers.inventory[index] < 150) {
-        client.pers.inventory[index] += 5;
-        if (client.pers.inventory[index] > 150) client.pers.inventory[index] = 150;
-        client.ctf_regentime = Gtime_add(client.ctf_regentime, Gtime_from_ms(500));
-        noise = true;
-      }
-    }
-    if (noise && client.ctf_techsndtime < level.time) {
-      client.ctf_techsndtime = Gtime_add(level.time, Gtime_from_ms(1000));
-      gi.sound(ent, SoundchanT.CHAN_AUX, gi.soundindex("ctf/tech4.wav"), volume, ATTN_NORM, 0);
-    }
-  }
-}
 
 // ---------------------------------------------------------------------------
 // SV_CalcRoll
@@ -1086,11 +1021,6 @@ function vec3_origin_local(): Vec3 {
 // ---------------------------------------------------------------------------
 // G_SetClientEffects
 // ---------------------------------------------------------------------------
-
-/** ctf/g_ctf.h:16-20 `enum ctfteam_grapple_state_t` -- see file header
- *  (CTF_GRAPPLE_STATE_FLY declared earlier). */
-const CTF_GRAPPLE_STATE_PULL = 1;
-const CTF_GRAPPLE_STATE_HANG = 2;
 
 /** p_view.cpp:861-989: `void G_SetClientEffects(edict_t *ent)`. */
 export function G_SetClientEffects(ent: EdictT): void {

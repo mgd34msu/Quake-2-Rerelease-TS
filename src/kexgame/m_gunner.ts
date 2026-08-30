@@ -176,6 +176,8 @@ import {
   RegisterMonsterinfoSidestep,
 } from "./g_save_registry";
 import { monster_duck_up, M_MonsterDodge } from "./m_soldier";
+import { blocked_checkjump } from "./rogue/g_rogue_newai";
+import { blocked_checkplat } from "./m_supertank";
 import { MframeT, MmoveT } from "./g_local_types";
 import { gi, level } from "./g_main_globals";
 import { ai_charge, ai_move, ai_run, ai_stand, ai_walk, FoundTarget, range_to, visible } from "./g_ai";
@@ -261,13 +263,11 @@ const MODEL_SCALE = 1.15;
 // EXTERNAL DEPENDENCIES NOT YET PORTED -- see file header
 // ---------------------------------------------------------------------------
 
-function blocked_checkplat(_self: EdictT, _dist: number): boolean {
-  throw new Error("blocked_checkplat: not yet ported (rogue mission-pack content, see rogue/g_rogue_newai.cpp:14)");
-}
-
-function blocked_checkjump(_self: EdictT, _dist: number): BlockedJumpResultT {
-  throw new Error("blocked_checkjump: not yet ported (rogue mission-pack content, see rogue/g_rogue_newai.cpp:123)");
-}
+// blocked_checkjump is now a real import from "./rogue/g_rogue_newai";
+// blocked_checkplat is now a real import from "./m_supertank" (its real
+// declared home is rogue/g_rogue_newai.cpp:14, but it is NOT re-exported
+// from rogue/g_rogue_newai.ts -- see that file's header note on the
+// three-module import-cycle hazard that re-export would create).
 
 // ---------------------------------------------------------------------------
 // PLACEMENT-MISMATCH FUNCTIONS PORTED LOCALLY -- see file header

@@ -205,6 +205,9 @@ import { irandom } from "./q_std";
 import { SpawnFlags_has } from "./spawnflags";
 import { ArmorIndex, PowerArmorType } from "./g_combat";
 import { G_TeamplayEnabled } from "./p_view";
+import { GetItemByIndex } from "./g_items";
+import { CTFCalcRankings, CTFCalcScores, CTFScoreboardMessage, SetCTFStats } from "./ctf/g_ctf";
+import { PMenu_Close } from "./ctf/p_ctf_menu";
 import { respawn, P_UseCoopInstancedItems } from "./p_client";
 
 // bg_local.h's `LAYOUTS_*` bit flags live in game.h (kexapi/game.ts) as
@@ -419,42 +422,28 @@ export function G_CheckInfiniteAmmo(item: GitemT): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// unported cross-deps (throwing stubs) -- see file header
+// unported cross-deps (throwing stubs) -- see file header. PMenu_Close/
+// CTFCalcScores/CTFScoreboardMessage/CTFCalcRankings are now REAL imports
+// from ctf/g_ctf.ts and ctf/p_ctf_menu.ts (this file's former throwing
+// stubs, and the narrow `ctfTeamLogoStats`/`ctfTechIcon`/`resolveItem`
+// stubs backing this file's own former local `SetCTFStats` partial, are all
+// gone -- SetCTFStats's real, full body now lives in ctf/g_ctf.ts; see that
+// file's own header for the full consolidation inventory).
 // ---------------------------------------------------------------------------
-
-function PMenu_Close(_ent: EdictT): void {
-  throw new Error("PMenu_Close: not yet ported (pending p_ctf_menu.ts, see ctf/p_ctf_menu.cpp)");
-}
-
-function CTFCalcScores(): void {
-  throw new Error("CTFCalcScores: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:892)");
-}
-
-function CTFScoreboardMessage(_ent: EdictT, _killer: EdictT | null): void {
-  throw new Error("CTFScoreboardMessage: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:1611)");
-}
-
-function CTFCalcRankingsAndReport(_isEnd: boolean): void {
-  throw new Error("CTFCalcRankings/gi.ReportMatchDetails_Multicast (team path): not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:907)");
-}
 
 function stripCoopKeys(): void {
   throw new Error("BeginIntermission coop key-strip: not yet ported -- itemlist IF_KEY scan needs g_items.ts (see p_hud.cpp:322-327)");
 }
 
-/** `GetItemByIndex(id)`: not yet ported (pending g_items.ts, see g_items.cpp).
- *  Returns the full `GitemT` (not just `.icon`) since callers also need
- *  `.flags` for `G_CheckInfiniteAmmo`. */
-function resolveItem(_id: ItemIdT): GitemT {
-  throw new Error("GetItemByIndex(...): not yet ported (pending g_items.ts, see g_items.cpp)");
-}
-
-function ctfTeamLogoStats(_ent: EdictT): void {
-  throw new Error("SetCTFStats team-logo block: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:1068-...)");
-}
-
-function ctfTechIcon(_id: ItemIdT): string {
-  throw new Error("SetCTFStats tech-icon GetItemByIndex(...).icon: not yet ported (pending g_items.ts, see ctf/g_ctf.cpp:1054-1063)");
+/** `GetItemByIndex(id)`: REAL import from g_items.ts below. Wraps it to
+ *  return the full, non-null `GitemT` (not just `.icon`) since callers also
+ *  need `.flags` for `G_CheckInfiniteAmmo` -- every real call site below
+ *  only passes an id it has already confirmed is not IT_NULL, so a null
+ *  result is an invariant violation, not a normal case. */
+function resolveItem(id: ItemIdT): GitemT {
+  const item = GetItemByIndex(id);
+  if (item === null) throw new Error(`resolveItem: GetItemByIndex(${id}) returned null (invariant violated -- caller must only pass a known-valid item id)`);
+  return item;
 }
 
 // ---------------------------------------------------------------------------
@@ -500,73 +489,10 @@ export function G_SetCoopStats(ent: EdictT): void {
 }
 
 // ---------------------------------------------------------------------------
-// SetCTFStats -- real CTF-independent prefix, narrow stubs for the
-// itemlist/ctf-cvar-gated tails (see file header)
+// SetCTFStats -- REAL import from ctf/g_ctf.ts (this file's own former
+// local partial, plus its three backing stubs, are gone; see that file's
+// own header for the full consolidation inventory).
 // ---------------------------------------------------------------------------
-
-/** ctf/g_ctf.cpp:98: `constexpr item_id_t tech_ids[] = { ... };` */
-const TECH_IDS: readonly ItemIdT[] = [ItemIdT.IT_TECH_RESISTANCE, ItemIdT.IT_TECH_STRENGTH, ItemIdT.IT_TECH_HASTE, ItemIdT.IT_TECH_REGENERATION];
-
-/** ctf/g_ctf.cpp:1006-1... : `void SetCTFStats(edict_t *ent)`. */
-function SetCTFStats(ent: EdictT): void {
-  const client = ent.client;
-  if (client === null) return;
-
-  // `ctfgame.match`/`ctfgame.warnactive` -- CTF match-state global, never
-  // populated anywhere in this port line (no g_ctf.ts unit has landed yet);
-  // concrete default (MATCH_NONE / not warning), matching g_combat.ts's
-  // CTFMatchSetup/DMGame "concrete faithful value, not a stub" precedent.
-  client.ps.stats[PlayerStatT.STAT_CTF_MATCH] = 0;
-  client.ps.stats[PlayerStatT.STAT_CTF_TEAMINFO] = 0;
-
-  // ghosting
-  if (client.resp.ghost !== null) {
-    client.resp.ghost.score = client.resp.score;
-    client.resp.ghost.netname = client.pers.netname;
-    client.resp.ghost.number = ent.s.number;
-  }
-
-  // logo headers for the frag display -- `imageindex_ctfsb1/2` are CTF
-  // module globals set by PrecacheItem (not ported); concrete default 0,
-  // same reasoning as p_view.ts's `modelindex_flag1/2`.
-  client.ps.stats[PlayerStatT.STAT_CTF_TEAM1_HEADER] = 0;
-  client.ps.stats[PlayerStatT.STAT_CTF_TEAM2_HEADER] = 0;
-
-  const blink = Gtime_milliseconds(level.time) % 1000 < 500;
-
-  // if during intermission, blink the team header of the winning team.
-  // `ctfgame.team1/team2/total1/total2` are always 0 (see above), so this
-  // always lands on the "tie game" branch (both headers 0) -- ported
-  // faithfully rather than special-cased so a future g_ctf.ts landing that
-  // starts populating `ctfgame` needs no changes here.
-  if (Gtime_nonzero(level.intermissiontime) && blink) {
-    const team1 = 0;
-    const team2 = 0;
-    const total1 = 0;
-    const total2 = 0;
-    if (team1 > team2) client.ps.stats[PlayerStatT.STAT_CTF_TEAM1_HEADER] = 0;
-    else if (team2 > team1) client.ps.stats[PlayerStatT.STAT_CTF_TEAM2_HEADER] = 0;
-    else if (total1 > total2) client.ps.stats[PlayerStatT.STAT_CTF_TEAM1_HEADER] = 0;
-    else if (total2 > total1) client.ps.stats[PlayerStatT.STAT_CTF_TEAM2_HEADER] = 0;
-    else {
-      client.ps.stats[PlayerStatT.STAT_CTF_TEAM1_HEADER] = 0;
-      client.ps.stats[PlayerStatT.STAT_CTF_TEAM2_HEADER] = 0;
-    }
-  }
-
-  // tech icon
-  client.ps.stats[PlayerStatT.STAT_CTF_TECH] = 0;
-  for (const techId of TECH_IDS) {
-    if (client.pers.inventory[techId]) {
-      client.ps.stats[PlayerStatT.STAT_CTF_TECH] = gi.imageindex(ctfTechIcon(techId)); // narrow stub, see file header
-      break;
-    }
-  }
-
-  if (cvarBool("ctf", "0", CvarFlagsT.CVAR_SERVERINFO | CvarFlagsT.CVAR_LATCH)) {
-    ctfTeamLogoStats(ent); // narrow stub, see file header
-  }
-}
 
 // ---------------------------------------------------------------------------
 // G_SetStats -- see file header "STAT-LAYOUT FINDINGS" / "DROPPED" / "STUB
@@ -620,7 +546,7 @@ export function G_SetStats(ent: EdictT): void {
   client.ps.stats[PlayerStatT.STAT_AMMO] = 0;
 
   if (client.pers.weapon !== null && client.pers.weapon.ammo !== ItemIdT.IT_NULL) {
-    const item = resolveItem(client.pers.weapon.ammo); // narrow stub, see file header
+    const item = resolveItem(client.pers.weapon.ammo);
     if (!G_CheckInfiniteAmmo(item)) {
       client.ps.stats[PlayerStatT.STAT_AMMO_ICON] = gi.imageindex(item.icon ?? "");
       client.ps.stats[PlayerStatT.STAT_AMMO] = client.pers.inventory[client.pers.weapon.ammo];
@@ -644,7 +570,7 @@ export function G_SetStats(ent: EdictT): void {
     client.ps.stats[PlayerStatT.STAT_ARMOR_ICON] = power_armor_type === ItemIdT.IT_ITEM_POWER_SHIELD ? gi.imageindex("i_powershield") : gi.imageindex("i_powerscreen");
     client.ps.stats[PlayerStatT.STAT_ARMOR] = cells;
   } else if (index !== ItemIdT.IT_NULL) {
-    const item = resolveItem(index); // narrow stub, see file header
+    const item = resolveItem(index);
     client.ps.stats[PlayerStatT.STAT_ARMOR_ICON] = gi.imageindex(item.icon ?? "");
     client.ps.stats[PlayerStatT.STAT_ARMOR] = client.pers.inventory[index];
   } else {
@@ -714,7 +640,7 @@ export function G_SetStats(ent: EdictT): void {
       else if (bestEntry.getTime !== null) value = Math.ceil(Gtime_seconds(Gtime_subtract(bestEntry.getTime(client), level.time)));
       else value = 0; // unreachable: every table entry has exactly one of getTime/getCount
 
-      client.ps.stats[PlayerStatT.STAT_TIMER_ICON] = gi.imageindex(resolveItem(bestEntry.item).icon ?? ""); // narrow stub, see file header
+      client.ps.stats[PlayerStatT.STAT_TIMER_ICON] = gi.imageindex(resolveItem(bestEntry.item).icon ?? "");
       client.ps.stats[PlayerStatT.STAT_TIMER] = value;
     }
   }
@@ -1092,36 +1018,45 @@ export function G_EndOfUnitMessage(): void {
 // G_ReportMatchDetails
 // ---------------------------------------------------------------------------
 
-/** p_hud.cpp:186-266: `void G_ReportMatchDetails(bool is_end)`. */
+/** p_hud.cpp:186-266: `void G_ReportMatchDetails(bool is_end)`. Both branches
+ *  below fall through into the SAME num_players-counting tail -- unlike this
+ *  file's former stub-standin, which early-returned out of the team branch
+ *  (a workaround for not having a real CTFCalcRankings yet) and so never
+ *  reached that tail for CTF/teamplay games. Now that ctf/g_ctf.ts's real
+ *  CTFCalcRankings has landed, this is corrected to match the real C++
+ *  control flow exactly. */
 export function G_ReportMatchDetails(isEnd: boolean): void {
   const player_ranks = new Array<number>(MAX_CLIENTS).fill(0);
 
   // CTF/TDM is simple
   if (cvarBool("ctf", "0", CvarFlagsT.CVAR_SERVERINFO | CvarFlagsT.CVAR_LATCH) || cvarBool("teamplay", "0", CvarFlagsT.CVAR_LATCH)) {
-    CTFCalcRankingsAndReport(isEnd); // narrow stub, see file header
-    return;
-  }
+    CTFCalcRankings(player_ranks);
 
-  // sort players by score, then match everybody to the current highest
-  // score downwards until we run out of players.
-  const sortedPlayers = activePlayers().sort((a, b) => {
-    const scoreA = a.client !== null ? a.client.resp.score : 0;
-    const scoreB = b.client !== null ? b.client.resp.score : 0;
-    return scoreB - scoreA;
-  });
+    gi.WriteByte(2);
+    gi.WriteString("RED TEAM"); // team 0
+    gi.WriteString("BLUE TEAM"); // team 1
+  } else {
+    // sort players by score, then match everybody to the current highest
+    // score downwards until we run out of players.
+    const sortedPlayers = activePlayers().sort((a, b) => {
+      const scoreA = a.client !== null ? a.client.resp.score : 0;
+      const scoreB = b.client !== null ? b.client.resp.score : 0;
+      return scoreB - scoreA;
+    });
 
-  gi.WriteByte(0);
+    let currentScore = 0;
+    let currentRank = 0;
 
-  let currentScore = 0;
-  let currentRank = 0;
-
-  for (const player of sortedPlayers) {
-    if (player.client === null) continue;
-    if (currentRank === 0 || player.client.resp.score !== currentScore) {
-      currentRank++;
-      currentScore = player.client.resp.score;
+    for (const player of sortedPlayers) {
+      if (player.client === null) continue;
+      if (currentRank === 0 || player.client.resp.score !== currentScore) {
+        currentRank++;
+        currentScore = player.client.resp.score;
+      }
+      player_ranks[player.s.number - 1] = currentRank;
     }
-    player_ranks[player.s.number - 1] = currentRank;
+
+    gi.WriteByte(0);
   }
 
   let numPlayers = 0;
@@ -1159,7 +1094,7 @@ export function BeginIntermission(targ: EdictT): void {
   if (Gtime_nonzero(level.intermissiontime)) return; // already activated
 
   // ZOID
-  if (cvarBool("ctf", "0", CvarFlagsT.CVAR_SERVERINFO | CvarFlagsT.CVAR_LATCH)) CTFCalcScores(); // narrow stub, see file header
+  if (cvarBool("ctf", "0", CvarFlagsT.CVAR_SERVERINFO | CvarFlagsT.CVAR_LATCH)) CTFCalcScores();
   // ZOID
 
   game.autosaved = false;
@@ -1273,7 +1208,7 @@ const MAX_SCOREBOARD_SIZE = 1024;
 export function DeathmatchScoreboardMessage(ent: EdictT, killer: EdictT | null): void {
   // ZOID
   if (G_TeamplayEnabled()) {
-    CTFScoreboardMessage(ent, killer); // narrow stub, see file header
+    CTFScoreboardMessage(ent, killer);
     return;
   }
   // ZOID
@@ -1360,7 +1295,7 @@ export function Cmd_Score_f(ent: EdictT): void {
   globals.server_flags &= ~ServerFlagsT.SERVER_FLAG_SLOW_TIME;
 
   // ZOID
-  if (client.menu !== null) PMenu_Close(ent); // narrow stub, see file header
+  if (client.menu !== null) PMenu_Close(ent);
   // ZOID
 
   if (!cvarBool("deathmatch", "0", CvarFlagsT.CVAR_LATCH) && !cvarBool("coop", "0", CvarFlagsT.CVAR_LATCH)) return;

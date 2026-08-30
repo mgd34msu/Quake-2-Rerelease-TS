@@ -109,6 +109,7 @@ import { G_FreeEdict } from "./g_utils";
 import { st } from "./g_spawn";
 import { ai_stand, ai_run, ai_walk, ai_charge, ai_move, range_to, visible, FoundTarget } from "./g_ai";
 import { M_SetAnimation, M_AllowSpawn, M_ShouldReactToPain, M_ProjectFlashSource, M_CheckClearShot, monster_dead, walkmonster_start } from "./g_monster";
+import { monster_duck_up, M_MonsterDodge } from "./m_soldier";
 import { fire_hit } from "./g_weapon";
 import { ThrowGibs, type GibDefT } from "./g_misc";
 import { monsterFlashOffset } from "./m_flash";
@@ -492,20 +493,9 @@ function monster_duck_hold(self: EdictT): void {
 // of module load order, and avoids a real (observed) `bun test`-time crash:
 // "g_save_registry: duplicate monsterinfo_unduck registration for name
 // 'monster_duck_up'".
-const monster_duck_up =
-  LookupMonsterinfoUnduck("monster_duck_up") ??
-  RegisterMonsterinfoUnduck("monster_duck_up", (self: EdictT): void => {
-    if ((self.monsterinfo.aiflags & MonsterAiFlagsT.AI_DUCKED) === 0n) return;
-
-    self.monsterinfo.aiflags &= ~MonsterAiFlagsT.AI_DUCKED;
-    self.maxs[2] = self.monsterinfo.base_height;
-    self.takedamage = true;
-    // we finished a duck-up successfully, so cut the time remaining in half
-    if (self.monsterinfo.next_duck_time > level.time) {
-      self.monsterinfo.next_duck_time = Gtime_add(level.time, Gtime_from_ms((self.monsterinfo.next_duck_time - level.time) / 2));
-    }
-    gi.linkentity(self);
-  });
+// canonical shared infra: import from m_soldier.ts (the owner). The old
+// lookup-or-register guard raced the canonical plain registration when this
+// module evaluated first.
 
 const M_MonsterDodge_impl = (self: EdictT, attacker: EdictT, eta: GTime, tr: KexTraceT | null, gravity: boolean): void => {
     const r = frandom();
@@ -600,7 +590,7 @@ const M_MonsterDodge_impl = (self: EdictT, attacker: EdictT, eta: GTime, tr: Kex
 
 // see monster_duck_up's comment above -- same process-wide save-registry
 // collision risk with the concurrent monster batch's m_soldier.ts.
-const M_MonsterDodge = LookupMonsterinfoDodge("M_MonsterDodge") ?? RegisterMonsterinfoDodge("M_MonsterDodge", M_MonsterDodge_impl);
+// canonical M_MonsterDodge imported from m_soldier.ts (see note above).
 
 // ---------------------------------------------------------------------------
 // local mframe_t / mmove_t helpers (see m_flipper.ts for rationale)

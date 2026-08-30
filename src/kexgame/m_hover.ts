@@ -27,7 +27,7 @@
 // here -- there is nothing to import.
 //
 // ============================================================================
-// EXTERNAL DEPENDENCY NOT PORTED: monster_fire_blaster2 (ROGUE mission pack)
+// STUB SWAP: monster_fire_blaster2 is now a real import (ROGUE mission pack)
 // ============================================================================
 // `hover_fire_blaster`'s daedalus branch (self->mass >= 200, i.e. every
 // monster_daedalus -- SP_monster_hover always sets mass=225 for that
@@ -35,14 +35,15 @@
 // only definition anywhere in the source tree is
 // rerelease/rogue/g_rogue_monster.cpp:7 (a two-line wrapper around
 // `fire_blaster2`, itself defined in rerelease/rogue/g_rogue_newweap.cpp --
-// a ROGUE mission-pack file, genuinely out of this unit's scope, which names
-// only m_hover.cpp/.h as sources). Kept as a local, unexported, cited
-// throwing stub -- matching m_soldier.ts's own precedent for its xatrix
-// ionripper/blueblaster/dabeam family (m_soldier.ts header: "a narrower gap
-// than [an unconditionally-reachable landmine], affecting three of six
-// spawn variants' attack animations only"). Here the shape is identical:
-// affects only the daedalus half of this file's two spawn variants' attack
-// animation, not the base hover, and not pain/death/movement for either.
+// a ROGUE mission-pack pair of files, genuinely out of this unit's original
+// scope, which named only m_hover.cpp/.h as sources). This file used to
+// carry a local, unexported, cited throwing stub for it -- matching
+// m_soldier.ts's own precedent for its xatrix ionripper/blueblaster/dabeam
+// family. Now that rogue/g_rogue_monster.ts and rogue/g_rogue_newweap.ts
+// have landed, the local stub is DELETED and replaced with `import {
+// monster_fire_blaster2 } from "./rogue/g_rogue_monster"`. Affects only the
+// daedalus half of this file's two spawn variants' attack animation, not
+// the base hover, and not pain/death/movement for either.
 //
 // ============================================================================
 // OTHER DEVIATIONS
@@ -114,6 +115,7 @@ import {
 import { ai_stand, ai_walk, ai_run, ai_move, ai_charge, visible } from "./g_ai";
 import { monster_fire_blaster, M_ProjectFlashSource, M_SetAnimation, M_AllowSpawn, M_ShouldReactToPain, flymonster_start } from "./g_monster";
 import { monsterFlashOffset } from "./m_flash";
+import { monster_fire_blaster2 } from "./rogue/g_rogue_monster";
 import { ThrowGibs } from "./g_misc";
 import { G_FreeEdict } from "./g_utils";
 import { gi, level } from "./g_main_globals";
@@ -390,14 +392,9 @@ function hover_reattack(self: EdictT): void {
   M_SetAnimation(self, hover_move_end_attack, true);
 }
 
-/**
- * `monster_fire_blaster2` (ROGUE mission pack, rogue/g_rogue_monster.cpp:7)
- * -- see file header. Reached only when `self.mass >= 200` (every
- * monster_daedalus).
- */
-function monster_fire_blaster2(_self: EdictT, _start: Vec3, _dir: Vec3, _damage: number, _speed: number, _flashtype: MonsterMuzzleflashIdT, _effect: EffectsT): void {
-  throw new Error("monster_fire_blaster2: not yet ported (ROGUE mission pack, see rogue/g_rogue_monster.cpp:7 + rogue/g_rogue_newweap.cpp's fire_blaster2)");
-}
+// monster_fire_blaster2 (ROGUE mission pack, rogue/g_rogue_monster.cpp:7) --
+// see file header "STUB SWAP". Reached only when `self.mass >= 200` (every
+// monster_daedalus). Real import from "./rogue/g_rogue_monster" below.
 
 function hover_fire_blaster(self: EdictT): void {
   const enemy = self.enemy;

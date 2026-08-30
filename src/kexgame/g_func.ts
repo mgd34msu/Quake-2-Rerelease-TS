@@ -56,68 +56,57 @@
 // `bunx tsc --noEmit` and `bun test` actually importing both files together.
 //
 // ============================================================================
-// THE plat2 BOUNDARY -- func_plat2/plat2_spawn_danger_area/
-// plat2_kill_danger_area are NOT in this file's scope, but their call sites
-// ARE reached by every ordinary func_plat, not just plat2 entities
+// THE plat2 BOUNDARY -- func_plat2 itself is NOT in this file's scope, but
+// plat_go_up/plat_hit_bottom's plat2_spawn_danger_area/plat2_kill_danger_area
+// call sites ARE reached by every ordinary func_plat, not just plat2 entities
 // ============================================================================
 // g_func.cpp calls `plat2_kill_danger_area(ent)` (plat_hit_bottom,
 // g_func.cpp:541) and `plat2_spawn_danger_area(ent)` (plat_go_up,
 // g_func.cpp:573) -- both forward-declared in g_local.h:2580-2581 but NEVER
-// DEFINED anywhere in g_func.cpp itself. Grepping the ENTIRE
-// quake2-rerelease-dll tree for their bodies (and for `SP_func_plat2`, which
-// g_spawn.cpp:181/393 declares and registers but likewise never defines
-// outside this one place) finds exactly one real definition each:
+// DEFINED anywhere in g_func.cpp itself. Their one real definition each is
 // rerelease/rogue/g_rogue_func.cpp:18 (plat2_spawn_danger_area) and :29
 // (plat2_kill_danger_area) -- the ROGUE mission-pack's OWN separate
 // translation unit, not g_func.cpp. `plat2flags_t`/`PLAT2_*`/
-// `edict_t::plat2flags` are save-compat-only in THIS file's scope (already
-// ported as pure types in g_local.ts/g_local_types.ts, per that unit's own
-// header) -- no plat2-SPECIFIC behavior (`func_plat2` itself, or its
-// CALLED/MOVING/WAITING state machine) is reachable from anything in
-// g_func.cpp.
+// `edict_t::plat2flags` are save-compat-only in THIS file's scope (pure
+// types in g_local.ts/g_local_types.ts) -- no plat2-SPECIFIC behavior
+// (`func_plat2` itself, or its CALLED/MOVING/WAITING state machine) is
+// reachable from anything in g_func.cpp.
 //
-// IMPORTANT CORRECTION (found by this unit's own test suite): an EARLIER
-// draft of this file ported both functions as unconditional throwing stubs,
-// reasoning that "every func_plat entity has plat2flags permanently at its
-// PLAT2_NONE default, so the stubs are unreachable from any map using plain
-// func_plat." That reasoning was WRONG -- reading g_rogue_func.cpp:18-35's
-// actual bodies shows NEITHER function checks `ent->plat2flags` at all; both
-// run unconditionally for every SOLID_BSP-moving func_plat, plat2 or not
-// (they exist to spawn/clear a "bad_area" hazard marker so monster AI paths
-// around a moving platform while it's not at rest -- a general MOVER
-// feature the KEX rerelease happens to have implemented inside the rogue
-// mission-pack's translation unit, not something plat2-exclusive). A
-// throwing stub here would make `plat_hit_bottom`/`plat_go_up` -- reached by
-// EVERY func_plat, the instant it reaches the bottom or starts moving up --
-// throw on ordinary platform use, which this file's own
-// "Use_Plat lowers a top-started plat..." test caught immediately.
+// `plat2_kill_danger_area` was ALREADY a real, faithful local implementation
+// here (needs only `G_FindByString`/`G_FreeEdict`, both already imported by
+// this file) -- unaffected by this swap, still exported to
+// rogue/g_rogue_func.ts's `plat2_hit_bottom` as a second call site (see that
+// file's own header for why it keeps its own copy rather than importing
+// this one). `plat2_spawn_danger_area` used to be a documented NO-OP: its
+// real body (g_rogue_func.cpp:18-26) calls `SpawnBadArea`, whose own real
+// home (rerelease/rogue/g_rogue_newai.cpp) had no src/kexgame/ port at the
+// time this file landed. rogue/g_rogue_newai.ts has since landed with a
+// real, exported `SpawnBadArea`, and rogue/g_rogue_func.ts now exports a
+// real `plat2_spawn_danger_area` built on top of it (g_rogue_func.cpp:
+// 18-26, ported verbatim). This file's own local no-op function and its
+// explanatory comment are DELETED; `plat_go_up` below now calls the real
+// import instead. Behaviorally this closes the one known gap the old
+// comment flagged: monsters now get a "don't path under this platform right
+// now" hint for the ~2-5 second window a func_plat spends mid-cycle, for
+// every SOLID_BSP-moving func_plat, plat2 or not -- exactly matching the
+// C++ source's own unconditional call site. Nothing about the plat's own
+// mechanical behavior (movement math, blocked handling, state transitions)
+// changes; `plat2_kill_danger_area`'s cleanup loop, previously guaranteed to
+// find nothing (spawn was a no-op), now actually has matching `bad_area`
+// entities to clean up.
 //
-// RULING: `plat2_kill_danger_area` (g_rogue_func.cpp:29-35) needs only
-// `G_FindByString`/`G_FreeEdict` (both already available from g_utils.ts,
-// already imported by this file) -- `while ((t = G_FindByString<&edict_t::
-// classname>(t, "bad_area"))) if (t->owner == ent) G_FreeEdict(t);` is
-// ported here as a REAL, faithful implementation, not a stub.
-// `plat2_spawn_danger_area` (g_rogue_func.cpp:18-26) calls `SpawnBadArea`,
-// which is NOT in this function's own file either -- grepped the ENTIRE
-// tree again: its one real definition is
-// rerelease/rogue/g_rogue_newai.cpp, the rogue AI-hint/pathing subsystem,
-// a third translation unit with no src/kexgame/ port at all yet. Its
-// EFFECT (per its callers) is purely a monster-AI pathing HINT -- "don't
-// path under this platform right now" -- with zero influence on the
-// platform's own mechanical behavior, on player movement, or on anything
-// this file's own state machine reads back. Per PORTING.md's "an honest,
-// documented consequence of a missing upstream global, not a silent
-// behavior change" standard, `plat2_spawn_danger_area` is ported as a
-// documented NO-OP (not a throw): every func_plat still opens/closes/waits
-// exactly per the C++ math; the only observable gap is that monsters won't
-// yet know to avoid standing under a platform mid-cycle, which has no
-// portable test surface in this unit anyway (monster AI pathing lives in
-// g_monster.ts/g_ai.ts, neither of which reads a "bad_area" entity kind
-// yet). Since spawn is a no-op, `plat2_kill_danger_area`'s cleanup loop
-// above will simply never find a match in practice today -- which is fine;
-// it is still the CORRECT, forward-compatible implementation for whenever
-// a future rogue-AI port starts calling `plat2_spawn_danger_area` for real
-// and needs the matching cleanup to already exist.
+// This creates a new import edge, g_func.ts -> rogue/g_rogue_func.ts, the
+// first cross into src/kexgame/rogue/ from a non-rogue file in this port
+// line -- one-way (rogue/g_rogue_func.ts already imports several symbols
+// FROM this file -- `Move_Calc`/`G_SetMoveinfoSounds`/
+// `plat_spawn_inside_trigger` -- for its own `SP_func_plat2`/`plat2_activate`,
+// making this a two-way module cycle). Safe: `plat2_spawn_danger_area` is a
+// hoisted top-level `export function` declaration on rogue/g_rogue_func.ts's
+// side, referenced here only inside `plat_go_up`'s function body (never at
+// this file's own module-eval time), and vice versa for this file's three
+// exports read inside rogue/g_rogue_func.ts's own function bodies -- no TDZ
+// hazard either direction. Verified end-to-end by `bunx tsc --noEmit`
+// succeeding with both files importing each other.
 //
 // ============================================================================
 // `st` (spawn_temp_t) -- a real-shaped, permanently-default placeholder
@@ -321,6 +310,7 @@ import {
   type MoveinfoEndfuncFn,
   type MoveinfoBlockedFn,
 } from "./g_save_registry";
+import { plat2_spawn_danger_area } from "./rogue/g_rogue_func";
 
 // ---------------------------------------------------------------------------
 // small local helpers -- see file header
@@ -802,18 +792,6 @@ function plat2_kill_danger_area(ent: EdictT): void {
   }
 }
 
-/** Documented NO-OP, not a throw -- see file header "THE plat2 BOUNDARY".
- *  The real body (rerelease/rogue/g_rogue_func.cpp:18-26) calls
- *  `SpawnBadArea`, a rogue AI-pathing-hint function defined in a THIRD
- *  translation unit (rerelease/rogue/g_rogue_newai.cpp) with no
- *  src/kexgame/ port at all yet. Its only effect is a monster-AI pathing
- *  hint ("don't path under this platform right now") with zero influence
- *  on this platform's own mechanical behavior -- runs unconditionally for
- *  every func_plat, not just plat2 entities. */
-function plat2_spawn_danger_area(_ent: EdictT): void {
-  // Intentional no-op -- see doc comment above.
-}
-
 const plat_go_down: ThinkFn = RegisterThink("plat_go_down", (ent: EdictT): void => {
   if ((ent.flags & EntFlagsT.FL_TEAMSLAVE) === 0n) {
     if (ent.moveinfo.sound_start) gi.sound(ent, SoundchanT.CHAN_NO_PHS_ADD | SoundchanT.CHAN_VOICE, ent.moveinfo.sound_start, 1, ATTN_STATIC, 0);
@@ -908,8 +886,12 @@ const Touch_Plat_Center: TouchFn = RegisterTouch("Touch_Plat_Center", (self: Edi
   else if (plat.moveinfo.state === MoveStateT.STATE_TOP) plat.nextthink = Gtime_add(level.time, Gtime_from_sec(1)); // still on the plat, delay going down
 });
 
-/** PGM - plat2's change the trigger field. */
-function plat_spawn_inside_trigger(ent: EdictT): EdictT {
+/** PGM - plat2's change the trigger field. Exported (rogue/g_rogue_func.ts
+ *  unit): `plat2_activate`/`SP_func_plat2` (rerelease/rogue/g_rogue_func.cpp)
+ *  call this exact function -- a one-word visibility change, no logic
+ *  touched. See rogue/g_rogue_func.ts's own header, "`plat_spawn_inside_trigger`"
+ *  section, for the full rationale. */
+export function plat_spawn_inside_trigger(ent: EdictT): EdictT {
   const trigger = G_Spawn();
   trigger.touch = Touch_Plat_Center;
   trigger.movetype = MovetypeT.MOVETYPE_NONE;

@@ -170,6 +170,34 @@
 //     ChangeWeapon's `if (ent.s.modelindex === MODELINDEX_PLAYER)` guard;
 //     this unit's fixtures leave modelindex at its zero default so
 //     ChangeWeapon tests never trip it.
+//
+// ============================================================================
+// STUB SWAP (xatrix unit): Throw_Generic / is_quad / damage_multiplier /
+// is_silenced / is_quadfire / requirePlayerClient now exported
+// ============================================================================
+// `Throw_Generic` was real, already-ported, already the shared throwable-
+// weapon state machine behind `Weapon_Grenade` -- just not `export`ed, since
+// only this file needed it before. p_xatrix_weapon.ts's own `Weapon_Trap`
+// (xatrix/p_xatrix_weapon.cpp:160-165) calls it exactly the way
+// `Weapon_Grenade` does here (`Throw_Generic(ent, 15, 48, 5,
+// "weapons/trapcock.wav", 11, 12, pause_frames, false, "weapons/traploop.wav",
+// weapon_trap_fire, false)`), so this unit adds `export` to the one
+// declaration -- no behavior change here.
+//
+// `is_quad`/`damage_multiplier`/`is_silenced` are mutable module-level
+// state, refreshed once per weapon-think tick by `Weapon_RunThink`
+// (p_weapon.cpp:291-306, this file's sole caller of any `weaponthink`,
+// including p_xatrix_weapon.ts's own `Weapon_Ionripper`/`Weapon_Phalanx`/
+// `Weapon_Trap`) BEFORE `weapon.weaponthink(ent)` runs -- so p_xatrix_weapon.ts
+// reading these via a live ES module import sees the exact same
+// already-refreshed values the vanilla weapon-fire functions in THIS file
+// read, with no extra plumbing needed on either side. Exported as `export
+// let` (not wrapped in a getter) specifically so cross-module reads stay
+// live bindings, matching ECMAScript module semantics for mutable exports.
+// `requirePlayerClient` is exported unchanged (same "unconditional
+// dereference invariant" helper this file already used internally),
+// reused by p_xatrix_weapon.ts's own three fire functions instead of being
+// duplicated a second time.
 
 import { type Vec3, vec3, VectorCopy } from "../shared/math";
 import {
@@ -236,6 +264,7 @@ import {
 } from "./m_player";
 import { G_CheckInfiniteAmmo } from "./p_hud";
 import { G_LagCompensate, G_UnLagCompensate } from "./p_view";
+import { CTFApplyHaste, CTFApplyHasteSound, CTFApplyStrengthSound } from "./ctf/g_ctf";
 import { G_Spawn } from "./g_utils";
 import { SpawnFlags_or } from "./spawnflags";
 import { fire_bfg, fire_blaster, fire_bullet, fire_disintegrator, fire_grenade, fire_grenade2, fire_rail, fire_rocket, fire_shotgun } from "./g_weapon";
@@ -277,7 +306,7 @@ const MOD_SSHOTGUN = modFromId(ModIdT.MOD_SSHOTGUN);
 // requireEnemy/requireOwner precedent for this exact idiom
 // ---------------------------------------------------------------------------
 
-function requirePlayerClient(ent: EdictT): GClientT {
+export function requirePlayerClient(ent: EdictT): GClientT {
   if (ent.client === null) throw new Error("p_weapon.ts: ent.client is null -- unconditional C++ dereference (invariant violated)");
   return ent.client;
 }
@@ -348,14 +377,14 @@ function GetItemByIndex(index: ItemIdT): GitemT | null {
 // them, verified by grep before writing this file)
 // ---------------------------------------------------------------------------
 
-let is_quad = false;
+export let is_quad = false;
 // RAFAEL
-let is_quadfire = false;
+export let is_quadfire = false;
 // RAFAEL
-let is_silenced: PlayerMuzzleT = PlayerMuzzleT.MZ_NONE;
+export let is_silenced: PlayerMuzzleT = PlayerMuzzleT.MZ_NONE;
 
 // PGM
-let damage_multiplier = 1;
+export let damage_multiplier = 1;
 // PGM
 
 // ---------------------------------------------------------------------------
@@ -369,8 +398,12 @@ export { G_CheckInfiniteAmmo };
 // P_DamageModifier -- ROGUE
 // ---------------------------------------------------------------------------
 
-/** p_weapon.cpp:35-57: `byte P_DamageModifier(edict_t *ent)`. */
-function P_DamageModifier(ent: EdictT): number {
+/** p_weapon.cpp:35-57: `byte P_DamageModifier(edict_t *ent)`. Exported (not
+ *  just a local helper for this file's own weapon-fire dispatch) because
+ *  rogue/g_rogue_newweap.ts's `fire_nuke` calls it directly, exactly like
+ *  the C++ source does (`int damage_modifier = P_DamageModifier(self);`) --
+ *  see that file's header for the citation. */
+export function P_DamageModifier(ent: EdictT): number {
   const client = requirePlayerClient(ent);
   is_quad = false;
   damage_multiplier = 1;
@@ -392,49 +425,10 @@ function P_DamageModifier(ent: EdictT): number {
 }
 
 // ---------------------------------------------------------------------------
-// CTFApplyStrengthSound / CTFApplyHaste / CTFApplyHasteSound -- ported here,
-// not stubs (pure field logic + gi.sound; no CTF match-state global needed
-// -- same "small self-contained function" precedent p_view.ts already
-// established for CTFEffects/CTFApplyRegeneration)
+// CTFApplyStrengthSound / CTFApplyHaste / CTFApplyHasteSound -- REAL imports
+// from ctf/g_ctf.ts (this file's own former real, local copies moved there
+// as part of that unit's consolidation; see ctf/g_ctf.ts's own header).
 // ---------------------------------------------------------------------------
-
-/** ctf/g_ctf.cpp:2033-2054: `bool CTFApplyStrengthSound(edict_t *ent)`. */
-function CTFApplyStrengthSound(ent: EdictT): boolean {
-  const client = ent.client;
-  if (client === null) return false;
-
-  const volume = client.silencer_shots ? 0.2 : 1.0;
-
-  if (client.pers.inventory[ItemIdT.IT_TECH_STRENGTH]) {
-    if (client.ctf_techsndtime < level.time) {
-      client.ctf_techsndtime = Gtime_add(level.time, Gtime_from_ms(1000));
-      if (client.quad_time > level.time) gi.sound(ent, SoundchanT.CHAN_AUX, gi.soundindex("ctf/tech2x.wav"), volume, ATTN_NORM, 0);
-      else gi.sound(ent, SoundchanT.CHAN_AUX, gi.soundindex("ctf/tech2.wav"), volume, ATTN_NORM, 0);
-    }
-    return true;
-  }
-  return false;
-}
-
-/** ctf/g_ctf.cpp:2056-2062: `bool CTFApplyHaste(edict_t *ent)`. */
-function CTFApplyHaste(ent: EdictT): boolean {
-  const client = ent.client;
-  if (client === null) return false;
-  return client.pers.inventory[ItemIdT.IT_TECH_HASTE] !== 0;
-}
-
-/** ctf/g_ctf.cpp:2064-2077: `void CTFApplyHasteSound(edict_t *ent)`. */
-function CTFApplyHasteSound(ent: EdictT): void {
-  const client = ent.client;
-  if (client === null) return;
-
-  const volume = client.silencer_shots ? 0.2 : 1.0;
-
-  if (client.pers.inventory[ItemIdT.IT_TECH_HASTE] && client.ctf_techsndtime < level.time) {
-    client.ctf_techsndtime = Gtime_add(level.time, Gtime_from_ms(1000));
-    gi.sound(ent, SoundchanT.CHAN_AUX, gi.soundindex("ctf/tech3.wav"), volume, ATTN_NORM, 0);
-  }
-}
 
 // ---------------------------------------------------------------------------
 // G_CheckPowerArmor -- local copy of g_combat.ts's unexported original (see
@@ -1032,8 +1026,13 @@ export function Drop_Weapon(ent: EdictT, item: GitemT): void {
 // Weapon_PowerupSound / Weapon_CanAnimate / Weapon_SetFinished
 // ---------------------------------------------------------------------------
 
-/** p_weapon.cpp:656-675: `void Weapon_PowerupSound(edict_t *ent)`. */
-function Weapon_PowerupSound(ent: EdictT): void {
+/** p_weapon.cpp:656-675: `void Weapon_PowerupSound(edict_t *ent)`. Exported
+ *  (not just a local helper for this file's own weapon-fire dispatch)
+ *  because rogue/p_rogue_weapon.ts's `weapon_etf_rifle_fire`/
+ *  `Heatbeam_Fire` call it directly, exactly the way vanilla
+ *  `Weapon_Blaster`/`Weapon_HyperBlaster`/etc. already do in this same
+ *  file. */
+export function Weapon_PowerupSound(ent: EdictT): void {
   const client = ent.client;
   if (client === null) return;
 
@@ -1387,7 +1386,7 @@ function weapon_grenade_fire(ent: EdictT, held: boolean): void {
  * accepted but never read anywhere in the C++ body -- see file header's
  * "QUIRKS PRESERVED BUG-FOR-BUG".
  */
-function Throw_Generic(
+export function Throw_Generic(
   ent: EdictT,
   FRAME_FIRE_LAST: number,
   FRAME_IDLE_LAST: number,

@@ -147,8 +147,6 @@ import {
   RenderfxT,
   PathFlags,
   PathReturnCode,
-  SolidityAreaT,
-  BoxEdictsResultT,
   CvarFlagsT,
 } from "../kexapi/game";
 import {
@@ -189,6 +187,7 @@ import {
 import { YAW, PITCH, Q_PIf, frandom, crandom, brandom, irandom } from "./q_std";
 import { G_TouchTriggers, G_TouchProjectiles } from "./g_utils";
 import { G_Impact, G_GetClipMask } from "./g_phys";
+import { TargetTesla, CheckForBadArea } from "./rogue/g_rogue_newai";
 
 // ---------------------------------------------------------------------------
 // small local helpers
@@ -269,62 +268,17 @@ function LerpAngle(a2: number, a1In: number, frac: number): number {
 // see the import at the top of the file.)
 
 // ---------------------------------------------------------------------------
-// EXTERNAL DEPENDENCIES NOT YET PORTED (rogue/g_rogue_newai.cpp)
+// TargetTesla / CheckForBadArea (rogue/g_rogue_newai.cpp:1472, 1003-1013) --
+// now real imports from "./rogue/g_rogue_newai"
 // ---------------------------------------------------------------------------
-
-function TargetTesla(self: EdictT, _tesla: EdictT): void {
-  throw new Error(
-    `TargetTesla: not yet ported (pending g_rogue_newai.ts, see g_local.h:2572 / rogue/g_rogue_newai.cpp:1472) -- called against ${self.classname ?? "?"}`,
-  );
-}
-
-// ---------------------------------------------------------------------------
-// CheckForBadArea (rogue/g_rogue_newai.cpp:1003-1013) -- ported for real
-// ---------------------------------------------------------------------------
-// Declared in g_local.h:2559 right next to TargetTesla (stubbed above), but
-// unlike TargetTesla this one is cheap and self-contained enough to port
-// faithfully instead of stubbing: the real body is just `gi.BoxEdicts` over
-// AREA_TRIGGERS, filtered to entities whose `touch` is the file's own
-// `badarea_touch` -- a function-pointer identity check with no TS analogue,
-// since `badarea_touch` doesn't exist as a value anywhere in this port yet.
-// `SpawnBadArea` (rogue/g_rogue_newai.cpp:971, the only place that ever
-// constructs one of these) sets `classname = "bad_area"` on every entity it
-// creates, so a `classname === "bad_area"` check is a faithful,
-// forward-compatible substitute: it is a no-op TODAY (nothing in this port
-// line can spawn a "bad_area" entity yet, since SpawnBadArea hasn't landed,
-// so this always returns null -- exactly matching a real level with no
-// active tesla mines) and will start returning real hits automatically once
-// SpawnBadArea/badarea_touch land in a future g_rogue_newai.ts unit, with no
-// further change needed here. This is called unconditionally from
-// SV_movestep whenever `ent.health > 0` (m_move.cpp:622) -- a throwing stub
-// here would make this file's entire public surface untestable for any live
-// monster, unlike TargetTesla which is only reached once a bad area is
-// actually found.
-function CheckForBadArea(ent: EdictT): EdictT | null {
-  const mins = vec3_add(ent.s.origin, ent.mins);
-  const maxs = vec3_add(ent.s.origin, ent.maxs);
-
-  let hit: EdictT | null = null;
-  gi.BoxEdicts(
-    mins,
-    maxs,
-    [],
-    0,
-    SolidityAreaT.AREA_TRIGGERS,
-    (kexEnt) => {
-      if (kexEnt === null) return BoxEdictsResultT.Skip;
-      const candidate = edictFrom(kexEnt);
-      if (candidate.classname === "bad_area") {
-        hit = candidate;
-        return BoxEdictsResultT.End;
-      }
-      return BoxEdictsResultT.Skip;
-    },
-    null,
-  );
-
-  return hit;
-}
+// TargetTesla was a local throwing stub. CheckForBadArea was ported here as
+// a faithful, forward-compatible substitute using a `classname ===
+// "bad_area"` check (since `badarea_touch` didn't exist as a value anywhere
+// in this port yet -- the real body's `hit->touch == badarea_touch`
+// function-pointer identity check had no TS analogue at the time). Now that
+// rogue/g_rogue_newai.ts has landed with a real `badarea_touch` and the
+// real touch-identity-based `CheckForBadArea`, both are real imports from
+// there instead of the local substitute/stub above.
 
 // ---------------------------------------------------------------------------
 // EXTERNAL DEPENDENCIES NOT YET PORTED (g_monster.cpp -- concurrent unit)

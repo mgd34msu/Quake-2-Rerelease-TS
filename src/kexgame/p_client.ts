@@ -298,6 +298,21 @@ import { SpawnFlags_and, SpawnFlags_from, SpawnFlags_has, SpawnFlags_not, SpawnF
 import { clamp, crandom_open, irandom, random_element } from "./q_std";
 import { AngleVectors, RotatePointAroundVector, vec3_add, vec3_length, vec3_sub } from "./q_vec3";
 import { G_FindByString, G_FreeEdict, G_InitEdict, G_PickTarget, G_Spawn, G_TouchProjectiles, G_TouchTriggers, KillBox } from "./g_utils";
+import {
+  CTFAssignSkin,
+  CTFAssignTeam,
+  CTFDeadDropFlag,
+  CTFDeadDropTech,
+  CTFFragBonuses,
+  CTFGrapplePull,
+  CTFOtherTeam,
+  CTFPlayerResetGrapple,
+  CTFResetGrapple,
+  CTFStartClient,
+  G_AdjustTeamScore,
+  SelectCTFSpawnPoint,
+} from "./ctf/g_ctf";
+import { PMenu_Next, PMenu_Prev, PMenu_Select } from "./ctf/p_ctf_menu";
 import { T_Damage } from "./g_combat";
 import { G_FixStuckObject_Generic } from "./p_move";
 import { PM_CONFIG_DEFAULT } from "./bg_local";
@@ -415,17 +430,9 @@ function Bot_BeginFrame(_ent: EdictT): void {
   throw new Error("Bot_BeginFrame: not yet ported (pending bots module, see bots/bot_includes.h)");
 }
 
-function PMenu_Prev(_ent: EdictT): void {
-  throw new Error("PMenu_Prev: not yet ported (pending p_ctf_menu.ts, see ctf/p_ctf_menu.cpp)");
-}
-
-function PMenu_Next(_ent: EdictT): void {
-  throw new Error("PMenu_Next: not yet ported (pending p_ctf_menu.ts, see ctf/p_ctf_menu.cpp)");
-}
-
-function PMenu_Select(_ent: EdictT): void {
-  throw new Error("PMenu_Select: not yet ported (pending p_ctf_menu.ts, see ctf/p_ctf_menu.cpp)");
-}
+// PMenu_Prev/PMenu_Next/PMenu_Select: formerly local throwing stubs here --
+// src/kexgame/ctf/p_ctf_menu.ts has landed with real exports; see this
+// file's own header, "STUB SWAP" note above (imported below).
 
 function GetChaseTarget(_ent: EdictT): void {
   throw new Error("GetChaseTarget: not yet ported (pending g_chase.ts, see g_chase.cpp:149)");
@@ -440,108 +447,11 @@ function UpdateChaseCam(_ent: EdictT): void {
 }
 
 // ---------------------------------------------------------------------------
-// ctf/g_ctf.cpp cross-deps -- see file header for the reachable-prefix strategy
+// ctf/g_ctf.cpp cross-deps -- REAL imports from ctf/g_ctf.ts (this file's
+// former reachable-prefix partials / throwing stubs are gone; see
+// ctf/g_ctf.ts's own header for the full consolidation inventory and the
+// sanctioned p_client.ts <-> ctf/g_ctf.ts import cycle this creates).
 // ---------------------------------------------------------------------------
-
-/** ctf/g_ctf.cpp:263-273: `int CTFOtherTeam(int team)` -- real, tiny, ported in full. */
-function CTFOtherTeam(team: CtfteamT): number {
-  switch (team) {
-    case CtfteamT.CTF_TEAM1:
-      return CtfteamT.CTF_TEAM2;
-    case CtfteamT.CTF_TEAM2:
-      return CtfteamT.CTF_TEAM1;
-    default:
-      return -1; // invalid value
-  }
-}
-
-/** ctf/g_ctf.cpp:1229: `void CTFResetGrapple(edict_t *self)` -- unreached (see file header). */
-function CTFResetGrapple(_self: EdictT): void {
-  throw new Error("CTFResetGrapple: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:1229); unreached -- ctf_grapple is always null in this port line");
-}
-
-/** ctf/g_ctf.cpp:428: `void CTFFragBonuses(edict_t *targ, edict_t *inflictor, edict_t *attacker)`.
- * The reachable prefix (ghost bumps, self-frag guard, CTFOtherTeam guard) is real; see file header. */
-function CTFFragBonuses(targ: EdictT, _inflictor: EdictT, attacker: EdictT): void {
-  if (targ.client !== null && attacker.client !== null) {
-    // attacker.client.resp.ghost / targ.client.resp.ghost: always null in this port line.
-  }
-
-  // no bonus for fragging yourself
-  if (targ.client === null || attacker.client === null || targ === attacker) return;
-
-  const otherteam = CTFOtherTeam(targ.client.resp.ctf_team);
-  if (otherteam < 0) return; // whoever died isn't on a team -- always true here (ctf_team defaults CTF_NOTEAM)
-
-  throw new Error(
-    "CTFFragBonuses: not yet ported past the ctf_team guard (pending g_ctf.ts, see ctf/g_ctf.cpp:454); unreached -- ctf_team is always CTF_NOTEAM in this port line",
-  );
-}
-
-/** ctf/g_ctf.cpp:1222: `void CTFPlayerResetGrapple(edict_t *ent)`. */
-function CTFPlayerResetGrapple(ent: EdictT): void {
-  if (ent.client !== null && ent.client.ctf_grapple !== null) {
-    CTFResetGrapple(ent.client.ctf_grapple);
-  }
-}
-
-/** ctf/g_ctf.cpp:791: `void CTFDeadDropFlag(edict_t *self)`. Real no-op given current defaults; see file header. */
-function CTFDeadDropFlag(self: EdictT): void {
-  if (self.client === null) return;
-  if (self.client.pers.inventory[ItemIdT.IT_FLAG1] !== 0 || self.client.pers.inventory[ItemIdT.IT_FLAG2] !== 0) {
-    throw new Error(
-      "CTFDeadDropFlag: not yet ported past the flag-inventory check (pending g_items.ts/g_ctf.ts, see ctf/g_ctf.cpp:791); unreached -- IT_FLAG1/IT_FLAG2 are never nonzero in this port line",
-    );
-  }
-}
-
-const CTF_TECH_IDS: readonly ItemIdT[] = [ItemIdT.IT_TECH_RESISTANCE, ItemIdT.IT_TECH_STRENGTH, ItemIdT.IT_TECH_HASTE, ItemIdT.IT_TECH_REGENERATION];
-
-/** ctf/g_ctf.cpp:1891: `void CTFDeadDropTech(edict_t *ent)`. Real no-op given current defaults; see file header. */
-function CTFDeadDropTech(ent: EdictT): void {
-  if (ent.client === null) return;
-  for (const id of CTF_TECH_IDS) {
-    if (ent.client.pers.inventory[id] !== 0) {
-      throw new Error(
-        "CTFDeadDropTech: not yet ported past the tech-inventory check (pending g_items.ts, see ctf/g_ctf.cpp:1891); unreached -- tech items are never held in this port line",
-      );
-    }
-  }
-}
-
-/** ctf/g_ctf.cpp:2965: `bool CTFStartClient(edict_t *ent)`. Real guard; see file header. */
-function CTFStartClient(ent: EdictT): boolean {
-  if (!G_TeamplayEnabled()) return false;
-  throw new Error(
-    "CTFStartClient: not yet ported past the G_TeamplayEnabled() guard (pending g_ctf.ts, see ctf/g_ctf.cpp:2965); unreached -- ctf/teamplay cvars default to 0",
-  );
-  void ent;
-}
-
-/** ctf/g_ctf.cpp:62: `void G_AdjustTeamScore(ctfteam_t team, int32_t offset)`. */
-function G_AdjustTeamScore(_team: CtfteamT, _offset: number): void {
-  throw new Error("G_AdjustTeamScore: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:62); reached only when the teamplay cvar is enabled (default 0)");
-}
-
-/** ctf/g_ctf.cpp:358: `edict_t *SelectCTFSpawnPoint(edict_t *ent, bool force_spawn)`. */
-function SelectCTFSpawnPoint(_ent: EdictT, _force_spawn: boolean): EdictT | null {
-  throw new Error("SelectCTFSpawnPoint: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:358); reached only when G_TeamplayEnabled() is true (default false)");
-}
-
-/** ctf/g_ctf.cpp:308: `void CTFAssignTeam(gclient_t *who)`. */
-function CTFAssignTeam(_who: GClientT): void {
-  throw new Error("CTFAssignTeam: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:308); reached only when G_TeamplayEnabled() is true (default false)");
-}
-
-/** ctf/g_ctf.cpp:280: `void CTFAssignSkin(edict_t *ent, const char *s)`. */
-function CTFAssignSkin(_ent: EdictT, _s: string): void {
-  throw new Error("CTFAssignSkin: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:280); reached only when G_TeamplayEnabled() is true (default false)");
-}
-
-/** ctf/g_ctf.cpp:1311: `void CTFGrapplePull(edict_t *self)`. */
-function CTFGrapplePull(_self: EdictT): void {
-  throw new Error("CTFGrapplePull: not yet ported (pending g_ctf.ts, see ctf/g_ctf.cpp:1311); reached only when client.ctf_grapple is non-null (always null)");
-}
 
 // ---------------------------------------------------------------------------
 // [Paril-KEX] ugly global to handle squad respawn origin (p_client.cpp:1944-1947)

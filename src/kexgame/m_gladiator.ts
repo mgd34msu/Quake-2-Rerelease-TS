@@ -17,17 +17,12 @@
 // EXTERNAL DEPENDENCIES NOT YET PORTED (throwing stubs, cited)
 // ============================================================================
 // - `fire_plasma(self, start, dir, damage, speed, damage_radius,
-//   radius_damage)`: declared in g_local.h:2339 but its ONLY body in the
-//   whole rerelease source tree lives in
-//   ~/Projects/quake2-rerelease-dll/rerelease/xatrix/g_xatrix_weapon.cpp:280
-//   -- xatrix (Ground Zero's sibling mission pack) weapon content, out of
-//   scope for this base-game monster porting round (no src/kexgame/
-//   g_xatrix_weapon.ts exists). Only `gladbGun`/`gladbGun_check` (the
-//   RAFAEL/gladb-only attack) reach this, so a base `monster_gladiator`
-//   (self->style !== 1) never calls it. `monster_gladb` genuinely throws if
-//   it ever fires its plasma gun today -- an honest gap, not a silent
-//   behavior change, mirroring g_turret.ts's own `infantry_die`-family stub
-//   precedent for the identical kind of missing-content-dir gap.
+//   radius_damage)`: STUB SWAP (xatrix unit) -- g_xatrix_weapon.ts has now
+//   landed as the real home. The local throwing stub that used to live here
+//   is DELETED and replaced with `import { fire_plasma } from
+//   "./g_xatrix_weapon"`. `gladbGun`/`gladbGun_check` (the RAFAEL/gladb-only
+//   attack, reached only when `self.style === 1`) now genuinely fires;
+//   a base `monster_gladiator` still never reaches it.
 // - `blocked_checkplat(self, dist)`: declared in g_local.h:2544 but its ONLY
 //   body in the whole rerelease source tree lives in
 //   ~/Projects/quake2-rerelease-dll/rerelease/rogue/g_rogue_newai.cpp:14 --
@@ -130,7 +125,9 @@ import { G_FreeEdict } from "./g_utils";
 import { brandom, frandom, irandom } from "./q_std";
 import { Gtime_add, Gtime_from_sec } from "./gtime";
 import { monsterFlashOffset } from "./m_flash";
+import { blocked_checkplat } from "./m_supertank";
 import { st } from "./g_spawn";
+import { fire_plasma } from "./g_xatrix_weapon";
 
 // ---------------------------------------------------------------------------
 // m_gladiator.h frame index constants (98 entries, FRAME_stand1 = 0). Pure
@@ -158,17 +155,13 @@ const FRAME_painup6 = 88;
 
 const MODEL_SCALE = 1.0;
 
-// ---------------------------------------------------------------------------
-// EXTERNAL DEPENDENCIES NOT YET PORTED -- see file header
-// ---------------------------------------------------------------------------
+// fire_plasma is now a real import from "./g_xatrix_weapon" -- see file
+// header "STUB SWAP (xatrix unit)".
 
-function fire_plasma(_self: EdictT, _start: Vec3, _dir: Vec3, _damage: number, _speed: number, _damage_radius: number, _radius_damage: number): void {
-  throw new Error("fire_plasma: not yet ported (xatrix mission-pack content, see xatrix/g_xatrix_weapon.cpp:280)");
-}
-
-function blocked_checkplat(_self: EdictT, _dist: number): boolean {
-  throw new Error("blocked_checkplat: not yet ported (rogue mission-pack content, see rogue/g_rogue_newai.cpp:14)");
-}
+// blocked_checkplat is now a real import from "./m_supertank" (its real
+// declared home is rogue/g_rogue_newai.cpp:14, but it is NOT re-exported
+// from rogue/g_rogue_newai.ts -- see that file's header note on the
+// three-module import-cycle hazard that re-export would create).
 
 // ---------------------------------------------------------------------------
 // PLACEMENT-MISMATCH FUNCTIONS PORTED LOCALLY -- see file header

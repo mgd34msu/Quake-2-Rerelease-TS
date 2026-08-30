@@ -17,16 +17,13 @@
 // EXTERNAL DEPENDENCIES NOT YET PORTED, AND HOW EACH IS HANDLED
 // ============================================================================
 // - `monster_fire_dabeam`/`dabeam_update` (xatrix/g_xatrix_monster.cpp:
-//   112/84): the laser-sweep primitives `guardian_laser_fire` calls.
-//   Genuinely out-of-scope mission-pack content (no xatrix/*.ts exists in
-//   this port line) -- identical citation and identical treatment to
-//   m_soldier.ts's/m_brain.ts's own `monster_fire_dabeam`/`dabeam_update`
-//   throwing stubs. Neither is exported from those files, so this file
-//   duplicates the same two stubs locally, matching this porting batch's
-//   "duplicate a small unexported helper per file" convention. Reachable
-//   whenever `guardian_attack` picks the atk2 (laser) branch, which happens
-//   whenever the enemy is farther than `RANGE_NEAR` (440 units) -- a real
-//   behavior gap, honestly stubbed rather than silently changed.
+//   112/84): STUB SWAP (xatrix unit) -- g_xatrix_monster.ts has now landed
+//   as the real home of both. The local throwing stubs that used to live
+//   here are DELETED and replaced with `import { dabeam_update,
+//   monster_fire_dabeam } from "./g_xatrix_monster"`. `guardian_attack`'s
+//   atk2 (laser) branch (picked whenever the enemy is farther than
+//   `RANGE_NEAR`, 440 units) now genuinely fires: `guardian_fire_update`
+//   (already ported for real below, unchanged) is no longer dead code.
 // - `guardian_fire_update` (the PRETHINK callback passed to
 //   `monster_fire_dabeam`) IS ported for real below, even though the stub
 //   above means `monster_fire_dabeam` never actually schedules it today --
@@ -113,6 +110,7 @@ import { M_SetAnimation, M_AllowSpawn, M_ProjectFlashSource, M_ShouldReactToPain
 import { fire_hit } from "./g_weapon";
 import { ThrowGibs, type GibDefT } from "./g_misc";
 import { BossExplode } from "./m_supertank";
+import { dabeam_update, monster_fire_dabeam } from "./g_xatrix_monster";
 import { monsterFlashOffset } from "./m_flash";
 import { MonsterMuzzleflashIdT } from "../kexapi/game";
 import {
@@ -161,13 +159,8 @@ export const MODEL_SCALE = 1.0;
 // EXTERNAL DEPENDENCIES NOT YET PORTED -- see file header
 // ---------------------------------------------------------------------------
 
-function dabeam_update(_laser: EdictT, _damage: boolean): void {
-  throw new Error("dabeam_update: not yet ported (xatrix mission pack, see xatrix/g_xatrix_monster.cpp:84)");
-}
-
-function monster_fire_dabeam(self: EdictT, _damage: number, _secondary: boolean, _update_func: PrethinkFn): void {
-  throw new Error(`monster_fire_dabeam: not yet ported (xatrix mission pack, see xatrix/g_xatrix_monster.cpp:112) -- called against ${self.classname ?? "?"}`);
-}
+// dabeam_update / monster_fire_dabeam: real imports from g_xatrix_monster.ts
+// -- see file header "STUB SWAP (xatrix unit)".
 
 // ---------------------------------------------------------------------------
 // local mframe_t / mmove_t helpers (see m_flipper.ts for rationale)

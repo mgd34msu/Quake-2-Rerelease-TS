@@ -369,6 +369,7 @@ import { type EdictT, type MframeT, MmoveT } from "./g_local_types";
 import type { PainFn, DieFn, MonsterinfoStandFn, MonsterinfoIdleFn, MonsterinfoWalkFn, MonsterinfoRunFn, MonsterinfoAttackFn, MonsterinfoSightFn, MonsterinfoSetskinFn, MonsterinfoDuckFn, MonsterinfoSidestepFn, MonsterinfoBlockedFn } from "./g_local_types";
 import { type GTime, Gtime_from_ms, Gtime_from_sec, Gtime_add } from "./gtime";
 import { monster_duck_up, M_MonsterDodge } from "./m_soldier";
+import { blocked_checkjump } from "./rogue/g_rogue_newai";
 import {
   RANGE_MELEE,
   MELEE_DISTANCE,
@@ -624,12 +625,8 @@ function blocked_checkplat(self: EdictT, dist: number): boolean {
   return false;
 }
 
-/** rogue/g_rogue_newai.cpp:123-~230+. See file header -- genuinely large
- *  ROGUE nav-path-integrated logic shared verbatim by every KEX monster;
- *  out of scope for this single-monster unit. Throwing stub, cited. */
-function blocked_checkjump(_self: EdictT, _dist: number): BlockedJumpResultT {
-  throw new Error("blocked_checkjump: not yet ported (pending rogue/g_rogue_newai.ts, see rogue/g_rogue_newai.cpp:123)");
-}
+// blocked_checkjump is now a real import from "./rogue/g_rogue_newai" --
+// see file header for the swap note.
 
 // rogue/g_rogue_newai.cpp:1304-1422. Superseded: this file originally
 // carried a throwing stub here ("not yet ported"), which meant infantry_pain

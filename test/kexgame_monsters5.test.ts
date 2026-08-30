@@ -71,9 +71,9 @@ Scope (18 cases, each citing the exact C++ line(s) it exercises):
     - guardian laser (distinctive + attack constant): guardian_laser_fire
       (guardian_move_atk2_fire's every frame, m_guardian.cpp:329-334) plays
       sound_laser then calls monster_fire_dabeam(self, 25, ...)
-      (m_guardian.cpp:323-327) -- a documented not-yet-ported xatrix
-      primitive, identical citation/treatment to m_soldier.ts's/m_brain.ts's
-      own dabeam stubs; this file's own copy throws the same way.
+      (m_guardian.cpp:323-327), which is a real port (g_xatrix_monster.ts)
+      -- spawns the beam entity and applies MOD_TARGET_LASER damage through
+      guardian_fire_update (m_guardian.cpp:302-320).
 
   ARACHNID (m_arachnid.cpp) -- NEW re-release monster, no legacy precedent:
     - mmove sanity: arachnid_attack1's frame array satisfies
@@ -631,18 +631,49 @@ describe("guardian", () => {
     expect(pendingOrActiveMove(self)).toBe(requireMmove("guardian_move_atk2_in"));
   });
 
-  test("guardian laser: guardian_laser_fire plays sound_laser then reaches monster_fire_dabeam(self, 25, ...), a documented not-yet-ported xatrix primitive (m_guardian.cpp:323-327), identical treatment to m_soldier.ts's/m_brain.ts's own dabeam stub", () => {
+  test("guardian laser: guardian_laser_fire plays sound_laser then calls the now-real monster_fire_dabeam(self, 25, ...) (m_guardian.cpp:323-327), spawning a beam entity and applying MOD_TARGET_LASER damage through guardian_fire_update (m_guardian.cpp:302-320)", () => {
     setupWorld(4);
     const self = makeMonster(1, vec3(0, 0, 0));
     const enemy = makeMonster(2, vec3(50, 0, 0));
     self.enemy = enemy;
 
+    // monster_fire_dabeam (g_xatrix_monster.cpp:112-142, now a real port --
+    // no longer the throwing stub this test used to document) runs
+    // guardian_fire_update once (dabeam_update(laser, false), no damage)
+    // then its own final dabeam_update(beam_ptr, true) pass. Each
+    // dabeam_update call that hits something burns exactly 3 gi.trace
+    // calls: a throwaway self-trace seed, the real beam trace, and a
+    // post-mark retrace that ends the pierce loop (see this file's own
+    // kexgame_xatrix.test.ts "dabeam_update" tests for the identical
+    // idiom). So the real hit is call #2 of the false-damage pass and call
+    // #5 of the true-damage pass.
+    let calls = 0;
+    traceImpl = (_start, _mins, _maxs, end) => {
+      calls++;
+      if (calls === 2 || calls === 5) return hitTrace(end, enemy, 0.5);
+      return noHitTrace(end);
+    };
+
     // guardian_move_atk2_fire's every frame calls guardian_laser_fire
     // (m_guardian.cpp:329-334).
     M_SetAnimation(self, requireMmove("guardian_move_atk2_fire"), true);
 
-    expect(() => stepFrame(self)).toThrow(/monster_fire_dabeam: not yet ported/);
-    expect(rec.soundCalls.length).toBe(1); // gi.sound(sound_laser) ran before the throw
+    stepFrame(self);
+
+    // guardian_laser_fire passes `secondary = self.s.frame & 1`
+    // (m_guardian.cpp:327); M_SetAnimation lands s.frame on
+    // FRAME_atk2_fire1 = 177 (odd), so this is the SECONDARY beam
+    // (self.beam2), not self.beam (g_xatrix_monster.cpp:113,124-125).
+    expect(self.s.frame % 2).toBe(1);
+    expect(rec.soundCalls.length).toBe(1); // gi.sound(sound_laser) ran
+    expect(self.beam).toBeNull(); // primary beam untouched -- this shot used the secondary slot
+    expect(self.beam2).not.toBeNull(); // monster_fire_dabeam's G_Spawn
+    expect(self.beam2!.dmg).toBe(25);
+    expect(self.beam2!.owner).toBe(self);
+    // guardian_fire_update's own dabeam_update(laser, false) call does not
+    // damage; only monster_fire_dabeam's trailing dabeam_update(beam_ptr,
+    // true) call does (g_xatrix_monster.cpp:141).
+    expect(enemy.health).toBe(75); // 100 - 25 dmg, MOD_TARGET_LASER
   });
 });
 

@@ -107,7 +107,7 @@ import {
   MovetypeT,
 } from "./g_local";
 import { ATTN_IDLE, ATTN_NORM, ContentsT, KexEntityEventT, KexMulticastT, KexTempEventT, type KexTraceT, MASK_SOLID, ServerCommandT, SolidT, SoundchanT, SvflagsT } from "../kexapi/game";
-import { MELEE_DISTANCE, RANGE_NEAR } from "./g_local";
+import { MELEE_DISTANCE, RANGE_NEAR, BlockedJumpResultT } from "./g_local";
 import { MframeT, MmoveT } from "./g_local_types";
 import { gi, level } from "./g_main_globals";
 import {
@@ -131,6 +131,8 @@ import {
 import { ai_charge, ai_move, ai_run, ai_stand, ai_walk, range_to } from "./g_ai";
 import { M_AllowSpawn, M_ProjectFlashSource, M_SetAnimation, M_ShouldReactToPain, monster_dead, walkmonster_start } from "./g_monster";
 import { M_MonsterDodge, monster_duck_down, monster_duck_hold, monster_duck_up, monster_done_dodge } from "./m_soldier";
+import { blocked_checkjump, monster_jump_finished } from "./rogue/g_rogue_newai";
+import { blocked_checkplat, PredictAim } from "./m_supertank";
 import { fire_hit } from "./g_weapon";
 import { G_FreeEdict, findradius } from "./g_utils";
 import { T_Damage, CanDamage } from "./g_combat";
@@ -191,35 +193,13 @@ const SPAWNFLAG_BERSERK_NOJUMPING: SpawnFlags = SpawnFlags_from(8);
 // EXTERNAL DEPENDENCIES NOT YET PORTED -- see file header
 // ---------------------------------------------------------------------------
 
-const BlockedJumpResultT = {
-  NO_JUMP: 0,
-  JUMP_TURN: 1,
-  JUMP_JUMP_UP: 2,
-  JUMP_JUMP_DOWN: 3,
-} as const;
-type BlockedJumpResultT = (typeof BlockedJumpResultT)[keyof typeof BlockedJumpResultT];
+// BlockedJumpResultT / blocked_checkplat / blocked_checkjump /
+// monster_jump_finished / PredictAim are now real imports from
+// "./g_local" / "./rogue/g_rogue_newai" -- see file header for the swap
+// note. (This file previously defined its own local, structurally-matching
+// `BlockedJumpResultT` mock rather than importing the real enum from
+// g_local.ts; that mock is deleted along with the throwing stubs.)
 
-function blocked_checkplat(_self: EdictT, _dist: number): boolean {
-  throw new Error("blocked_checkplat: not yet ported (rogue mission-pack content, see rogue/g_rogue_newai.cpp:14)");
-}
-function blocked_checkjump(_self: EdictT, _dist: number): BlockedJumpResultT {
-  throw new Error("blocked_checkjump: not yet ported (rogue mission-pack content, see rogue/g_rogue_newai.cpp:123)");
-}
-function monster_jump_finished(_self: EdictT): boolean {
-  throw new Error("monster_jump_finished: not yet ported (rogue mission-pack content, see rogue/g_rogue_newai.cpp:101)");
-}
-function PredictAim(
-  _self: EdictT,
-  _target: EdictT,
-  _start: Vec3,
-  _bolt_speed: number,
-  _eye_height: boolean,
-  _offset: number,
-  _aimdir: Vec3 | null,
-  _aimpoint: Vec3 | null,
-): boolean {
-  throw new Error("PredictAim: not yet ported (rogue mission-pack content, see rogue/g_rogue_newai.cpp:1083)");
-}
 // `M_MonsterDodge`/`monster_duck_down`/`monster_duck_hold`/`monster_duck_up`/
 // `monster_done_dodge` were ALL local throwing stubs here despite being
 // genuinely reachable (self.monsterinfo.dodge/unduck wired below, and

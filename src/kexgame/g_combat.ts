@@ -40,12 +40,9 @@
 // the "an unported cross-dep that's actually unconditionally reachable can't
 // be a throwing stub without breaking every caller" rule first got written
 // down for this file, before g_ai.ts existed to satisfy it for real. The
-// rest are reached only on genuinely guarded, narrow paths and remain
-// throwing stubs:
-//   - MarkTeslaArea/TargetTesla -> rogue/g_rogue_newai.cpp:1019/1472 (future
-//     src/kexgame/g_rogue_newai.ts) -- reached only when `inflictor.classname
-//     === "tesla_mine"`; no tesla_mine spawn function exists in this port
-//     line yet, so this is unreachable outside a deliberately-crafted test.
+// rest were reached only on genuinely guarded, narrow paths and were
+// throwing stubs until this file's own "STUB SWAP: MarkTeslaArea/TargetTesla"
+// note below.
 //
 // ============================================================================
 // STUB SWAP: cleanupHealTarget is now a real import from m_medic.ts
@@ -63,6 +60,17 @@
 // other sanctioned cycle in this port line (g_utils.ts<->g_phys.ts,
 // g_utils.ts<->g_combat.ts, g_phys.ts<->g_monster.ts). Verified end-to-end
 // by `bunx tsc --noEmit` actually importing both files together.
+//
+// ============================================================================
+// STUB SWAP: MarkTeslaArea / TargetTesla are now real imports from
+// rogue/g_rogue_newai.ts
+// ============================================================================
+// Both (rogue/g_rogue_newai.cpp:1019/1472) were local throwing stubs, reached
+// only when `inflictor.classname === "tesla_mine"` in `Killed`'s
+// damage-redirect branch. Both are now real imports from
+// "./rogue/g_rogue_newai", now landed. This file does not import anything
+// g_rogue_newai.ts imports back from it, so this is a plain one-way edge,
+// not a cycle.
 //
 // ============================================================================
 // ArmorIndex / PowerArmorType / G_CheckPowerArmor -- ported here, not g_items.ts
@@ -142,7 +150,6 @@ import {
 import {
   AUTO_SHIELD_AUTO,
   AUTO_SHIELD_MANUAL,
-  CtfteamT,
   COOP_DAMAGE_RESPAWN_TIME,
   type DamageIndicatorT,
   DamageflagsT,
@@ -169,6 +176,8 @@ import { AngleVectors, closest_point_to_box, vec3_add, vec3_addEq, vec3_dot, vec
 import { brandom } from "./q_std";
 import { visible, FoundTarget } from "./g_ai";
 import { cleanupHealTarget } from "./m_medic";
+import { MarkTeslaArea, TargetTesla } from "./rogue/g_rogue_newai";
+import { CTFApplyResistance, CTFApplyStrength, CTFCheckHurtCarrier, CTFMatchSetup } from "./ctf/g_ctf";
 
 // ---------------------------------------------------------------------------
 // cvar-read helpers (see g_utils.ts's own `coopEnabled()` precedent for the
@@ -185,17 +194,8 @@ function cvarBool(name: string, def: string, flags: CvarFlagsT = CvarFlagsT.CVAR
   return cvarInt(name, def, flags) !== 0;
 }
 
-// ---------------------------------------------------------------------------
-// unported cross-deps (throwing stubs) -- see file header
-// ---------------------------------------------------------------------------
-
-function MarkTeslaArea(_self: EdictT, _tesla: EdictT): boolean {
-  throw new Error("MarkTeslaArea: not yet ported (pending g_rogue_newai.ts, see rogue/g_rogue_newai.cpp:1019)");
-}
-
-function TargetTesla(_self: EdictT, _tesla: EdictT): void {
-  throw new Error("TargetTesla: not yet ported (pending g_rogue_newai.ts, see rogue/g_rogue_newai.cpp:1472)");
-}
+// MarkTeslaArea / TargetTesla are now real imports from
+// "./rogue/g_rogue_newai" -- see that file's header for the swap note.
 
 // ---------------------------------------------------------------------------
 // CanDamage
@@ -702,54 +702,17 @@ export function CheckTeamDamage(targ: EdictT, attacker: EdictT): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// CTF helpers T_Damage calls unconditionally -- see file header
+// CTF helpers T_Damage calls unconditionally -- REAL imports from
+// ctf/g_ctf.ts (this unit's own module). CTFApplyStrength/CTFApplyResistance/
+// CTFCheckHurtCarrier used to be real, local copies here; CTFMatchSetup used
+// to be pinned `return false` (a full CTF match-flow port was out of scope
+// for whichever unit landed them first). ctf/g_ctf.ts now owns the real
+// `ctfgame` match-state global and every one of these for real; this file
+// imports them instead of carrying its own copies. See ctf/g_ctf.ts's own
+// header for the full consolidation inventory and the sanctioned import
+// cycle this creates (g_combat.ts <-> p_client.ts <-> ctf/g_ctf.ts, etc.).
 // ---------------------------------------------------------------------------
 
-/** ctf/g_ctf.cpp:2024: `int CTFApplyStrength(edict_t *ent, int dmg)`. */
-function CTFApplyStrength(ent: EdictT, dmg: number): number {
-  if (dmg && ent.client !== null && ent.client.pers.inventory[ItemIdT.IT_TECH_STRENGTH] !== 0) {
-    return dmg * 2;
-  }
-  return dmg;
-}
-
-/** ctf/g_ctf.cpp:2008: `int CTFApplyResistance(edict_t *ent, int dmg)`. */
-function CTFApplyResistance(ent: EdictT, dmg: number): number {
-  const volume = ent.client !== null && ent.client.silencer_shots !== 0 ? 0.2 : 1.0;
-
-  if (dmg && ent.client !== null && ent.client.pers.inventory[ItemIdT.IT_TECH_RESISTANCE] !== 0) {
-    gi.sound(ent, SoundchanT.CHAN_AUX, gi.soundindex("ctf/tech1.wav"), volume, ATTN_NORM, 0);
-    return Math.trunc(dmg / 2);
-  }
-  return dmg;
-}
-
-/** ctf/g_ctf.cpp:583: `void CTFCheckHurtCarrier(edict_t *targ, edict_t *attacker)`. */
-function CTFCheckHurtCarrier(targ: EdictT, attacker: EdictT): void {
-  if (targ.client === null || attacker.client === null) return;
-
-  const flag_item = targ.client.resp.ctf_team === CtfteamT.CTF_TEAM1 ? ItemIdT.IT_FLAG2 : ItemIdT.IT_FLAG1;
-
-  if (targ.client.pers.inventory[flag_item] !== 0 && targ.client.resp.ctf_team !== attacker.client.resp.ctf_team) {
-    attacker.client.resp.ctf_lasthurtcarrier = level.time;
-  }
-}
-
-/**
- * ctf/g_ctf.cpp:2665: `bool CTFMatchSetup() { return ctfgame.match ==
- * MATCH_SETUP || ctfgame.match == MATCH_PREGAME; }`. `ctfgame` (the CTF
- * match-state global) is not ported anywhere in this port line -- a full
- * CTF match-flow port is out of scope. T_Damage calls this UNCONDITIONALLY
- * on every hit (`if (!CTFMatchSetup()) targ->health -= take;`), so this
- * can't be a throwing stub without breaking every non-CTF damage call too.
- * MATCH_SETUP/MATCH_PREGAME are states a CTF match-flow controller enters
- * only during its own pre-round setup; a server that never runs that
- * controller (every server this port line can currently simulate) never
- * reaches them, so `false` is the faithful, always-correct answer here.
- */
-function CTFMatchSetup(): boolean {
-  return false;
-}
 
 /**
  * g_local.h:3275 `extern dm_game_rt DMGame;` -- real assignment lives in

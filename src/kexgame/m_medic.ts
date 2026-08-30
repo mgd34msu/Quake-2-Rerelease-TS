@@ -79,18 +79,29 @@
 // `CheckGroundSpawnPoint`, and `SpawnGrow_Spawn` FOR REAL, locally
 // (unexported -- narrow, single-consumer helpers, matching the
 // "monster_footstep/M_CheckGib" trivial-local-duplicate idiom), each cited
-// to its actual rogue/g_rogue_*.cpp source. The ONLY genuinely-stubbed piece
-// of the commander path is `monster_fire_blaster2`/`fire_blaster2`
-// (rogue/g_rogue_monster.cpp:7 / rogue/g_rogue_newweap.cpp:1374) -- unlike
-// the spawn-placement helpers above, `fire_blaster2` is a full second
-// blaster-bolt PROJECTILE weapon (its own spawn/touch/think, not a thin
-// wrapper around the already-ported `fire_blaster`), a weapons-file concern
-// out of this unit's scope, exactly like m_soldier.ts's own xatrix
-// ionripper/blueblaster stubs. It is reached only from `medic_fire_blaster`
-// when `self.mass > 400` (commander) -- narrowly gated, not a landmine: a
-// base `monster_medic` (mass 400) never reaches it, and even a commander
-// only reaches it on its blaster-attack branch, not its (equally likely)
-// reinforcement-calling or cable-heal branches.
+// to its actual rogue/g_rogue_*.cpp source. `monster_fire_blaster2`/
+// `fire_blaster2` (rogue/g_rogue_monster.cpp:7 / rogue/g_rogue_newweap.cpp:
+// 1374) used to be this file's only genuinely-stubbed piece of the
+// commander path -- unlike the spawn-placement helpers above,
+// `fire_blaster2` is a full second blaster-bolt PROJECTILE weapon (its own
+// spawn/touch/think, not a thin wrapper around the already-ported
+// `fire_blaster`), a weapons-file concern that was out of this file's own
+// scope, exactly like m_soldier.ts's own xatrix ionripper/blueblaster
+// stubs. Now that rogue/g_rogue_monster.ts and rogue/g_rogue_newweap.ts
+// have landed, `monster_fire_blaster2` is a real import from
+// "./rogue/g_rogue_monster" (see "STUB SWAP" below). It is reached only
+// from `medic_fire_blaster` when `self.mass > 400` (commander) -- narrowly
+// gated, not a landmine: a base `monster_medic` (mass 400) never reaches
+// it, and even a commander only reaches it on its blaster-attack branch,
+// not its (equally likely) reinforcement-calling or cable-heal branches.
+//
+// ============================================================================
+// STUB SWAP: monster_fire_blaster2 is now a real import
+// ============================================================================
+// This file's own local, unexported throwing stub for `monster_fire_blaster2`
+// (cited to rogue/g_rogue_monster.cpp:7 + rogue/g_rogue_newweap.cpp:1374) is
+// DELETED; the real function is imported from "./rogue/g_rogue_monster"
+// instead.
 //
 // ============================================================================
 // OTHER LOCALLY-PORTED, NARROWLY-GATED, OR SHARED CROSS-DEPS
@@ -216,6 +227,7 @@ import { ModIdT } from "./g_local";
 import { monster_done_dodge, monster_duck_down, monster_duck_hold, monster_duck_up, M_MonsterDodge } from "./m_soldier";
 import { blocked_checkplat } from "./m_supertank";
 import { monsterFlashOffset as monsterFlashOffsetTable } from "./m_flash";
+import { monster_fire_blaster2 } from "./rogue/g_rogue_monster";
 
 // ---------------------------------------------------------------------------
 // m_medic.h frame-index enum (248 lines; anonymous enum, declaration order =
@@ -601,19 +613,31 @@ const MOD_UNKNOWN: ModT = { id: ModIdT.MOD_UNKNOWN, friendly_fire: false, no_poi
 // See file header's "THE REINFORCEMENTS FINDING" section.
 // ---------------------------------------------------------------------------
 
-/** rogue/g_rogue_newai.cpp:914-921. */
-function realrange(self: EdictT, other: EdictT): number {
+/** rogue/g_rogue_newai.cpp:914-921. EXPORTED: g_rogue_combat.ts's
+ *  `T_RadiusNukeDamage` (rogue/g_rogue_combat.cpp:94) needs this same
+ *  `realrange` -- rather than duplicate this trivial one-liner a second
+ *  time, g_rogue_combat.ts imports it from here, its real home file per
+ *  this port line's "import, don't duplicate" rule for the 7 primitives
+ *  this file already ported for real (see file header's "THE
+ *  REINFORCEMENTS FINDING" section). */
+export function realrange(self: EdictT, other: EdictT): number {
   return vec3_length(vec3_sub(self.s.origin, other.s.origin));
 }
 
-/** rogue/g_rogue_monster.cpp:105-108. */
-function M_SlotsLeft(self: EdictT): number {
+/** rogue/g_rogue_monster.cpp:105-108. EXPORTED: g_rogue_monster.ts
+ *  re-exports this as its own `M_SlotsLeft` (its real declared home is
+ *  g_rogue_monster.cpp, but the body already lives here -- see this
+ *  file's header) rather than duplicating the body a second time. */
+export function M_SlotsLeft(self: EdictT): number {
   return self.monsterinfo.monster_slots - self.monsterinfo.monster_used;
 }
 
 /** rogue/g_rogue_newai.cpp:1508-1534 -- returns a randomly-selected visible
- *  coop player, or null outside coop / with none visible. */
-function PickCoopTarget(self: EdictT): EdictT | null {
+ *  coop player, or null outside coop / with none visible. EXPORTED:
+ *  g_rogue_newai.ts re-exports this as its own `PickCoopTarget` (its real
+ *  declared home is g_rogue_newai.cpp) rather than duplicating the body a
+ *  second time. */
+export function PickCoopTarget(self: EdictT): EdictT | null {
   if (!coopEnabled()) return null;
 
   const targets: EdictT[] = [];
@@ -641,7 +665,7 @@ function PickCoopTarget(self: EdictT): EdictT | null {
  *  this port's `mins`/`maxs` are always real `Vec3` values, never null;
  *  dropped, not ported, matching this port line's precedent for C
  *  null-pointer guards with no TS equivalent given the narrower signature. */
-function CheckSpawnPoint(origin: Vec3, mins: Vec3, maxs: Vec3): boolean {
+export function CheckSpawnPoint(origin: Vec3, mins: Vec3, maxs: Vec3): boolean {
   const tr = gi.trace(origin, mins, maxs, origin, null, MASK_MONSTERSOLID);
   if (tr.startsolid || tr.allsolid) return false;
   if (tr.ent !== g_edicts[0]) return false;
@@ -649,7 +673,7 @@ function CheckSpawnPoint(origin: Vec3, mins: Vec3, maxs: Vec3): boolean {
 }
 
 /** rogue/g_rogue_spawn.cpp:139-151. */
-function CheckGroundSpawnPoint(origin: Vec3, entMins: Vec3, entMaxs: Vec3, height: number, _gravity: number): boolean {
+export function CheckGroundSpawnPoint(origin: Vec3, entMins: Vec3, entMaxs: Vec3, height: number, _gravity: number): boolean {
   if (!CheckSpawnPoint(origin, entMins, entMaxs)) return false;
 
   if (M_CheckBottom_Fast_Generic(vec3(origin[0] + entMins[0], origin[1] + entMins[1], origin[2] + entMins[2]), vec3(origin[0] + entMaxs[0], origin[1] + entMaxs[1], origin[2] + entMaxs[2]), false)) return true;
@@ -668,7 +692,7 @@ function CheckGroundSpawnPoint(origin: Vec3, entMins: Vec3, entMaxs: Vec3, heigh
  *  the C++ body (never referenced) -- kept as an unused parameter to match
  *  the call signature bug-for-bug, per this port line's "dead C parameter,
  *  kept" precedent. */
-function FindSpawnPoint(startpoint: Vec3, mins: Vec3, maxs: Vec3, _maxMoveUp: number, drop: boolean = true): Vec3 | null {
+export function FindSpawnPoint(startpoint: Vec3, mins: Vec3, maxs: Vec3, _maxMoveUp: number, drop: boolean = true): Vec3 | null {
   let spawnpoint = vec3(startpoint[0], startpoint[1], startpoint[2]);
 
   if (!drop || !M_droptofloor_generic(spawnpoint, mins, maxs, false, null, MASK_MONSTERSOLID, false)) {
@@ -688,7 +712,7 @@ function FindSpawnPoint(startpoint: Vec3, mins: Vec3, maxs: Vec3, _maxMoveUp: nu
  *  `CreateMonster` has no other caller in this file's dependency closure
  *  (`CreateFlyMonster`, `CreateMonster`'s only other C++ caller, belongs to
  *  the carrier/widow files, out of scope here). */
-function CreateGroundMonster(origin: Vec3, angles: Vec3, entMins: Vec3, entMaxs: Vec3, classname: string, height: number): EdictT | null {
+export function CreateGroundMonster(origin: Vec3, angles: Vec3, entMins: Vec3, entMaxs: Vec3, classname: string, height: number): EdictT | null {
   if (!CheckGroundSpawnPoint(origin, entMins, entMaxs, height, -1)) return null;
 
   const newEnt = G_Spawn();
@@ -743,7 +767,7 @@ const SpawnGro_laser_think: ThinkFn = (self: EdictT): void => {
   self.nextthink = Gtime_add(level.time, Gtime_from_ms(1));
 };
 
-function SpawnGrow_Spawn(startpos: Vec3, start_size: number, end_size: number): void {
+export function SpawnGrow_Spawn(startpos: Vec3, start_size: number, end_size: number): void {
   const ent = G_Spawn();
   ent.s.origin = vec3(startpos[0], startpos[1], startpos[2]);
 
@@ -791,14 +815,13 @@ function SpawnGrow_Spawn(startpos: Vec3, start_size: number, end_size: number): 
 }
 
 // ---------------------------------------------------------------------------
-// monster_fire_blaster2 / fire_blaster2 -- genuinely out-of-scope (a full
-// second projectile weapon, not plumbing). See file header.
-// ---------------------------------------------------------------------------
-
-function monster_fire_blaster2(self: EdictT, _start: Vec3, _dir: Vec3, _damage: number, _speed: number, _flashtype: MonsterMuzzleflashIdT, _effect: EffectsT): void {
-  throw new Error(`monster_fire_blaster2: not yet ported (rogue mission pack, see rogue/g_rogue_monster.cpp:7 + rogue/g_rogue_newweap.cpp:1374) -- called against ${self.classname ?? "?"}`);
-}
-
+// monster_fire_blaster2 -- formerly a local throwing stub here (a full
+// second projectile weapon, not plumbing -- see file header). Now that
+// rogue/g_rogue_monster.ts and its sibling rogue/g_rogue_newweap.ts have
+// landed, this file's local stub is DELETED and replaced with `import {
+// monster_fire_blaster2 } from "./rogue/g_rogue_monster"` (that file's own
+// three-line wrapper calls the real `fire_blaster2` projectile spawner from
+// g_rogue_newweap.ts, then `monster_muzzleflash`).
 // ---------------------------------------------------------------------------
 // M_PickReinforcements / M_SetupReinforcements (m_medic.cpp:69-167).
 // Non-static in the C++ (g_local.h-declared, shared with carrier/widow) --

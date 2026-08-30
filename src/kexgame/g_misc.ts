@@ -67,6 +67,18 @@
 // Verified end-to-end by `bunx tsc --noEmit` and `bun test` actually
 // importing both files together. See g_func.ts's own header for the full
 // writeup of this cycle from its side.
+//
+// ============================================================================
+// STUB SWAP (xatrix unit): misc_viper_use / misc_strogg_ship_use now exported
+// ============================================================================
+// Both were real, already-ported, already-`RegisterUse`d local `const`
+// bindings -- just not `export`ed, since nothing outside this file needed
+// them before. g_xatrix_misc.ts's own `SP_misc_crashviper`/
+// `SP_misc_transport` (xatrix/g_xatrix_misc.cpp:9/85) reuse them exactly the
+// way the shipped C++ does: `ent->use = misc_viper_use;` /
+// `ent->use = misc_strogg_ship_use;` on a freshly-spawned xatrix entity, with
+// no behavior change here -- only the `export` keyword was added to each
+// declaration.
 // - `CTFPlayerResetGrapple` -> grepped the ENTIRE quake2-rerelease-dll tree:
 //   declared in rerelease/ctf/g_ctf.h:111, defined in
 //   rerelease/ctf/g_ctf.cpp:1222 -- a file with no src/kexgame/ port yet.
@@ -331,6 +343,7 @@ import { T_Damage, T_RadiusDamage } from "./g_combat";
 import { M_walkmove, M_ChangeYaw } from "./m_move";
 import { M_droptofloor, M_CatagorizePositionSelf, M_WorldEffects } from "./g_monster";
 import { train_use, func_train_find } from "./g_func";
+import { CTFPlayerResetGrapple } from "./ctf/g_ctf";
 import {
   FRAME_flip01,
   FRAME_flip12,
@@ -410,20 +423,14 @@ function defaultShadowLightData(): ShadowLightDataT {
 
 
 // ---------------------------------------------------------------------------
-// CROSS-DEPENDENCY STUBS -- see file header
+// CROSS-DEPENDENCY -- CTFPlayerResetGrapple/CTFResetGrapple -- REAL imports
+// from src/kexgame/ctf/g_ctf.ts (this file's own former real, local
+// CTFPlayerResetGrapple copy and its throwing CTFResetGrapple stub are gone;
+// see ctf/g_ctf.ts's own header for the full consolidation inventory). Note
+// this is the KEX rerelease `CTFPlayerResetGrapple` (ctf/g_ctf.cpp), NOT
+// src/ctf/g_ctf.ts's same-named export for the unrelated legacy Zoid CTF
+// mod -- see this file's own header for that distinction.
 // ---------------------------------------------------------------------------
-
-function CTFResetGrapple(_grapple: EdictT): void {
-  throw new Error("CTFResetGrapple: not yet ported -- owning file rerelease/ctf/g_ctf.cpp:1230 (future src/kexgame/g_ctf.ts)");
-}
-
-/** rerelease/ctf/g_ctf.cpp:1222-1226 -- see file header's CTFPlayerResetGrapple
- *  note for why this is a real port, not a stub. */
-function CTFPlayerResetGrapple(ent: EdictT): void {
-  if (ent.client !== null && ent.client.ctf_grapple !== null) {
-    CTFResetGrapple(ent.client.ctf_grapple);
-  }
-}
 
 //=====================================================
 // func_group is editor-only (no runtime behavior); nothing to port.
@@ -1697,7 +1704,7 @@ There must be a path for it to follow once it is activated.
 
 "speed"		How fast the Viper should fly */
 
-const misc_viper_use = RegisterUse("misc_viper_use", (self: EdictT, other: EdictT | null, activator: EdictT | null): void => {
+export const misc_viper_use = RegisterUse("misc_viper_use", (self: EdictT, other: EdictT | null, activator: EdictT | null): void => {
   self.svflags &= ~SvflagsT.SVF_NOCLIENT;
   self.use = train_use;
   train_use(self, other, activator);
@@ -1804,7 +1811,7 @@ It is trigger_spawned, so you must have something use it for it to show up.
 There must be a path for it to follow once it is activated.
 
 "speed"		How fast it should fly */
-const misc_strogg_ship_use = RegisterUse("misc_strogg_ship_use", (self: EdictT, other: EdictT | null, activator: EdictT | null): void => {
+export const misc_strogg_ship_use = RegisterUse("misc_strogg_ship_use", (self: EdictT, other: EdictT | null, activator: EdictT | null): void => {
   self.svflags &= ~SvflagsT.SVF_NOCLIENT;
   self.use = train_use;
   train_use(self, other, activator);

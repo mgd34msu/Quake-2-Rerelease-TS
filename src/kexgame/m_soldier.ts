@@ -64,20 +64,21 @@
 //     verbatim, unexported.
 // (3) XATRIX MISSION-PACK WEAPON PRIMITIVES (xatrix/g_xatrix_monster.cpp,
 //     xatrix/g_xatrix_weapon.cpp, rogue/g_rogue_newai.cpp's `PredictAim`) --
-//     `monster_fire_ionripper`, `monster_fire_blueblaster`,
-//     `monster_fire_dabeam`/`dabeam_update`, and `PredictAim`. These are
-//     genuinely out-of-scope mission-pack content directories (matching
-//     g_monster.ts's own `fire_flechette` precedent exactly -- ROGUE's
-//     rogue/g_rogue_newweap.cpp:41 stays a local unexported throwing stub
-//     there for the identical reason). Kept as local, unexported, cited
-//     throwing stubs. Unlike (1), this is NOT a landmine: these four are
-//     reached only from `soldier_fire_xatrix`'s ionripper/hyperblaster/
-//     laserbeam branches, which in turn are reached only when
-//     `self.style === 1` (the three xatrix-styled spawns:
-//     SP_monster_soldier_ripper/hypergun/lasergun) AND that specific
-//     weapon's `self.count` bucket fires -- a real but narrower gap than
-//     (1), affecting three of the six spawn variants' attack animations
-//     only, not pain-processing for every soldier ever spawned.
+//     `monster_fire_ionripper`, `monster_fire_blueblaster`, and
+//     `monster_fire_dabeam`/`dabeam_update`: STUB SWAP (xatrix unit) --
+//     g_xatrix_monster.ts has now landed as the real home of all four. The
+//     local throwing stubs that used to live here are DELETED and replaced
+//     with an import from "./g_xatrix_monster". `soldier_fire_xatrix`'s
+//     ionripper/hyperblaster/laserbeam branches (reached only when
+//     `self.style === 1`, the three xatrix-styled spawns:
+//     SP_monster_soldier_ripper/hypergun/lasergun, on that specific weapon's
+//     `self.count` bucket) now genuinely fire: `soldierh_laser_update`
+//     (already ported for real below, unchanged) is no longer dead code.
+//     `PredictAim` (rogue/g_rogue_newai.cpp, NOT xatrix) is untouched by
+//     THIS swap -- it was already converted to a real import from
+//     "./m_supertank" by an earlier change in this file (see this file's own
+//     "PREDICTAIM SIGNATURE FIX" note below), out of this xatrix unit's
+//     scope either way.
 //
 // ============================================================================
 // FORWARD-DECLARED C++ FUNCTIONS -> TS HOISTED `function` DECLARATIONS
@@ -187,6 +188,8 @@ import { g_edicts } from "./g_main_globals";
 import { Gtime_add, Gtime_subtract, Gtime_from_sec, Gtime_from_ms, Gtime_milliseconds, type GTime } from "./gtime";
 import { irandom, brandom } from "./q_std";
 import { ModIdT } from "./g_local";
+import { PredictAim } from "./m_supertank";
+import { dabeam_update, monster_fire_dabeam, monster_fire_ionripper, monster_fire_blueblaster } from "./g_xatrix_monster";
 
 // ---------------------------------------------------------------------------
 // m_soldier.h frame-index enum (585 lines; anonymous enum, declaration
@@ -1051,25 +1054,15 @@ export function M_MonsterDodge(self: EdictT, attacker: EdictT, eta: GTime, tr: K
 RegisterMonsterinfoDodge("M_MonsterDodge", M_MonsterDodge);
 
 // ---------------------------------------------------------------------------
-// XATRIX MISSION-PACK PRIMITIVES -- local unexported cited throwing stubs.
+// XATRIX MISSION-PACK PRIMITIVES -- real imports from g_xatrix_monster.ts.
 // See file header (3).
 // ---------------------------------------------------------------------------
 
-function monster_fire_ionripper(self: EdictT, _start: Vec3, _dir: Vec3, _damage: number, _speed: number, _flashtype: MonsterMuzzleflashIdT, _effect: EffectsT): void {
-  throw new Error(`monster_fire_ionripper: not yet ported (xatrix mission pack, see xatrix/g_xatrix_monster.cpp:14 + xatrix/g_xatrix_weapon.cpp:91) -- called against ${self.classname ?? "?"}`);
-}
-function monster_fire_blueblaster(self: EdictT, _start: Vec3, _dir: Vec3, _damage: number, _speed: number, _flashtype: MonsterMuzzleflashIdT, _effect: EffectsT): void {
-  throw new Error(`monster_fire_blueblaster: not yet ported (xatrix mission pack, see xatrix/g_xatrix_monster.cpp:7 + xatrix/g_xatrix_weapon.cpp:7) -- called against ${self.classname ?? "?"}`);
-}
-function dabeam_update(self: EdictT, _damage: boolean): void {
-  throw new Error(`dabeam_update: not yet ported (xatrix mission pack, see xatrix/g_xatrix_monster.cpp:84) -- called against ${self.classname ?? "?"}`);
-}
-function monster_fire_dabeam(self: EdictT, _damage: number, _secondary: boolean, _update_func: PrethinkFn): void {
-  throw new Error(`monster_fire_dabeam: not yet ported (xatrix mission pack, see xatrix/g_xatrix_monster.cpp:112) -- called against ${self.classname ?? "?"}`);
-}
-function PredictAim(self: EdictT, _target: EdictT | null, _start: Vec3, _bolt_speed: number, _eye_height: boolean, _offset: number, _aimdir: Vec3): void {
-  throw new Error(`PredictAim: not yet ported (rogue mission pack, see rogue/g_rogue_newai.cpp:1083) -- called against ${self.classname ?? "?"}`);
-}
+// PredictAim is now a real import from "./m_supertank" -- see file header's
+// "PREDICTAIM SIGNATURE FIX" note (this file's own stub had a stale
+// 7-parameter signature missing the real `aimpoint` out-param; the one call
+// site below now passes `null` for it, matching every other real call site
+// in this port line).
 
 // ---------------------------------------------------------------------------
 // mkframe/mkMove local builders -- see file header.
@@ -1649,7 +1642,7 @@ export function soldierh_laser_update(self: EdictT): void {
   start = vec3_add(start, vec3_muls(up, tempvec[2] + 6));
 
   const aimdir = vec3(forward[0], forward[1], forward[2]);
-  if (!owner.deadflag) PredictAim(owner, owner.enemy, start, 0, false, crandom_local() * 0.05 + 0.15, aimdir);
+  if (!owner.deadflag) PredictAim(owner, owner.enemy, start, 0, false, crandom_local() * 0.05 + 0.15, aimdir, null);
 
   self.s.origin = start;
   self.movedir = aimdir;
