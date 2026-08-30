@@ -12,28 +12,24 @@
 //                                    CLIENTNUM-prefixed multi-player delta
 //                                    used only by the MVD stream)
 //
-// SCOPE (legacy family only -- see this file's "KEX GAP" note below): this
-// module ports the non-extended, non-rerelease branch of
-// MSG_WriteDeltaPlayerstate_Packet/MSG_ReadDeltaPlayerstate_Packet only
-// (`flags` is always treated as 0: MSG_PS_EXTENSIONS/MSG_PS_RERELEASE/
-// MSG_PS_EXTENSIONS_2 never set). This matches PROTOCOL_VERSION_MVD_DEFAULT
-// (2010), the wire format q2pro/q2repro use for MVD demos recorded against a
-// classic (non-kex) game DLL -- which is the only family this engine's own
-// server can run today (src/server/sv_game.ts's `currentGameFamily()` still
-// gates svs.codec between VANILLA_CODEC and Q2REPRO_CODEC only for the LIVE
-// per-client protocol; nothing in this port negotiates the separate
-// PROTOCOL_VERSION_MVD_RERELEASE=3038 MVD sub-protocol msg.c's rerelease
-// branch would require -- `MSG_PS_RERELEASE` writes viewoffset/kick_angles/
-// gunoffset/gunangles as scaled shorts instead of chars, adds `gunrate`, and
-// widens stats to MAX_STATS_NEW=64 with a different bit-length encoding).
-//
-// KEX GAP (documented per PORTING.md/.orch/preferences.md rule 17 and the
-// task brief's "otherwise legacy-family MVD first with the kex gap
-// documented"): recording while `currentGameFamily() === "kex"` is refused
-// by sv_mvd.ts's SV_MvdRecord_f with an explicit error rather than emitting
-// bytes that claim rerelease compatibility. Porting the rerelease branch is
-// real, scoped follow-up work (a second `flags`-aware code path through
-// every function below), not attempted here.
+// SCOPE: the base MSG_WriteDeltaMvdPlayerstate/MSG_ReadDeltaMvdPlayerstate*
+// functions in this file port the non-extended, non-rerelease branch of
+// MSG_WriteDeltaPlayerstate_Packet/MSG_ReadDeltaPlayerstate_Packet
+// (`flags` treated as 0: MSG_PS_EXTENSIONS/MSG_PS_RERELEASE/
+// MSG_PS_EXTENSIONS_2 never set), matching PROTOCOL_VERSION_MVD_DEFAULT
+// (2010) -- the wire format q2pro/q2repro use for MVD demos recorded against
+// a classic (non-kex) game DLL. The MSG_PS_RERELEASE branch (viewoffset/
+// kick_angles/gunoffset/gunangles as scaled shorts, gunframe/gunindex as
+// shorts, damage_blend, 64-entry stats) is ALSO now ported, as a separate
+// `*Rerelease` codec further down this file (PROTOCOL_VERSION_MVD_RERELEASE
+// =3038) -- sv_mvd.ts's emitGamestateInto/emitFrameInto/server/mvd/parse.ts's
+// readPlayersSection pick whichever codec matches the recording's
+// negotiated sub-version (`mvd.rerelease`/`channel.rerelease`). See that
+// codec's own header comment (below, right before MAX_STATS_NEW) for the
+// exact field-by-field citations, what's deliberately NOT ported (gunrate --
+// verified absent from the actual MVD packet writer despite the task
+// brief's summary saying otherwise -- and rerelease entity-delta
+// extensions), and the PlayerStateT.stats=32 truncation gap.
 //
 // ENTITY DELTA REUSE (no separate "packed" entity format is ported here):
 // msg.c's MSG_PackEntity/MSG_WriteDeltaEntity(entity_packed_t) operate on a

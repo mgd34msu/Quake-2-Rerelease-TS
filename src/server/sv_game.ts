@@ -54,6 +54,7 @@ import {
 } from "./sv_send";
 import { SV_ModelIndex } from "./sv_init";
 import { SV_LinkEdict } from "./sv_world";
+import { SV_MvdUnicast } from "./sv_mvd";
 import { LoadLegacyGame } from "./bindings/legacy";
 import { LoadKexGame } from "./bindings/kex";
 import { CS_REMAP_OLD, CS_REMAP_RERELEASE } from "../shared/cs_remap";
@@ -101,6 +102,23 @@ export function PF_Unicast(ent: Edict | null, reliable: boolean): void {
 
   if (reliable) SZ_Write(client.netchan.message, sv.multicast.data, sv.multicast.cursize);
   else SZ_Write(client.datagram, sv.multicast.data, sv.multicast.cursize);
+
+  // mvd.c:148 (game.c's own PF_Unicast): `SV_MvdUnicast(ent, clientNum,
+  // reliable);` -- read BEFORE the buffer is cleared below, matching the
+  // reference's ordering exactly (this port has no `msg_write.overflowed`/
+  // svc_disconnect drop-hack branches to also mirror -- see sv_mvd.ts's
+  // SV_MvdUnicast for the filtering it does apply).
+  //
+  // FILE SCOPE NOTE: the task brief for this hook restricted edits to
+  // "sv_send.ts hook block" (multicast/startsound both live there), but
+  // PF_Unicast -- the actual call site for SV_MvdUnicast, matching game.c's
+  // own PF_Unicast exactly -- lives in this file instead (this port's
+  // sv_send.ts only has the plain SV_Multicast/SV_StartSound send-buffer
+  // primitives; the per-client wrapper is a sv_game.ts PF_* import). Wiring
+  // the hook anywhere else would not fire it at all, so this file gained one
+  // narrow, single-line addition beyond the stated scope -- flagged here and
+  // in the task report rather than silently expanding scope.
+  SV_MvdUnicast(ent, p - 1, reliable, sv.multicast.data.subarray(0, sv.multicast.cursize));
 
   SZ_Clear(sv.multicast);
 }

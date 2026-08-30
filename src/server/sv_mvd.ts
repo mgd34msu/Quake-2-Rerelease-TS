@@ -12,39 +12,51 @@
 // to qcommon/protocol/mvd.ts).
 //
 // SCOPE (see qcommon/protocol/mvd.ts's header for the legacy-vs-kex family
-// split, cited again at SV_MvdRecord_f below):
+// split, cited again at SV_MvdRecord_f below). Updated for the MVD
+// completion sweep (.orch/followups.md's "MVD COMPLETION" entry) -- items
+// 1/2/3/4 below are now ported; remaining gaps are called out per item:
 //
-//   1. NO MVD DUMMY CLIENT. The real engine spawns a fake connected client +
-//      edict ("mvd.dummy") that the game DLL treats as a real spectator, so
-//      operators can run mvdstuff/scoreboard commands through it and the
-//      recording always has an always-active default observer. Standing one
-//      up means driving ClientConnect/ClientBegin against a live
-//      GameExports for a synthetic client -- real integration risk (fake
-//      player counts, spawn-point consumption) for a feature (admin
-//      stringcmd forwarding into the recording) this unit's tests don't
-//      exercise. Recording instead captures every REAL connected player's
-//      state directly; `player_is_active`'s "always capture dummy" special
-//      case is simply absent (there is nothing to special-case).
-//   2. NO SV_MvdMulticast/SV_MvdUnicast/SV_MvdStartSound hooks into
-//      SV_Multicast/SV_Unicast/SV_StartSound (sv_send.ts). Those forward
-//      arbitrary out-of-band game bytes (muzzle flashes, temp entities,
-//      positioned sounds sent via PF_multicast rather than baked into
-//      entity_state_t) into the MVD stream's reliable/unreliable buffers.
-//      The round-trip fidelity this unit proves is entity/player STATE
-//      (position, angles, stats) each frame, which does not depend on
-//      those hooks. SV_MvdBroadcastPrint (below) IS wired, since
-//      SV_BroadcastPrintf's hook site is a single call and broadcast prints
-//      are genuinely useful/testable observer output.
-//   3. NO GTV auth (sv_mvd_password/whitelist/blacklist), NO zlib stream
-//      compression (GTF_DEFLATE is always masked off, matching the C's own
-//      `#if !USE_ZLIB` build path), NO connection-count cap. GTV here is an
-//      open relay with an unbounded client pool -- acceptable for what this
-//      unit proves (the handshake and live frame relay work end to end);
-//      revisit before any real network exposure.
-//   4. KEX/RERELEASE FAMILY: SV_MvdRecord_f refuses with an explicit error
-//      when `currentGameFamily() === "kex"` rather than emitting bytes that
-//      claim PROTOCOL_VERSION_MVD_RERELEASE compatibility no code here
-//      actually implements (see qcommon/protocol/mvd.ts's header).
+//   1. SV_MvdMulticast/SV_MvdUnicast/SV_MvdStartSound (below) are wired into
+//      SV_Multicast (sv_send.ts), PF_Unicast (sv_game.ts), and SV_StartSound
+//      (sv_send.ts) respectively, buffering into mvd.message (reliable) /
+//      mvd.datagram (unreliable) and flushed once per frame by
+//      SV_MvdEndFrame alongside the frame delta -- see MvdRecorderStateT's
+//      own comment and each hook's doc comment for the exact mvd.c
+//      citations. SV_MvdConfigstring is NOT wired (not named in the task
+//      brief for this sweep; its call site would be a PF_Configstring-style
+//      wrapper this port does not have a dedicated hook point for).
+//   2. MVD DUMMY CLIENT: dummyCreate/dummyRun/dummyDestroy below drive a
+//      real synthetic client through GameExports.ClientConnect/ClientBegin/
+//      ClientThink/ClientDisconnect, gated by the `sv_mvd_spawn_dummy` cvar
+//      (default "1", matching mvd.c's own default) and by the game module
+//      actually accepting the connect -- see dummyCreate's own comment for
+//      the full mvd.c citations and the one deliberate scope trim (no
+//      console-command-forwarding path; this unit has no live spectator
+//      networking to forward those commands over regardless).
+//   3. GTV HARDENING: password auth (authGtvClient/handleGtvHello, gated by
+//      `sv_mvd_password`), a connection-count cap (`sv_mvd_maxclients`,
+//      checked in SV_MvdRunGtv's accept loop), and GTF_DEFLATE compression
+//      (via Bun's built-in zlib bindings, one independent raw-deflate block
+//      per GTS_STREAM_DATA message rather than the C's single continuous
+//      per-connection zlib stream -- see writeGtvMessage's own comment for
+//      why) are all now ported. NOT ported: IP whitelist/blacklist
+//      (gtv_white_list/gtv_black_list) and the per-source-IP connection
+//      limit (sv_iplimit) -- general-purpose mechanisms outside "the auth
+//      handshake (password)" this sweep's brief actually asked for, and
+//      net_tcp.ts's connection object does not expose a peer address today.
+//   4. KEX/RERELEASE FAMILY: SV_MvdRecord_f no longer refuses under
+//      `currentGameFamily() === "kex"`. Player-state deltas switch to
+//      MSG_WriteDeltaMvdPlayerstateRerelease/MSG_ReadDeltaMvdPlayerstateRerelease
+//      (qcommon/protocol/mvd.ts) whenever a recording starts under kex,
+//      emitting PROTOCOL_VERSION_MVD_RERELEASE(3038) instead of
+//      PROTOCOL_VERSION_MVD_DEFAULT. Entity deltas still go through
+//      VANILLA_CODEC regardless of family (the task brief's field list names
+//      player-state fields only; rerelease entity-delta extensions --
+//      MSG_ES_LONGSOLID/SHORTANGLES/EXTENSIONS -- are a separate, larger,
+//      not-requested unit). See qcommon/protocol/mvd.ts's header for the
+//      exact field-by-field citations and the stats-widening truncation gap
+//      (PlayerStateT.stats is still MAX_STATS=32, a pre-existing tracked gap
+//      outside this file's scope).
 
 import { SizeBuf, SZ_Init, SZ_Clear, SZ_Write, MSG_WriteByte, MSG_WriteShort, MSG_WriteLong, MSG_WriteString } from "../qcommon/sizebuf";
 import { FS_CreatePath, FS_FOpenFileWrite, FS_Write, FS_FCloseFile } from "../qcommon/files";
@@ -575,6 +587,10 @@ interface GtvClientConnT {
   state: GtvClientStateT;
   recvBuf: Uint8Array;
   gotMagic: boolean;
+  // GTF_DEFLATE, negotiated in handleGtvHello: once true, every
+  // GTS_STREAM_DATA payload sent to this client is compressed (see
+  // writeGtvMessage below).
+  deflate: boolean;
 }
 
 let gtvListenerId: number | null = null;
@@ -591,12 +607,35 @@ function appendRecv(client: GtvClientConnT, data: Uint8Array): void {
   client.recvBuf = merged;
 }
 
+// GTF_DEFLATE (item 5, GTV hardening): mvd.c streams a single ongoing zlib
+// deflate context per client (Z_SYNC_FLUSH after every frame) so the
+// dictionary carries across messages; this port instead deflates each
+// GTS_STREAM_DATA payload as its own INDEPENDENT raw-deflate block via
+// Bun's built-in zlib bindings (`Bun.deflateSync`/`Bun.inflateSync`, no
+// Node `zlib` stream plumbing needed). Each block is self-contained and
+// decodes correctly on its own -- exactly what Z_SYNC_FLUSH guarantees for
+// the real continuous stream too -- at the cost of the cross-message
+// dictionary reuse a persistent deflate context would give. This unit's
+// scope has never claimed real .mvd2/GTV byte-for-byte tool interop (see
+// qcommon/protocol/mvd.ts's header), so trading compression ratio for a
+// much smaller, synchronous, per-message implementation is the right call
+// here.
 function writeGtvMessage(id: number, op: GtvServerOpT, body: SizeBuf): void {
+  const client = gtvClients.get(id);
+  let payload = body.data.subarray(0, body.cursize);
+  if (client?.deflate && payload.length) {
+    // `new Uint8Array(payload)` copies into a fresh ArrayBuffer-backed
+    // typed array: `payload` here is a `.subarray()` view, whose TS type
+    // (`Uint8Array<ArrayBufferLike>`) Bun's zlib bindings don't accept
+    // directly (`Uint8Array<ArrayBuffer>` only).
+    payload = Bun.deflateSync(new Uint8Array(payload));
+  }
+
   const header = new Uint8Array(3);
-  new DataView(header.buffer).setUint16(0, body.cursize + 1, true);
+  new DataView(header.buffer).setUint16(0, payload.length + 1, true);
   header[2] = op;
   TCP_Write(id, header);
-  if (body.cursize) TCP_Write(id, body.data.subarray(0, body.cursize));
+  if (payload.length) TCP_Write(id, payload);
 }
 
 function dropGtvClient(id: number): void {
@@ -605,16 +644,28 @@ function dropGtvClient(id: number): void {
   mvdDisableIfIdle();
 }
 
+// mvd.c's auth_client, minus the whitelist/blacklist host-matching branches
+// (SV_MatchAddress against gtv_white_list/gtv_black_list -- not requested by
+// this unit's brief, which names "the auth handshake (password)"
+// specifically; IP allow/deny lists are a separate, general-purpose
+// mechanism this port's net_tcp.ts layer does not expose an address for
+// today). Password-only: empty cvar allows anyone (mvd.c:1453's
+// `*sv_mvd_password->string == 0` check), non-empty requires an exact match.
+function authGtvClient(password: string): boolean {
+  const required = svMvdPasswordCvar();
+  if (required.length === 0) return true;
+  return password === required;
+}
+
 function handleGtvHello(client: GtvClientConnT, msg: ByteCursorT): void {
   // GTC_HELLO body (post op-byte, already consumed by the caller): word
   // protocol, long flags, long unused, string name, string password, string
-  // version (mvd.c:1460-1536). This port ignores name/password/version and
-  // never authenticates (see file header).
+  // version (mvd.c:1460-1536).
   const protocol = readShortAt(msg);
-  readLongAt(msg); // flags -- GTF_DEFLATE/GTF_STRINGCMDS both unsupported, ignored
+  const flags = readLongAt(msg);
   readLongAt(msg); // unused
   readStringAt(msg); // name
-  readStringAt(msg); // password
+  const password = readStringAt(msg);
   readStringAt(msg); // version
 
   if (protocol !== GTV_PROTOCOL_VERSION) {
@@ -625,13 +676,31 @@ function handleGtvHello(client: GtvClientConnT, msg: ByteCursorT): void {
     return;
   }
 
+  if (!authGtvClient(password)) {
+    const empty = new SizeBuf();
+    SZ_Init(empty, new Uint8Array(0), 0);
+    writeGtvMessage(client.id, GtvServerOpT.GTS_NOACCESS, empty);
+    dropGtvClient(client.id);
+    return;
+  }
+
   client.state = GtvClientStateT.CS_PRIMED;
+  // GTF_STRINGCMDS stays unsupported regardless of what the client asked
+  // for (no dummy-forwarded console command path -- see dummyCreate's
+  // header); GTF_DEFLATE is granted whenever the client requests it, since
+  // Bun's built-in zlib bindings make it always available here (unlike the
+  // C's `#if !USE_ZLIB` build-time gate).
+  const grantDeflate = !!(flags & GTF_DEFLATE);
 
   const reply = new SizeBuf();
   const replyData = new Uint8Array(8);
   SZ_Init(reply, replyData, replyData.length);
-  MSG_WriteLong(reply, 0); // flags echoed back -- always 0 (no deflate/stringcmds)
+  MSG_WriteLong(reply, grantDeflate ? GTF_DEFLATE : 0);
+  // Sent in plaintext: the client cannot know to inflate this very reply
+  // until AFTER it decodes the echoed flags inside it (mvd.c:1517-1531 --
+  // deflateInit only runs once the hello reply has already been queued).
   writeGtvMessage(client.id, GtvServerOpT.GTS_HELLO, reply);
+  client.deflate = grantDeflate;
 }
 
 function handleGtvStreamStart(client: GtvClientConnT): void {
@@ -765,11 +834,21 @@ export function SV_MvdRunGtv(): void {
     for (;;) {
       const accepted = TCP_Accept(gtvListenerId);
       if (!accepted) break;
+
+      // mvd.c's find_slot(): a full GTV client pool rejects new connections
+      // outright (accept_client's "no free slots" path, mvd.c:1763-1767)
+      // rather than queuing them.
+      if (gtvClients.size >= svMvdMaxClientsCvar()) {
+        TCP_Close(accepted.id);
+        continue;
+      }
+
       gtvClients.set(accepted.id, {
         id: accepted.id,
         state: GtvClientStateT.CS_CONNECTED,
         recvBuf: new Uint8Array(0),
         gotMagic: false,
+        deflate: false,
       });
     }
   }
@@ -848,25 +927,50 @@ export function SV_MvdBeginFrame(): void {
 }
 
 export function SV_MvdEndFrame(): void {
+  dummyRun();
   SV_MvdRunGtv();
 
   if (!mvd.active) return;
 
-  const msg = new SizeBuf();
-  const data = new Uint8Array(65536);
-  SZ_Init(msg, data, data.length);
-  emitFrameInto(msg);
+  if (mvd.message.overflowed) {
+    Com_Printf("MVD reliable message overflowed\n");
+    SZ_Clear(mvd.message);
+    SZ_Clear(mvd.datagram);
+    return;
+  }
+  if (mvd.datagram.overflowed) {
+    Com_Printf("WARNING: Unreliable MVD datagram overflowed.\n");
+    SZ_Clear(mvd.datagram);
+  }
+
+  const frame = new SizeBuf();
+  const frameData = new Uint8Array(65536);
+  SZ_Init(frame, frameData, frameData.length);
+  emitFrameInto(frame);
+
+  // mvd.c:1033-1071: one combined message per frame -- mvd.message (reliable
+  // out-of-band: configstrings/prints/multicast_r/unicast_r, buffered by the
+  // hooks above over the course of this frame), then the frame delta itself,
+  // then mvd.datagram (unreliable out-of-band: multicast/unicast/sound).
+  const total = mvd.message.cursize + frame.cursize + mvd.datagram.cursize;
+  const combined = new SizeBuf();
+  const combinedData = new Uint8Array(Math.max(total, 1));
+  SZ_Init(combined, combinedData, combinedData.length);
+  SZ_Write(combined, mvd.message.data.subarray(0, mvd.message.cursize), mvd.message.cursize);
+  SZ_Write(combined, frame.data.subarray(0, frame.cursize), frame.cursize);
+  SZ_Write(combined, mvd.datagram.data.subarray(0, mvd.datagram.cursize), mvd.datagram.cursize);
 
   for (const client of gtvActiveClients()) {
-    writeGtvMessage(client.id, GtvServerOpT.GTS_STREAM_DATA, msg);
+    writeGtvMessage(client.id, GtvServerOpT.GTS_STREAM_DATA, combined);
   }
 
   if (mvd.recording !== null) {
-    recWriteMessage(mvd.recording, msg);
+    recWriteMessage(mvd.recording, combined);
     mvd.numframes++;
   }
 
-  SZ_Clear(msg);
+  SZ_Clear(mvd.message);
+  SZ_Clear(mvd.datagram);
 }
 
 /*
@@ -879,34 +983,205 @@ baseline from scratch.
 ==============
 */
 export function SV_MvdMapChanged(): void {
-  if (mvd.active) buildGamestate();
+  if (!mvd.active) return;
+  buildGamestate();
+
+  // SV_SpawnServer downgrades every connected client (including the dummy,
+  // an entry in the same svs.clients array) from cs_spawned back to
+  // cs_connected before respawning the level (sv_init.ts's own client loop);
+  // real clients re-reach cs_spawned via their own reconnect/"begin" flow.
+  // The dummy has no such flow of its own, so it needs the same explicit
+  // re-spawn mvd.c's SV_MvdMapChanged gives it (dummy_create/dummy_spawn,
+  // mvd.c:2002-2014) -- otherwise it would silently stop being captured
+  // (playerIsActive's cs_spawned gate) after the very first map change.
+  if (mvdDummy.clientIndex !== null && mvdDummy.edict) {
+    const ge = geHolder.ge;
+    const cl = svs.clients[mvdDummy.clientIndex];
+    if (ge && cl) {
+      ge.ClientBegin(mvdDummy.edict);
+      cl.state = ClientStateT.cs_spawned;
+    }
+  } else {
+    dummyCreate();
+  }
 }
 
 /*
 ==============
 SV_MvdBroadcastPrint
 
-Hook for SV_BroadcastPrintf (sv_send.ts). Appends a print message to every
-GTV client's stream immediately (not buffered into a per-frame reliable
-message like the real engine's `mvd.message` -- see file header's scope
-note 2; this is simpler and sends prints promptly instead of batching them
-until the next SV_MvdEndFrame).
+Hook for SV_BroadcastPrintf (sv_send.ts). Buffers a print message into
+mvd.message (the reliable out-of-band buffer), flushed once per frame by
+SV_MvdEndFrame alongside the frame delta and the multicast/unicast/sound
+hooks below -- matches mvd.c:1249-1255 exactly now that this unit ports the
+same per-frame accumulate-then-flush cycle those hooks need (previously this
+function wrote straight to each GTV client's stream immediately; see git
+history / this file's superseded header note for that earlier design).
 ==============
 */
 export function SV_MvdBroadcastPrint(level: number, text: string): void {
   if (!mvd.active) return;
-  const active = gtvActiveClients();
-  if (active.length === 0) return;
+  MSG_WriteMvdCmd(mvd.message, mvd_print, 0);
+  MSG_WriteByte(mvd.message, level);
+  MSG_WriteString(mvd.message, text);
+}
 
-  const buf = new SizeBuf();
-  const data = new Uint8Array(text.length + 8);
-  SZ_Init(buf, data, data.length);
-  MSG_WriteByte(buf, level);
-  MSG_WriteString(buf, text);
+// mvd.c's filter_unicast_data: discards unicast payloads a real MVD viewer
+// would just throw away, and (when a dummy exists) routes layout/print
+// traffic the same way the real engine does. `SvcOpsT.svc_stufftext`'s
+// "play " exception lets client-side sound-hack stufftexts (some mods stuff
+// `play sound/foo.wav` instead of using gi.sound) still reach the recording.
+const PLAY_PREFIX = [0x70, 0x6c, 0x61, 0x79, 0x20]; // "play "
 
-  for (const client of active) {
-    writeGtvMessage(client.id, GtvServerOpT.GTS_STREAM_DATA, buf);
+function payloadStartsWithPlay(payload: Uint8Array): boolean {
+  if (payload.length < 1 + PLAY_PREFIX.length) return false;
+  for (let i = 0; i < PLAY_PREFIX.length; i++) {
+    if (payload[1 + i] !== PLAY_PREFIX[i]) return false;
   }
+  return true;
+}
+
+function svMvdNomsgsCvar(): boolean {
+  const v = Cvar_Get("sv_mvd_nomsgs", "1", 0);
+  return v ? v.value !== 0 : true;
+}
+
+function filterUnicastData(ent: Edict, payload: Uint8Array): boolean {
+  if (payload.length === 0) return true;
+  const cmd = payload[0];
+
+  if (cmd === SvcOpsT.svc_stufftext) {
+    return payloadStartsWithPlay(payload);
+  }
+
+  // if there is no dummy client, don't discard anything (mvd.c:1159-1161)
+  if (!mvdDummy.edict) return true;
+
+  if (cmd === SvcOpsT.svc_layout) {
+    return ent === mvdDummy.edict; // discard layout updates to real players
+  }
+  if (cmd === SvcOpsT.svc_print) {
+    if (ent !== mvdDummy.edict && svMvdNomsgsCvar()) return false;
+  }
+
+  return true;
+}
+
+/*
+==============
+SV_MvdMulticast
+
+Hook for SV_Multicast (sv_send.ts). `to` must name a base MulticastT kind
+(ALL/PHS/PVS or their _R reliable variants); `payload` is the multicast
+buffer's contents (sv.multicast, read BEFORE the caller clears it).
+==============
+*/
+export function SV_MvdMulticast(leafnum: number, to: MulticastT, payload: Uint8Array): void {
+  if (!mvd.active) return;
+
+  if (payload.length >= 2048) {
+    Com_Printf("SV_MvdMulticast: overflow\n");
+    return;
+  }
+
+  let baseKind: number;
+  let reliable: boolean;
+  switch (to) {
+    case MulticastT.MULTICAST_ALL:
+      baseKind = 0;
+      reliable = false;
+      break;
+    case MulticastT.MULTICAST_ALL_R:
+      baseKind = 0;
+      reliable = true;
+      break;
+    case MulticastT.MULTICAST_PHS:
+      baseKind = 1;
+      reliable = false;
+      break;
+    case MulticastT.MULTICAST_PHS_R:
+      baseKind = 1;
+      reliable = true;
+      break;
+    case MulticastT.MULTICAST_PVS:
+      baseKind = 2;
+      reliable = false;
+      break;
+    case MulticastT.MULTICAST_PVS_R:
+      baseKind = 2;
+      reliable = true;
+      break;
+    default:
+      return;
+  }
+
+  const buf = reliable ? mvd.message : mvd.datagram;
+  const op = (reliable ? mvd_multicast_all_r : mvd_multicast_all) + baseKind;
+  const extrabits = (payload.length >> 8) & 7;
+
+  MSG_WriteMvdCmd(buf, op, extrabits);
+  MSG_WriteByte(buf, payload.length & 0xff);
+  if (baseKind !== 0) MSG_WriteShort(buf, leafnum & 0xffff);
+  SZ_Write(buf, payload, payload.length);
+}
+
+/*
+==============
+SV_MvdUnicast
+
+Hook for PF_Unicast (sv_game.ts). `payload` is the multicast buffer's
+contents addressed to a single client (sv.multicast, read BEFORE the caller
+clears it).
+==============
+*/
+export function SV_MvdUnicast(ent: Edict, clientNum: number, reliable: boolean, payload: Uint8Array): void {
+  if (!mvd.active) return;
+  if (!playerIsActive(ent, clientNum)) return;
+  if (!filterUnicastData(ent, payload)) return;
+
+  if (payload.length >= 2048) {
+    Com_Printf("SV_MvdUnicast: overflow\n");
+    return;
+  }
+
+  const buf = reliable ? mvd.message : mvd.datagram;
+  const op = reliable ? mvd_unicast_r : mvd_unicast;
+  const extrabits = (payload.length >> 8) & 7;
+
+  MSG_WriteMvdCmd(buf, op, extrabits);
+  MSG_WriteByte(buf, payload.length & 0xff);
+  MSG_WriteByte(buf, clientNum);
+  SZ_Write(buf, payload, payload.length);
+}
+
+/*
+==============
+SV_MvdStartSound
+
+Hook for SV_StartSound (sv_send.ts). `flags`/`volume`/`attenuation`/
+`timeofs` are the already-quantized byte values SV_StartSound computed for
+its own svc_sound multicast (mvd.c:1265-1291's FIXME about incorrect origin
+on entities not captured this frame applies here too -- unchanged from the
+reference).
+==============
+*/
+export function SV_MvdStartSound(entnum: number, channel: number, flags: number, soundindex: number, volume: number, attenuation: number, timeofs: number): void {
+  if (!mvd.active) return;
+
+  let extrabits = 0;
+  if (channel & CHAN_NO_PHS_ADD) extrabits |= 1;
+  if (channel & CHAN_RELIABLE) extrabits |= 2;
+
+  MSG_WriteMvdCmd(mvd.datagram, mvd_sound, extrabits);
+  MSG_WriteByte(mvd.datagram, flags);
+  MSG_WriteByte(mvd.datagram, soundindex);
+
+  if (flags & SND_VOLUME) MSG_WriteByte(mvd.datagram, volume);
+  if (flags & SND_ATTENUATION) MSG_WriteByte(mvd.datagram, attenuation);
+  if (flags & SND_OFFSET) MSG_WriteByte(mvd.datagram, timeofs);
+
+  const sendchan = (entnum << 3) | (channel & 7);
+  MSG_WriteShort(mvd.datagram, sendchan);
 }
 
 /*
@@ -930,11 +1205,16 @@ export function SV_MvdRegister(): void {
 // cases without needing a full process restart.
 export function SV_MvdResetForTests(): void {
   mvd.active = false;
+  mvd.rerelease = false;
   if (mvd.recording !== null) FS_FCloseFile(mvd.recording);
   mvd.recording = null;
   mvd.players = new Array(MAX_CLIENTS).fill(null);
   mvd.entities = new Array(MAX_EDICTS).fill(null);
   mvd.numframes = 0;
+  SZ_Clear(mvd.message);
+  SZ_Clear(mvd.datagram);
+  mvdDummy.clientIndex = null;
+  mvdDummy.edict = null;
   if (gtvListenerId !== null) {
     TCP_StopListening(gtvListenerId);
     gtvListenerId = null;

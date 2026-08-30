@@ -32,6 +32,7 @@ import { SV_ReadLevelFile } from "./sv_ccmds";
 import { SV_ClearWorld } from "./sv_world";
 import { SetPmAirAccelerate } from "../qcommon/pmove";
 import { Nav_Load, Nav_Unload } from "./nav";
+import { SV_MvdMapChanged } from "./sv_mvd";
 
 function requireGe(): GameExports {
   const ge = geHolder.ge;
@@ -308,6 +309,11 @@ export function SV_SpawnServer(server: string, spawnpoint: string, serverstate: 
 
   // check for a savegame
   SV_CheckForSavegame();
+
+  // respawn dummy MVD client, rebuild the MVD delta-compressor's baseline,
+  // etc. (init.c:216, right after SV_CheckForSavegame and before the
+  // serverinfo update below -- matches the reference's ordering)
+  SV_MvdMapChanged();
 
   // set serverinfo variable
   Cvar_FullSet("mapname", sv.name, CVAR_SERVERINFO | CVAR_NOSET);

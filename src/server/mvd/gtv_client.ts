@@ -17,7 +17,7 @@
 // src/client/gtv.c's UI-bound code.
 
 import { TCP_Connect, TCP_Read, TCP_Write, TCP_IsClosed, TCP_Close } from "../../platform/net_tcp";
-import { MVD_MAGIC, GtvServerOpT, GtvClientOpT, GTV_PROTOCOL_VERSION } from "../../qcommon/protocol/mvd";
+import { MVD_MAGIC, GtvServerOpT, GtvClientOpT, GTV_PROTOCOL_VERSION, GTF_DEFLATE } from "../../qcommon/protocol/mvd";
 import { MvdChannelT, MVD_NewChannel } from "./client";
 import { MVD_ParseMessage } from "./parse";
 
@@ -36,6 +36,16 @@ export interface GtvClientLinkT {
   recvBuf: Uint8Array;
   channel: MvdChannelT;
   lastError: string | null;
+  // GTF_DEFLATE (item 5, GTV hardening): true once the server's GTS_HELLO
+  // reply echoes GTF_DEFLATE back -- every GTS_STREAM_DATA payload after
+  // that point is an independent Bun.deflateSync block (see sv_mvd.ts's
+  // writeGtvMessage for why "independent per message" rather than one
+  // continuous zlib stream).
+  deflate: boolean;
+  requestDeflate: boolean;
+  // GTC_HELLO's password field (item 5, GTV hardening) -- matched against
+  // the server's sv_mvd_password cvar in sv_mvd.ts's authGtvClient.
+  password: string;
 }
 
 function appendRecv(link: GtvClientLinkT, data: Uint8Array): void {
@@ -59,13 +69,14 @@ function encodeCString(s: string): number[] {
   return bytes;
 }
 
-function sendHello(link: GtvClientLinkT): void {
+function sendHello(link: GtvClientLinkT, password: string): void {
+  const flags = link.requestDeflate ? GTF_DEFLATE : 0;
   const body: number[] = [];
   body.push(GTV_PROTOCOL_VERSION & 0xff, (GTV_PROTOCOL_VERSION >> 8) & 0xff); // word protocol
-  body.push(0, 0, 0, 0); // long flags (no GTF_DEFLATE/GTF_STRINGCMDS)
+  body.push(flags & 0xff, (flags >> 8) & 0xff, (flags >> 16) & 0xff, (flags >> 24) & 0xff); // long flags
   body.push(0, 0, 0, 0); // long unused
   body.push(...encodeCString("quake-2-re-ts-mvd-test"));
-  body.push(...encodeCString("")); // password
+  body.push(...encodeCString(password));
   body.push(...encodeCString("1.0")); // version
   writeFramedClientMessage(link, GtvClientOpT.GTC_HELLO, new Uint8Array(body));
 }
@@ -86,7 +97,12 @@ Returns null if the TCP connect itself fails; the handshake continues
 asynchronously via MVD_GtvPump.
 ==============
 */
-export async function MVD_GtvConnect(hostname: string, port: number): Promise<GtvClientLinkT | null> {
+export interface GtvConnectOptionsT {
+  password?: string;
+  requestDeflate?: boolean;
+}
+
+export async function MVD_GtvConnect(hostname: string, port: number, options: GtvConnectOptionsT = {}): Promise<GtvClientLinkT | null> {
   const connId = await TCP_Connect(hostname, port);
   if (connId === null) return null;
 
@@ -100,6 +116,9 @@ export async function MVD_GtvConnect(hostname: string, port: number): Promise<Gt
     recvBuf: new Uint8Array(0),
     channel: MVD_NewChannel(),
     lastError: null,
+    deflate: false,
+    requestDeflate: !!options.requestDeflate,
+    password: options.password ?? "",
   };
 }
 
@@ -136,7 +155,7 @@ export function MVD_GtvPump(link: GtvClientLinkT): void {
         return;
       }
       link.state = GtvClientLinkStateT.AWAITING_HELLO;
-      sendHello(link);
+      sendHello(link, link.password);
       continue;
     }
 
@@ -159,6 +178,12 @@ export function MVD_GtvPump(link: GtvClientLinkT): void {
     switch (op) {
       case GtvServerOpT.GTS_HELLO:
         if (link.state === GtvClientLinkStateT.AWAITING_HELLO) {
+          // Echoed flags (sv_mvd.ts's handleGtvHello reply body): a single
+          // long, GTF_DEFLATE bit0. Read in plaintext -- deflate does not
+          // apply until AFTER this exact message (see sv_mvd.ts's
+          // handleGtvHello for the matching ordering on the write side).
+          const echoedFlags = payload.length >= 4 ? new DataView(payload.buffer, payload.byteOffset, 4).getUint32(0, true) : 0;
+          link.deflate = !!(echoedFlags & GTF_DEFLATE);
           link.state = GtvClientLinkStateT.AWAITING_STREAM_START;
           sendStreamStart(link);
         }
@@ -169,7 +194,13 @@ export function MVD_GtvPump(link: GtvClientLinkT): void {
         }
         break;
       case GtvServerOpT.GTS_STREAM_DATA:
-        if (payload.length > 0) MVD_ParseMessage(link.channel, payload);
+        if (payload.length > 0) {
+          // `new Uint8Array(payload)` copies into a fresh ArrayBuffer-backed
+          // typed array -- see sv_mvd.ts's writeGtvMessage for the matching
+          // write-side note on why Bun's zlib bindings need this copy.
+          const decoded = link.deflate ? Bun.inflateSync(new Uint8Array(payload)) : payload;
+          MVD_ParseMessage(link.channel, decoded);
+        }
         break;
       case GtvServerOpT.GTS_BADREQUEST:
       case GtvServerOpT.GTS_NOACCESS:

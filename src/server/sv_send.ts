@@ -14,7 +14,7 @@ import { sv, svs, ServerStateT, ClientStateT, RedirectT, type ClientT, svClientH
 import { SV_DropClient } from "./sv_main";
 import { SV_BuildClientFrame, SV_WriteFrameToClient } from "./sv_ents";
 import { SV_Nextserver } from "./sv_user";
-import { SV_MvdBroadcastPrint } from "./sv_mvd";
+import { SV_MvdBroadcastPrint, SV_MvdMulticast, SV_MvdStartSound } from "./sv_mvd";
 
 // qcommon.h's SND_*/DEFAULT_SOUND_PACKET_* constants are not yet ported to
 // qcommon.ts (that module's own brief only ports the pieces its landed
@@ -194,6 +194,10 @@ export function SV_Multicast(origin: Vec3 | null, to: MulticastT): void {
     else SZ_Write(client.datagram, sv.multicast.data, sv.multicast.cursize);
   }
 
+  // mvd.c:311: "add to MVD datagram" -- called with the same payload just
+  // fanned out to real clients, before the buffer is cleared below.
+  SV_MvdMulticast(leafnum, to, sv.multicast.data.subarray(0, sv.multicast.cursize));
+
   SZ_Clear(sv.multicast);
 }
 
@@ -293,6 +297,13 @@ export function SV_StartSound(origin: Vec3 | null, entity: Edict, channel: numbe
     if (use_phs) SV_Multicast(useOrigin, MulticastT.MULTICAST_PHS);
     else SV_Multicast(useOrigin, MulticastT.MULTICAST_ALL);
   }
+
+  // mvd.c:625: SV_MvdStartSound(snd.entity, channel, sound_msg.sound.flags,
+  // soundindex, ...) -- called with the SAME already-quantized byte values
+  // (flags/volume/attenuation/timeofs) just written into the multicast
+  // buffer above, not the original float volume/attenuation/timeofs
+  // arguments.
+  SV_MvdStartSound(ent, channel, flags, soundindex, (volume * 255) | 0, (attenuation * 64) | 0, (timeofs * 1000) | 0);
 }
 
 /*

@@ -15,8 +15,11 @@
 // matches). See sv_mvd.ts's header for the matching "no MVD dummy client"
 // scope note on the RECORDING side.
 //
-// LEGACY FAMILY ONLY -- see qcommon/protocol/mvd.ts's header for the kex/
-// rerelease gap.
+// Holds either family's state (see the `rerelease` field below) -- legacy
+// (PROTOCOL_VERSION_MVD_DEFAULT) and kex/rerelease (PROTOCOL_VERSION_MVD_
+// RERELEASE) both parse into the same MvdChannelT shape, since the two
+// player-state sub-formats differ only in wire encoding, not in what
+// PlayerStateT fields they populate.
 
 import { EntityStateT, PlayerStateT, MAX_EDICTS, MAX_CLIENTS } from "../../shared/q_shared";
 import { CS_REMAP_OLD, type CsRemapT } from "../../shared/cs_remap";
@@ -26,12 +29,39 @@ export enum MvdChannelStateT {
   MVD_READING, // gamestate received, frames may be applied
 }
 
+// See MvdChannelT.events below. `base`/`clientNum`/`extrabits` are the raw
+// decoded header fields (matching SV_MvdMulticast/SV_MvdUnicast/
+// SV_MvdStartSound's own parameters in sv_mvd.ts); `length` is the payload's
+// byte length -- this unit does not decode the underlying svc_* payload
+// bytes themselves (that IS decoding a live per-client protocol message
+// recursively, which is exactly the spectator-networking scope this port's
+// MVD channel has never implemented -- see this file's own header).
+export type MvdEventT =
+  | { kind: "multicast"; base: number; reliable: boolean; leafnum: number; length: number }
+  | { kind: "unicast"; reliable: boolean; clientNum: number; length: number }
+  | { kind: "sound"; extrabits: number; length: number }
+  | { kind: "print"; level: number; text: string }
+  | { kind: "configstring"; index: number; value: string };
+
 export class MvdChannelT {
   state: MvdChannelStateT = MvdChannelStateT.MVD_DEAD;
 
   gamedir = "";
   servercount = 0;
   clientNum = -1;
+
+  // true once a gamestate carrying PROTOCOL_VERSION_MVD_RERELEASE has been
+  // parsed (qcommon/protocol/mvd.ts's MSG_WriteDeltaMvdPlayerstateRerelease/
+  // MSG_ReadDeltaMvdPlayerstateRerelease branch) -- selects which player-
+  // state delta codec every subsequent frame in this channel uses.
+  rerelease = false;
+
+  // Out-of-band capture log (item 1's read-side observability): every
+  // multicast/unicast/sound/print segment this channel's messages carry,
+  // decoded to the extent this unit's scope covers (see parse.ts's header --
+  // no PVS-based spectator fan-out, just enough to prove the hooks' bytes
+  // actually land in a parsed recording/stream).
+  events: MvdEventT[] = [];
 
   csr: CsRemapT = CS_REMAP_OLD;
   configstrings: string[] = new Array(CS_REMAP_OLD.end).fill("");
@@ -55,11 +85,13 @@ export function MVD_ClearState(channel: MvdChannelT): void {
   channel.gamedir = "";
   channel.servercount = 0;
   channel.clientNum = -1;
+  channel.rerelease = false;
   channel.configstrings = new Array(channel.csr.end).fill("");
   channel.players = new Array(MAX_CLIENTS).fill(null);
   channel.entities = new Array(MAX_EDICTS).fill(null);
   channel.portalbits = new Uint8Array(0);
   channel.framenum = 0;
+  channel.events = [];
 }
 
 export function MVD_NewChannel(): MvdChannelT {
