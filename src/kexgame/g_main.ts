@@ -566,7 +566,20 @@ export function InitGame(): void {
 
   // initialize all entities for this game
   game.maxentities = Math.trunc(maxentities.value);
-  SetGEdicts(Array.from({ length: game.maxentities }, () => defaultEdict()));
+  // Every preallocated edict gets its array index stamped into s.number up
+  // front. The C++ never needs this pre-spawn (ClientConnect et al. use raw
+  // pointer arithmetic, `ent - g_edicts`); this port's EDICT_NUM idiom makes
+  // s.number the identity key everywhere -- including for client slots the
+  // engine hands to ClientConnect before any G_InitEdict has run. Without
+  // the stamp, a fresh slot's number is 0 and the kex binding resolves it to
+  // the world edict (found via the first interactive kex client connect).
+  SetGEdicts(
+    Array.from({ length: game.maxentities }, (_v, i) => {
+      const e = defaultEdict();
+      e.s.number = i;
+      return e;
+    }),
+  );
   globals.edicts = g_edicts;
   globals.max_edicts = game.maxentities;
 

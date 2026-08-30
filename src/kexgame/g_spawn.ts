@@ -1569,8 +1569,16 @@ export function SpawnEntities(mapname: string, entities: string, spawnpoint: str
   Object.assign(level, defaultLevelReset());
   // memset(g_edicts, 0, game.maxentities * sizeof(g_edicts[0])) -- same
   // `Object.assign(e, defaultEdict())` idiom g_utils.ts's own G_FreeEdict
-  // uses for the identical "memset one edict" operation.
-  for (const e of g_edicts) Object.assign(e, defaultEdict());
+  // uses for the identical "memset one edict" operation. The array index is
+  // re-stamped into s.number afterward: the C++ needs no number pre-spawn
+  // (pointer arithmetic), but this port's EDICT_NUM idiom makes s.number the
+  // identity key the engine binding resolves through -- a zeroed number on a
+  // preallocated client slot resolves to the world edict (found by the first
+  // interactive kex client connect; see g_main.ts's matching stamp).
+  for (let i = 0; i < g_edicts.length; i++) {
+    Object.assign(g_edicts[i], defaultEdict());
+    g_edicts[i].s.number = i;
+  }
 
   // all other flags are not important atm
   globals.server_flags = globals.server_flags & ServerFlagsT.SERVER_FLAG_LOADING;
