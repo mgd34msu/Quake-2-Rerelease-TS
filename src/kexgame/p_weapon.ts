@@ -111,7 +111,7 @@
 // implementations in here via `SetGetItemByIndex`/`SetGShouldPlayersCollide`.
 // Every other call site that reaches either function (Weapon_AttemptSwitch's
 // ammo-name print path; every fire_*_fire function's P_ProjectSource call)
-// is unaffected -- same default-throwing behavior as any other stub unless
+// is unaffected -- same default-throwing behavior like every other stub unless
 // a test opts in. Note this does NOT touch g_weapon.ts's OWN, separate,
 // non-reassignable `G_ShouldPlayersCollide` copy (out of this unit's file
 // list) -- fire_bullet/fire_grenade2/fire_rocket/etc. still throw for a
@@ -239,6 +239,8 @@ import { G_LagCompensate, G_UnLagCompensate } from "./p_view";
 import { G_Spawn } from "./g_utils";
 import { SpawnFlags_or } from "./spawnflags";
 import { fire_bfg, fire_blaster, fire_bullet, fire_disintegrator, fire_grenade, fire_grenade2, fire_rail, fire_rocket, fire_shotgun } from "./g_weapon";
+import { G_ShouldPlayersCollide as RealG_ShouldPlayersCollide } from "./p_client";
+import { GetItemByIndex as RealGetItemByIndex } from "./g_items";
 
 // ---------------------------------------------------------------------------
 // small per-file helpers (see this port line's established convention for
@@ -307,45 +309,33 @@ function Drop_Item(_ent: EdictT, _item: GitemT): EdictT {
  * unchanged (still throws) until a future p_client.ts landing wires the
  * real implementation in here.
  */
-let gShouldPlayersCollideImpl: (weaponry: boolean) => boolean = (_weaponry) => {
-  throw new Error("G_ShouldPlayersCollide: not yet ported (pending p_client.ts, see p_client.cpp:2996)");
-};
+// p_client.ts landed: the default is now the real implementation. The
+// setter remains as the test seam.
+let gShouldPlayersCollideImpl: (weaponry: boolean) => boolean = RealG_ShouldPlayersCollide;
 
 /** See the doc comment above for why this one (unlike this file's other
  *  stubs) is reassignable. Pass `null` to restore the default throwing
  *  stub. */
 export function SetGShouldPlayersCollide(fn: ((weaponry: boolean) => boolean) | null): void {
-  gShouldPlayersCollideImpl =
-    fn ??
-    ((_weaponry) => {
-      throw new Error("G_ShouldPlayersCollide: not yet ported (pending p_client.ts, see p_client.cpp:2996)");
-    });
+  gShouldPlayersCollideImpl = fn ?? RealG_ShouldPlayersCollide;
 }
 
 function G_ShouldPlayersCollide(weaponry: boolean): boolean {
   return gShouldPlayersCollideImpl(weaponry);
 }
 
-/** Same stub p_view.ts already carries under this exact name; see that
- *  file's own header and this file's header. */
-function P_AssignClientSkinnum(_ent: EdictT): void {
-  throw new Error("P_AssignClientSkinnum: not yet ported (pending p_client.ts, see p_client.cpp:1741)");
-}
+import { P_AssignClientSkinnum } from "./p_view";
 
 /** See file header's "GetItemByIndex" section for why this one is
  *  reassignable instead of a plain throw. */
-let getItemByIndexImpl: (index: ItemIdT) => GitemT | null = (index) => {
-  throw new Error(`GetItemByIndex: not yet ported (pending g_items.ts, see g_items.cpp:52) [index=${index}]`);
-};
+// g_items.ts landed: the default is now the real itemlist lookup. The
+// setter remains as the test seam.
+let getItemByIndexImpl: (index: ItemIdT) => GitemT | null = RealGetItemByIndex;
 
 /** Lets a future g_items.ts wiring step (or a test) supply the real
  *  itemlist lookup. Pass `null` to restore the default throwing stub. */
 export function SetGetItemByIndex(fn: ((index: ItemIdT) => GitemT | null) | null): void {
-  getItemByIndexImpl =
-    fn ??
-    ((index) => {
-      throw new Error(`GetItemByIndex: not yet ported (pending g_items.ts, see g_items.cpp:52) [index=${index}]`);
-    });
+  getItemByIndexImpl = fn ?? RealGetItemByIndex;
 }
 
 function GetItemByIndex(index: ItemIdT): GitemT | null {

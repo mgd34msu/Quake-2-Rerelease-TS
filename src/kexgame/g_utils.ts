@@ -64,30 +64,54 @@
 //   - T_Damage            -> g_combat.cpp:527  (src/kexgame/g_combat.ts -- LANDED, real import)
 //   - G_Impact            -> g_phys.cpp:122    (src/kexgame/g_phys.ts -- LANDED, real import)
 //   - G_GetClipMask       -> g_phys.cpp:30     (src/kexgame/g_phys.ts -- LANDED, real import)
-//   - G_ShouldPlayersCollide -> p_client.cpp:2996 (future src/kexgame/p_client.ts)
-// G_MonsterKilled/G_ShouldPlayersCollide's owning files still don't exist in
-// src/kexgame/. Per PORTING.md's "a function you cannot port faithfully is a
-// reported deviation, not a TODO", each of those two is still a local,
-// unexported stub that throws, naming itself and the file that owns the real
-// implementation. Reached only by G_UseTargets's killtarget-vs-live-monster
-// branch and KillBox's coop-collision branch -- neither of which this unit's
-// own test suite exercises. Replace each with a real import once its owning
-// file lands.
+//   - G_ShouldPlayersCollide -> p_client.cpp:2996 (src/kexgame/p_client.ts -- LANDED, real import; see next paragraph)
+// G_MonsterKilled's owning file (src/kexgame/g_monster.ts) has since landed
+// too, alongside G_ShouldPlayersCollide's (src/kexgame/p_client.ts); both are
+// now real imports (see below), leaving zero throwing stubs in this section.
 //
-// T_Damage/G_Impact/G_GetClipMask are DIFFERENT: their owning files
-// (src/kexgame/g_combat.ts, src/kexgame/g_phys.ts) have landed and export
-// real implementations, so this file now imports all three directly instead
-// of stubbing them. G_Impact/G_GetClipMask close a real, two-way import
-// cycle with g_phys.ts (which imports G_TouchTriggers/G_TouchProjectiles
-// from THIS file) -- see g_phys.ts's own file header ("g_utils.ts <->
-// g_phys.ts: a real, sanctioned import cycle") for why that's safe. T_Damage
-// closes an analogous cycle with g_combat.ts (which imports `findradius`
-// from this file for T_RadiusDamage) -- see g_combat.ts's own file header
-// ("IMPORT CYCLE: g_utils.ts <-> g_combat.ts"). All four cycle-facing
-// exports on both sides of both cycles are hoisted `export function`
-// declarations, never a top-level `const` evaluated at module-init time, so
-// there is no TDZ hazard for PORTING.md's require()-workaround rule to apply
-// to.
+// T_Damage/G_Impact/G_GetClipMask/G_ShouldPlayersCollide are all real
+// imports now that their owning files (src/kexgame/g_combat.ts,
+// src/kexgame/g_phys.ts, src/kexgame/p_client.ts) have landed. G_Impact/
+// G_GetClipMask close a real, two-way import cycle with g_phys.ts (which
+// imports G_TouchTriggers/G_TouchProjectiles from THIS file) -- see
+// g_phys.ts's own file header ("g_utils.ts <-> g_phys.ts: a real, sanctioned
+// import cycle") for why that's safe. T_Damage closes an analogous cycle
+// with g_combat.ts (which imports `findradius` from this file for
+// T_RadiusDamage) -- see g_combat.ts's own file header ("IMPORT CYCLE:
+// g_utils.ts <-> g_combat.ts"). G_ShouldPlayersCollide closes a THIRD such
+// cycle with p_client.ts (which imports G_FindByString/G_FreeEdict/
+// G_InitEdict/G_PickTarget/G_Spawn/G_TouchProjectiles/G_TouchTriggers/
+// KillBox from THIS file) -- same shape, same safety argument. All
+// cycle-facing exports on every side of all three cycles are hoisted
+// `export function` declarations, never a top-level `const` evaluated at
+// module-init time, so there is no TDZ hazard for PORTING.md's
+// require()-workaround rule to apply to.
+//
+// ============================================================================
+// STUB SWAP: G_ShouldPlayersCollide -- now a real import from p_client.ts,
+// THE ACTUAL C++ HOME
+// ============================================================================
+// This file used to carry its own local, unexported throwing stub for
+// G_ShouldPlayersCollide (cited "pending p_client.ts, see p_client.cpp:2996"
+// -- reached only by G_UseTargets's killtarget-vs-live-monster branch and
+// KillBox's coop-collision branch, neither of which this file's own test
+// suite exercises, so the stub never actually threw in practice). Now that
+// src/kexgame/p_client.ts has landed with a real, exported
+// G_ShouldPlayersCollide (its genuine C++ home), the local stub is DELETED
+// and replaced with a real import. Two OTHER local copies of this exact stub
+// exist elsewhere in this port line and are explicitly NOT touched by this
+// swap: g_weapon.ts's own copy (unexported, tiny, its own header cites this
+// file's former stub as precedent -- left in place per this unit's brief,
+// reported as a finding) and p_view.ts's own copy (unexported, its own
+// header cites the same precedent again -- out of this unit's write scope
+// entirely, p_view.ts is not among the files this unit may edit). Neither
+// is a defect; this port line's own convention is "duplicate the tiny
+// unexported helper, don't reach across files for it" for files that don't
+// otherwise need a real cross-module dependency on the owning file -- this
+// file (g_utils.ts) is different because it ALREADY has a real, sanctioned,
+// two-way import relationship with p_client.ts (p_client.ts imports eight
+// symbols from here), so importing the real function instead of duplicating
+// it is the natural choice, not an inconsistency.
 //
 // ============================================================================
 // OTHER NOTED DEVIATIONS
@@ -151,6 +175,7 @@ import { gi, globals, g_edicts, game, level, defaultEdict } from "./g_main_globa
 import { G_Impact, G_GetClipMask } from "./g_phys";
 import { T_Damage } from "./g_combat";
 import { G_MonsterKilled } from "./g_monster";
+import { G_ShouldPlayersCollide } from "./p_client";
 import { GTIME_ZERO, Gtime_add, Gtime_from_ms, Gtime_from_sec, Gtime_nonzero, Gtime_subtract } from "./gtime";
 import { SpawnFlags_has } from "./spawnflags";
 import { AngleVectors, vec3_equals, vec3_length, vec3_origin } from "./q_vec3";
@@ -170,10 +195,6 @@ import { irandom } from "./q_std";
 // ("g_utils.ts <-> g_phys.ts: a real, sanctioned import cycle") for why that
 // is safe here (both sides are hoisted `export function` declarations, no
 // top-level cross-module value access at module-init time).
-
-function G_ShouldPlayersCollide(_weaponry: boolean): boolean {
-  throw new Error("G_ShouldPlayersCollide: not yet ported (pending p_client.ts, see p_client.cpp:2996)");
-}
 
 function modFromId(id: ModIdT): ModT {
   // mod_t's implicit single-argument constructor from mod_id_t

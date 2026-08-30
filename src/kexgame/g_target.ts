@@ -33,21 +33,22 @@
 // honestly always "unset" until a future g_spawn.ts unit lands.
 //
 // ============================================================================
-// EXTERNAL DEPENDENCIES NOT YET PORTED (throwing stubs, cited)
+// EXTERNAL DEPENDENCIES NOT YET PORTED (throwing stubs, cited) -- CORRECTED
 // ============================================================================
+// This section previously listed BeginIntermission, MoveClientToIntermission,
+// G_SetClientFrame, G_EndOfUnitMessage, respawn, and P_UseCoopInstancedItems
+// as a single "not yet ported" group. That was stale: earlier units already
+// swapped BeginIntermission/MoveClientToIntermission/G_EndOfUnitMessage (real
+// imports from src/kexgame/p_hud.ts, line ~171) and G_SetClientFrame (real
+// import from src/kexgame/p_view.ts, line ~172) to real implementations
+// without updating this comment. The p_client.ts unit that swapped
+// respawn/P_UseCoopInstancedItems to real imports below is the one that
+// finally corrected this. As of now, the only genuinely unported cross-dep
+// left in this file is:
 // - ED_CallSpawn            -> g_spawn.cpp (future g_spawn.ts; no
-//   src/kexgame/g_spawn.ts exists yet). Reached only by target_spawner's use
-//   handler.
-// - BeginIntermission       -> p_client.cpp (future p_client.ts). Reached
-//   only by use_target_changelevel's final success path (every earlier
-//   early-return branch -- already-activated, single-player-dead-check,
-//   deathmatch-noexit-damage, deathmatch-too-early -- is real logic and
-//   fully testable without it).
-// - MoveClientToIntermission, respawn, G_SetClientFrame,
-//   G_EndOfUnitMessage, P_UseCoopInstancedItems -> p_client.cpp/p_view.cpp
-//   (future p_client.ts/p_view.ts). Reached only once target_camera is
-//   actually used, which requires a real player-driven intermission flow
-//   this port line doesn't have yet.
+//   src/kexgame/g_spawn.ts exists yet in THIS port line -- the legacy/
+//   vanilla `src/game/g_spawn.ts` is a different port line and does not
+//   satisfy this). Reached only by target_spawner's use handler.
 //
 // ============================================================================
 // STUB SWAP: fire_blaster / pierce_trace / GetUnicastKey -- now real imports
@@ -82,6 +83,25 @@
 // cross-file LOGIC the way the four symbols above were.
 //
 // ============================================================================
+// STUB SWAP: respawn / P_UseCoopInstancedItems -- now real imports from
+// src/kexgame/p_client.ts, THEIR ACTUAL C++ HOME
+// ============================================================================
+// This file carried local, unexported throwing stubs for these two symbols
+// (cited "pending p_client.ts"), reached only once target_camera is actually
+// used, which requires a real player-driven intermission flow this port line
+// doesn't have yet -- neither stub ever actually threw in this file's own
+// test suite. Now that src/kexgame/p_client.ts has landed with real,
+// exported `respawn`/`P_UseCoopInstancedItems` (their genuine C++ home), the
+// local stubs are DELETED and replaced with real imports. This closes a
+// real, sanctioned import cycle with p_client.ts (which imports
+// G_PlayerNotifyGoal from THIS file, for ClientBegin's own
+// "[Paril-KEX] send them goal, if needed" call) -- same shape and safety
+// argument as g_utils.ts's/g_weapon.ts's/p_hud.ts's identical precedent
+// comments: both cycle-facing exports (`respawn`/`P_UseCoopInstancedItems`
+// here, `G_PlayerNotifyGoal` on p_client.ts's side) are hoisted top-level
+// declarations used only inside function bodies, never at module-eval time.
+//
+// ============================================================================
 // CONFIG_HEALTH_BAR_NAME / CONFIG_STORY -- computed locally, not guessed
 // ============================================================================
 // Declared in bg_local.h's own "reserved general CS ranges" anonymous enum
@@ -99,12 +119,17 @@
 // ============================================================================
 // xyspeed -- placement-mismatch global, ported as file-scoped state
 // ============================================================================
-// `extern float xyspeed;` (defined in p_view.cpp, not ported) is read by
-// `target_camera_dummy_think` immediately before its own call into the
-// (stubbed) `G_SetClientFrame`. Since no shared home exists for it yet, it
-// is a local, unexported, module-scope mutable variable here -- same
-// "placement mismatch, report don't move" precedent g_monster.ts's own `st`
-// note and this file's `st` placeholder both already establish.
+// `extern float xyspeed;` (defined in p_view.cpp, not ported as an exported
+// value there -- p_view.ts's own copy is an unexported module-scope `let`)
+// is read by `target_camera_dummy_think` immediately before its own call
+// into the now-real, imported `G_SetClientFrame` (see the corrected
+// "EXTERNAL DEPENDENCIES NOT YET PORTED" section above -- G_SetClientFrame
+// itself has been a real import from p_view.ts since an earlier unit; this
+// note used to call it "(stubbed)", which was stale). Since p_view.ts's own
+// `xyspeed` isn't exported, this file still can't import it, so it stays a
+// local, unexported, module-scope mutable variable here -- same "placement
+// mismatch, report don't move" precedent g_monster.ts's own `st` note and
+// this file's `st` placeholder both already establish.
 
 import { vec3, type Vec3 } from "../shared/math";
 import {
@@ -170,6 +195,7 @@ import { G_FindByString, G_FreeEdict, G_PickTarget, G_SetMovedir, G_Spawn, G_Use
 import { fire_blaster, GetUnicastKey, markPierce, restorePierce, pierceTrace } from "./g_weapon";
 import { BeginIntermission, MoveClientToIntermission, G_EndOfUnitMessage } from "./p_hud";
 import { G_SetClientFrame } from "./p_view";
+import { respawn, P_UseCoopInstancedItems } from "./p_client";
 import { GTIME_ZERO, Gtime_add, Gtime_from_ms, Gtime_from_sec, Gtime_nonzero, Gtime_seconds, Gtime_subtract } from "./gtime";
 import { SpawnFlags_from, SpawnFlags_has, type SpawnFlags } from "./spawnflags";
 import { RotatePointAroundVector, vec3_add, vec3_equals, vec3_length, vec3_lengthSquared, vec3_muls, vec3_normalized, vec3_origin, vec3_sub } from "./q_vec3";
@@ -276,12 +302,10 @@ const CONFIG_STORY_INDEX = CONFIG_HEALTH_BAR_NAME_INDEX + 1;
 function ED_CallSpawn(_ent: EdictT): void {
   throw new Error("ED_CallSpawn: not yet ported (pending g_spawn.ts, see g_spawn.cpp)");
 }
-function respawn(_client: EdictT): void {
-  throw new Error("respawn: not yet ported (pending p_client.ts, see p_client.cpp)");
-}
-function P_UseCoopInstancedItems(): boolean {
-  throw new Error("P_UseCoopInstancedItems: not yet ported (pending p_client.ts, see p_client.cpp)");
-}
+
+// respawn / P_UseCoopInstancedItems: formerly local throwing stubs here --
+// src/kexgame/p_client.ts has landed with real exports; see this file's own
+// header, "STUB SWAP: respawn / P_UseCoopInstancedItems".
 
 /** `extern float xyspeed;` (p_view.cpp) -- see file header. */
 let xyspeed = 0;

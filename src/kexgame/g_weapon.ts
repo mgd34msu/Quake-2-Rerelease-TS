@@ -266,9 +266,7 @@ function G_ShouldPlayersCollide(_weaponry: boolean): boolean {
   throw new Error("G_ShouldPlayersCollide: not yet ported (pending p_client.ts, see p_client.cpp:2996)");
 }
 
-function PlayerNoise(_who: EdictT, _where: Vec3, _type: number): void {
-  throw new Error("PlayerNoise: not yet ported (pending p_weapon.ts, see p_weapon.cpp:149)");
-}
+import { PlayerNoise } from "./p_weapon";
 
 /** [Paril-KEX] player_noise_t (g_local.h) -- only PNOISE_IMPACT is used in this file. */
 const PNOISE_IMPACT = 1;

@@ -105,9 +105,17 @@
 //     only in `coop` with a `*`-suffixed changemap (unit-transition maps);
 //     itemlist-dependent, same reasoning as the STAT_KEY_A/B/C drop above.
 //   - BeginIntermission's `respawn(client)` (p_client.cpp:1621) /
-//     `P_UseCoopInstancedItems()` (p_client.cpp:90): reached only when
-//     respawning a DEAD client at intermission -- this unit's own test
-//     fixtures keep clients alive to exercise the rest of the function.
+//     `P_UseCoopInstancedItems()` (p_client.cpp:90): STUB SWAP -- both are
+//     now real imports from src/kexgame/p_client.ts (their genuine C++ home,
+//     landed after this unit). This closes a real, sanctioned import cycle
+//     with p_client.ts (which imports Cmd_Help_f/MoveClientToIntermission/
+//     PlayerTrail_Destroy from THIS file) -- same shape and safety argument
+//     as this file's own "IMPORT CYCLE: p_view.ts <-> p_hud.ts" precedent
+//     below (both imports used only inside function bodies, never at
+//     module-eval time). Reached only when respawning a DEAD client at
+//     intermission -- this unit's own test fixtures keep clients alive to
+//     exercise the rest of the function, so neither import is exercised by
+//     this file's own test suite even now that it's real.
 //
 // ============================================================================
 // REAL despite living in another not-yet-landed C++ file (same
@@ -197,6 +205,7 @@ import { irandom } from "./q_std";
 import { SpawnFlags_has } from "./spawnflags";
 import { ArmorIndex, PowerArmorType } from "./g_combat";
 import { G_TeamplayEnabled } from "./p_view";
+import { respawn, P_UseCoopInstancedItems } from "./p_client";
 
 // bg_local.h's `LAYOUTS_*` bit flags live in game.h (kexapi/game.ts) as
 // `LayoutFlagsT`, not bg_local.h itself.
@@ -412,14 +421,6 @@ export function G_CheckInfiniteAmmo(item: GitemT): boolean {
 // ---------------------------------------------------------------------------
 // unported cross-deps (throwing stubs) -- see file header
 // ---------------------------------------------------------------------------
-
-function respawn(_ent: EdictT): void {
-  throw new Error("respawn: not yet ported (pending p_client.ts, see p_client.cpp:1621)");
-}
-
-function P_UseCoopInstancedItems(): boolean {
-  throw new Error("P_UseCoopInstancedItems: not yet ported (pending p_client.ts, see p_client.cpp:90)");
-}
 
 function PMenu_Close(_ent: EdictT): void {
   throw new Error("PMenu_Close: not yet ported (pending p_ctf_menu.ts, see ctf/p_ctf_menu.cpp)");
@@ -1174,7 +1175,7 @@ export function BeginIntermission(targ: EdictT): void {
       // instanced items we'd lose the items we touched so we always want
       // to respawn with our max.
       if (P_UseCoopInstancedItems()) {
-        // narrow stub, see file header -- reached only for a dead client
+        // real import from p_client.ts -- see file header "STUB SWAP"
         const c = client.client;
         if (c !== null) {
           c.pers.health = client.max_health;
@@ -1182,7 +1183,7 @@ export function BeginIntermission(targ: EdictT): void {
         }
       }
 
-      respawn(client); // narrow stub, see file header
+      respawn(client); // real import from p_client.ts -- see file header "STUB SWAP"
     }
   }
 
