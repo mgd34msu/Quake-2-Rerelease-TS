@@ -229,6 +229,18 @@ sv_game.ts's SV_InitGameProgs; the caller retains the apiversion check and
 geHolder assignment.
 ===============
 */
+// "lmctf" is NOT a fifth game tree and has no GPL source anywhere in this
+// port's reference libraries -- it's Mike's own classic-era CTF map pack
+// (~/q2ts/lmctf), which ships its own closed-source game DLLs (gamex86.dll
+// et al.) for a third-party CTF variant we have no source to port. Per
+// src/client/menu_content.ts's Content & Rules selector (its file header
+// has the full mapping table), "lmctf" content plays under OUR compiled
+// ctf track -- Mike's map pack running with stock CTF rules, not a port of
+// whatever the original lmctf DLL actually did differently. This is a
+// content-to-track alias only: gameName "lmctf" still drives
+// FS_SetGamedir("lmctf") (cvar.ts's "game" latch hook), which mounts
+// lmctf's own pak/map data as the active search root; only the compiled
+// game logic served here is redirected to CTF_GetGameAPI.
 export function LoadLegacyGame(gameName: string): GameExports {
   const importsObj = BuildLegacyImports();
 
@@ -239,7 +251,7 @@ export function LoadLegacyGame(gameName: string): GameExports {
   // `Edict` type as parameters, so passing it to CTF_GetGameAPI needs no
   // cast. Its GameExports return does NOT assign back structurally (see
   // adaptPackGameExports's comment above) -- bridged through that adapter.
-  return gameName === "ctf"
+  return gameName === "ctf" || gameName === "lmctf"
     ? adaptPackGameExports(CTF_GetGameAPI(importsObj))
     : gameName === "xatrix"
       ? adaptPackGameExports(XATRIX_GetGameAPI(importsObj))

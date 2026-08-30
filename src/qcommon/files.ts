@@ -156,6 +156,13 @@ interface FileLinkT {
 let fs_gamedir = "";
 export let fs_basedir: CvarT | null = null;
 export let fs_cddir: CvarT | null = null;
+// content_root <path> -- see FS_InitFilesystem's own comment at the mount
+// site for why this cvar exists (Mike's basedir reality: classic 3.21 data
+// and the 2023 rerelease tree are two different, non-overlapping install
+// trees on this machine, and menu_content.ts's Content & Rules selector
+// needs re-release-only assets -- mapdb.json, q64/*, mg2 content -- to be
+// reachable no matter which basedir the client actually launched with).
+export let fs_content_root: CvarT | null = null;
 export let fs_gamedirvar: CvarT | null = null;
 
 let fs_links: FileLinkT | null = null;
@@ -990,6 +997,38 @@ export function FS_InitFilesystem(): void {
   // site is the equivalent of a home directory, a search-path root this
   // port doesn't have (see FS_InitFilesystem's basedir/cddir cvars above).
   add_game_kpf(basedirString());
+
+  // content_root <path>
+  // BASEDIR REALITY (see ARCHITECTURE.md / .orch task brief, 2026-08-30):
+  // Mike's classic 3.21 data lives at one basedir (~/q2ts) and the 2023
+  // retail rerelease tree lives at a completely different one (~/q2rets/
+  // rerelease) -- confirmed by inspection, neither tree contains the
+  // other's assets (the classic baseq2/pak0.pak has no mapdb.json and no
+  // q64/* content at all; the rerelease tree's "kex" gamedir carries no
+  // pak of its own -- all of its content, including mapdb.json, lives
+  // inside ITS baseq2/pak0.pak). FS_AddGameDirectory/add_game_kpf already
+  // support layering an arbitrary extra root on top of the primary
+  // basedir (fs_cddir and the Q2Game.kpf mount above are exactly this
+  // mechanism) -- switching basedirs at runtime would need a full
+  // restart-with-different-args (fs_basedir is CVAR_NOSET, read once,
+  // FS_AddGameDirectory's search-path linked list has no path to remove
+  // and re-root an existing search root), so THAT is not attempted here.
+  // Instead content_root mounts the rerelease tree's baseq2 (and its
+  // Q2Game.kpf, if a client basedir install lacks its own) as an
+  // ADDITIONAL, lower-priority search root -- same idiom as fs_cddir
+  // immediately above, and mounted at the same point in the call order
+  // (before the primary basedir's baseq2 directory) so the user's actual
+  // basedir always wins on any filename collision; content_root only
+  // fills gaps (mapdb.json, q64/*, mg2 content) that the running
+  // basedir's own tree doesn't have. This is judged the clean, honest
+  // option: it doesn't touch fs_searchpaths' existing structure or
+  // FS_SetGamedir's single-component-name contract at all, it just adds
+  // one more root the exact way cddir already does.
+  fs_content_root = cvar.Cvar_Get("content_root", "", CVAR_NOSET);
+  if (fs_content_root && fs_content_root.string.length) {
+    add_game_kpf(fs_content_root.string);
+    FS_AddGameDirectory(`${fs_content_root.string}/${BASEDIRNAME}`);
+  }
 
   // start up with baseq2 by default
   FS_AddGameDirectory(`${basedirString()}/${BASEDIRNAME}`);

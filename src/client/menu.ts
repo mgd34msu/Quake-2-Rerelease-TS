@@ -10,7 +10,13 @@
 // can be driven directly by cl_menu.test.ts with fabricated frameworks, per
 // this unit's test brief -- every real C caller of M_PushMenu/M_PopMenu is
 // itself inside menu.c, so this only widens the module's export list, it
-// does not change behavior.
+// does not change behavior. Same rationale, 2026-08-30: M_Menu_Game_f,
+// M_Menu_Content_f, and BeginContentFunc (the new Content & Rules screen,
+// see its own section below and menu_content.ts's header) are additionally
+// exported so menu_content.test.ts can drive the real screen end to end
+// (push -> default widget state -> "begin" callback -> resulting cvars)
+// without needing to reach into this file's private MenuframeworkS
+// singletons.
 //
 // Deviations from the C, collected here instead of repeated at each site:
 //  - `re` is `RefExports | null` (ref_gl/ not ported). Every drawing entry
@@ -132,6 +138,17 @@ import {
 } from "./qmenu";
 import { Field_Key, isField, Menu_AddItem, Menu_AdjustCursor, Menu_Center, Menu_Draw, Menu_ItemAtCursor, Menu_SelectItem, Menu_SetStatusBar, Menu_SlideItem } from "./qmenu_impl";
 import { fixedLength } from "../shared/fixed";
+import { MapDB_Init, type MapdbUnitEntry } from "../qcommon/mapdb";
+import {
+  CONTENT_LIST,
+  RULESETS,
+  AvailableRulesetsFor,
+  ResolveLaunch,
+  UnitsForContent,
+  PerformLaunch,
+  type ContentDef,
+  type RulesetId,
+} from "./menu_content";
 
 // C's per-widget callbacks take `void *self` and cast it back to the
 // concrete struct type the call site knows it is (`(menuaction_s *)self`,
@@ -1432,6 +1449,7 @@ const s_medium_game_action = new MenuactionS();
 const s_hard_game_action = new MenuactionS();
 const s_load_game_action = new MenuactionS();
 const s_save_game_action = new MenuactionS();
+const s_content_menu_action = new MenuactionS();
 const s_credits_action = new MenuactionS();
 const s_blankline = new MenuseparatorS();
 
@@ -1473,6 +1491,10 @@ function SaveGameFunc(): void {
 
 function CreditsFunc(): void {
   M_Menu_Credits_f();
+}
+
+function ContentMenuFunc(): void {
+  M_Menu_Content_f();
 }
 
 function Game_MenuInit(): void {
@@ -1523,6 +1545,18 @@ function Game_MenuInit(): void {
   s_credits_action.generic.name = "credits";
   s_credits_action.generic.callback = CreditsFunc;
 
+  // NEW (Mike's v1.0.0 requirement, 2026-08-30): "content & rules" is the
+  // menu's answer to "the menu is the content selector" -- see
+  // menu_content.ts's header. Appended after the existing rows rather
+  // than interleaved so every original item keeps its exact x/y (nothing
+  // above this line changed).
+  s_content_menu_action.generic.type = MTYPE_ACTION;
+  s_content_menu_action.generic.flags = QMF_LEFT_JUSTIFY;
+  s_content_menu_action.generic.x = 0;
+  s_content_menu_action.generic.y = 80;
+  s_content_menu_action.generic.name = "content & rules";
+  s_content_menu_action.generic.callback = ContentMenuFunc;
+
   Menu_AddItem(s_game_menu, s_easy_game_action);
   Menu_AddItem(s_game_menu, s_medium_game_action);
   Menu_AddItem(s_game_menu, s_hard_game_action);
@@ -1531,6 +1565,8 @@ function Game_MenuInit(): void {
   Menu_AddItem(s_game_menu, s_save_game_action);
   Menu_AddItem(s_game_menu, s_blankline);
   Menu_AddItem(s_game_menu, s_credits_action);
+  Menu_AddItem(s_game_menu, s_blankline);
+  Menu_AddItem(s_game_menu, s_content_menu_action);
 
   Menu_Center(s_game_menu);
 }
@@ -1545,9 +1581,166 @@ function Game_MenuKey(key: number): string | null {
   return Default_MenuKey(s_game_menu, key);
 }
 
-function M_Menu_Game_f(): void {
+export function M_Menu_Game_f(): void {
   Game_MenuInit();
   M_PushMenu(Game_MenuDraw, Game_MenuKey);
+}
+
+/*
+=============================================================================
+CONTENT & RULES MENU
+
+Mike's design (2026-08-30 task brief), not a port -- see menu_content.ts's
+header for the full mapping table and rationale. This screen is this
+port's answer to "the menu is the content selector": pick WHAT to play
+(content, a MenulistS spincontrol) x WHICH ruleset to play it under
+(another spincontrol, its itemnames rebuilt to only the rulesets that
+content actually has), optionally where to start within it (mapdb-driven
+unit browser, when mapdb.json is loaded and the content has campaign
+units) and skill (when the content needs one), then "begin" -- same
+widget shapes and the same cvar-then-Cbuf launch idiom as
+StartServer_MenuInit/StartServer_ActionFunc above, reusing
+menu_content.ts's PerformLaunch for the actual sequencing.
+=============================================================================
+*/
+const s_content_menu = new MenuframeworkS();
+const s_content_list = new MenulistS();
+const s_content_ruleset_list = new MenulistS();
+const s_content_start_list = new MenulistS();
+const s_content_skill_list = new MenulistS();
+const s_content_begin_action = new MenuactionS();
+
+// Index-aligned with the currently displayed spincontrol itemnames --
+// MenulistS only stores the selected index, never the underlying id, same
+// pattern as StartServer_MenuInit's own `mapnames` array above.
+let content_rulesets: RulesetId[] = [];
+let content_units: MapdbUnitEntry[] = [];
+
+function currentContentDef(): ContentDef {
+  return CONTENT_LIST[s_content_list.curvalue] ?? CONTENT_LIST[0];
+}
+
+function currentRuleset(): RulesetId | null {
+  return content_rulesets[s_content_ruleset_list.curvalue] ?? null;
+}
+
+// Rebuilds the ruleset spincontrol for whichever content is now selected,
+// then cascades into RebuildStartPoints (the unit browser depends on both
+// content AND ruleset -- a classic-ruleset selection never has mapdb
+// units to browse, only the rerelease side does).
+function RebuildRulesets(): void {
+  const def = currentContentDef();
+  content_rulesets = AvailableRulesetsFor(def.id);
+  s_content_ruleset_list.itemnames = content_rulesets.map((id) => RULESETS.find((r) => r.id === id)?.name ?? id);
+  if (s_content_ruleset_list.curvalue >= content_rulesets.length) s_content_ruleset_list.curvalue = 0;
+
+  s_content_skill_list.generic.flags = def.needsSkillSelect ? QMF_LEFT_JUSTIFY : QMF_LEFT_JUSTIFY | QMF_GRAYED;
+
+  RebuildStartPoints();
+}
+
+// mapdb.json only ever describes rerelease-side campaign structure (see
+// menu_content.ts's header) -- MapDB_Init() is called fresh every time
+// this screen opens (ContentMenuInit below), same "reload on open" idiom
+// StartServer_MenuInit uses for maps.lst, so a content_root cvar set
+// after the client was already running still takes effect next time this
+// menu is opened.
+function RebuildStartPoints(): void {
+  const def = currentContentDef();
+  const ruleset = currentRuleset();
+
+  content_units = ruleset === "rerelease" ? UnitsForContent(def.id) : [];
+
+  s_content_start_list.itemnames = content_units.length ? content_units.map((u) => u.title) : ["Start"];
+  if (s_content_start_list.curvalue >= s_content_start_list.itemnames.length) s_content_start_list.curvalue = 0;
+}
+
+function ContentChangeFunc(): void {
+  RebuildRulesets();
+}
+
+function ContentRulesetChangeFunc(): void {
+  RebuildStartPoints();
+}
+
+export function BeginContentFunc(): void {
+  const def = currentContentDef();
+  const ruleset = currentRuleset();
+  if (!ruleset) return;
+
+  const plan = ResolveLaunch(def.id, ruleset);
+  if (!plan) return;
+
+  const bsp = content_units[s_content_start_list.curvalue]?.bsp ?? plan.map;
+  const skill = def.needsSkillSelect ? s_content_skill_list.curvalue : null;
+
+  PerformLaunch(plan, bsp, skill);
+  M_ForceMenuOff();
+}
+
+function Content_MenuInit(): void {
+  MapDB_Init();
+
+  s_content_menu.x = viddef.width * 0.5;
+  s_content_menu.nitems = 0;
+
+  s_content_list.generic.type = MTYPE_SPINCONTROL;
+  s_content_list.generic.x = 0;
+  s_content_list.generic.y = 0;
+  s_content_list.generic.name = "content";
+  s_content_list.itemnames = CONTENT_LIST.map((c) => c.name);
+  s_content_list.generic.callback = ContentChangeFunc;
+
+  s_content_ruleset_list.generic.type = MTYPE_SPINCONTROL;
+  s_content_ruleset_list.generic.x = 0;
+  s_content_ruleset_list.generic.y = 20;
+  s_content_ruleset_list.generic.name = "ruleset";
+  s_content_ruleset_list.generic.callback = ContentRulesetChangeFunc;
+
+  s_content_start_list.generic.type = MTYPE_SPINCONTROL;
+  s_content_start_list.generic.x = 0;
+  s_content_start_list.generic.y = 40;
+  s_content_start_list.generic.name = "start at";
+
+  s_content_skill_list.generic.type = MTYPE_SPINCONTROL;
+  s_content_skill_list.generic.x = 0;
+  s_content_skill_list.generic.y = 60;
+  s_content_skill_list.generic.name = "skill";
+  s_content_skill_list.itemnames = ["easy", "medium", "hard"];
+
+  s_content_begin_action.generic.type = MTYPE_ACTION;
+  s_content_begin_action.generic.flags = QMF_LEFT_JUSTIFY;
+  s_content_begin_action.generic.x = 24;
+  s_content_begin_action.generic.y = 80;
+  s_content_begin_action.generic.name = "begin";
+  s_content_begin_action.generic.callback = BeginContentFunc;
+
+  Menu_AddItem(s_content_menu, s_content_list);
+  Menu_AddItem(s_content_menu, s_content_ruleset_list);
+  Menu_AddItem(s_content_menu, s_content_start_list);
+  Menu_AddItem(s_content_menu, s_content_skill_list);
+  Menu_AddItem(s_content_menu, s_content_begin_action);
+
+  Menu_Center(s_content_menu);
+
+  // set proper initial state, same call-now pattern StartServer_MenuInit
+  // uses for RulesChangeFunc
+  RebuildRulesets();
+}
+
+function Content_MenuDraw(): void {
+  M_Banner("m_banner_game");
+  Menu_AdjustCursor(s_content_menu, 1);
+  Menu_Draw(s_content_menu);
+}
+
+function Content_MenuKey(key: number): string | null {
+  return Default_MenuKey(s_content_menu, key);
+}
+
+export function M_Menu_Content_f(): void {
+  Content_MenuInit();
+  M_PushMenu(Content_MenuDraw, Content_MenuKey);
 }
 
 /*
@@ -2862,6 +3055,7 @@ function M_Menu_Quit_f(): void {
 export function M_Init(): void {
   Cmd_AddCommand("menu_main", M_Menu_Main_f);
   Cmd_AddCommand("menu_game", M_Menu_Game_f);
+  Cmd_AddCommand("menu_content", M_Menu_Content_f);
   Cmd_AddCommand("menu_loadgame", M_Menu_LoadGame_f);
   Cmd_AddCommand("menu_savegame", M_Menu_SaveGame_f);
   Cmd_AddCommand("menu_joinserver", M_Menu_JoinServer_f);
