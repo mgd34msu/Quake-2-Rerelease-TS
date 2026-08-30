@@ -40,19 +40,33 @@
 // each C++ name exactly as this port's other spawn-owning files do.
 //
 // ============================================================================
-// CROSS-DEPENDENCIES NOT YET PORTED
+// STUB SWAP (done): train_use/func_train_find are now real imports from
+// g_func.ts
 // ============================================================================
-// - `train_use`/`func_train_find` -> g_func.cpp:2390/2349 (future
-//   src/kexgame/g_func.ts). Both are THINK/USE-macro-wrapped in the C++
-//   source, so per this port's "a save-registered function you cannot port
-//   faithfully is still save-registered under its real name" precedent
-//   (g_monster.ts's own M_CheckAttack stub), they are registered via
-//   RegisterThink("func_train_find", ...)/RegisterUse("train_use", ...)
-//   throwing stubs -- a future g_func.ts landing should delete these two
-//   local stubs and let its own real implementations register under the
-//   same names instead (mirroring g_phys.ts's M_CheckGround/etc swap).
-//   Reached only by misc_viper_use/misc_strogg_ship_use/SP_misc_viper/
-//   SP_misc_strogg_ship, none of which this unit's own test suite exercises.
+// `train_use`/`func_train_find` (g_func.cpp:2390/2349) used to be local
+// throwing stubs here (see prior revisions of this header) -- both were
+// THINK/USE-macro-wrapped in the C++ source, so per this port's "a
+// save-registered function you cannot port faithfully is still
+// save-registered under its real name" precedent, they were registered via
+// RegisterThink("func_train_find", ...)/RegisterUse("train_use", ...)
+// throwing stubs until g_func.ts landed. Now that it has, both local stubs
+// are REMOVED and this file imports the real `train_use`/`func_train_find`
+// from "./g_func" instead (used, unchanged in call shape, by
+// misc_viper_use/misc_strogg_ship_use/SP_misc_viper/SP_misc_strogg_ship,
+// none of which this unit's own test suite exercises) -- mirroring
+// g_phys.ts's M_CheckGround/etc swap against g_monster.ts. This makes a
+// real, sanctioned import cycle: this file now imports `train_use`/
+// `func_train_find` from g_func.ts, while g_func.ts imports
+// `BecomeExplosion1` (below) from this file. Every cross-module symbol on
+// both sides is either a hoisted `export function` declaration
+// (`BecomeExplosion1`) or a top-level `const` only read inside a closure
+// that isn't invoked until a real game callback fires (`train_use`/
+// `func_train_find`, referenced only inside misc_viper_use/
+// misc_strogg_ship_use/SP_misc_viper/SP_misc_strogg_ship's own closures
+// here, never at this file's top level) -- no TDZ hazard either direction.
+// Verified end-to-end by `bunx tsc --noEmit` and `bun test` actually
+// importing both files together. See g_func.ts's own header for the full
+// writeup of this cycle from its side.
 // - `CTFPlayerResetGrapple` -> grepped the ENTIRE quake2-rerelease-dll tree:
 //   declared in rerelease/ctf/g_ctf.h:111, defined in
 //   rerelease/ctf/g_ctf.cpp:1222 -- a file with no src/kexgame/ port yet.
@@ -218,8 +232,9 @@
 // misc_viper_bomb_touch/prethink/use, misc_strogg_ship_use,
 // misc_satellite_dish_think/use, target_string_use, func_clock_think/use,
 // teleporter_touch, misc_flare_use, misc_hologram_think, fire_touch,
-// fire_fly, info_world_text_use/think, misc_player_mannequin_use/think, plus
-// the two cross-dependency stubs (func_train_find/train_use) noted above.
+// fire_fly, info_world_text_use/think, misc_player_mannequin_use/think.
+// (func_train_find/train_use are now imported from g_func.ts -- see this
+// file's header "STUB SWAP (done)" section above -- not registered here.)
 // Plain `void`-returning functions with no macro wrapper (ThrowGib,
 // ThrowClientHead, BecomeExplosion1/2, VelocityForDamage, ClipGibVelocity,
 // ThrowGibs, GetShadowLightData, setup_shadow_lights, G_LoadShadowLights,
@@ -274,8 +289,6 @@ import {
 import {
   type EdictT,
   type ModT,
-  type ThinkFn,
-  type UseFn,
   type TouchFn,
   type DieFn,
   type PrethinkFn,
@@ -302,6 +315,7 @@ import { G_Spawn, G_FreeEdict, G_FindByString, G_PickTarget, G_UseTargets, KillB
 import { T_Damage, T_RadiusDamage } from "./g_combat";
 import { M_walkmove, M_ChangeYaw } from "./m_move";
 import { M_droptofloor, M_CatagorizePositionSelf, M_WorldEffects } from "./g_monster";
+import { train_use, func_train_find } from "./g_func";
 import {
   FRAME_flip01,
   FRAME_flip12,
@@ -431,14 +445,6 @@ function CTFPlayerResetGrapple(ent: EdictT): void {
     CTFResetGrapple(ent.client.ctf_grapple);
   }
 }
-
-const func_train_find: ThinkFn = RegisterThink("func_train_find", (_self: EdictT): void => {
-  throw new Error("func_train_find: not yet ported -- owning file g_func.cpp:2349 (future src/kexgame/g_func.ts)");
-});
-
-const train_use: UseFn = RegisterUse("train_use", (_self: EdictT, _other: EdictT | null, _activator: EdictT | null): void => {
-  throw new Error("train_use: not yet ported -- owning file g_func.cpp:2390 (future src/kexgame/g_func.ts)");
-});
 
 //=====================================================
 // func_group is editor-only (no runtime behavior); nothing to port.
