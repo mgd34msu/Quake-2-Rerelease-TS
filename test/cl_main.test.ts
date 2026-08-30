@@ -272,7 +272,18 @@ describe("cl_main.ts -- real loopback connect against a booted server", () => {
     Cvar_ForceSet("coop", "1");
     Cvar_ForceSet("deathmatch", "0");
 
-    Qcommon_Init(["quake2", "+set", "basedir", tmpRoot, "+set", "coop", "1", "+set", "port", "0"]);
+    // allow_download=0: this test's box-room fixture (buildBoxRoomBsp) ships
+    // no real player/gib/sound assets on disk, and the game library's own
+    // worldspawn precaching (kexgame) registers plenty of CS_MODELS/
+    // CS_SOUNDS entries regardless (gibs, standard sounds) that this test
+    // never intended to serve. Now that cl_main.ts's CL_RequestNextDownload
+    // is a real precache/download walk (previously a stub that skipped the
+    // whole thing unconditionally), leaving downloads enabled here would
+    // have the client stall requesting files this fake local server can
+    // never supply, instead of reaching the ClientBegin/area-portal code
+    // this test is actually about. A real dedicated server configured this
+    // way (downloads off) is common and legitimate, not a workaround.
+    Qcommon_Init(["quake2", "+set", "basedir", tmpRoot, "+set", "coop", "1", "+set", "port", "0", "+set", "allow_download", "0"]);
 
     Cbuf_AddText("map clmaintest\n");
     for (let i = 0; i < 200 && sv.state !== ServerStateT.ss_game; i++) {

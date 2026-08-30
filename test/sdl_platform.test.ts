@@ -202,7 +202,17 @@ describe("src/main.ts -- windowed client boot with dedicated 0", () => {
     // The "+map" late command is also what makes Qcommon_Init call
     // SCR_EndLoadingPlaque, which drops cls.disable_screen so the screen
     // actually draws.
-    Qcommon_Init(["quake2", "+set", "basedir", tmpRoot, "+set", "dedicated", "0", "+set", "port", "0", "+set", "coop", "1", "+map", "sdlsmoke"]);
+    // allow_download=0: this test's synthetic map (bsp_builder) ships no
+    // real player/gib/sound assets, and the game library's own worldspawn
+    // precaching registers CS_MODELS/CS_SOUNDS entries regardless. Now that
+    // cl_main.ts's CL_RequestNextDownload is a real precache/download walk
+    // (previously a stub that unconditionally skipped straight to
+    // CL_PrepRefresh), leaving downloads enabled here would stall the
+    // client waiting on files this local test server can never supply,
+    // instead of reaching CL_PrepRefresh the way this test expects
+    // (`cl.refresh_prepped` below) -- see test/cl_main.test.ts's identical
+    // fix for the same reason.
+    Qcommon_Init(["quake2", "+set", "basedir", tmpRoot, "+set", "dedicated", "0", "+set", "port", "0", "+set", "coop", "1", "+set", "allow_download", "0", "+map", "sdlsmoke"]);
 
     expect(Cvar_VariableValue("dedicated")).toBe(0);
     expect(SDL_BackendEnabled()).toBe(true);
