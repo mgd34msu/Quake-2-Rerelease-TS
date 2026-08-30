@@ -242,11 +242,12 @@ import {
   type ModT,
   ModIdT,
   PlayerNoiseT,
+  SPAWNFLAG_ITEM_DROPPED,
   SPAWNFLAG_ITEM_DROPPED_PLAYER,
   WeaponstateT,
 } from "./g_local";
 import { gi, g_edicts, level } from "./g_main_globals";
-import { type GTime, GTIME_ZERO, Gtime_add, Gtime_divide, Gtime_from_ms, Gtime_milliseconds, Gtime_nonzero, Gtime_scale, Gtime_seconds, Gtime_subtract } from "./gtime";
+import { type GTime, GTIME_ZERO, Gtime_add, Gtime_divide, Gtime_from_ms, Gtime_milliseconds, Gtime_nonzero, Gtime_scale, Gtime_seconds, Gtime_subtract, Gtime_from_sec } from "./gtime";
 import { AngleVectors, G_ProjectSource2, vec3_add, vec3_muls, vec3_normalized, vec3_origin, vec3_sub } from "./q_vec3";
 import { PITCH, ROLL, YAW, crandom, crandom_open, frandom, irandom, Q_PIf } from "./q_std";
 import {
@@ -266,10 +267,10 @@ import { G_CheckInfiniteAmmo } from "./p_hud";
 import { G_LagCompensate, G_UnLagCompensate } from "./p_view";
 import { CTFApplyHaste, CTFApplyHasteSound, CTFApplyStrengthSound } from "./ctf/g_ctf";
 import { G_Spawn } from "./g_utils";
-import { SpawnFlags_or } from "./spawnflags";
+import { SpawnFlags_or, SpawnFlags_has } from "./spawnflags";
 import { fire_bfg, fire_blaster, fire_bullet, fire_disintegrator, fire_grenade, fire_grenade2, fire_rail, fire_rocket, fire_shotgun } from "./g_weapon";
-import { G_ShouldPlayersCollide as RealG_ShouldPlayersCollide } from "./p_client";
-import { GetItemByIndex as RealGetItemByIndex } from "./g_items";
+import { G_ShouldPlayersCollide as RealG_ShouldPlayersCollide, P_UseCoopInstancedItems } from "./p_client";
+import { GetItemByIndex as RealGetItemByIndex, Add_Ammo, SetRespawn, G_CheckAutoSwitch } from "./g_items";
 
 // ---------------------------------------------------------------------------
 // small per-file helpers (see this port line's established convention for
@@ -279,6 +280,11 @@ import { GetItemByIndex as RealGetItemByIndex } from "./g_items";
 function cvarFloat(name: string, def: string, flags: CvarFlagsT = CvarFlagsT.CVAR_NOFLAGS): number {
   const c = gi.cvar(name, def, flags);
   return c === null ? Number(def) : c.value;
+}
+
+function cvarInt(name: string, def: string): number {
+  const c = gi.cvar(name, def, CvarFlagsT.CVAR_NOFLAGS);
+  return c ? Math.trunc(c.value) : 0;
 }
 
 function cvarBool(name: string, def: string, flags: CvarFlagsT = CvarFlagsT.CVAR_NOFLAGS): boolean {
@@ -630,6 +636,57 @@ export function PlayerNoise(who: EdictT, where: Vec3, type: PlayerNoiseT): void 
   noise.absmax = vec3_add(where, noise.maxs);
   noise.teleport_time = level.time;
   gi.linkentity(noise);
+}
+
+// ---------------------------------------------------------------------------
+// G_WeaponShouldStay / Pickup_Weapon (p_weapon.cpp:229-289) -- restored by the
+// phase-6 coverage audit: the original port deferred these to g_items.ts while
+// g_items.ts deferred back here (circular deferral; Pickup_Weapon was a LIVE
+// throwing stub wired into every weapon itemlist entry).
+// ---------------------------------------------------------------------------
+
+export function G_WeaponShouldStay(): boolean {
+  if (cvarBool("deathmatch", "0", CvarFlagsT.CVAR_LATCH)) return cvarBool("g_dm_weapons_stay", "0", CvarFlagsT.CVAR_NOFLAGS);
+  if (cvarBool("coop", "0", CvarFlagsT.CVAR_LATCH)) return !P_UseCoopInstancedItems();
+  return false;
+}
+
+export function Pickup_Weapon(ent: EdictT, other: EdictT): boolean {
+  const client = requirePlayerClient(other);
+  const item = ent.item;
+  if (!item) throw new Error("Pickup_Weapon: ent has no item (C++ would crash)");
+  const index = item.id;
+
+  if (G_WeaponShouldStay() && client.pers.inventory[index]) {
+    if (!SpawnFlags_has(ent.spawnflags, SPAWNFLAG_ITEM_DROPPED) && !SpawnFlags_has(ent.spawnflags, SPAWNFLAG_ITEM_DROPPED_PLAYER))
+      return false; // leave the weapon for others to pickup
+  }
+
+  const is_new = !client.pers.inventory[index];
+  client.pers.inventory[index]++;
+
+  if (!SpawnFlags_has(ent.spawnflags, SPAWNFLAG_ITEM_DROPPED)) {
+    // give them some ammo with it -- PGM: IF APPROPRIATE!
+    if (item.ammo) {
+      const ammo = RealGetItemByIndex(item.ammo);
+      if (ammo) {
+        // RAFAEL: don't get infinite ammo with trap
+        if (G_CheckInfiniteAmmo(ammo)) Add_Ammo(other, ammo, 1000);
+        else Add_Ammo(other, ammo, ammo.quantity);
+      }
+    }
+
+    if (!SpawnFlags_has(ent.spawnflags, SPAWNFLAG_ITEM_DROPPED_PLAYER)) {
+      if (cvarBool("deathmatch", "0", CvarFlagsT.CVAR_LATCH)) {
+        if (cvarBool("g_dm_weapons_stay", "0", CvarFlagsT.CVAR_NOFLAGS)) ent.flags |= EntFlagsT.FL_RESPAWN;
+        SetRespawn(ent, Gtime_from_sec(cvarInt("g_weapon_respawn_time", "30")), !cvarBool("g_dm_weapons_stay", "0", CvarFlagsT.CVAR_NOFLAGS));
+      }
+      if (cvarBool("coop", "0", CvarFlagsT.CVAR_LATCH)) ent.flags |= EntFlagsT.FL_RESPAWN;
+    }
+  }
+
+  G_CheckAutoSwitch(other, item, is_new);
+  return true;
 }
 
 // ---------------------------------------------------------------------------

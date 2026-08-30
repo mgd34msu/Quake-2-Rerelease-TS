@@ -273,6 +273,7 @@ import { G_Spawn, G_FreeEdict, G_UseTargets, G_PrintActivationMessage } from "./
 import { AngleVectors, G_ProjectSource, vec3_add, vec3_muls } from "./q_vec3";
 import { RegisterThink, RegisterTouch, RegisterUse, type ThinkFn, type TouchFn, type UseFn } from "./g_save_registry";
 import { ArmorIndex, PowerArmorType } from "./g_combat";
+import { Pickup_Weapon as P_Pickup_Weapon } from "./p_weapon";
 import {
   CTFDrop_Flag as CTFDrop_Flag_real,
   CTFDrop_Tech as CTFDrop_Tech_real,
@@ -420,8 +421,10 @@ const STAT_SELECTED_ITEM_NAME = 51;
 // file header "STUB INVENTORY"
 // ---------------------------------------------------------------------------
 
-function Pickup_Weapon(_ent: EdictT, _other: EdictT): boolean {
-  throw new Error("Pickup_Weapon: not yet ported (pending p_weapon.ts, see p_weapon.cpp:241)");
+// Real implementation lives in p_weapon.ts (its C++ home); hoisted wrapper
+// per the TDZ convention for cycle-safe itemlist references.
+function Pickup_Weapon(ent: EdictT, other: EdictT): boolean {
+  return P_Pickup_Weapon(ent, other);
 }
 function Use_Weapon(_ent: EdictT, _item: GitemT): void {
   throw new Error("Use_Weapon: not yet ported (pending p_weapon.ts, see p_weapon.cpp:585)");
@@ -1174,7 +1177,7 @@ export function Add_Ammo(ent: EdictT, item: GitemT, count: number): boolean {
   return G_AddAmmoAndCap(ent, item.id, ent.client.pers.max_ammo[item.tag]!, count);
 }
 
-function G_CheckAutoSwitch(ent: EdictT, item: GitemT, is_new: boolean): void {
+export function G_CheckAutoSwitch(ent: EdictT, item: GitemT, is_new: boolean): void {
   const client = requireClient(ent, "G_CheckAutoSwitch");
 
   if (client.pers.weapon === item || client.newweapon === item) return;

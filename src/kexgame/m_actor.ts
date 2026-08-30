@@ -4,7 +4,7 @@
 // m_actor.cpp / m_actor.h -- ACTOR (2023 Quake II re-release / "KEX" engine)
 // AND target_actor. Ported from
 // ~/Projects/quake2-rerelease-dll/rerelease/m_actor.cpp (565 lines, C++17)
-// and m_actor.h (493 lines, 490-entry frame enum plus MODEL_SCALE).
+// and m_actor.h (492 lines, 481-entry frame enum (transcription corrected: an earlier draft recorded header line numbers, +9 off, for every constant from FRAME_flip01 on) plus MODEL_SCALE).
 // Behavioral code, ported bug-for-bug per PORTING.md.
 //
 // This is a full KEX rewrite of the legacy vanilla-Q2 `misc_actor`/
@@ -122,22 +122,22 @@ export const FRAME_death101 = 4;
 export const FRAME_death107 = 10;
 export const FRAME_death201 = 11;
 export const FRAME_death213 = 23;
-export const FRAME_flip01 = 48;
-export const FRAME_flip14 = 61;
-export const FRAME_pain101 = 83;
-export const FRAME_pain103 = 85;
-export const FRAME_pain201 = 86;
-export const FRAME_pain203 = 88;
-export const FRAME_pain301 = 89;
-export const FRAME_pain303 = 91;
-export const FRAME_run02 = 102;
-export const FRAME_run07 = 107;
-export const FRAME_stand101 = 137;
-export const FRAME_stand140 = 176;
-export const FRAME_taunt01 = 243;
-export const FRAME_taunt17 = 259;
-export const FRAME_walk01 = 260;
-export const FRAME_walk08 = 267;
+export const FRAME_flip01 = 39;
+export const FRAME_flip14 = 52;
+export const FRAME_pain101 = 74;
+export const FRAME_pain103 = 76;
+export const FRAME_pain201 = 77;
+export const FRAME_pain203 = 79;
+export const FRAME_pain301 = 80;
+export const FRAME_pain303 = 82;
+export const FRAME_run02 = 93;
+export const FRAME_run07 = 98;
+export const FRAME_stand101 = 128;
+export const FRAME_stand140 = 167;
+export const FRAME_taunt01 = 234;
+export const FRAME_taunt17 = 250;
+export const FRAME_walk01 = 251;
+export const FRAME_walk08 = 258;
 
 export const MODEL_SCALE = 1.0;
 

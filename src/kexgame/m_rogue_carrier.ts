@@ -537,6 +537,13 @@ function CarrierMachineGun(self: EdictT): void {
   if (self.enemy !== null) carrier_firebullet_right(self);
 }
 
+/** m_rogue_carrier.cpp:724 -- declared and defined but never referenced in the
+ *  shipped C++ (dead-but-live one-liner); restored by the phase-6 coverage
+ *  audit for completeness, matching the legacy port's precedent. */
+export function CarrierMachineGunHold(self: EdictT): void {
+  CarrierMachineGun(self);
+}
+
 // ---------------------------------------------------------------------------
 // CarrierSpawn (cpp:331-394)
 // ---------------------------------------------------------------------------
