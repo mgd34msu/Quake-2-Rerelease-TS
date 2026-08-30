@@ -7,6 +7,7 @@ import { MAX_MSGLEN, NetadrT, UPDATE_BACKUP } from "../qcommon/qcommon";
 import { NetchanT } from "../qcommon/net_chan";
 import { SizeBuf } from "../qcommon/sizebuf";
 import { MAX_EDICTS, MAX_MODELS, CmodelT, EntityStateT, PlayerStateT, UsercmdT, type CvarT } from "../shared/q_shared";
+import { type Vec3, vec3 } from "../shared/math";
 import { MAX_MAP_AREAS } from "../qcommon/qfiles";
 import { type CsRemapT, CS_REMAP_OLD, CS_REMAP_RERELEASE } from "../shared/cs_remap";
 import type { Edict } from "../game/game";
@@ -30,6 +31,36 @@ export enum ServerStateT {
   ss_cinematic,
   ss_demo,
   ss_pic,
+}
+
+// mirrors q2repro's server_entity_t (src/server/server.h:120-140, guarded
+// there by `#if USE_FPS`): an 8-slot ring of recent origins/framenums per
+// edict, consumed by framediv interpolation (world.c's PF_LinkEdict records
+// it; entities.c's fix_old_origin reads it back) to reconstruct where a low-
+// framediv entity actually was on the logic sub-frames a client's send rate
+// skips. ENT_HISTORY_SIZE must be > MAX_FRAMEDIV (q2repro allows framediv up
+// to 6 -- see Com_ComputeFrametime); 8 matches upstream. Only the recording
+// side is wired up so far (this file + sv_world.ts's SV_LinkEdict) -- nothing
+// reads the ring yet, since the framediv send path itself is future work
+// (.orch/phase3-design.md, sequencing item 3).
+export const ENT_HISTORY_SIZE = 8;
+export const ENT_HISTORY_MASK = ENT_HISTORY_SIZE - 1;
+
+export class EntHistorySlotT {
+  origin: Vec3 = vec3();
+  framenum = 0;
+}
+
+// q2repro keeps server_entity_t as a member of solid/link bookkeeping
+// (src/server/server.h's `edict_link_t`-adjacent struct) that lives in
+// `server_entity_t entities[MAX_EDICTS]` on `server_t` itself (server.h:177,
+// i.e. `sv.entities`, not `svs`) -- it is wiped by SV_SpawnServer's
+// `memset(&sv, 0, sizeof(sv))` alongside everything else per-level. Placed
+// on ServerT here for the same reason: this port's minimal cut only carries
+// the history ring (no create_origin/create_framenum -- unused until the
+// framediv read side lands).
+export class ServerEntityT {
+  history: EntHistorySlotT[] = Array.from({ length: ENT_HISTORY_SIZE }, () => new EntHistorySlotT());
 }
 
 export class ServerT {
@@ -64,6 +95,11 @@ export class ServerT {
   configstrings: string[] = new Array(CS_REMAP_RERELEASE.end).fill("");
   baselines: EntityStateT[] = Array.from({ length: MAX_EDICTS }, () => new EntityStateT());
 
+  // per-edict framediv history ring; see ServerEntityT above. Sized to
+  // MAX_EDICTS like `baselines`, indexed the same way (ent.s.number, this
+  // port's NUM_FOR_EDICT substitute -- see the comment below).
+  entities: ServerEntityT[] = Array.from({ length: MAX_EDICTS }, () => new ServerEntityT());
+
   // the multicast buffer is used to send a message to a set of clients
   // it is only used to marshall data until SV_Multicast is called
   multicast: SizeBuf = new SizeBuf();
@@ -92,6 +128,7 @@ export class ServerT {
     this.models = new Array(MAX_MODELS).fill(null);
     this.configstrings = new Array(CS_REMAP_RERELEASE.end).fill("");
     this.baselines = Array.from({ length: MAX_EDICTS }, () => new EntityStateT());
+    this.entities = Array.from({ length: MAX_EDICTS }, () => new ServerEntityT());
     this.multicast = new SizeBuf();
     this.multicast_buf = new Uint8Array(MAX_MSGLEN);
     this.demofile = null;
@@ -293,6 +330,20 @@ export let sv_noreload: CvarT | null = null; // don't reload level state when re
 export let sv_airaccelerate: CvarT | null = null; // development tool
 export let sv_enforcetime: CvarT | null = null;
 
+// mirrors q2repro's sv_tick_rate (src/server/main.c ~line 2211, default
+// "40", CVAR_LATCH). Our default is "10", NOT 40: q2repro's dispatch
+// (src/server/init.c:136-148) only ever honors this cvar for the rerelease
+// ("kex") game family -- every other family is pinned to BASE_FRAMERATE
+// (10) regardless of what the cvar holds, unless the game library
+// advertises GMF_VARIABLE_FPS. This port has no kex family binding yet
+// (ARCHITECTURE.md phase 3) -- every loadable game tree today is a legacy
+// tree hardcoded to FRAMETIME = 0.1s (75 files) -- so defaulting to "40"
+// would silently desync the engine's frame clock from every game tree's
+// own assumption of 10Hz. The default flips to "40" (matching q2repro) once
+// the kex binding lands and family dispatch actually exists to pin legacy
+// trees back to 10 regardless of this value.
+export let sv_tick_rate: CvarT | null = null;
+
 export function setSvPaused(v: CvarT | null): void {
   sv_paused = v;
 }
@@ -307,6 +358,9 @@ export function setSvAiraccelerate(v: CvarT | null): void {
 }
 export function setSvEnforcetime(v: CvarT | null): void {
   sv_enforcetime = v;
+}
+export function setSvTickRate(v: CvarT | null): void {
+  sv_tick_rate = v;
 }
 
 // `client_t *sv_client;`/`edict_t *sv_player;` are pointers reassigned from

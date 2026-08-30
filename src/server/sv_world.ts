@@ -16,7 +16,7 @@ import {
   CM_BoxTrace,
   CM_TransformedBoxTrace,
 } from "../qcommon/cmodel";
-import { sv, ServerStateT } from "./server";
+import { sv, ServerStateT, ENT_HISTORY_MASK } from "./server";
 import { geHolder } from "./sv_game";
 import { Com_DPrintf, Com_Printf, Com_Error } from "../qcommon/common";
 import { ERR_FATAL } from "../qcommon/qcommon";
@@ -297,6 +297,18 @@ export function SV_LinkEdict(ent: Edict): void {
     VectorCopy(ent.s.origin, ent.s.old_origin);
   }
   ent.linkcount++;
+
+  // record this frame's origin into the framediv interpolation ring
+  // (q2repro world.c's PF_LinkEdict, USE_FPS block, ~world.c:330-335).
+  // ent.s.number is this port's NUM_FOR_EDICT(ent) substitute (server.ts's
+  // EDICT_NUM/NUM_FOR_EDICT comment; same convention as sv_send.ts/
+  // sv_game.ts). Always recorded -- cheap, and unconditional in upstream
+  // too -- but nothing reads the ring yet; see server.ts's ServerEntityT
+  // comment for what's still missing before framediv > 1 can use it.
+  const sent = sv.entities[ent.s.number];
+  const historySlot = sv.framenum & ENT_HISTORY_MASK;
+  VectorCopy(ent.s.origin, sent.history[historySlot].origin);
+  sent.history[historySlot].framenum = sv.framenum;
 
   if (ent.solid === SolidT.SOLID_NOT) return;
 

@@ -46,6 +46,7 @@ import {
   setSvNoreload,
   setSvAiraccelerate,
   setSvEnforcetime,
+  setSvTickRate,
 } from "./server";
 import { geHolder, SV_ShutdownGameProgs } from "./sv_game";
 import { SV_BroadcastPrintf, SV_SendClientMessages, SV_FlushRedirect } from "./sv_send";
@@ -860,6 +861,13 @@ export function SV_Init(): void {
   Cvar_Get("cheats", "0", CVAR_SERVERINFO | CVAR_LATCH);
   Cvar_Get("protocol", `${PROTOCOL_VERSION}`, CVAR_SERVERINFO | CVAR_NOSET);
   setMaxclients(Cvar_Get("maxclients", "1", CVAR_SERVERINFO | CVAR_LATCH));
+
+  // mirrors q2repro's sv_tick_rate (src/server/main.c ~line 2211, default
+  // "40", CVAR_LATCH); see server.ts's sv_tick_rate declaration for why our
+  // default is "10" instead. Latched like maxclients -- SV_InitGame reads
+  // the settled value the same way it reads maxclients (Cvar_GetLatchedVars).
+  setSvTickRate(Cvar_Get("sv_tick_rate", "10", CVAR_LATCH));
+
   hostname = Cvar_Get("hostname", "noname", CVAR_SERVERINFO | CVAR_ARCHIVE);
   timeout = Cvar_Get("timeout", "125", 0);
   zombietime = Cvar_Get("zombietime", "2", 0);

@@ -24,7 +24,7 @@ import {
 import { vec3_origin, VectorCopy } from "../shared/math";
 import { cloneEntityState } from "../shared/state_copy";
 import type { GameExports } from "../game/game";
-import { sv, svs, master_adr, ServerStateT, ClientStateT, ClientT, sv_airaccelerate, sv_noreload, maxclients } from "./server";
+import { sv, svs, master_adr, ServerStateT, ClientStateT, ClientT, sv_airaccelerate, sv_noreload, maxclients, sv_tick_rate } from "./server";
 import { SV_Shutdown } from "./sv_main";
 import { SV_Multicast, SV_BroadcastCommand, SV_SendClientMessages } from "./sv_send";
 import { geHolder, SV_InitGameProgs } from "./sv_game";
@@ -174,6 +174,26 @@ export function SV_SpawnServer(server: string, spawnpoint: string, serverstate: 
   svs.realtime = 0;
   sv.loadgame = loadgame;
   sv.attractloop = attractloop;
+
+  // set framerate parameters -- mirrors q2repro's set_frame_time() dispatch
+  // (src/server/init.c:136-148), called right after the same memset there.
+  // sv.clear() just re-asserted the 10Hz defaults (see its own comment);
+  // this re-derives them from the latched cvar the same way maxclients'
+  // already-latched value is read directly below (`maxclients.value`, no
+  // extra Cvar_GetLatchedVars() call needed here -- SV_InitGame already
+  // settled it before SV_SpawnServer runs). Clamp mirrors
+  // Com_ComputeFrametime's Q_clip(rate/BASE_FRAMERATE, 1, MAX_FRAMEDIV=6):
+  // valid rates are BASE_FRAMERATE(10) * 1..6, i.e. 10..60. q2repro
+  // init.c:136-148 pins legacy-family games to BASE_FRAMERATE regardless of
+  // sv_tick_rate (their FRAMETIME constant assumes 0.1s ticks); the only
+  // family this port has today IS legacy, so the derived value is
+  // overridden to 10 until the kex binding introduces family dispatch --
+  // otherwise `sv_tick_rate 40` would desync engine time from the frozen
+  // game trees.
+  const tickRate = Math.min(60, Math.max(10, sv_tick_rate ? sv_tick_rate.value : 10));
+  const legacyFamily = true; // kex binding does not exist yet
+  sv.framerate = legacyFamily ? 10 : tickRate;
+  sv.frametime = 1000 / sv.framerate;
 
   // save name for levels that don't set message
   sv.configstrings[CS_NAME] = server;
