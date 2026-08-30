@@ -427,6 +427,11 @@ import { SP_trigger_health_relay } from "./g_monster";
 // g_turret.ts landed concurrently with this unit (704 lines, all four
 // SP_turret_* real) -- see file header "REGISTRY COMPLETENESS" update.
 import { SP_turret_breach, SP_turret_base, SP_turret_driver, SP_turret_invisible_brain } from "./g_turret";
+import { SP_monster_berserk } from "./m_berserk";
+import { SP_monster_gladb, SP_monster_gladiator } from "./m_gladiator";
+import { SP_monster_gunner } from "./m_gunner";
+import { SP_monster_infantry } from "./m_infantry";
+import { SP_monster_soldier, SP_monster_soldier_hypergun, SP_monster_soldier_lasergun, SP_monster_soldier_light, SP_monster_soldier_ripper, SP_monster_soldier_ss } from "./m_soldier";
 import {
   SP_target_temp_entity,
   SP_target_speaker,
@@ -1072,13 +1077,13 @@ export const spawns: readonly SpawnEntry[] = [
   { name: "misc_hologram", spawn: SP_misc_hologram },
   { name: "misc_lavaball", spawn: SP_misc_lavaball },
 
-  { name: "monster_berserk", spawn: unported("SP_monster_berserk", "m_berserk.cpp (future src/kexgame/m_berserk.ts)") },
-  { name: "monster_gladiator", spawn: unported("SP_monster_gladiator", "m_gladiator.cpp (future src/kexgame/m_gladiator.ts)") },
-  { name: "monster_gunner", spawn: unported("SP_monster_gunner", "m_gunner.cpp (future src/kexgame/m_gunner.ts)") },
-  { name: "monster_infantry", spawn: unported("SP_monster_infantry", "m_infantry.cpp (future src/kexgame/m_infantry.ts)") },
-  { name: "monster_soldier_light", spawn: unported("SP_monster_soldier_light", "m_soldier.cpp (future src/kexgame/m_soldier.ts)") },
-  { name: "monster_soldier", spawn: unported("SP_monster_soldier", "m_soldier.cpp (future src/kexgame/m_soldier.ts)") },
-  { name: "monster_soldier_ss", spawn: unported("SP_monster_soldier_ss", "m_soldier.cpp (future src/kexgame/m_soldier.ts)") },
+  { name: "monster_berserk", spawn: SP_monster_berserk },
+  { name: "monster_gladiator", spawn: SP_monster_gladiator },
+  { name: "monster_gunner", spawn: SP_monster_gunner },
+  { name: "monster_infantry", spawn: SP_monster_infantry },
+  { name: "monster_soldier_light", spawn: SP_monster_soldier_light },
+  { name: "monster_soldier", spawn: SP_monster_soldier },
+  { name: "monster_soldier_ss", spawn: SP_monster_soldier_ss },
   { name: "monster_tank", spawn: SP_monster_tank },
   { name: "monster_tank_commander", spawn: SP_monster_tank },
   { name: "monster_medic", spawn: SP_monster_medic },
@@ -1114,13 +1119,13 @@ export const spawns: readonly SpawnEntry[] = [
   { name: "misc_amb4", spawn: unported("SP_misc_amb4", "xatrix/g_xatrix_misc.cpp (future src/xatrix/g_xatrix_misc.ts)") },
   { name: "misc_transport", spawn: unported("SP_misc_transport", "xatrix/g_xatrix_misc.cpp (future src/xatrix/g_xatrix_misc.ts)") },
   { name: "misc_nuke", spawn: unported("SP_misc_nuke", "xatrix/g_xatrix_misc.cpp (future src/xatrix/g_xatrix_misc.ts)") },
-  { name: "monster_soldier_hypergun", spawn: unported("SP_monster_soldier_hypergun", "m_soldier.cpp (future src/kexgame/m_soldier.ts)") },
-  { name: "monster_soldier_lasergun", spawn: unported("SP_monster_soldier_lasergun", "m_soldier.cpp (future src/kexgame/m_soldier.ts)") },
-  { name: "monster_soldier_ripper", spawn: unported("SP_monster_soldier_ripper", "m_soldier.cpp (future src/kexgame/m_soldier.ts)") },
+  { name: "monster_soldier_hypergun", spawn: SP_monster_soldier_hypergun },
+  { name: "monster_soldier_lasergun", spawn: SP_monster_soldier_lasergun },
+  { name: "monster_soldier_ripper", spawn: SP_monster_soldier_ripper },
   { name: "monster_fixbot", spawn: unported("SP_monster_fixbot", "xatrix/m_xatrix_fixbot.cpp (future src/xatrix/m_xatrix_fixbot.ts)") },
   { name: "monster_gekk", spawn: unported("SP_monster_gekk", "xatrix/m_xatrix_gekk.cpp (future src/xatrix/m_xatrix_gekk.ts)") },
   { name: "monster_chick_heat", spawn: unported("SP_monster_chick_heat", "m_chick.cpp (future src/kexgame/m_chick.ts)") },
-  { name: "monster_gladb", spawn: unported("SP_monster_gladb", "m_gladiator.cpp (future src/kexgame/m_gladiator.ts)") },
+  { name: "monster_gladb", spawn: SP_monster_gladb },
   { name: "monster_boss5", spawn: unported("SP_monster_boss5", "m_supertank.cpp (future src/kexgame/m_supertank.ts)") },
 
   { name: "func_plat2", spawn: unported("SP_func_plat2", "rogue/g_rogue_func.cpp (future src/rogue/g_rogue_func.ts)") },

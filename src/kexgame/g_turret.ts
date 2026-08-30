@@ -154,23 +154,7 @@ const st: SpawnTempT = {
 // unported cross-deps (throwing stubs) -- see file header
 // ---------------------------------------------------------------------------
 
-function infantry_die(_self: EdictT, _inflictor: EdictT, _attacker: EdictT, _damage: number, _point: Vec3, _mod: ModT): void {
-  throw new Error("infantry_die: not yet ported (monster content dir, pending m_infantry.ts, see m_infantry.cpp)");
-}
-function infantry_stand(_self: EdictT): void {
-  throw new Error("infantry_stand: not yet ported (monster content dir, pending m_infantry.ts, see m_infantry.cpp)");
-}
-function infantry_pain(_self: EdictT, _other: EdictT, _kick: number, _damage: number, _mod: ModT): void {
-  throw new Error("infantry_pain: not yet ported (monster content dir, pending m_infantry.ts, see m_infantry.cpp)");
-}
-function infantry_setskin(_self: EdictT): void {
-  throw new Error("infantry_setskin: not yet ported (monster content dir, pending m_infantry.ts, see m_infantry.cpp)");
-}
-function InfantryPrecache(): void {
-  throw new Error(
-    "InfantryPrecache: not yet ported (monster content dir, pending m_infantry.ts, see m_infantry.cpp) -- SP_turret_driver's only caller always reaches this outside deathmatch",
-  );
-}
+import { infantry_die, infantry_stand, infantry_pain, infantry_setskin, InfantryPrecache } from "./m_infantry";
 
 // ---------------------------------------------------------------------------
 // AnglesNormalize (g_turret.cpp:9-19)
