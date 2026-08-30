@@ -33,15 +33,13 @@
 // exactly why this real-data e2e check earns its keep independently of the
 // hand-derived suite.
 //
-// ALSO FOUND (pre-existing, NOT part of this unit's own kexdemo.ts/
-// cl_demo.ts work -- src/client/cl_fx.ts's CL_ParseMuzzleFlash2): the
-// classic MZ2_* monster-muzzleflash offset table (src/game/m_flash.ts) has
-// no entries for muzzleflash indices the re-release's expanded monster
-// roster introduced, and looking one up crashed outright instead of
-// degrading gracefully. Given a narrow, cited crash guard (`?? vec3(0,0,0)`)
-// rather than the full separate unit porting the re-release's own offset
-// table would require -- see that file's own comment for the exact
-// tradeoff.
+// HISTORICAL NOTE (resolved): this unit originally found that
+// CL_ParseMuzzleFlash2 used only the classic MZ2_* table and crashed on
+// the re-release's expanded muzzleflash indices; a crash guard was the
+// interim fix. Family-aware dispatch has since landed (cl_fx.ts selects
+// the 290-entry kexgame table under CS_REMAP_RERELEASE), so this demo's
+// muzzleflashes now resolve real offsets; the guard remains only for
+// genuinely out-of-range classic-family bytes. See test/cl_muzzleflash.test.ts.
 //
 // No retail content is read into this repository or committed anywhere:
 // the PAK file is read directly from the user's local retail install path

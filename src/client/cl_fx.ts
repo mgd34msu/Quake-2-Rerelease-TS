@@ -274,18 +274,42 @@ import {
   CparticleT,
   PARTICLE_GRAVITY,
   INSTANT_PARTICLE,
+  re,
   type CdlightT,
   type CentityT,
+  type ShadowLightT,
 } from "./client";
 import { MAX_PARTICLES, MAX_LIGHTSTYLES, type EntityT } from "./ref";
-import { V_AddParticle, V_AddLight, V_AddLightStyle } from "./cl_view";
+import { V_AddParticle, V_AddLight, V_AddLightStyle, V_AddLightEx } from "./cl_view";
 import { S_StartSound, S_RegisterSound } from "./snd_dma";
 import { ComError } from "../qcommon/qcommon";
 import { ERR_DROP, MAX_EDICTS } from "../shared/q_shared";
 import { MSG_ReadShort, MSG_ReadByte } from "../qcommon/sizebuf";
-import { monsterFlashOffset } from "../game/m_flash";
+// Family-aware muzzleflash offset table: game/m_flash.ts's own header
+// comment ("this file is included in both the game dll and quake2, the
+// game needs it to source shot locations, the client needs it to position
+// muzzle flashes") is the documented precedent for a client file importing
+// this table directly rather than going through a server-round-trip or a
+// game-side accessor -- kexgame/m_flash.ts carries the identical
+// both-game-and-client comment, so importing it here the same way is that
+// same precedent extended to the second family, not a new leak.
+import { monsterFlashOffset as classicMonsterFlashOffset } from "../game/m_flash";
+import { monsterFlashOffset as kexMonsterFlashOffset } from "../kexgame/m_flash";
+import { CS_REMAP_RERELEASE } from "../shared/cs_remap";
 import { CL_SmokeAndFlash, cl_sfx_footsteps } from "./cl_tent";
 import { fixedLength } from "../shared/fixed";
+
+// Which monster_flash_offset table CL_ParseMuzzleFlash2 resolves `flash_number`
+// through. Keyed off cls.csr (set by cl_parse.ts's CL_ParseServerData from the
+// connection's negotiated protocol -- CS_REMAP_RERELEASE for the kex family,
+// CS_REMAP_OLD otherwise), the same signal cl_parse.ts already uses right next
+// to it for CG_SetActiveCgameKind. Not routed through CG_GetActiveCgameKind
+// (host.ts): that seam exists for HUD/cgame-export selection, and coupling
+// this unrelated data-table lookup to it would trade one direct, already-
+// precedented import (see above) for a dependency on the cgame subsystem.
+function activeMonsterFlashOffset(): readonly Vec3[] {
+  return cls.csr === CS_REMAP_RERELEASE ? kexMonsterFlashOffset() : classicMonsterFlashOffset();
+}
 
 // C's raw rand() (0..0x7fff), used directly (rather than through frand()/
 // crand()) all over cl_fx.c/cl_newfx.c/cl_tent.c for its bit-masking idiom
@@ -353,6 +377,88 @@ export function CL_SetLightstyle(i: number): void {
   for (let k = 0; k < j; k++) {
     cl_lightstyle[i].map[k] = (s.charCodeAt(k) - "a".charCodeAt(0)) / ("m".charCodeAt(0) - "a".charCodeAt(0));
   }
+}
+
+/*
+=================
+CL_ParseShadowLightConfigstring
+
+q2repro src/client/precache.c's CS_LoadShadowLight -- task #25 (v1.1.0).
+Wire format (kexgame/g_misc.ts's GetShadowLightData writer, matching
+q2repro's own G_Fmt call byte-for-byte): 12 semicolon-separated fields --
+entity number, is-cone flag, radius, resolution, intensity, fade_start,
+fade_end, lightstyle, coneangle, conedirection xyz. A malformed string (not
+exactly 12 fields, q2repro's "n !== 11" semicolon count) is silently
+dropped, matching the original's `return;` on that same check.
+=================
+*/
+export function CL_ParseShadowLightConfigstring(index: number, s: string): void {
+  const parts = s.split(";");
+  if (parts.length !== 12) return;
+
+  const def = cl.shadowdefs[index];
+  if (def === undefined) return;
+
+  def.number = parseInt(parts[0] ?? "0", 10);
+  const isCone = parseInt(parts[1] ?? "0", 10) !== 0;
+  def.light.radius = parseFloat(parts[2] ?? "0");
+  def.light.resolution = parseInt(parts[3] ?? "0", 10);
+  def.light.intensity = parseFloat(parts[4] ?? "0");
+  def.light.fade_start = parseFloat(parts[5] ?? "0");
+  def.light.fade_end = parseFloat(parts[6] ?? "0");
+  def.light.lightstyle = parseInt(parts[7] ?? "0", 10);
+  def.light.coneangle = isCone ? parseFloat(parts[8] ?? "0") : 0;
+  def.light.conedirection[0] = parseFloat(parts[9] ?? "0");
+  def.light.conedirection[1] = parseFloat(parts[10] ?? "0");
+  def.light.conedirection[2] = parseFloat(parts[11] ?? "0");
+}
+
+// q2repro src/client/effects.c's CL_AddShadowLights -- task #25 (v1.1.0).
+// Re-evaluates every active shadowdefs[] slot against the entity it's
+// attached to (by entity number, per this frame's cl_entities[] snapshot)
+// and hands the result to V_AddLightEx. No-op unless both cl_shadowlights
+// and the renderer's per-pixel shader path are active -- a shadow light is
+// otherwise pointless to evaluate (the fixed-function path has nothing
+// that consumes its per-pixel fields).
+export function CL_AddShadowLights(): void {
+  if (!clCvars.cl_shadowlights?.value) return;
+  if (!re?.SupportsPerPixelLighting()) return;
+
+  for (let i = 0; i < cls.csr.max_shadowlights; i++) {
+    if (!cl.configstrings[cls.csr.shadowlights + i]) continue;
+
+    const def = cl.shadowdefs[i];
+    if (def === undefined) continue;
+
+    const ent = cl_entities[def.number];
+    if (ent === undefined || ent.serverframe !== cl.frame.serverframe) continue;
+
+    // technically we should be lerping, but these lights never move in the
+    // game (even though they can) -- same comment as q2repro's own source
+    unpackShadowLightColor(ent.current.skinnum, def.light);
+    def.light.origin[0] = ent.current.origin[0];
+    def.light.origin[1] = ent.current.origin[1];
+    def.light.origin[2] = ent.current.origin[2];
+
+    V_AddLightEx(def.light);
+  }
+}
+
+// q2repro's `color.u32 = BigLong(ent->current.skinnum);` unpacked as
+// little-endian RGBA bytes (color_t's in-memory layout); skinnum===0 means
+// COLOR_WHITE, matching CL_AddShadowLights' own `!ent->current.skinnum`
+// check.
+function unpackShadowLightColor(skinnum: number, light: ShadowLightT): void {
+  if (!skinnum) {
+    light.color[0] = 1;
+    light.color[1] = 1;
+    light.color[2] = 1;
+    return;
+  }
+  const u = skinnum >>> 0;
+  light.color[0] = (u & 0xff) / 255;
+  light.color[1] = ((u >>> 8) & 0xff) / 255;
+  light.color[2] = ((u >>> 16) & 0xff) / 255;
 }
 
 export function CL_AddLightStyles(): void {
@@ -662,19 +768,27 @@ export function CL_ParseMuzzleFlash2(): void {
   const forward = vec3();
   const right = vec3();
   AngleVectors(cl_entities[ent].current.angles, forward, right, null);
-  // monsterFlashOffset() (src/game/m_flash.ts) is the CLASSIC MZ2_* table
-  // (baseq2 + rogue/xatrix mission-pack additions); it has no entries for
-  // muzzleflash indices the KEX re-release's own expanded monster roster
-  // introduced. Found via a real retail KEX-format demo file crashing
-  // playback outright on an unmapped `flash_number` (KEX demo playback
-  // unit's own task report) -- `?? vec3(0,0,0)` is a narrow crash guard,
-  // NOT a full port of the rerelease's own offset table (a separate, much
-  // larger unit: enumerating every new monster's own muzzle offsets from
-  // the rerelease source). Falling back to a zero offset only affects the
-  // exact visual/light POSITION of an unrecognized flash type; every other
-  // effect this function drives off `flash_number` (sound, particle color,
-  // etc., in the switch below) is unaffected and still runs for real.
-  const offset = monsterFlashOffset()[flash_number] ?? vec3(0, 0, 0);
+  // activeMonsterFlashOffset() picks the classic 212-entry table (src/game/
+  // m_flash.ts, baseq2 + rogue/xatrix mission-pack additions) or the kex
+  // 290-entry table (src/kexgame/m_flash.ts, MZ2_UNUSED_0..MZ2_LAST) by
+  // connection family -- see the selector's own doc comment above. The kex
+  // table's range (0..289) already covers every value `flash_number` (a
+  // single byte, 0..255) can hold, so under the kex family this lookup is
+  // always defined; the `?? vec3(0,0,0)` fallback below is now a genuine
+  // out-of-range guard for the CLASSIC family only, where a `flash_number`
+  // of 212..255 has no table entry (matches the original engine indexing a
+  // fixed-size array with no bounds check -- out of range there is
+  // undefined behavior, not a defined zero; this fallback is a deliberate,
+  // documented deviation, not a faithfully-ported crash). Previously this
+  // guard was also standing in for the whole missing kex table (found via a
+  // real retail KEX-format demo file crashing playback on an unmapped
+  // `flash_number` -- KEX demo playback unit's own task report); now that
+  // the kex table is ported in full, that reason no longer applies. Falling
+  // back to a zero offset only affects the exact visual/light POSITION of
+  // an unrecognized flash type; every other effect this function drives off
+  // `flash_number` (sound, particle color, etc., in the switch below) is
+  // unaffected and still runs for real.
+  const offset = activeMonsterFlashOffset()[flash_number] ?? vec3(0, 0, 0);
   const origin = vec3();
   origin[0] = cl_entities[ent].current.origin[0] + forward[0] * offset[0] + right[0] * offset[1];
   origin[1] = cl_entities[ent].current.origin[1] + forward[1] * offset[0] + right[1] * offset[1];
