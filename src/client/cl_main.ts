@@ -53,7 +53,22 @@ import { Key_WriteBindings } from "./keys_impl";
 import { Cmd_Argc, Cmd_Argv, Cmd_Args, Cmd_AddCommand, Cmd_TokenizeString, Cbuf_AddText, Cbuf_Execute, setCmdForwardToServerHandler } from "../qcommon/cmd";
 import { Cvar_WriteVariables, Cvar_Get, Cvar_Set, Cvar_SetValue, Cvar_VariableValue, Cvar_VariableString, Cvar_Userinfo, SetUserinfoModified } from "../qcommon/cvar";
 import { Com_Printf, Com_DPrintf, Com_Error, Com_Quit, Com_ServerState, Info_Print, dedicated, COM_BlockSequenceCRCByte } from "../qcommon/common";
-import { NetadrT, NetadrtypeT, NetsrcT, ComError, ERR_DROP, SvcOpsT, ClcOpsT, PROTOCOL_VERSION, PORT_SERVER, MAX_MSGLEN } from "../qcommon/qcommon";
+import {
+  NetadrT,
+  NetadrtypeT,
+  NetsrcT,
+  ComError,
+  ERR_DROP,
+  SvcOpsT,
+  ClcOpsT,
+  PROTOCOL_VERSION,
+  PROTOCOL_VERSION_R1Q2,
+  PROTOCOL_VERSION_R1Q2_CURRENT,
+  PROTOCOL_VERSION_Q2PRO,
+  PROTOCOL_VERSION_Q2PRO_CURRENT,
+  PORT_SERVER,
+  MAX_MSGLEN,
+} from "../qcommon/qcommon";
 import { NET_StringToAdr, NET_AdrToString, NET_CompareAdr, NET_IsLocalAddress, NET_SendPacket, NET_GetPacket, NET_Config } from "../platform/net_udp";
 import { Netchan_OutOfBandPrint, Netchan_Setup, Netchan_Transmit, Netchan_Process, net_from, net_message } from "../qcommon/net_chan";
 import { SizeBuf, SZ_Init, SZ_Clear, SZ_Print, MSG_WriteByte, MSG_WriteChar, MSG_WriteShort, MSG_WriteLong, MSG_WriteString, MSG_ReadString, MSG_ReadStringLine, MSG_BeginReading, MSG_ReadLong } from "../qcommon/sizebuf";
@@ -80,7 +95,8 @@ import { CL_PredictMovement } from "./cl_pred";
 import { CL_RunDLights, CL_RunLightStyles, CL_ClearEffects } from "./cl_fx";
 import { CL_ClearTEnts } from "./cl_tent";
 import { S_StopAllSounds, S_Update, S_Init, S_Shutdown } from "./snd_dma";
-import { CL_RegisterSounds, CL_ParseClientinfo, CL_ParseServerMessage } from "./cl_parse";
+import { CL_RegisterSounds, CL_ParseClientinfo, CL_ParseServerMessage, CL_StartUdpDownload } from "./cl_parse";
+import { HTTP_Init, HTTP_SetServer, HTTP_SetCallbacks, HTTP_CleanupDownloads, HTTP_RunDownloads } from "./cl_http";
 import { CL_PrepRefresh, V_Init } from "./cl_view";
 import { SCR_Init, SCR_UpdateScreen, SCR_BeginLoadingPlaque, SCR_EndLoadingPlaque, SCR_RunConsole } from "./cl_scrn";
 import { SCR_StopCinematic, SCR_RunCinematic } from "./cl_cin";
@@ -412,7 +428,35 @@ export function CL_SendConnectPacket(): void {
   const port = Cvar_VariableValue("qport");
   SetUserinfoModified(false);
 
-  Netchan_OutOfBandPrint(NetsrcT.NS_CLIENT, adr, 'connect %i %i %i "%s"\n', PROTOCOL_VERSION, port, cls.challenge, Cvar_Userinfo());
+  // v1.0.0 wire cluster (task board #23): cl_protocol picks which protocol
+  // this client requests (defaults to PROTOCOL_VERSION/34 -- see
+  // clCvars.cl_protocol's doc comment in client.ts for why the default must
+  // not change). R1Q2 (35) and Q2PRO (36) each append their own trailing
+  // connect-string tokens after the standard four fields
+  // (q2proto_r1q2_connect_tail / q2proto_q2pro_connect_tail); protocol 34
+  // sends none, matching this engine's wire bytes exactly as before.
+  const protocol = clCvars.cl_protocol ? clCvars.cl_protocol.value : PROTOCOL_VERSION;
+  // A packet_length token both families send but this port's netchan
+  // (qcommon/net_chan.ts) never acts on -- we only ever implement the
+  // classic/"old" (unfragmented) netchan framing, so any value a real
+  // server would accept as "no larger than mine" is fine here. MAX_MSGLEN
+  // (1400) documents that ceiling honestly rather than inventing a fake
+  // larger-than-we-support capability.
+  const packetLength = MAX_MSGLEN;
+  let tail = "";
+  if (protocol === PROTOCOL_VERSION_R1Q2) {
+    tail = ` ${packetLength} ${PROTOCOL_VERSION_R1Q2_CURRENT}`;
+  } else if (protocol === PROTOCOL_VERSION_Q2PRO) {
+    // netchan_type=0 (NETCHAN_OLD): this port never implements Q2PRO's
+    // alternate fragmented netchan variant (documented scope cut, see
+    // q2pro.ts's file header) -- requesting NETCHAN_OLD is the honest
+    // request, not a lie our own transport can't back up. has_zlib=1: this
+    // port DOES implement svc_r1q2_zpacket unwrap (qcommon/protocol/
+    // zpacket.ts), so advertising support is accurate.
+    tail = ` ${packetLength} 0 1 ${PROTOCOL_VERSION_Q2PRO_CURRENT}`;
+  }
+
+  Netchan_OutOfBandPrint(NetsrcT.NS_CLIENT, adr, `connect ${protocol} ${port} ${cls.challenge} "${Cvar_Userinfo()}"${tail}\n`);
 }
 
 /*
@@ -594,6 +638,9 @@ export function CL_Disconnect(): void {
     FS_FCloseFile(cls.download);
     cls.download = null;
   }
+
+  // task #24: mirrors Q2PRO's CL_CleanupDownloads calling HTTP_CleanupDownloads
+  HTTP_CleanupDownloads();
 
   cls.state = ConnstateT.ca_disconnected;
 
@@ -801,6 +848,28 @@ export function CL_ConnectionlessPacket(): void {
       Com_Printf("Dup connect received.  Ignored.\n");
       return;
     }
+
+    // task #24 dlserver negotiation: ported from Q2PRO src/client/main.c's
+    // "client_connect" handler, which scans the extra space-separated
+    // parameters appended to this same out-of-band string for a
+    // "dlserver=<url>" token (see src/server/main.c's send_connect_packet,
+    // mirrored on our server side in sv_main.ts's SV_ConnectionlessPacket).
+    // This is plain connectionless-packet string handling in cl_main.c's
+    // own file in the original -- no wire-protocol/codec change, so it
+    // needs no touch to src/qcommon/protocol/ (which this brief is scoped
+    // away from). Only "dlserver=" is ported; Q2PRO's other tokens on this
+    // same line (ac=/nc=/map=) belong to netchan-type/anticheat negotiation
+    // outside this brief's scope and are left untouched.
+    let dlserver: string | null = null;
+    for (let i = 1; i < Cmd_Argc(); i++) {
+      const arg = Cmd_Argv(i);
+      if (arg.slice(0, 9) === "dlserver=") {
+        dlserver = arg.slice(9);
+        break;
+      }
+    }
+    HTTP_SetServer(dlserver, NET_IsLocalAddress(net_from));
+
     Netchan_Setup(NetsrcT.NS_CLIENT, cls.netchan, net_from, cls.quakePort);
     MSG_WriteChar(cls.netchan.message, ClcOpsT.clc_stringcmd);
     MSG_WriteString(cls.netchan.message, "new");
@@ -1099,6 +1168,18 @@ export function CL_InitLocal(): void {
 
   CL_InitInput();
 
+  // task #24: HTTP downloads (cl_http.ts). Callbacks wire the HTTP queue
+  // back to this file's existing UDP download state machine: a per-file
+  // HTTP failure retries over UDP (CL_StartUdpDownload), and every settled
+  // HTTP entry re-drives the precache walk exactly like Q2PRO's
+  // process_downloads()/abort_downloads() both ending in
+  // CL_RequestNextDownload().
+  HTTP_Init();
+  HTTP_SetCallbacks({
+    udpFallback: (path) => CL_StartUdpDownload(path),
+    onSettled: () => CL_RequestNextDownload(),
+  });
+
   adr0 = Cvar_Get("adr0", "", CVAR_ARCHIVE);
   adr1 = Cvar_Get("adr1", "", CVAR_ARCHIVE);
   adr2 = Cvar_Get("adr2", "", CVAR_ARCHIVE);
@@ -1144,6 +1225,7 @@ export function CL_InitLocal(): void {
   clCvars.m_forward = Cvar_Get("m_forward", "1", 0);
   clCvars.m_side = Cvar_Get("m_side", "1", 0);
 
+  clCvars.cl_protocol = Cvar_Get("cl_protocol", `${PROTOCOL_VERSION}`, 0);
   clCvars.cl_shownet = Cvar_Get("cl_shownet", "0", 0);
   clCvars.cl_showmiss = Cvar_Get("cl_showmiss", "0", 0);
   clCvars.cl_showclamp = Cvar_Get("showclamp", "0", 0);
@@ -1346,6 +1428,9 @@ export function CL_Frame(msec: number): void {
 
   // if in the debugger last frame, don't timeout
   if (msec > 5000) cls.netchan.last_received = Sys_Milliseconds();
+
+  // task #24: pump the HTTP download queue (see cl_http.ts's HTTP_RunDownloads doc comment)
+  HTTP_RunDownloads();
 
   // fetch results from server
   CL_ReadPackets();

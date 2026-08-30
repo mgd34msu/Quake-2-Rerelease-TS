@@ -78,6 +78,12 @@ export let public_server: CvarT | null = null; // should heartbeats be sent
 
 export let sv_reconnect_limit: CvarT | null = null; // minimum seconds between connect messages
 
+// task #24: HTTP download server advertisement (Q2PRO src/server/main.c:
+// "sv_downloadserver = Cvar_Get("sv_downloadserver", "", 0);"). When set,
+// appended to the "client_connect" out-of-band reply below so clients can
+// negotiate an HTTP dlserver exactly as Q2PRO's send_connect_packet does.
+export let sv_downloadserver: CvarT | null = null;
+
 function atoi(s: string): number {
   const n = Number.parseInt(s, 10);
   return Number.isNaN(n) ? 0 : n;
@@ -404,8 +410,15 @@ export function SVC_DirectConnect(): void {
   newcl.userinfo = userinfo;
   SV_UserinfoChanged(newcl);
 
-  // send the connect packet to the client
-  Netchan_OutOfBandPrint(NetsrcT.NS_SERVER, adr, "client_connect");
+  // send the connect packet to the client. task #24: advertise the HTTP
+  // dlserver URL (if configured) via the same out-of-band string Q2PRO's
+  // send_connect_packet appends " dlserver=<url>" to -- cl_main.ts's
+  // "client_connect" handler parses this token back out.
+  if (sv_downloadserver && sv_downloadserver.string.length) {
+    Netchan_OutOfBandPrint(NetsrcT.NS_SERVER, adr, "client_connect dlserver=%s", sv_downloadserver.string);
+  } else {
+    Netchan_OutOfBandPrint(NetsrcT.NS_SERVER, adr, "client_connect");
+  }
 
   Netchan_Setup(NetsrcT.NS_SERVER, newcl.netchan, adr, qport);
 
@@ -916,6 +929,7 @@ export function SV_Init(): void {
   public_server = Cvar_Get("public", "0", 0);
 
   sv_reconnect_limit = Cvar_Get("sv_reconnect_limit", "3", CVAR_ARCHIVE);
+  sv_downloadserver = Cvar_Get("sv_downloadserver", "", 0);
 
   SZ_Init(net_message, net_message_buffer, net_message_buffer.length);
 }

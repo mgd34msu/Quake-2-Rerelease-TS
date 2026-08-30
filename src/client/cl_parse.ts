@@ -48,6 +48,7 @@ import { FS_LoadFile, FS_Gamedir, FS_CreatePath, FS_FOpenFileWrite, FS_Write, FS
 import { COM_StripExtension } from "../shared/math";
 import { CM_InlineModel } from "../qcommon/cmodel";
 import { CL_ClearState, CL_RequestNextDownload, CL_WriteDemoMessage } from "./cl_main";
+import { HTTP_QueueDownload, type HttpDlType } from "./cl_http";
 import { CG_SetActiveCgameKind } from "./cgame/host";
 import { SCR_PlayCinematic } from "./cl_cin";
 import { SCR_CenterPrint } from "./cl_scrn";
@@ -101,7 +102,7 @@ for (let i = 0; i < SVC_STRING_NAMES.length; i++) svc_strings[i] = SVC_STRING_NA
 
 //=============================================================================
 
-function CL_DownloadFileName(fn: string): string {
+export function CL_DownloadFileName(fn: string): string {
   if (fn.slice(0, 7) === "players") return `${BASEDIRNAME}/${fn}`;
   return `${FS_Gamedir()}/${fn}`;
 }
@@ -120,23 +121,16 @@ function writeStringcmd(text: string): void {
 
 /*
 ===============
-CL_CheckOrDownloadFile
+CL_StartUdpDownload
 
-Returns true if the file exists, otherwise it attempts
-to start a download from the server.
+Extracted from CL_CheckOrDownloadFile's tail so cl_http.ts's HTTP path
+(HTTP_QueueDownload) can fall back to it two ways: synchronously, when no
+dlserver is advertised at all, and asynchronously, as the per-file UDP
+fallback callback (HTTP_SetCallbacks' udpFallback) invoked after an HTTP
+transfer fails. Body unchanged from the original CL_CheckOrDownloadFile.
 ===============
 */
-export function CL_CheckOrDownloadFile(filename: string): boolean {
-  if (filename.includes("..")) {
-    Com_Printf("Refusing to download a path with ..\n");
-    return true;
-  }
-
-  if (FS_LoadFile(filename) !== null) {
-    // it exists, no need to download
-    return true;
-  }
-
+export function CL_StartUdpDownload(filename: string): void {
   cls.downloadname = filename;
 
   // download to a temp name, and only rename
@@ -164,7 +158,40 @@ export function CL_CheckOrDownloadFile(filename: string): boolean {
   }
 
   cls.downloadnumber++;
+}
 
+/*
+===============
+CL_CheckOrDownloadFile
+
+Returns true if the file exists, otherwise it attempts to start a download
+from the server.
+
+task #24 wiring: tries the HTTP queue first (cl_http.ts's HTTP_QueueDownload,
+Q2PRO's check_file_len ordering: "ret = HTTP_QueueDownload(...); if (ret !=
+Q_ERR(ENOSYS)) return ret;"). HTTP_QueueDownload itself no-ops immediately
+(outcome "no-server"/"http-disabled") when no dlserver was advertised for
+this connection or cl_http_downloads is 0, in which case this falls straight
+through to the original UDP request unchanged.
+===============
+*/
+export function CL_CheckOrDownloadFile(filename: string, type: HttpDlType = "single"): boolean {
+  if (filename.includes("..")) {
+    Com_Printf("Refusing to download a path with ..\n");
+    return true;
+  }
+
+  if (FS_LoadFile(filename) !== null) {
+    // it exists, no need to download
+    return true;
+  }
+
+  const httpResult = HTTP_QueueDownload(filename, type);
+  if (httpResult.outcome === "queued" || httpResult.outcome === "duplicate") {
+    return false;
+  }
+
+  CL_StartUdpDownload(filename);
   return false;
 }
 
