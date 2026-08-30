@@ -6,9 +6,10 @@
 //
 // Self-sufficient per preferences.md rule 13: cls.state stays below
 // ca_active for every test here, which keeps the real SCR_DrawStats/
-// SCR_DrawLayout pass-through (cl_scrn.ts's SCR_ExecuteLayoutString bails
-// out immediately unless cls.state === ca_active) a safe no-op regardless
-// of what other test files have left in the shared cl/cls singletons.
+// SCR_DrawLayout call (classic_hud.ts's SCR_ExecuteLayoutString bails out
+// immediately unless imports.CL_FrameValid() -- cls.state === ca_active &&
+// cl.refresh_prepped, host.ts -- is true) a safe no-op regardless of what
+// other test files have left in the shared cl/cls singletons.
 
 import { describe, expect, test } from "bun:test";
 import { CG_DrawHUD, CG_GetActiveCgame, CG_SetActiveCgame, CGAME_API_VERSION, buildCgameImports, type CgameExports } from "../src/client/cgame/host";
@@ -51,14 +52,17 @@ describe("cgame host", () => {
 
     // Wraps (rather than replaces) the real classic implementation, so the
     // flag proves dispatch reached classic's actual DrawHUD body -- not
-    // just a fake standing in for it.
+    // just a fake standing in for it. Forwards the real (playernum, ps,
+    // data) CG_DrawHUD supplies rather than dropping them: classic.ts's
+    // DrawHUD now actually reads ps.stats, so calling it with no arguments
+    // would crash instead of no-op'ing like the old bare pass-through did.
     CG_SetActiveCgame({
       apiversion: classic.apiversion,
       Init: classic.Init,
       Shutdown: classic.Shutdown,
-      DrawHUD() {
+      DrawHUD(playernum, ps, data) {
         reachedClassic = true;
-        classic.DrawHUD();
+        classic.DrawHUD(playernum, ps, data);
       },
     });
 

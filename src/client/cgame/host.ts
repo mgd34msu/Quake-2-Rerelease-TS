@@ -1,35 +1,48 @@
 // cgame host -- ARCHITECTURE.md phase 4 ("Client: cgame host, two built-in
-// cgames"). Step 1 of that phase: introduce the seam and exercise it,
-// WITHOUT extracting the ~8k lines of cl_scrn/cl_tent/cl_fx/cl_newfx/cl_inv
-// that will eventually live behind it. Precedent: q2repro's
-// src/client/cgame.c (the host) and src/client/cgame_classic.c (the
-// built-in classic cgame), both GPLv2.
+// cgames"). Precedent: q2repro's src/client/cgame.c (the host) and
+// src/client/cgame_classic.c (the built-in classic cgame), both GPLv2.
 //
 // CgameImports below is the 2022/2023 cgame import surface verbatim
-// (KexCgameImports, src/kexapi/game.ts) -- reused as-is rather than
-// trimmed, because every future cgame implementation (including the
-// phase 6 kex cgame port) needs the full surface, not a subset invented
-// for this step. Only the members the classic cgame's pass-through
-// DrawHUD path touches today are wired to real client/engine functions
-// in buildCgameImports() below; every other member is a stub, each
-// commented with the phase expected to give it a real body.
+// (KexCgameImports, src/kexapi/game.ts), widened by ClassicOnlyImports (this
+// file, just below) with the one primitive the real API doesn't have: a
+// native-size Draw_Pic. KexCgameImports's own SCR_DrawPic is stretch-shaped
+// (explicit w/h -- fine for the kex cgame, which always knows its icon
+// sizes up front); the classic layout interpreter's "pic"/"picn"/"client"/
+// field_3/sb_nums/inventory-background draws call the classic engine's
+// re.DrawPic(x, y, name) (native size, no stretch) throughout, and going
+// through SCR_DrawPic would swap that for a DrawStretchPic call even when
+// visually identical -- which breaks the byte-for-byte draw-call identity
+// test/cgame_classic_extraction.test.ts enforces. Draw_Pic is the "surface
+// gap found, add it" fix flagged by that unit's task brief, kept out of
+// KexCgameImports itself (that type mirrors the real upstream API and
+// shouldn't grow invented members) via the intersection below instead.
 //
-// CgameExports is intentionally NOT the full KexCgameExports -- this step's
-// classic cgame is a bare pass-through (Init/Shutdown no-ops, DrawHUD
-// delegating to the existing SCR_DrawStats/SCR_DrawLayout functions in
-// cl_scrn.ts), so only the members actually exercised are declared. It
-// grows toward KexCgameExports's full shape (isplit/data/hud_vrect/
-// hud_safe/scale/playernum/ps parameters on DrawHUD, the weapon-wheel/
-// centerprint/notify members, etc.) once the kex cgame (phase 6) needs
-// them.
+// Most members the classic cgame's DrawHUD path touches are wired to real
+// client/engine functions in buildCgameImports() below; every other member
+// is a stub, each commented with the phase expected to give it a real body.
+// CL_GetClientPic and CL_FrameValid, previously two such stubs, are now
+// wired for real (see their own comments below) -- the classic HUD's
+// "client" layout token and its own connection-state guard both moved
+// behind this interface in the same step that extracted the layout
+// interpreter into ./classic_hud.ts, closing out both TODOs.
+//
+// CgameExports is intentionally NOT the full KexCgameExports -- DrawHUD's
+// signature only carries the subset the classic cgame's real (now-extracted)
+// implementation needs (playernum, ps, and the classic-shaped
+// ClassicHudDataT bundling the layout string + inventory array KexCgameExports'
+// own CgServerDataT covers for kex, minus the Int16Array/Int32Array mismatch
+// noted on ClassicHudDataT below). It grows further toward KexCgameExports's
+// full shape (isplit/hud_vrect/hud_safe/scale, the weapon-wheel/centerprint/
+// notify members, etc.) once the kex cgame (phase 6) needs them.
 
-import { cl, cls, re } from "../client";
+import { cl, cls, re, ConnstateT } from "../client";
 import { Com_Printf, Com_Error as Engine_Com_Error } from "../../qcommon/common";
 import { Loc_Localize } from "../../qcommon/loc";
 import { ERR_DROP } from "../../qcommon/qcommon";
 import { Cvar_Get, Cvar_Set, Cvar_ForceSet } from "../../qcommon/cvar";
 import type { KexCgameImports, Vec2T } from "../../kexapi/game";
 import { TextAlignT } from "../../kexapi/game";
+import type { PlayerStateT } from "../../shared/q_shared";
 import { Key_GetBinding } from "../keys_impl";
 import { GetClassicCgameAPI } from "./classic";
 import { GetCGameAPI as GetKexCgameAPI } from "../../kexgame/cgame/cg_main";
@@ -111,7 +124,13 @@ function drawFontStringFallback(str: string, x: number, y: number, scale: number
 // Import table (engine -> cgame)
 // ---------------------------------------------------------------------------
 
-export type CgameImports = KexCgameImports;
+// See this file's top-of-file comment for why Draw_Pic exists outside
+// KexCgameImports proper.
+interface ClassicOnlyImports {
+  Draw_Pic(x: number, y: number, name: string): void;
+}
+
+export type CgameImports = KexCgameImports & ClassicOnlyImports;
 
 // The classic engine's game logic has always run at a fixed 10Hz tick (see
 // server.ts's ServerT.framerate/frametime, which documents the identical
@@ -136,6 +155,24 @@ function boundsCheckedClientName(index: number): string {
     Engine_Com_Error(ERR_DROP, "CL_GetClientName: invalid client index");
   }
   return cl.clientinfo[index].name;
+}
+
+// Real body for CL_GetClientPic (see this file's top-of-file comment): the
+// classic layout interpreter's "client" token resolves a scoreboard icon
+// with the exact same fallback cl_scrn.c always used -- draw the indexed
+// client's own icon unless it never registered one (ci.icon null), in which
+// case fall back to cl.baseclientinfo's icon. Note the fallback applies only
+// to the ICON, not the name text drawn alongside it (CL_GetClientName above
+// never falls back) -- this mirrors the original inline code's `let ci = ...;
+// ...draw name/score/ping/time off ci...; if (!ci.icon) ci = baseclientinfo;
+// ...draw icon off (possibly reassigned) ci...` sequencing exactly.
+function boundsCheckedClientPic(index: number): string {
+  if (index < 0 || index >= cl.clientinfo.length) {
+    Engine_Com_Error(ERR_DROP, "CL_GetClientPic: invalid client index");
+  }
+  const ci = cl.clientinfo[index];
+  const resolved = ci.icon ? ci : cl.baseclientinfo;
+  return resolved.iconname;
 }
 
 export function buildCgameImports(): CgameImports {
@@ -191,6 +228,13 @@ export function buildCgameImports(): CgameImports {
       if (!re) return;
       re.DrawStretchPic(x, y, w, h, name);
     },
+    // ClassicOnlyImports member (see this file's top-of-file comment) --
+    // straight pass-through to the native-size draw primitive, matching
+    // this file's own SCR_DrawChar's guard-then-forward shape exactly.
+    Draw_Pic(x, y, name) {
+      if (!re) return;
+      re.DrawPic(x, y, name);
+    },
 
     // ---- stubs: no current caller needs these; each names its phase ----
 
@@ -221,11 +265,13 @@ export function buildCgameImports(): CgameImports {
       return null;
     },
 
-    // TODO(phase 4 continuation): real once the classic cgame's DrawHUD
-    // stops being a bare pass-through and needs to skip stale frames
-    // itself instead of relying on cl_scrn.ts's own guards.
+    // Wired for real: the classic layout interpreter (classic_hud.ts's
+    // SCR_ExecuteLayoutString) used to bail out inline on
+    // `cls.state !== ca_active || !cl.refresh_prepped` before this move --
+    // now that it only sees the host import surface, that same guard lives
+    // here. Matches the exact condition it replaces, just relocated.
     CL_FrameValid() {
-      return true;
+      return cls.state === ConnstateT.ca_active && cl.refresh_prepped;
     },
 
     // TODO(phase 3, variable tick + framediv): wall-clock plumbing
@@ -240,11 +286,10 @@ export function buildCgameImports(): CgameImports {
       return 0;
     },
 
-    // TODO(phase 6, kex cgame): client icon assets are a kex HUD concept;
-    // the classic HUD path (cl_scrn.ts) reads cl.clientinfo directly today.
-    CL_GetClientPic(_index) {
-      return "";
-    },
+    // Wired for real (see boundsCheckedClientPic's own comment above) --
+    // classic_hud.ts's "client" layout token now resolves the scoreboard
+    // icon through this import instead of reading cl.clientinfo directly.
+    CL_GetClientPic: boundsCheckedClientPic,
     // TODO(phase 6, kex cgame): dogtags are a kex-only concept, absent from
     // classic Q2's ClientinfoT.
     CL_GetClientDogtag(_index) {
@@ -389,17 +434,38 @@ export function buildCgameImports(): CgameImports {
 // Exports table (cgame -> engine) -- minimal shape for this step
 // ---------------------------------------------------------------------------
 
-// Not KexCgameExports: this step's classic cgame is a bare pass-through,
-// so only Init/Shutdown/DrawHUD exist. DrawHUD takes no parameters yet --
-// it grows to KexCgameExports.DrawHUD's full signature (isplit, data,
-// hud_vrect, hud_safe, scale, playernum, ps) in phase 6 when the kex cgame
-// needs them and the classic cgame's internals actually move behind this
-// interface.
+// ClassicHudDataT bundles the two pieces of per-frame server-sent state the
+// classic layout interpreter needs beyond playerstate stats: the raw layout
+// string (cl.layout, svc_layout) and the inventory counts array (cl.inventory,
+// svc_inventory). This is the classic-shaped analogue of KexCgameExports'
+// own CgServerDataT ({ layout, inventory }, kexapi/game.ts) -- not reused
+// directly because CgServerDataT.inventory is typed Int16Array while this
+// port's `cl.inventory` is an Int32Array (client.ts; a pre-existing,
+// out-of-scope-to-fix mismatch from how CL_ParseInventory's MSG_ReadShort
+// values get stored) -- reusing CgServerDataT here would force a cast this
+// port's zero-cast policy doesn't allow, so classic gets its own
+// identically-shaped type instead.
+export interface ClassicHudDataT {
+  layout: string;
+  inventory: Int32Array;
+}
+
+// Not KexCgameExports: DrawHUD's signature only carries the subset the
+// classic cgame's real implementation (classic.ts + classic_hud.ts) needs --
+// playernum and ps mirror KexCgameExports.DrawHUD's own params of the same
+// name (kexapi/game.ts), just typed against this port's classic PlayerStateT
+// instead of KexPlayerStateT (cl.frame.playerstate's actual type); data is
+// ClassicHudDataT above. isplit/hud_vrect/hud_safe/scale are still missing --
+// the classic HUD path reads screen geometry off `viddef` directly (see
+// classic_hud.ts's own top-of-file comment) rather than through per-split
+// rect/scale parameters, so there is nothing for them to carry yet. Grows
+// toward KexCgameExports.DrawHUD's full signature in phase 6 when the kex
+// cgame needs those remaining parameters for real.
 export interface CgameExports {
   apiversion: number;
   Init(): void;
   Shutdown(): void;
-  DrawHUD(): void;
+  DrawHUD(playernum: number, ps: PlayerStateT, data: ClassicHudDataT): void;
 }
 
 // Own versioning for this minimal seam -- not yet KexCgameExports.apiversion
@@ -428,14 +494,14 @@ export const CGAME_API_VERSION = 1;
 // PlayerStateT that `cl.frame.playerstate` actually holds are DIFFERENT
 // TYPES with no conversion function anywhere in this port line -- that
 // conversion is protocol-layer work (ARCHITECTURE.md phase 5; see
-// buildCgameImports()'s own CL_ServerProtocol/CL_FrameValid stubs above,
-// which are TODO'd to the identical phase for the identical reason).
-// Fabricating a placeholder KexPlayerStateT out of the classic one would
-// silently draw a WRONG hud rather than no hud, so this adapter's DrawHUD is
-// a documented no-op instead -- degrades visually, does not crash. Init/
-// Shutdown/apiversion need none of that missing state and are wired for
-// real. This is exactly the "kex cgame becomes active only when the kex
-// binding drives the client, future wiring" boundary from this unit's brief.
+// buildCgameImports()'s own CL_ServerProtocol stub above, TODO'd to the
+// identical phase for the identical reason). Fabricating a placeholder
+// KexPlayerStateT out of the classic one would silently draw a WRONG hud
+// rather than no hud, so this adapter's DrawHUD is a documented no-op
+// instead -- degrades visually, does not crash. Init/Shutdown/apiversion
+// need none of that missing state and are wired for real. This is exactly
+// the "kex cgame becomes active only when the kex binding drives the
+// client, future wiring" boundary from this unit's brief.
 function GetKexCgameAsClassicShape(imports: CgameImports): CgameExports {
   const kex = GetKexCgameAPI(imports);
   return {
@@ -447,13 +513,13 @@ function GetKexCgameAsClassicShape(imports: CgameImports): CgameExports {
     apiversion: CGAME_API_VERSION,
     Init: kex.Init,
     Shutdown: kex.Shutdown,
-    DrawHUD() {
+    DrawHUD(_playernum, _ps, _data) {
       // TODO(phase 5, protocol layer): no KexPlayerStateT / CgServerDataT /
-      // per-split hud_vrect/hud_safe/scale/playernum is derivable from the
-      // classic client state yet -- see comment above. Intentionally not
-      // wired; kex's real CG_DrawHUD (src/kexgame/cgame/cg_screen.ts) is
-      // fully implemented and unit-tested (test/kexgame_cgame.test.ts), it
-      // just has nothing valid to call it with here yet.
+      // per-split hud_vrect/hud_safe/scale is derivable from the classic
+      // client state yet -- see comment above. Intentionally not wired;
+      // kex's real CG_DrawHUD (src/kexgame/cgame/cg_screen.ts) is fully
+      // implemented and unit-tested (test/kexgame_cgame.test.ts), it just
+      // has nothing valid to call it with here yet.
     },
   };
 }
@@ -519,8 +585,15 @@ export function CG_GetActiveCgameKind(): CgameKind {
   return activeCgameKind;
 }
 
-// The single entry point cl_scrn.ts's SCR_UpdateScreen calls in place of
-// its former direct SCR_DrawStats()/SCR_DrawLayout() calls.
+// The single entry point cl_scrn.ts's SCR_UpdateScreen calls in place of its
+// former direct SCR_DrawStats()/SCR_DrawLayout()/CL_DrawInventory() calls.
+// Gathering playernum/ps/data off `cl` here (rather than inside the cgame)
+// is deliberate: this function IS the engine side of the seam, so it's the
+// one place allowed to reach into client state directly and hand it down as
+// parameters -- exactly the KexCgameExports.DrawHUD calling convention this
+// step's ClassicHudDataT/CgameExports.DrawHUD mirror (see their own doc
+// comments above).
 export function CG_DrawHUD(): void {
-  ensureActiveCgame().DrawHUD();
+  const data: ClassicHudDataT = { layout: cl.layout, inventory: cl.inventory };
+  ensureActiveCgame().DrawHUD(cl.playernum, cl.frame.playerstate, data);
 }

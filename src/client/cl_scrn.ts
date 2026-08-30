@@ -49,40 +49,25 @@ import { viddef } from "./vid";
 import { Cvar_Get, Cvar_Set, Cvar_SetValue } from "../qcommon/cvar";
 import { Cmd_AddCommand, Cmd_Argc, Cmd_Argv } from "../qcommon/cmd";
 import { Com_Printf, developer } from "../qcommon/common";
-import {
-  Com_sprintf,
-  CVAR_ARCHIVE,
-  STAT_HEALTH,
-  STAT_AMMO,
-  STAT_ARMOR,
-  STAT_FLASHES,
-  STAT_LAYOUTS,
-  MAX_CLIENTS,
-  MAX_IMAGES,
-  MAX_CONFIGSTRINGS,
-  CS_STATUSBAR,
-  CS_IMAGES,
-  type CvarT,
-} from "../shared/q_shared";
-import { type Vec3, vec3, type ComParseState, COM_Parse } from "../shared/math";
+import { Com_sprintf, CVAR_ARCHIVE, type CvarT } from "../shared/q_shared";
+import { type Vec3, vec3 } from "../shared/math";
 import { Sys_Milliseconds } from "../platform/sys";
 import { S_StopAllSounds } from "./snd_dma";
-import { Con_CheckResize, Con_DrawConsole as Con_DrawConsoleImpl, Con_DrawNotify, Con_ClearNotify, DrawString, DrawAltString } from "./console_impl";
-import { CL_DrawInventory } from "./cl_inv";
+import { Con_CheckResize, Con_DrawConsole as Con_DrawConsoleImpl, Con_DrawNotify, Con_ClearNotify } from "./console_impl";
 import { SCR_DrawCinematic } from "./cl_cin";
 import { V_RenderView } from "./cl_view";
 import { M_Draw } from "./menu";
 import type { EntityT } from "./ref";
 import { CG_DrawHUD } from "./cgame/host";
+import { sb_nums } from "./cgame/classic_hud";
 
 function atof(s: string): number {
   const n = Number.parseFloat(s);
   return Number.isNaN(n) ? 0 : n;
 }
-function atoi(s: string): number {
-  const n = Number.parseInt(s, 10);
-  return Number.isNaN(n) ? 0 : n;
-}
+// atoi (the layout interpreter's token->number helper) moved with
+// SCR_ExecuteLayoutString to ./cgame/classic_hud.ts -- it had no other
+// caller in this file.
 
 // CDAudio_Stop -- no platform cdaudio module exists yet (cdaudio.ts
 // documents the boundary decision but has no exports; see that file). No-op
@@ -681,100 +666,24 @@ function SCR_TileClear(): void {
 
 //===============================================================
 
-const STAT_MINUS = 10; // num frame for '-' stats digit
-const sb_nums: string[][] = fixedLength("sb_nums", 2, [
-  fixedLength("sb_nums row", 11, ["num_0", "num_1", "num_2", "num_3", "num_4", "num_5", "num_6", "num_7", "num_8", "num_9", "num_minus"]),
-  fixedLength("sb_nums row", 11, ["anum_0", "anum_1", "anum_2", "anum_3", "anum_4", "anum_5", "anum_6", "anum_7", "anum_8", "anum_9", "anum_minus"]),
-]);
-
-const ICON_WIDTH = 24;
-const ICON_HEIGHT = 24;
-const CHAR_WIDTH = 16;
-const ICON_SPACE = 8;
-
-/*
-================
-SizeHUDString
-
-Allow embedded \n in the string
-================
-*/
-function SizeHUDString(str: string): { w: number; h: number } {
-  let lines = 1;
-  let width = 0;
-  let current = 0;
-
-  for (let i = 0; i < str.length; i++) {
-    if (str[i] === "\n") {
-      lines++;
-      current = 0;
-    } else {
-      current++;
-      if (current > width) width = current;
-    }
-  }
-
-  return { w: width * 8, h: lines * 8 };
-}
-
-function DrawHUDString(str: string, xIn: number, yIn: number, centerwidth: number, xor: number): void {
-  if (!re) return;
-
-  const margin = xIn;
-  let y = yIn;
-  let i = 0;
-
-  while (i < str.length) {
-    // scan out one line of text from the string
-    let line = "";
-    while (i < str.length && str[i] !== "\n") line += str[i++];
-
-    let x: number;
-    if (centerwidth) x = margin + Math.trunc((centerwidth - line.length * 8) / 2);
-    else x = margin;
-    for (let j = 0; j < line.length; j++) {
-      re.DrawChar(x, y, line.charCodeAt(j) ^ xor);
-      x += 8;
-    }
-    if (i < str.length) {
-      i++; // skip the \n
-      y += 8;
-    }
-  }
-}
-
-/*
-==============
-SCR_DrawField
-==============
-*/
-function SCR_DrawField(x: number, yIn: number, color: number, widthIn: number, value: number): void {
-  if (widthIn < 1) return;
-
-  // draw number string
-  const width = widthIn > 5 ? 5 : widthIn;
-
-  SCR_AddDirtyPoint(x, yIn);
-  SCR_AddDirtyPoint(x + width * CHAR_WIDTH + 2, yIn + 23);
-
-  const num = Com_sprintf("%i", value);
-  let l = num.length;
-  if (l > width) l = width;
-  let px = x + 2 + CHAR_WIDTH * (width - l);
-
-  if (!re) return;
-
-  let ptr = 0;
-  while (ptr < num.length && l) {
-    const ch = num[ptr];
-    const frame = ch === "-" ? STAT_MINUS : ch.charCodeAt(0) - "0".charCodeAt(0);
-
-    re.DrawPic(px, yIn, sb_nums[color][frame]);
-    px += CHAR_WIDTH;
-    ptr++;
-    l--;
-  }
-}
+// sb_nums (the digit-icon status bar numbers), SizeHUDString, DrawHUDString,
+// and SCR_DrawField moved to ./cgame/classic_hud.ts along with
+// SCR_ExecuteLayoutString/SCR_DrawStats/SCR_DrawLayout (ARCHITECTURE.md
+// phase 4 classic-cgame extraction) -- sb_nums is re-imported below because
+// SCR_TouchPics (this file) still needs the same pic names to precache.
+// SCR_TouchPics itself stays here rather than moving: unlike SCR_DrawField's
+// pure stat-bar concern, it also owns crosshair pic setup (crosshair_pic/
+// crosshair_width via screen.ts), a cl_view.c concern with no relation to
+// the layout interpreter -- splitting the sb_nums half out from under the
+// crosshair half would leave this function's remaining crosshair-only
+// SCOPE looking arbitrarily half-moved for no behavioral benefit. It is
+// also an Init-time precache call (cl_view.ts's V_Init/VID_Init), not a
+// per-frame HUD draw, so it doesn't fit CgameExports.DrawHUD's shape either;
+// it is exactly the kind of thing KexCgameExports.TouchPics() exists for
+// (kexapi/game.ts), but CgameExports hasn't grown that member yet -- left
+// as a TODO alongside CgameExports's existing Init()/TouchPics() TODOs in
+// host.ts/classic.ts for the same "Init-time cgame registration hasn't
+// moved behind the interface yet" reason.
 
 /*
 ===============
@@ -802,268 +711,12 @@ export function SCR_TouchPics(): void {
   }
 }
 
-/*
-================
-SCR_ExecuteLayoutString
-
-================
-*/
-function nextLayoutToken(state: ComParseState): { token: string; done: boolean } {
-  const startIndex = state.index;
-  const token = COM_Parse(state);
-  const closedEmptyQuote = state.index > startIndex && state.data.charAt(state.index - 1) === '"';
-  const done = token === "" && !closedEmptyQuote;
-  return { token, done };
-}
-
-function SCR_ExecuteLayoutString(s: string): void {
-  if (cls.state !== ConnstateT.ca_active || !cl.refresh_prepped) return;
-  if (!s || s.length === 0) return;
-
-  let x = 0;
-  let y = 0;
-  let width = 3;
-
-  const state: ComParseState = { data: s, index: 0 };
-
-  for (;;) {
-    const { token, done } = nextLayoutToken(state);
-    if (done) break;
-
-    if (token === "xl") {
-      x = atoi(nextLayoutToken(state).token);
-      continue;
-    }
-    if (token === "xr") {
-      x = viddef.width + atoi(nextLayoutToken(state).token);
-      continue;
-    }
-    if (token === "xv") {
-      x = Math.trunc(viddef.width / 2) - 160 + atoi(nextLayoutToken(state).token);
-      continue;
-    }
-
-    if (token === "yt") {
-      y = atoi(nextLayoutToken(state).token);
-      continue;
-    }
-    if (token === "yb") {
-      y = viddef.height + atoi(nextLayoutToken(state).token);
-      continue;
-    }
-    if (token === "yv") {
-      y = Math.trunc(viddef.height / 2) - 120 + atoi(nextLayoutToken(state).token);
-      continue;
-    }
-
-    if (token === "pic") {
-      // draw a pic from a stat number
-      const value = cl.frame.playerstate.stats[atoi(nextLayoutToken(state).token)];
-      if (value >= MAX_IMAGES) {
-        Com_Printf("Pic >= MAX_IMAGES\n");
-        return;
-      }
-      if (cl.configstrings[CS_IMAGES + value]) {
-        SCR_AddDirtyPoint(x, y);
-        SCR_AddDirtyPoint(x + 23, y + 23);
-        if (re) re.DrawPic(x, y, cl.configstrings[CS_IMAGES + value]);
-      }
-      continue;
-    }
-
-    if (token === "client") {
-      // draw a deathmatch client block
-      x = Math.trunc(viddef.width / 2) - 160 + atoi(nextLayoutToken(state).token);
-      y = Math.trunc(viddef.height / 2) - 120 + atoi(nextLayoutToken(state).token);
-      SCR_AddDirtyPoint(x, y);
-      SCR_AddDirtyPoint(x + 159, y + 31);
-
-      const value = atoi(nextLayoutToken(state).token);
-      if (value >= MAX_CLIENTS || value < 0) {
-        Com_Printf("client >= MAX_CLIENTS\n");
-        return;
-      }
-      let ci = cl.clientinfo[value];
-
-      const score = atoi(nextLayoutToken(state).token);
-      const ping = atoi(nextLayoutToken(state).token);
-      const time = atoi(nextLayoutToken(state).token);
-
-      DrawAltString(x + 32, y, ci.name);
-      DrawString(x + 32, y + 8, "Score: ");
-      DrawAltString(x + 32 + 7 * 8, y + 8, Com_sprintf("%i", score));
-      DrawString(x + 32, y + 16, Com_sprintf("Ping:  %i", ping));
-      DrawString(x + 32, y + 24, Com_sprintf("Time:  %i", time));
-
-      if (!ci.icon) ci = cl.baseclientinfo;
-      if (re) re.DrawPic(x, y, ci.iconname);
-      continue;
-    }
-
-    if (token === "ctf") {
-      // draw a ctf client block
-      x = Math.trunc(viddef.width / 2) - 160 + atoi(nextLayoutToken(state).token);
-      y = Math.trunc(viddef.height / 2) - 120 + atoi(nextLayoutToken(state).token);
-      SCR_AddDirtyPoint(x, y);
-      SCR_AddDirtyPoint(x + 159, y + 31);
-
-      const value = atoi(nextLayoutToken(state).token);
-      if (value >= MAX_CLIENTS || value < 0) {
-        Com_Printf("client >= MAX_CLIENTS\n");
-        return;
-      }
-      const ci = cl.clientinfo[value];
-
-      const score = atoi(nextLayoutToken(state).token);
-      let ping = atoi(nextLayoutToken(state).token);
-      if (ping > 999) ping = 999;
-
-      const block = Com_sprintf("%3i %3i %-12.12s", score, ping, ci.name);
-
-      if (value === cl.playernum) DrawAltString(x, y, block);
-      else DrawString(x, y, block);
-      continue;
-    }
-
-    if (token === "picn") {
-      // draw a pic from a name
-      const name = nextLayoutToken(state).token;
-      SCR_AddDirtyPoint(x, y);
-      SCR_AddDirtyPoint(x + 23, y + 23);
-      if (re) re.DrawPic(x, y, name);
-      continue;
-    }
-
-    if (token === "num") {
-      // draw a number
-      width = atoi(nextLayoutToken(state).token);
-      const value = cl.frame.playerstate.stats[atoi(nextLayoutToken(state).token)];
-      SCR_DrawField(x, y, 0, width, value);
-      continue;
-    }
-
-    if (token === "hnum") {
-      // health number
-      width = 3;
-      const value = cl.frame.playerstate.stats[STAT_HEALTH];
-      let color: number;
-      if (value > 25) color = 0; // green
-      else if (value > 0) color = (cl.frame.serverframe >> 2) & 1; // flash
-      else color = 1;
-
-      if (cl.frame.playerstate.stats[STAT_FLASHES] & 1) {
-        if (re) re.DrawPic(x, y, "field_3");
-      }
-
-      SCR_DrawField(x, y, color, width, value);
-      continue;
-    }
-
-    if (token === "anum") {
-      // ammo number
-      width = 3;
-      const value = cl.frame.playerstate.stats[STAT_AMMO];
-      let color: number;
-      if (value > 5) color = 0; // green
-      else if (value >= 0) color = (cl.frame.serverframe >> 2) & 1; // flash
-      else continue; // negative number = don't show
-
-      if (cl.frame.playerstate.stats[STAT_FLASHES] & 4) {
-        if (re) re.DrawPic(x, y, "field_3");
-      }
-
-      SCR_DrawField(x, y, color, width, value);
-      continue;
-    }
-
-    if (token === "rnum") {
-      // armor number
-      width = 3;
-      const value = cl.frame.playerstate.stats[STAT_ARMOR];
-      if (value < 1) continue;
-
-      const color = 0; // green
-
-      if (cl.frame.playerstate.stats[STAT_FLASHES] & 2) {
-        if (re) re.DrawPic(x, y, "field_3");
-      }
-
-      SCR_DrawField(x, y, color, width, value);
-      continue;
-    }
-
-    if (token === "stat_string") {
-      let index = atoi(nextLayoutToken(state).token);
-      if (index < 0 || index >= MAX_CONFIGSTRINGS) {
-        Com_Printf("Bad stat_string index\n");
-        return;
-      }
-      index = cl.frame.playerstate.stats[index];
-      if (index < 0 || index >= MAX_CONFIGSTRINGS) {
-        Com_Printf("Bad stat_string index\n");
-        return;
-      }
-      DrawString(x, y, cl.configstrings[index]);
-      continue;
-    }
-
-    if (token === "cstring") {
-      DrawHUDString(nextLayoutToken(state).token, x, y, 320, 0);
-      continue;
-    }
-
-    if (token === "string") {
-      DrawString(x, y, nextLayoutToken(state).token);
-      continue;
-    }
-
-    if (token === "cstring2") {
-      DrawHUDString(nextLayoutToken(state).token, x, y, 320, 0x80);
-      continue;
-    }
-
-    if (token === "string2") {
-      DrawAltString(x, y, nextLayoutToken(state).token);
-      continue;
-    }
-
-    if (token === "if") {
-      // draw a number
-      const value = cl.frame.playerstate.stats[atoi(nextLayoutToken(state).token)];
-      if (!value) {
-        // skip to endif
-        for (;;) {
-          const next = nextLayoutToken(state);
-          if (next.done || next.token === "endif") break;
-        }
-      }
-      continue;
-    }
-  }
-}
-
-/*
-================
-SCR_DrawStats
-
-The status bar is a small layout program that
-is based on the stats array
-================
-*/
-export function SCR_DrawStats(): void {
-  SCR_ExecuteLayoutString(cl.configstrings[CS_STATUSBAR]);
-}
-
-/*
-================
-SCR_DrawLayout
-
-================
-*/
-export function SCR_DrawLayout(): void {
-  if (!cl.frame.playerstate.stats[STAT_LAYOUTS]) return;
-  SCR_ExecuteLayoutString(cl.layout);
-}
+// SCR_ExecuteLayoutString/SCR_DrawStats/SCR_DrawLayout moved to
+// ./cgame/classic_hud.ts (see this file's earlier note on the classic-cgame
+// extraction, above SCR_TouchPics) -- they now run behind the cgame host
+// interface (CG_DrawHUD, ./cgame/host.ts), called from SCR_UpdateScreen
+// below in the exact same place/order/conditions this file used to call
+// them directly.
 
 //=======================================================
 
@@ -1150,12 +803,12 @@ export function SCR_UpdateScreen(): void {
       V_RenderView(separation[i]);
 
       // Routed through the cgame host (src/client/cgame/host.ts) rather
-      // than calling SCR_DrawStats/SCR_DrawLayout directly -- the active
-      // cgame's DrawHUD (classic.ts, today) makes those same two calls
-      // under the same condition; see that file for the pass-through.
+      // than calling SCR_DrawStats/SCR_DrawLayout/CL_DrawInventory directly
+      // -- the active cgame's DrawHUD (classic.ts + classic_hud.ts, today)
+      // makes those same three calls under the same conditions; see those
+      // files for the (now real, no longer pass-through) implementation.
       // ARCHITECTURE.md phase 4 ("cgame host, two built-in cgames").
       CG_DrawHUD();
-      if (cl.frame.playerstate.stats[STAT_LAYOUTS] & 2) CL_DrawInventory();
 
       SCR_DrawNet();
       SCR_CheckDrawCenterString();
