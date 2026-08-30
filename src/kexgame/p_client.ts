@@ -39,6 +39,39 @@
 // two swapped in THIS unit.
 //
 // ============================================================================
+// CLOSURE COMPLETION: P_UseCoopInstancedItems -- g_items.ts's stale citing
+// stub swapped, key-carry deviation resolved, cvar-default typo fixed
+// ============================================================================
+// Three follow-on fixes now that g_items.ts (with a real, exported
+// `itemlist`) has landed, closing out the P_UseCoopInstancedItems dependency
+// closure:
+//   - g_items.ts still carried its OWN local throwing stub for
+//     P_UseCoopInstancedItems (cited "pending p_client.ts"), even though this
+//     file's real export had already landed and p_hud.ts/g_target.ts were
+//     already importing it. Swapped to a real `import { ...,
+//     P_UseCoopInstancedItems } from "./p_client"` in g_items.ts -- safe
+//     across the existing g_items.ts<->p_client.ts cycle since both sides'
+//     relevant symbols are hoisted `export function` declarations (see
+//     g_items.ts's own updated header note at the former stub site).
+//   - This file's own `player_die` (p_client.cpp:581-591) previously dropped
+//     the `itemlist[n].flags & IF_KEY` key-carry-into-coop_respawn logic as a
+//     reported PORTING.md deviation, since g_items.ts hadn't landed and this
+//     file couldn't resolve item flags. Now imports `itemlist` from
+//     "./g_items" (a plain `const` array -- safe here because it's only read
+//     inside `player_die`'s function body at runtime, never at this file's
+//     own module-init time, so no temporal-dead-zone hazard despite the
+//     cycle) and ports the key-carry branch for real.
+//   - P_UseCoopInstancedItems's own cvar default was `cvarBool
+//     ("g_coop_instanced_items", "0")`, inconsistent with both this file's
+//     sibling `cvarBool("g_coop_squad_respawn", "1")` on the same line and
+//     the real C++ default (`gi.cvar("g_coop_instanced_items", "1",
+//     CVAR_LATCH)`, g_main.cpp:254 / this port line's g_main.ts:464). Fixed
+//     to "1". Harmless in the ordinary boot order (g_main.ts's InitGame
+//     always registers the cvar with "1" before any gameplay code can call
+//     this function), but matters for any test or entry point that calls
+//     P_UseCoopInstancedItems before InitGame has run.
+//
+// ============================================================================
 // RECONCILIATION: G_SetClientFrame / G_ShouldPlayersCollide / P_AssignClientSkinnum /
 // P_ForceFogTransition / MoveClientToIntermission / G_PlayerNotifyGoal /
 // G_Monster_CheckCoopHealthScaling -- already real elsewhere, NOT duplicated here
@@ -275,6 +308,7 @@ import {
   FALL_TIME,
   type GClientT,
   HandednessT,
+  ItemFlagsT,
   ItemIdT,
   MELEE_DISTANCE,
   ModIdT,
@@ -407,6 +441,7 @@ import {
   GetItemByIndex as G_GetItemByIndex,
   Drop_Item,
   Touch_Item as G_Touch_Item,
+  itemlist,
 } from "./g_items";
 
 function FindItemByClassname(classname: string | null): GitemT | null {
@@ -577,7 +612,7 @@ export function SP_info_player_intermission(_ent: EdictT): void {
 export function P_UseCoopInstancedItems(): boolean {
   // squad respawn forces instanced items on, since we don't
   // want players to need to backtrack just to get their stuff.
-  return cvarBool("g_coop_instanced_items", "0") || cvarBool("g_coop_squad_respawn", "1");
+  return cvarBool("g_coop_instanced_items", "1") || cvarBool("g_coop_squad_respawn", "1");
 }
 
 // ---------------------------------------------------------------------------
@@ -990,13 +1025,15 @@ export const player_die: DieFn = RegisterDie("player_die", (self: EdictT, inflic
 
     if (coopEnabled() && !P_UseCoopInstancedItems()) {
       // clear inventory -- this is kind of ugly, but it's how we want to
-      // handle keys in coop
+      // handle keys in coop (p_client.cpp:581-591). Previously this loop
+      // dropped the itemlist[n].flags & IF_KEY key-carry-into-coop_respawn
+      // preservation as a reported PORTING.md deviation because g_items.ts
+      // hadn't landed yet; g_items.ts now exports a real `itemlist`, so this
+      // is ported faithfully.
       for (let n = 0; n < ItemIdT.IT_TOTAL; n++) {
-        // itemlist[n].flags & IF_KEY -- unported (g_items.ts); the key-carry
-        // preservation into coop_respawn.inventory is dropped per PORTING.md
-        // ("a function you cannot port faithfully is a reported deviation,
-        // not a TODO") -- keys are simply cleared along with everything else
-        // until g_items.ts lands and this can resolve item.flags for real.
+        if (coopEnabled() && (itemlist[n].flags & ItemFlagsT.IF_KEY) !== 0) {
+          client.resp.coop_respawn.inventory[n] = client.pers.inventory[n];
+        }
         client.pers.inventory[n] = 0;
       }
     }

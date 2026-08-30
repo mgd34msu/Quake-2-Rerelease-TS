@@ -147,8 +147,11 @@
 // Defender_Launch/Hunter_Launch/Vengeance_Launch (rogue/g_rogue_sphere.cpp).
 // CTF (ctf/g_ctf.cpp, not ported anywhere yet): CTFPickup_Flag, CTFDrop_Flag,
 // CTFPickup_Tech, CTFDrop_Tech, CTFFlagSetup.
-// Established precedent (matches p_hud.ts's/g_target.ts's own copies):
-// P_UseCoopInstancedItems (p_client.cpp:90, guarded by coop, default off).
+// P_UseCoopInstancedItems (p_client.cpp:90, guarded by coop, default ON):
+// formerly this file's own local throwing stub, matching p_hud.ts's/
+// g_target.ts's precedent copies -- now a real import from p_client.ts (see
+// the "STUB SWAP" note at this file's former stub site, just above
+// PMenu_Next).
 // Menu/chase (guarded unreachable from this file, see above): PMenu_Next,
 // ChaseNext.
 //
@@ -294,7 +297,7 @@ import { RegisterThink, RegisterTouch, RegisterUse, type ThinkFn, type TouchFn, 
 import { ArmorIndex, PowerArmorType } from "./g_combat";
 import { Pickup_Weapon as P_Pickup_Weapon } from "./p_weapon";
 import { GetUnicastKey } from "./g_weapon";
-import { P_SendLevelPOI } from "./p_client";
+import { P_SendLevelPOI, P_UseCoopInstancedItems } from "./p_client";
 import {
   CTFDrop_Flag as CTFDrop_Flag_real,
   CTFDrop_Tech as CTFDrop_Tech_real,
@@ -552,9 +555,17 @@ function Tag_PickupToken(ent: EdictT, other: EdictT): boolean {
 function DoRandomRespawn(ent: EdictT): ItemIdT {
   return DoRandomRespawn_real(ent);
 }
-function P_UseCoopInstancedItems(): boolean {
-  throw new Error("P_UseCoopInstancedItems: not yet ported (pending p_client.ts, see p_client.cpp:90) -- only reached when coop is set (default off)");
-}
+// P_UseCoopInstancedItems: formerly a local throwing stub here (cited
+// "pending p_client.ts") -- p_client.ts has since landed its real
+// implementation (p_client.cpp:90-95) and both p_hud.ts and g_target.ts
+// already import it for real; this file now does the same, closing the
+// last stale citing stub. Safe across the existing g_items.ts<->p_client.ts
+// import cycle (this file already imports P_SendLevelPOI from p_client.ts
+// above, and p_client.ts imports FindItemByClassname/GetItemByIndex/
+// Drop_Item/Touch_Item from here) because every symbol on both sides is a
+// hoisted `export function` declaration -- no top-level cross-module value
+// access at module-init time, so no temporal-dead-zone hazard (see this
+// file's own header note on the cycle, and p_client.ts's matching note).
 // PMenu_Next: formerly a local throwing stub here -- see file header
 // (imported below from ctf/p_ctf_menu.ts). This is genuinely reachable now
 // (SelectNextItem/SelectPrevItem's menu=true branch, whenever the client has

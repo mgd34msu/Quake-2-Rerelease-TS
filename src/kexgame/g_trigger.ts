@@ -77,6 +77,22 @@
 //   here rather than silently fixed with no trace.
 //
 // ============================================================================
+// STUB SWAP: P_UseCoopInstancedItems -- now a real import from
+// src/kexgame/p_client.ts, trigger_key_use's dropped guard restored
+// ============================================================================
+// trigger_key_use (g_trigger.cpp:286-366) guards its two
+// `resp.coop_respawn.*` resets with `if (!P_UseCoopInstancedItems())` so
+// instanced-items coop doesn't strip a used key/power-cube from a player's
+// COOP RESPAWN copy along with their live inventory. Previously this file's
+// own copy of trigger_key_use unconditionally applied both resets (a real
+// behavior gap, not a throw -- the symbol was simply unavailable from this
+// file at the time, so the guard was silently dropped per a comment citing
+// g_target.ts's own stub). Now imports `P_UseCoopInstancedItems` directly
+// from "./p_client" (p_client.ts does not import anything from this file, so
+// this is a plain one-way import, no cycle) and restores both guards to
+// match the C++ exactly.
+//
+// ============================================================================
 // latched_trigger_filter / trigger_coop_relay_player_filter -- closure
 // instead of the C++ `void *data` parameter
 // ============================================================================
@@ -141,6 +157,7 @@ import { SpawnFlags_from, SpawnFlags_has, type SpawnFlags } from "./spawnflags";
 import { AngleVectors, boxes_intersect, vec3_dot, vec3_muls, vec3_negate, vec3_normalized, vec3_normalized_len, vec3_origin, vec3_scale, vec3_sub } from "./q_vec3";
 import { clamp, frandom, irandom } from "./q_std";
 import { FindItemByClassname, P_ToggleFlashlight } from "./g_items";
+import { P_UseCoopInstancedItems } from "./p_client";
 
 // ---------------------------------------------------------------------------
 // `st` -- real shared import (see file header)
@@ -428,10 +445,10 @@ export const trigger_key_use: UseFn = RegisterUse(
             ent.client.pers.inventory[index]--;
             ent.client.pers.power_cubes &= ~(1 << cube);
             // [Paril-KEX] don't allow respawning players to keep used keys
-            // (P_UseCoopInstancedItems() unavailable -- see g_target.ts's
-            // own stub; always take the "not instanced items" branch)
-            ent.client.resp.coop_respawn.inventory[index] = 0;
-            ent.client.resp.coop_respawn.power_cubes &= ~(1 << cube);
+            if (!P_UseCoopInstancedItems()) {
+              ent.client.resp.coop_respawn.inventory[index] = 0;
+              ent.client.resp.coop_respawn.power_cubes &= ~(1 << cube);
+            }
           }
         }
       } else {
@@ -439,7 +456,11 @@ export const trigger_key_use: UseFn = RegisterUse(
           const ent = g_edicts[player];
           if (ent === undefined || !ent.inuse || ent.client === null) continue;
           ent.client.pers.inventory[index] = 0;
-          ent.client.resp.coop_respawn.inventory[index] = 0;
+
+          // [Paril-KEX] don't allow respawning players to keep used keys
+          if (!P_UseCoopInstancedItems()) {
+            ent.client.resp.coop_respawn.inventory[index] = 0;
+          }
         }
       }
     } else {
