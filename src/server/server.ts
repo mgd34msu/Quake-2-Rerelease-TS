@@ -6,8 +6,9 @@
 import { MAX_MSGLEN, NetadrT, UPDATE_BACKUP } from "../qcommon/qcommon";
 import { NetchanT } from "../qcommon/net_chan";
 import { SizeBuf } from "../qcommon/sizebuf";
-import { MAX_CONFIGSTRINGS, MAX_EDICTS, MAX_MODELS, CmodelT, EntityStateT, PlayerStateT, UsercmdT, type CvarT } from "../shared/q_shared";
+import { MAX_EDICTS, MAX_MODELS, CmodelT, EntityStateT, PlayerStateT, UsercmdT, type CvarT } from "../shared/q_shared";
 import { MAX_MAP_AREAS } from "../qcommon/qfiles";
+import { type CsRemapT, CS_REMAP_OLD, CS_REMAP_RERELEASE } from "../shared/cs_remap";
 import type { Edict } from "../game/game";
 
 // server_t.name/mapcmd, client_t.name/userinfo are fixed-size C char arrays
@@ -51,7 +52,16 @@ export class ServerT {
   name = ""; // map name, or cinematic name
   models: Array<CmodelT | null> = new Array(MAX_MODELS).fill(null);
 
-  configstrings: string[] = new Array(MAX_CONFIGSTRINGS).fill("");
+  // Sized at the widest known family's configstring count (CS_REMAP_RERELEASE.end,
+  // cs_remap.ts), not svs.csr.end: this mirrors q2repro's own `configstring_t
+  // configstrings[MAX_MAX_CONFIGSTRINGS]` (inc/shared/shared.h:164,1607-1658),
+  // a fixed array sized to the max across every family regardless of which
+  // one is active at runtime. Every read/write of this array is bounds-
+  // checked against svs.csr (e.g. sv_game.ts's PF_Configstring), so the
+  // array's own size is not observable behavior -- it just has to be large
+  // enough for whichever family svs.csr selects, and svs.csr is CS_REMAP_OLD
+  // until family selection arrives with the kex binding.
+  configstrings: string[] = new Array(CS_REMAP_RERELEASE.end).fill("");
   baselines: EntityStateT[] = Array.from({ length: MAX_EDICTS }, () => new EntityStateT());
 
   // the multicast buffer is used to send a message to a set of clients
@@ -80,7 +90,7 @@ export class ServerT {
     this.framenum = 0;
     this.name = "";
     this.models = new Array(MAX_MODELS).fill(null);
-    this.configstrings = new Array(MAX_CONFIGSTRINGS).fill("");
+    this.configstrings = new Array(CS_REMAP_RERELEASE.end).fill("");
     this.baselines = Array.from({ length: MAX_EDICTS }, () => new EntityStateT());
     this.multicast = new SizeBuf();
     this.multicast_buf = new Uint8Array(MAX_MSGLEN);
@@ -206,6 +216,18 @@ export class ServerStaticT {
   initialized = false; // sv_init has completed
   realtime = 0; // always increasing, no clamping, etc
 
+  // mirrors q2repro's svs.csr (src/server/init.c:478 `svs.csr = cs_remap_old;`,
+  // set once at SV_Init and re-derived per game_api during game-library init
+  // -- src/server/game.c:1139-1157). Selects which configstring-index layout
+  // ("game family") is active: which CS_* block starts where, and how many
+  // models/sounds/images/edicts/shadowlights/wheelitems that family allows.
+  // Lives here (server-static), not on ServerT, because in q2repro it
+  // survives across SV_SpawnServer's per-level sv.clear() and is only
+  // re-chosen when the game library itself is (re)loaded. Fixed at
+  // CS_REMAP_OLD (classic protocol 34 layout) until family selection
+  // arrives with the kex binding; nothing chooses cs_remap_rerelease yet.
+  csr: CsRemapT = CS_REMAP_OLD;
+
   mapcmd = ""; // ie: *intro.cin+base
 
   spawncount = 0; // incremented each server start
@@ -229,6 +251,12 @@ export class ServerStaticT {
   clear(): void {
     this.initialized = false;
     this.realtime = 0;
+    // Not part of the C `memset(&svs, 0, ...)` wipe's zeroing in spirit --
+    // q2repro's SV_Init re-derives svs.csr to cs_remap_old right after
+    // (src/server/init.c:478); re-asserting the same default here rather
+    // than zeroing avoids a transient all-zero CsRemapT (which would make
+    // every csr.end/csr.models/etc bound momentarily wrong).
+    this.csr = CS_REMAP_OLD;
     this.mapcmd = "";
     this.spawncount = 0;
     this.clients = [];

@@ -885,7 +885,12 @@ function SV_ServerRecord_f(): void {
   // send full levelname
   MSG_WriteString(buf, sv.configstrings[CS_NAME]);
 
-  for (let i = 0; i < MAX_CONFIGSTRINGS; i++) {
+  // Loop bound is "how many configstring slots the current game family has"
+  // (svs.csr.end), not a protocol-34 wire-encoding limit -- MSG_WriteShort
+  // can hold any family's index range. Distinct from decodeConfigstringsBlock/
+  // encodeConfigstringsBlock below, which keep MAX_CONFIGSTRINGS because
+  // those two encode the fixed-width on-disk savegame blob layout.
+  for (let i = 0; i < svs.csr.end; i++) {
     if (sv.configstrings[i].length) {
       MSG_WriteByte(buf, SvcOpsT.svc_configstring);
       MSG_WriteShort(buf, i);

@@ -20,7 +20,7 @@
 // it -- a dead declaration, dropped here along with it (see report).
 
 import { type Vec3, VectorCopy, vec3_origin } from "../shared/math";
-import { MulticastT, MAX_CONFIGSTRINGS } from "../shared/q_shared";
+import { MulticastT } from "../shared/q_shared";
 import { ERR_DROP, SvcOpsT } from "../qcommon/qcommon";
 import { Com_Error, Com_Printf } from "../qcommon/common";
 import {
@@ -164,7 +164,7 @@ PF_Configstring
 ===============
 */
 export function PF_Configstring(index: number, val: string): void {
-  if (index < 0 || index >= MAX_CONFIGSTRINGS) Com_Error(ERR_DROP, "configstring: bad index %i\n", index);
+  if (index < 0 || index >= svs.csr.end) Com_Error(ERR_DROP, "configstring: bad index %i\n", index);
 
   // change the string in sv
   sv.configstrings[index] = val;

@@ -7,7 +7,7 @@
 // comment for the rationale) instead of bare reassignable globals.
 
 import { Com_sprintf } from "../shared/q_shared";
-import { UsercmdT, MAX_INFO_STRING, MAX_CONFIGSTRINGS, MAX_EDICTS, EntityStateT, CS_NAME } from "../shared/q_shared";
+import { UsercmdT, MAX_INFO_STRING, MAX_EDICTS, EntityStateT, CS_NAME } from "../shared/q_shared";
 import { SysError, ClcOpsT, SvcOpsT, PROTOCOL_VERSION, MAX_MSGLEN, ERR_DROP, UPDATE_MASK } from "../qcommon/qcommon";
 import { Com_Printf, Com_DPrintf, Com_Error, COM_BlockSequenceCRCByte, Info_Print } from "../qcommon/common";
 import { Cmd_TokenizeString, Cmd_Argv, Cmd_Argc, Cbuf_AddText, Cbuf_InsertFromDefer } from "../qcommon/cmd";
@@ -154,7 +154,7 @@ export function SV_Configstrings_f(): void {
   let start = atoi(Cmd_Argv(2));
 
   // write a packet full of data
-  while (cl.netchan.message.cursize < MAX_MSGLEN / 2 && start < MAX_CONFIGSTRINGS) {
+  while (cl.netchan.message.cursize < MAX_MSGLEN / 2 && start < svs.csr.end) {
     if (sv.configstrings[start].length) {
       MSG_WriteByte(cl.netchan.message, SvcOpsT.svc_configstring);
       MSG_WriteShort(cl.netchan.message, start);
@@ -164,7 +164,7 @@ export function SV_Configstrings_f(): void {
   }
 
   // send next command
-  if (start === MAX_CONFIGSTRINGS) {
+  if (start === svs.csr.end) {
     MSG_WriteByte(cl.netchan.message, SvcOpsT.svc_stufftext);
     MSG_WriteString(cl.netchan.message, Com_sprintf("cmd baselines %i 0\n", svs.spawncount));
   } else {

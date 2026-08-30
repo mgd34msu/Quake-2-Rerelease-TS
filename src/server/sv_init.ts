@@ -12,15 +12,7 @@ import {
   Com_sprintf,
   ERR_DROP,
   MAX_CLIENTS,
-  MAX_MODELS,
-  MAX_SOUNDS,
-  MAX_IMAGES,
   CS_NAME,
-  CS_AIRACCEL,
-  CS_MAPCHECKSUM,
-  CS_MODELS,
-  CS_SOUNDS,
-  CS_IMAGES,
   MulticastT,
   CVAR_SERVERINFO,
   CVAR_LATCH,
@@ -79,15 +71,15 @@ export function SV_FindIndex(name: string, start: number, max: number, create: b
 }
 
 export function SV_ModelIndex(name: string): number {
-  return SV_FindIndex(name, CS_MODELS, MAX_MODELS, true);
+  return SV_FindIndex(name, svs.csr.models, svs.csr.max_models, true);
 }
 
 export function SV_SoundIndex(name: string): number {
-  return SV_FindIndex(name, CS_SOUNDS, MAX_SOUNDS, true);
+  return SV_FindIndex(name, svs.csr.sounds, svs.csr.max_sounds, true);
 }
 
 export function SV_ImageIndex(name: string): number {
-  return SV_FindIndex(name, CS_IMAGES, MAX_IMAGES, true);
+  return SV_FindIndex(name, svs.csr.images, svs.csr.max_images, true);
 }
 
 /*
@@ -186,10 +178,10 @@ export function SV_SpawnServer(server: string, spawnpoint: string, serverstate: 
   // save name for levels that don't set message
   sv.configstrings[CS_NAME] = server;
   if (Cvar_VariableValue("deathmatch")) {
-    sv.configstrings[CS_AIRACCEL] = Com_sprintf("%g", sv_airaccelerate ? sv_airaccelerate.value : 0);
+    sv.configstrings[svs.csr.airaccel] = Com_sprintf("%g", sv_airaccelerate ? sv_airaccelerate.value : 0);
     SetPmAirAccelerate(sv_airaccelerate ? sv_airaccelerate.value : 0);
   } else {
-    sv.configstrings[CS_AIRACCEL] = "0";
+    sv.configstrings[svs.csr.airaccel] = "0";
     SetPmAirAccelerate(0);
   }
 
@@ -217,20 +209,20 @@ export function SV_SpawnServer(server: string, spawnpoint: string, serverstate: 
     sv.models[1] = loaded.model;
     checksum = loaded.checksum;
   } else {
-    sv.configstrings[CS_MODELS + 1] = `maps/${server}.bsp`;
-    const loaded = CM_LoadMap(sv.configstrings[CS_MODELS + 1], false);
+    sv.configstrings[svs.csr.models + 1] = `maps/${server}.bsp`;
+    const loaded = CM_LoadMap(sv.configstrings[svs.csr.models + 1], false);
     sv.models[1] = loaded.model;
     checksum = loaded.checksum;
   }
-  sv.configstrings[CS_MAPCHECKSUM] = `${checksum}`;
+  sv.configstrings[svs.csr.mapchecksum] = `${checksum}`;
 
   // clear physics interaction links
   SV_ClearWorld();
 
   const numInline = CM_NumInlineModels();
   for (let i = 1; i < numInline; i++) {
-    sv.configstrings[CS_MODELS + 1 + i] = `*${i}`;
-    sv.models[i + 1] = CM_InlineModel(sv.configstrings[CS_MODELS + 1 + i]);
+    sv.configstrings[svs.csr.models + 1 + i] = `*${i}`;
+    sv.models[i + 1] = CM_InlineModel(sv.configstrings[svs.csr.models + 1 + i]);
   }
 
   //
