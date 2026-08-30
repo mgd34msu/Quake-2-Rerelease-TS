@@ -16,7 +16,7 @@ import { Com_Printf } from "../qcommon/common";
 import { CM_BoxTrace, CM_TransformedBoxTrace, CM_HeadnodeForBox, CM_PointContents, CM_TransformedPointContents } from "../qcommon/cmodel";
 import { Pmove, SetPmAirAccelerate } from "../qcommon/pmove";
 import { type Vec3, vec3, vec3_origin, VectorClear, VectorCopy } from "../shared/math";
-import { PmoveT, PmoveStateT, UsercmdT, TraceT, CS_AIRACCEL, MASK_PLAYERSOLID, PMF_NO_PREDICTION, PMF_ON_GROUND, SHORT2ANGLE, type EntityStateT } from "../shared/q_shared";
+import { PmoveT, PmoveStateT, UsercmdT, TraceT, MASK_PLAYERSOLID, PMF_NO_PREDICTION, PMF_ON_GROUND, SHORT2ANGLE, type EntityStateT } from "../shared/q_shared";
 import { cl, cls, ConnstateT, clCvars, cl_parse_entities, CMD_BACKUP, MAX_PARSE_ENTITIES } from "./client";
 
 function atof(s: string): number {
@@ -207,7 +207,7 @@ export function CL_PredictMovement(): void {
   pm.trace = CL_PMTrace;
   pm.pointcontents = CL_PMpointcontents;
 
-  SetPmAirAccelerate(atof(cl.configstrings[CS_AIRACCEL]));
+  SetPmAirAccelerate(atof(cl.configstrings[cls.csr.airaccel]));
 
   copyPmoveState(pm.s, cl.frame.playerstate.pmove);
 

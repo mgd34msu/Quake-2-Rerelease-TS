@@ -67,19 +67,8 @@ import {
   CVAR_NOSET,
   CVAR_USERINFO,
   MAX_CLIENTS,
-  MAX_MODELS,
-  MAX_SOUNDS,
-  MAX_IMAGES,
-  MAX_CONFIGSTRINGS,
   MAX_EDICTS,
   CS_NAME,
-  CS_MODELS,
-  CS_SOUNDS,
-  CS_IMAGES,
-  CS_PLAYERSKINS,
-  CS_SKY,
-  CS_MAPCHECKSUM,
-  CS_MAXCLIENTS,
   Q_stricmp,
   type CvarT,
 } from "../shared/q_shared";
@@ -270,7 +259,7 @@ export function CL_Record_f(): void {
   MSG_WriteString(buf, cl.configstrings[CS_NAME]);
 
   // configstrings
-  for (let i = 0; i < MAX_CONFIGSTRINGS; i++) {
+  for (let i = 0; i < cls.csr.end; i++) {
     if (cl.configstrings[i].length) {
       if (buf.cursize + cl.configstrings[i].length + 32 > buf.maxsize) flush();
 
@@ -768,8 +757,8 @@ Load or download any custom player skins and models
 */
 export function CL_Skins_f(): void {
   for (let i = 0; i < MAX_CLIENTS; i++) {
-    if (!cl.configstrings[CS_PLAYERSKINS + i].length) continue;
-    Com_Printf("client %i: %s\n", i, cl.configstrings[CS_PLAYERSKINS + i]);
+    if (!cl.configstrings[cls.csr.playerskins + i].length) continue;
+    Com_Printf("client %i: %s\n", i, cl.configstrings[cls.csr.playerskins + i]);
     SCR_UpdateScreen();
     Sys_SendKeyEvents(); // pump message loop
     CL_ParseClientinfo(i);
@@ -973,45 +962,56 @@ let precache_spawncount = 0;
 
 const PLAYER_MULT = 5;
 
-// ENV_CNT is map load, ENV_CNT+1 is first env map
-const ENV_CNT = CS_PLAYERSKINS + MAX_CLIENTS * PLAYER_MULT;
-const TEXTURE_CNT = ENV_CNT + 13;
+// ENV_CNT is map load, ENV_CNT+1 is first env map. These were originally
+// module-level constants (`CS_PLAYERSKINS + MAX_CLIENTS * PLAYER_MULT`), but
+// CS_PLAYERSKINS now varies per connection (cls.csr.playerskins -- classic
+// vs kex/rerelease configstring-index layout, shared/cs_remap.ts), so they
+// are computed off the ACTIVE csr instead of being fixed at module load.
+function envCnt(): number {
+  return cls.csr.playerskins + MAX_CLIENTS * PLAYER_MULT;
+}
+function textureCnt(): number {
+  return envCnt() + 13;
+}
 
 const env_suf = ["rt", "bk", "lf", "ft", "up", "dn"];
 
 export function CL_RequestNextDownload(): void {
   if (cls.state !== ConnstateT.ca_connected) return;
 
+  const ENV_CNT = envCnt();
+  const TEXTURE_CNT = textureCnt();
+
   if (!(allow_download && allow_download.value) && precache_check < ENV_CNT) precache_check = ENV_CNT;
 
   //ZOID
-  if (precache_check === CS_MODELS) {
+  if (precache_check === cls.csr.models) {
     // confirm map
-    precache_check = CS_MODELS + 2; // 0 isn't used
+    precache_check = cls.csr.models + 2; // 0 isn't used
     // allow_download_maps' CL_CheckOrDownloadFile call is skipped along with
     // the rest of the CS_MODELS phase below -- see file banner.
   }
-  if (precache_check >= CS_MODELS && precache_check < CS_MODELS + MAX_MODELS) {
+  if (precache_check >= cls.csr.models && precache_check < cls.csr.models + cls.csr.max_models) {
     // model + per-skin download scanning omitted (see file banner: needs
     // dmdl_t, not ported, and unreachable while allow_download defaults
     // off). Faithfully skip straight past this phase like the "models
     // disabled" C path does.
-    precache_check = CS_SOUNDS;
+    precache_check = cls.csr.sounds;
   }
-  if (precache_check >= CS_SOUNDS && precache_check < CS_SOUNDS + MAX_SOUNDS) {
+  if (precache_check >= cls.csr.sounds && precache_check < cls.csr.sounds + cls.csr.max_sounds) {
     if (allow_download_sounds && allow_download_sounds.value) {
       // per-sound download scanning uses CL_CheckOrDownloadFile, a pending
       // stub (cl_parse.ts) that always throws -- unreachable while
       // allow_download_sounds defaults off; skipped here too.
     }
-    precache_check = CS_IMAGES;
+    precache_check = cls.csr.images;
   }
-  if (precache_check >= CS_IMAGES && precache_check < CS_IMAGES + MAX_IMAGES) {
-    precache_check = CS_PLAYERSKINS;
+  if (precache_check >= cls.csr.images && precache_check < cls.csr.images + cls.csr.max_images) {
+    precache_check = cls.csr.playerskins;
   }
   // skins are special, since a player has three things to download:
   // model, weapon model and skin
-  if (precache_check >= CS_PLAYERSKINS && precache_check < CS_PLAYERSKINS + MAX_CLIENTS * PLAYER_MULT) {
+  if (precache_check >= cls.csr.playerskins && precache_check < cls.csr.playerskins + MAX_CLIENTS * PLAYER_MULT) {
     // precache phase completed
     precache_check = ENV_CNT;
   }
@@ -1019,10 +1019,10 @@ export function CL_RequestNextDownload(): void {
   if (precache_check === ENV_CNT) {
     precache_check = ENV_CNT + 1;
 
-    const { checksum: map_checksum } = CM_LoadMap(cl.configstrings[CS_MODELS + 1], true);
+    const { checksum: map_checksum } = CM_LoadMap(cl.configstrings[cls.csr.models + 1], true);
 
-    if (map_checksum !== atoi(cl.configstrings[CS_MAPCHECKSUM])) {
-      Com_Error(ERR_DROP, "Local map version differs from server: %i != '%s'\n", map_checksum, cl.configstrings[CS_MAPCHECKSUM]);
+    if (map_checksum !== atoi(cl.configstrings[cls.csr.mapchecksum])) {
+      Com_Error(ERR_DROP, "Local map version differs from server: %i != '%s'\n", map_checksum, cl.configstrings[cls.csr.mapchecksum]);
       return;
     }
   }
@@ -1065,13 +1065,13 @@ export function CL_Precache_f(): void {
   //Yet another hack to let old demos work
   //the old precache sequence
   if (Cmd_Argc() < 2) {
-    CM_LoadMap(cl.configstrings[CS_MODELS + 1], true);
+    CM_LoadMap(cl.configstrings[cls.csr.models + 1], true);
     CL_RegisterSounds();
     CL_PrepRefresh();
     return;
   }
 
-  precache_check = CS_MODELS;
+  precache_check = cls.csr.models;
   precache_spawncount = atoi(Cmd_Argv(1));
 
   CL_RequestNextDownload();
@@ -1260,7 +1260,7 @@ const cheatvars: CheatvarT[] = [
 let cheatvarsInitialized = false;
 
 export function CL_FixCvarCheats(): void {
-  if (cl.configstrings[CS_MAXCLIENTS] === "1" || !cl.configstrings[CS_MAXCLIENTS].length) return; // single player can cheat
+  if (cl.configstrings[cls.csr.maxclients] === "1" || !cl.configstrings[cls.csr.maxclients].length) return; // single player can cheat
 
   // find all the cvars if we haven't done it yet
   if (!cheatvarsInitialized) {

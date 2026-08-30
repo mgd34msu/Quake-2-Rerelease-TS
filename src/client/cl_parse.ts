@@ -5,21 +5,18 @@ import { Sys_SendKeyEvents } from "../platform/sys";
 import { fixedLength } from "../shared/fixed";
 import { MSG_ReadByte, MSG_ReadShort, MSG_ReadLong, MSG_ReadString, MSG_ReadPos, MSG_WriteByte, MSG_WriteString } from "../qcommon/sizebuf";
 import { net_message } from "../qcommon/net_chan";
-import { SvcOpsT, ClcOpsT, PROTOCOL_VERSION, ERR_DROP, BASEDIRNAME } from "../qcommon/qcommon";
+import { SvcOpsT, ClcOpsT, PROTOCOL_VERSION, PROTOCOL_VERSION_RERELEASE, ERR_DROP, BASEDIRNAME } from "../qcommon/qcommon";
 import { cl, cls, ConnstateT, svc_strings, clCvars, cl_entities, type ClientinfoT, num_cl_weaponmodels, cl_weaponmodels, re } from "./client";
+import type { ProtocolCodec } from "../qcommon/protocol/codec";
+import { VANILLA_CODEC } from "../qcommon/protocol/vanilla";
+import { Q2REPRO_CODEC } from "../qcommon/protocol/q2repro";
+import { type CsRemapT, CS_REMAP_OLD, CS_REMAP_RERELEASE } from "../shared/cs_remap";
 import {
   EntityStateT,
   type CmodelT,
-  CS_LIGHTS,
   CS_CDTRACK,
-  CS_MODELS,
-  CS_SOUNDS,
-  CS_IMAGES,
-  CS_PLAYERSKINS,
-  MAX_MODELS,
   MAX_CLIENTS,
   MAX_LIGHTSTYLES,
-  MAX_CONFIGSTRINGS,
   MAX_EDICTS,
   PRINT_CHAT,
   ERR_DISCONNECT,
@@ -199,8 +196,8 @@ export function CL_RegisterSounds(): void {
   S_BeginRegistration();
   CL_RegisterTEntSounds();
   for (let i = 1; i < cl.sound_precache.length; i++) {
-    if (!cl.configstrings[CS_SOUNDS + i]) break;
-    cl.sound_precache[i] = S_RegisterSound(cl.configstrings[CS_SOUNDS + i]);
+    if (!cl.configstrings[cls.csr.sounds + i]) break;
+    cl.sound_precache[i] = S_RegisterSound(cl.configstrings[cls.csr.sounds + i]);
     Sys_SendKeyEvents(); // pump message loop
   }
   S_EndRegistration();
@@ -280,6 +277,35 @@ export function CL_ParseDownload(): void {
 =====================================================================
 */
 
+// Selects the wire codec + configstring-index layout for a freshly-read
+// protocol number (ARCHITECTURE.md "Protocol layer" / .orch/phase5-design.md
+// phase 5's client-parity follow-up; mirrors sv_game.ts's SV_InitGameProgs
+// picking svs.codec/svs.csr off the game family). 1038
+// (PROTOCOL_VERSION_RERELEASE) is q2repro's rerelease wire format; every
+// other value preserves this engine's ORIGINAL protocol-34 handling
+// verbatim, including the pre-existing "BIG HACK to let demos from release
+// work with the 3.0x patch!!!" bypass (a listen server's own demo/loopback
+// traffic skips the version check entirely) -- that hack must stay scoped to
+// "accept anything as vanilla", not "accept anything and skip codec
+// selection", which is what let a kex listen server's serverdata silently
+// desync the rest of CL_ParseServerMessage before this unit (see task
+// report). Returning a function-scoped `never` from Com_Error satisfies
+// TypeScript's definite-assignment analysis for the fallthrough return below
+// without needing an explicit unreachable branch.
+export function selectServerCodec(protocol: number): { codec: ProtocolCodec; csr: CsRemapT } {
+  if (protocol === PROTOCOL_VERSION_RERELEASE) {
+    return { codec: Q2REPRO_CODEC, csr: CS_REMAP_RERELEASE };
+  }
+  if (Com_ServerState() && PROTOCOL_VERSION === 34) {
+    // no-op; see C source
+    return { codec: VANILLA_CODEC, csr: CS_REMAP_OLD };
+  }
+  if (protocol !== PROTOCOL_VERSION) {
+    Com_Error(ERR_DROP, "Server returned version %i, not %i", protocol, PROTOCOL_VERSION);
+  }
+  return { codec: VANILLA_CODEC, csr: CS_REMAP_OLD };
+}
+
 /*
 ==================
 CL_ParseServerData
@@ -297,29 +323,26 @@ export function CL_ParseServerData(): void {
   const i = MSG_ReadLong(net_message);
   cls.serverProtocol = i;
 
-  // BIG HACK to let demos from release work with the 3.0x patch!!!
-  if (Com_ServerState() && PROTOCOL_VERSION === 34) {
-    // no-op; see C source
-  } else if (i !== PROTOCOL_VERSION) {
-    Com_Error(ERR_DROP, "Server returned version %i, not %i", i, PROTOCOL_VERSION);
-  }
+  const { codec, csr } = selectServerCodec(i);
+  cls.codec = codec;
+  cls.csr = csr;
 
-  cl.servercount = MSG_ReadLong(net_message);
-  cl.attractloop = MSG_ReadByte(net_message) !== 0;
+  const sd = codec.readServerData();
+  cl.servercount = sd.servercount;
+  cl.attractloop = sd.attractloop;
 
   // game directory
-  const gamedirStr = MSG_ReadString(net_message);
-  cl.gamedir = gamedirStr;
+  cl.gamedir = sd.gamedir;
 
   // set gamedir
   const currentGamedir = fs_gamedirvar ? fs_gamedirvar.string : "";
-  if (gamedirStr !== currentGamedir) Cvar_Set("game", gamedirStr);
+  if (sd.gamedir !== currentGamedir) Cvar_Set("game", sd.gamedir);
 
   // parse player entity number
-  cl.playernum = MSG_ReadShort(net_message);
+  cl.playernum = sd.clientnum;
 
   // get the full level name
-  const str = MSG_ReadString(net_message);
+  const str = sd.levelname;
 
   if (cl.playernum === -1) {
     // playing a cinematic or showing a pic, not a level
@@ -453,7 +476,7 @@ Load the skin, icon, and model for a client
 ================
 */
 export function CL_ParseClientinfo(player: number): void {
-  const s = cl.configstrings[player + CS_PLAYERSKINS];
+  const s = cl.configstrings[player + cls.csr.playerskins];
   const ci = cl.clientinfo[player];
   CL_LoadClientinfo(ci, s);
 }
@@ -479,33 +502,59 @@ CL_ParseConfigString
 */
 export function CL_ParseConfigString(): void {
   const i = MSG_ReadShort(net_message);
-  if (i < 0 || i >= MAX_CONFIGSTRINGS) Com_Error(ERR_DROP, "configstring > MAX_CONFIGSTRINGS");
+  if (i < 0 || i >= cls.csr.end) Com_Error(ERR_DROP, "configstring > MAX_CONFIGSTRINGS");
   const s = MSG_ReadString(net_message);
   cl.configstrings[i] = s;
 
   // do something apropriate
 
-  if (i >= CS_LIGHTS && i < CS_LIGHTS + MAX_LIGHTSTYLES) {
-    CL_SetLightstyle(i - CS_LIGHTS);
+  // Index bases below come from cls.csr (shared/cs_remap.ts), the connection's
+  // configstring-index layout selected at CL_ParseServerData time -- CS_LIGHTS/
+  // CS_MODELS/CS_SOUNDS/CS_IMAGES/CS_PLAYERSKINS all differ between the classic
+  // (protocol 34) and rerelease (1038/kex) families (server.ts's svs.csr is
+  // the write-side mirror of this same table). CS_CDTRACK is one of the few
+  // low fixed indices q2repro's cs_remap_rerelease keeps identical to
+  // classic's layout (shared.h's cs_remap tables both start CS_CDTRACK at 1),
+  // so it stays a plain q_shared.ts import, unlike the family-varying blocks.
+  //
+  // DEVIATION from a byte-for-byte port: upstream's real cl_parse.c (and this
+  // port's original protocol-34-only code) reuses MAX_MODELS as the upper
+  // bound for the CS_SOUNDS and CS_IMAGES branches below too (a genuine id
+  // Software copy-paste bug, verified against qsrc/quake-2/client/cl_parse.c:
+  // 550,555) -- harmless under the classic family only because
+  // MAX_MODELS===MAX_SOUNDS===256 there. Under the rerelease family
+  // MAX_MODELS_WIDE(8192) is nearly 4x MAX_SOUNDS_WIDE(2048) and 16x
+  // MAX_IMAGES_WIDE(512), so reproducing the bug literally would make the
+  // CS_SOUNDS branch's range swallow the entire real CS_IMAGES/CS_LIGHTS/
+  // CS_ITEMS/CS_PLAYERSKINS blocks that follow it in configstring-index space
+  // (every image/light/item/skin configstring update would be misrouted into
+  // S_RegisterSound), which is not something q2repro's own (bug-free)
+  // configstring handling does either. Each branch below uses its OWN
+  // family-correct bound (cls.csr.max_sounds / cls.csr.max_images) instead --
+  // byte-identical to the buggy original under the classic family (where the
+  // two bounds are numerically equal), and correct under the rerelease
+  // family where they are not.
+  if (i >= cls.csr.lights && i < cls.csr.lights + MAX_LIGHTSTYLES) {
+    CL_SetLightstyle(i - cls.csr.lights);
   } else if (i === CS_CDTRACK) {
     if (cl.refresh_prepped) {
       CDAudio_Play(parseInt(cl.configstrings[CS_CDTRACK], 10) || 0, true);
     }
-  } else if (i >= CS_MODELS && i < CS_MODELS + MAX_MODELS) {
+  } else if (i >= cls.csr.models && i < cls.csr.models + cls.csr.max_models) {
     if (cl.refresh_prepped) {
-      cl.model_draw[i - CS_MODELS] = re?.RegisterModel(cl.configstrings[i]) ?? null;
+      cl.model_draw[i - cls.csr.models] = re?.RegisterModel(cl.configstrings[i]) ?? null;
       if (cl.configstrings[i][0] === "*") {
-        cl.model_clip[i - CS_MODELS] = CM_InlineModelSafe(cl.configstrings[i]);
+        cl.model_clip[i - cls.csr.models] = CM_InlineModelSafe(cl.configstrings[i]);
       } else {
-        cl.model_clip[i - CS_MODELS] = null;
+        cl.model_clip[i - cls.csr.models] = null;
       }
     }
-  } else if (i >= CS_SOUNDS && i < CS_SOUNDS + MAX_MODELS) {
-    if (cl.refresh_prepped) cl.sound_precache[i - CS_SOUNDS] = S_RegisterSound(cl.configstrings[i]);
-  } else if (i >= CS_IMAGES && i < CS_IMAGES + MAX_MODELS) {
-    if (cl.refresh_prepped) cl.image_precache[i - CS_IMAGES] = re?.RegisterPic(cl.configstrings[i]) ?? null;
-  } else if (i >= CS_PLAYERSKINS && i < CS_PLAYERSKINS + MAX_CLIENTS) {
-    if (cl.refresh_prepped) CL_ParseClientinfo(i - CS_PLAYERSKINS);
+  } else if (i >= cls.csr.sounds && i < cls.csr.sounds + cls.csr.max_sounds) {
+    if (cl.refresh_prepped) cl.sound_precache[i - cls.csr.sounds] = S_RegisterSound(cl.configstrings[i]);
+  } else if (i >= cls.csr.images && i < cls.csr.images + cls.csr.max_images) {
+    if (cl.refresh_prepped) cl.image_precache[i - cls.csr.images] = re?.RegisterPic(cl.configstrings[i]) ?? null;
+  } else if (i >= cls.csr.playerskins && i < cls.csr.playerskins + MAX_CLIENTS) {
+    if (cl.refresh_prepped) CL_ParseClientinfo(i - cls.csr.playerskins);
   }
 }
 

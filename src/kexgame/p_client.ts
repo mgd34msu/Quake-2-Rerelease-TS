@@ -259,8 +259,8 @@
 // `KexEntityStateT` field, cloning the three Vec3 fields with `vec3(...)` so
 // the body queue entity's origin/angles/old_origin are independent storage.
 
-import { vec3, type Vec3 } from "../shared/math";
-import { CvarT } from "../shared/q_shared";
+import { vec3, type Vec3, VectorCopy } from "../shared/math";
+import { CvarT, CplaneT, PITCH, YAW, ROLL } from "../shared/q_shared";
 import {
   ATTN_NONE,
   ATTN_NORM,
@@ -272,6 +272,7 @@ import {
   EffectsT,
   type KexEdictT,
   type KexEntityStateT,
+  KexEntityEventT,
   type KexPmoveT,
   type KexPmoveStateT,
   type KexPlayerStateT,
@@ -294,6 +295,7 @@ import {
   ServerCommandT,
   SolidT,
   SoundchanT,
+  STEPSIZE,
   SvflagsT,
   SvcPoiFlagsT,
   WaterLevelT,
@@ -324,6 +326,7 @@ import {
   type ThinkFn,
   WeaponstateT,
   AnimPriorityT,
+  LADDER_SOUND_TIME,
 } from "./g_local";
 import type { ClientPersistantT, ClientRespawnT, GhostT, GitemT } from "./g_local_types";
 import { CtfteamT } from "./g_local_types";
@@ -350,7 +353,7 @@ import {
 } from "./ctf/g_ctf";
 import { PMenu_Next, PMenu_Prev, PMenu_Select } from "./ctf/p_ctf_menu";
 import { T_Damage } from "./g_combat";
-import { G_FixStuckObject_Generic } from "./p_move";
+import { G_FixStuckObject_Generic, Pmove } from "./p_move";
 import { PM_CONFIG_DEFAULT } from "./bg_local";
 import { ClientEndServerFrame, G_TeamplayEnabled, P_AssignClientSkinnum, P_ForceFogTransition } from "./p_view";
 import { Cmd_Help_f, MoveClientToIntermission, PlayerTrail_Destroy } from "./p_hud";
@@ -3157,7 +3160,14 @@ export function P_FallingDamage(ent: EdictT, pm: KexPmoveT): void {
   }
 
   if (delta < 15) {
-    if ((pm.s.pm_flags & PmflagsT.PMF_ON_LADDER) === 0) ent.s.event = 3; // EV_FOOTSTEP
+    // BUG FIX (found while wiring runPmoveAndApplyResults, this file's
+    // ClientThink -- see that function's own doc comment): this used to
+    // write the literal `3`, labeled "EV_FOOTSTEP" in a comment, but
+    // KexEntityEventT.EV_FOOTSTEP is actually 2 -- 3 is EV_FALLSHORT. Not a
+    // carried-over C bug (the real p_client.cpp:3066 sets `EV_FOOTSTEP`
+    // correctly); a transcription mistake in this port's own numeric
+    // literal, now corrected to match the enum.
+    if ((pm.s.pm_flags & PmflagsT.PMF_ON_LADDER) === 0) ent.s.event = KexEntityEventT.EV_FOOTSTEP;
     return;
   }
 
@@ -3166,7 +3176,11 @@ export function P_FallingDamage(ent: EdictT, pm: KexPmoveT): void {
   client.fall_time = Gtime_add(level.time, FALL_TIME(Gtime_from_ms(gi.frame_time_ms)));
 
   if (delta > 30) {
-    ent.s.event = delta >= 55 ? 2 /* EV_FALLFAR */ : 1 /* EV_FALL */;
+    // BUG FIX (same class as the EV_FOOTSTEP one above): this used to write
+    // the literals `2`/`1`, labeled "EV_FALLFAR"/"EV_FALL", but those are
+    // actually EV_FOOTSTEP(2) and EV_ITEM_RESPAWN(1) on the real enum --
+    // EV_FALL is 4 and EV_FALLFAR is 5. Corrected to the named constants.
+    ent.s.event = delta >= 55 ? KexEntityEventT.EV_FALLFAR : KexEntityEventT.EV_FALL;
 
     ent.pain_debounce_time = Gtime_add(level.time, Gtime_from_ms(gi.frame_time_ms));
     let damage = Math.trunc((delta - 30) / 2);
@@ -3177,7 +3191,9 @@ export function P_FallingDamage(ent: EdictT, pm: KexPmoveT): void {
       T_Damage(ent, world, world, dir, ent.s.origin, vec3(), damage, 0, 0, modFromId(ModIdT.MOD_FALLING));
     }
   } else {
-    ent.s.event = 0; // EV_FALLSHORT
+    // Same bug class: this wrote the literal `0` labeled "EV_FALLSHORT",
+    // but 0 is EV_NONE -- EV_FALLSHORT is 3. Corrected.
+    ent.s.event = KexEntityEventT.EV_FALLSHORT;
   }
 
   // Paril: falling damage noises alert monsters
@@ -3318,22 +3334,22 @@ export function ClientThink(ent: EdictT, ucmd: KexUsercmdT): void {
     // PGM: trigger_gravity support
     client.ps.pmove.gravity = level.gravity * ent.gravity;
 
-    // NOTE: constructing a `KexPmoveT` and calling `Pmove(&pm)` here
-    // (p_client.cpp:3246-3376: the pmove struct setup, the invocation
-    // itself, and the post-processing -- step detection, falling damage,
-    // ladder-step sound, view angle/gravity/touch bookkeeping) is
-    // intentionally NOT wired in this unit. `p_move.ts`'s real
-    // `Pmove(pmove: KexPmoveT, config)` expects a fully-populated
-    // `KexPmoveT` (including a real `groundplane`/`clip`/`trace` triple
-    // wired to the engine's exact `KexEdictT`-shaped types); assembling a
-    // synthetic one from scratch here, without a real running server to
-    // verify against byte-for-byte, risks a silently wrong physics result
-    // this unit cannot catch. This is a reported, deliberate deviation: the
-    // pmove SETUP that precedes it (pm_type selection, collision-mask
-    // flagging, gravity, all above this comment) is ported faithfully and
-    // independently testable; the invocation and its post-processing are a
-    // throwing stub, cited for the coordinator to wire once a real
-    // end-to-end client-think integration test exists.
+    // Constructing a `KexPmoveT` and calling `Pmove(&pm)` (p_client.cpp:
+    // 3246-3376: the pmove struct setup, the invocation itself, and the
+    // post-processing -- step detection, falling damage, ladder-step sound,
+    // view angle/gravity/touch bookkeeping) used to be deliberately NOT
+    // wired here (see git history / .orch/decisions.tsv for the prior
+    // "no real end-to-end client-think integration test exists yet" ruling)
+    // -- that integration test is exactly what q2repro (1038/kex protocol)
+    // boot gate turned out to be: a spawned kex player's very first
+    // ClientThink call reaches this function on the first clc_move message,
+    // so leaving it a throwing stub blocks that gate outright. Wired for
+    // real below -- see runPmoveAndApplyResults's own doc comment for the
+    // exact C line-by-line mapping. `SV_PM_Clip`/`P_FallingDamage`/
+    // `G_TouchTriggers`/`G_TouchProjectiles`/`CTFGrapplePull` (this
+    // function's real trace/clip/touch dependencies) were already real,
+    // exported functions elsewhere in this file/module -- only the
+    // `KexPmoveT` assembly + `Pmove()` call + result copy-back were missing.
     runPmoveAndApplyResults(ent, ucmd);
   }
 
@@ -3383,16 +3399,196 @@ export function ClientThink(ent: EdictT, ucmd: KexUsercmdT): void {
   }
 }
 
+// Struct-value-copy helpers for KexPmoveStateT (mirrors src/game/p_client.ts's
+// own clonePmoveState/pmoveStateEqual pair for the classic engine's
+// PmoveStateT -- same rationale: `pm.s = client->ps.pmove;` is a BY-VALUE
+// struct copy in C; JS object references need an explicit clone so mutating
+// `pm.s` during Pmove() can never alias `client.ps.pmove` or `client.old_pmove`).
+function clonePmoveState(s: KexPmoveStateT): KexPmoveStateT {
+  return {
+    pm_type: s.pm_type,
+    origin: vec3(s.origin[0], s.origin[1], s.origin[2]),
+    velocity: vec3(s.velocity[0], s.velocity[1], s.velocity[2]),
+    pm_flags: s.pm_flags,
+    pm_time: s.pm_time,
+    gravity: s.gravity,
+    delta_angles: vec3(s.delta_angles[0], s.delta_angles[1], s.delta_angles[2]),
+    viewheight: s.viewheight,
+  };
+}
+
+function pmoveStateEqual(a: KexPmoveStateT, b: KexPmoveStateT): boolean {
+  return (
+    a.pm_type === b.pm_type &&
+    a.pm_flags === b.pm_flags &&
+    a.pm_time === b.pm_time &&
+    a.gravity === b.gravity &&
+    a.viewheight === b.viewheight &&
+    a.origin[0] === b.origin[0] &&
+    a.origin[1] === b.origin[1] &&
+    a.origin[2] === b.origin[2] &&
+    a.velocity[0] === b.velocity[0] &&
+    a.velocity[1] === b.velocity[1] &&
+    a.velocity[2] === b.velocity[2] &&
+    a.delta_angles[0] === b.delta_angles[0] &&
+    a.delta_angles[1] === b.delta_angles[1] &&
+    a.delta_angles[2] === b.delta_angles[2]
+  );
+}
+
+// `pm.groundentity`/`pm.player` are `KexEdictT | null` (the "server-visible
+// subset" boundary type, see `traceEdict`'s own doc comment just above) --
+// this is `traceEdict`'s null-preserving twin: `traceEdict` maps a null
+// trace target to the WORLD edict (matching a trace's own "hit nothing ==
+// hit the world" convention), but `groundentity === null` means "not on
+// ground" and must stay null, never coerce to world.
+function groundentityFromPmove(ent: KexEdictT | null): EdictT | null {
+  if (ent === null) return null;
+  return g_edicts[ent.s.number] ?? null;
+}
+
 /** p_client.cpp:3246-3376: the pmove struct setup, `Pmove(&pm)` invocation,
  * and post-processing (step size detection, falling damage, ladder step
  * sound, view angle/gravity/touch bookkeeping). Kept as its own function so
  * ClientThink's real pre-pmove setup above (pm_type selection, collision
- * masking, gravity) is unit-testable independent of this deliberately
- * unwired portion -- see the NOTE at its call site. */
-function runPmoveAndApplyResults(_ent: EdictT, _ucmd: KexUsercmdT): void {
-  throw new Error(
-    "ClientThink: Pmove() invocation and post-processing (p_client.cpp:3246-3376) intentionally not wired in this unit -- see this file's own ClientThink comment for why",
-  );
+ * masking, gravity) is unit-testable independent of this one -- see the
+ * comment at its call site. */
+function runPmoveAndApplyResults(ent: EdictT, ucmd: KexUsercmdT): void {
+  if (ent.client === null) throw new Error("runPmoveAndApplyResults: ent.client is null (invariant violated)");
+  const client = ent.client;
+
+  // p_client.cpp:3245-3259: pm.s = client->ps.pmove; pm.s.origin =
+  // ent->s.origin; pm.s.velocity = ent->velocity; pm.cmd = *ucmd; pm.player
+  // = ent; pm.trace = gi.game_import_t::trace; pm.clip = SV_PM_Clip;
+  // pm.pointcontents = gi.pointcontents; pm.viewoffset = ent->client->ps.viewoffset;
+  const pm: KexPmoveT = {
+    s: clonePmoveState(client.ps.pmove),
+    cmd: ucmd,
+    snapinitial: false,
+    touch: { num: 0, traces: [] },
+    viewangles: vec3(),
+    mins: vec3(),
+    maxs: vec3(),
+    groundentity: null,
+    groundplane: new CplaneT(),
+    watertype: ContentsT.CONTENTS_NONE,
+    waterlevel: WaterLevelT.WATER_NONE,
+    player: ent,
+    trace: gi.trace,
+    clip: SV_PM_Clip,
+    pointcontents: gi.pointcontents,
+    viewoffset: vec3(client.ps.viewoffset[0], client.ps.viewoffset[1], client.ps.viewoffset[2]),
+    screen_blend: new Float32Array(4),
+    rdflags: RefdefFlagsT.RDF_NONE,
+    jump_sound: false,
+    step_clip: false,
+    impact_delta: 0,
+  };
+  pm.s.origin = vec3(ent.s.origin[0], ent.s.origin[1], ent.s.origin[2]);
+  pm.s.velocity = vec3(ent.velocity[0], ent.velocity[1], ent.velocity[2]);
+
+  // p_client.cpp:3249-3250: `if (memcmp(&client->old_pmove, &pm.s, sizeof(pm.s))) pm.snapinitial = true;`
+  if (!pmoveStateEqual(client.old_pmove, pm.s)) pm.snapinitial = true;
+
+  // p_client.cpp:3260: `Pmove(&pm);`
+  Pmove(pm, PM_CONFIG_DEFAULT);
+
+  // p_client.cpp:3262-3271: step detection.
+  if (pm.groundentity !== null && ent.groundentity !== null) {
+    const stepsize = Math.abs(ent.s.origin[2] - pm.s.origin[2]);
+    if (stepsize > 4 && stepsize < STEPSIZE) {
+      ent.s.renderfx |= RenderfxT.RF_STAIR_STEP;
+      client.step_frame = gi.ServerFrame() + 1;
+    }
+  }
+
+  // p_client.cpp:3273: `P_FallingDamage(ent, pm);`
+  P_FallingDamage(ent, pm);
+
+  // p_client.cpp:3275-3279.
+  if (client.landmark_free_fall && pm.groundentity !== null) {
+    client.landmark_free_fall = false;
+    client.landmark_noise_time = Gtime_add(level.time, Gtime_from_ms(100));
+  }
+
+  // p_client.cpp:3281-3282: `vec3_t old_origin = ent->s.origin;` (saved
+  // for G_TouchProjectiles, below).
+  const old_origin = vec3(ent.s.origin[0], ent.s.origin[1], ent.s.origin[2]);
+
+  ent.s.origin = vec3(pm.s.origin[0], pm.s.origin[1], pm.s.origin[2]);
+  ent.velocity = vec3(pm.s.velocity[0], pm.s.velocity[1], pm.s.velocity[2]);
+
+  // p_client.cpp:3288-3303: ladder-step transition sound (a SEPARATE
+  // mechanism from G_SetClientEvent's own distance-based ladder footstep
+  // logic in p_view.ts -- the real engine has both).
+  if ((pm.s.pm_flags & PmflagsT.PMF_ON_LADDER) !== (client.ps.pmove.pm_flags & PmflagsT.PMF_ON_LADDER)) {
+    VectorCopy(ent.s.origin, client.last_ladder_pos);
+
+    if ((pm.s.pm_flags & PmflagsT.PMF_ON_LADDER) !== 0) {
+      if (!deathmatchEnabled() && client.last_ladder_sound < level.time) {
+        ent.s.event = KexEntityEventT.EV_LADDER_STEP;
+        client.last_ladder_sound = Gtime_add(level.time, LADDER_SOUND_TIME);
+      }
+    }
+  }
+
+  // p_client.cpp:3305-3307: `client->ps.pmove = pm.s; client->old_pmove = pm.s;`
+  client.ps.pmove = clonePmoveState(pm.s);
+  client.old_pmove = clonePmoveState(pm.s);
+
+  VectorCopy(pm.mins, ent.mins);
+  VectorCopy(pm.maxs, ent.maxs);
+
+  if (client.menu === null) client.resp.cmd_angles = vec3(ucmd.angles[0], ucmd.angles[1], ucmd.angles[2]);
+
+  // p_client.cpp:3312-3318.
+  if (pm.jump_sound && (pm.s.pm_flags & PmflagsT.PMF_ON_LADDER) === 0) {
+    gi.sound(ent, SoundchanT.CHAN_VOICE, gi.soundindex("*jump1.wav"), 1, ATTN_NORM, 0);
+    // Paril: PlayerNoise(ent, ent->s.origin, PNOISE_SELF) removed upstream
+    // (real comment, preserved) "to make ambushes more effective and to
+    // not have monsters around corners come to jumps" -- correctly absent
+    // here too.
+  }
+
+  // ROGUE sam raimi cam support.
+  if ((ent.flags & EntFlagsT.FL_SAM_RAIMI) !== 0n) ent.viewheight = 8;
+  else ent.viewheight = Math.trunc(pm.s.viewheight);
+
+  ent.waterlevel = pm.waterlevel;
+  ent.watertype = pm.watertype;
+  ent.groundentity = groundentityFromPmove(pm.groundentity);
+  if (ent.groundentity !== null) ent.groundentity_linkcount = ent.groundentity.linkcount;
+
+  if (ent.deadflag) {
+    client.ps.viewangles[ROLL] = 40;
+    client.ps.viewangles[PITCH] = -15;
+    client.ps.viewangles[YAW] = client.killer_yaw;
+  } else if (client.menu === null) {
+    VectorCopy(pm.viewangles, client.v_angle);
+    VectorCopy(pm.viewangles, client.ps.viewangles);
+    AngleVectors(client.v_angle, client.v_forward, null, null);
+  }
+
+  // ZOID
+  if (client.ctf_grapple !== null) CTFGrapplePull(client.ctf_grapple);
+
+  gi.linkentity(ent);
+
+  // PGM trigger_gravity support
+  ent.gravity = 1.0;
+
+  if (ent.movetype !== MovetypeT.MOVETYPE_NOCLIP) {
+    G_TouchTriggers(ent);
+    G_TouchProjectiles(ent, old_origin);
+  }
+
+  // touch other objects (p_client.cpp:3363-3371).
+  for (let i = 0; i < pm.touch.num; i++) {
+    const tr = pm.touch.traces[i];
+    if (tr.ent === null) continue;
+    const other = traceEdict(tr.ent);
+    if (other.touch !== null) other.touch(other, ent, tr, true);
+  }
 }
 
 // ---------------------------------------------------------------------------

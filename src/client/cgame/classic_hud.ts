@@ -50,12 +50,8 @@ import {
   STAT_LAYOUTS,
   STAT_SELECTED_ITEM,
   MAX_CLIENTS,
-  MAX_IMAGES,
-  MAX_CONFIGSTRINGS,
   MAX_ITEMS,
   CS_STATUSBAR,
-  CS_IMAGES,
-  CS_ITEMS,
 } from "../../shared/q_shared";
 import { fixedLength } from "../../shared/fixed";
 import { type ComParseState, COM_Parse } from "../../shared/math";
@@ -206,11 +202,11 @@ function SCR_ExecuteLayoutString(imports: CgameImports, ps: PlayerStateT, player
     if (token === "pic") {
       // draw a pic from a stat number
       const value = ps.stats[atoi(nextLayoutToken(state).token)];
-      if (value >= MAX_IMAGES) {
+      if (value >= cls.csr.max_images) {
         imports.Com_Print("Pic >= MAX_IMAGES\n");
         return;
       }
-      const picname = imports.get_configstring(CS_IMAGES + value);
+      const picname = imports.get_configstring(cls.csr.images + value);
       if (picname) {
         SCR_AddDirtyPoint(x, y);
         SCR_AddDirtyPoint(x + 23, y + 23);
@@ -341,12 +337,12 @@ function SCR_ExecuteLayoutString(imports: CgameImports, ps: PlayerStateT, player
 
     if (token === "stat_string") {
       let index = atoi(nextLayoutToken(state).token);
-      if (index < 0 || index >= MAX_CONFIGSTRINGS) {
+      if (index < 0 || index >= cls.csr.end) {
         imports.Com_Print("Bad stat_string index\n");
         return;
       }
       index = ps.stats[index];
-      if (index < 0 || index >= MAX_CONFIGSTRINGS) {
+      if (index < 0 || index >= cls.csr.end) {
         imports.Com_Print("Bad stat_string index\n");
         return;
       }
@@ -472,7 +468,7 @@ export function CL_DrawInventory(imports: CgameImports, ps: PlayerStateT, invent
   y += 16;
   for (let i = top; i < num && i < top + DISPLAY_ITEMS; i++) {
     const item = index[i];
-    const itemName = imports.get_configstring(CS_ITEMS + item);
+    const itemName = imports.get_configstring(cls.csr.items + item);
     // search for a binding
     const binding = Com_sprintf("use %s", itemName);
     const bind = imports.CL_GetKeyBinding(binding);

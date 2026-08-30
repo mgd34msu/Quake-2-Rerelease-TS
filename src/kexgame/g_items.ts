@@ -126,14 +126,24 @@
 // STUB INVENTORY (throwing, cited to their real C++ home)
 // ============================================================================
 // Weapon system (p_weapon.cpp / rogue's p_rogue_weapon.cpp / xatrix's
-// p_xatrix_weapon.cpp -- none ported anywhere in this port line yet):
-// Pickup_Weapon, Use_Weapon, Drop_Weapon, Weapon_Blaster, Weapon_Shotgun,
-// Weapon_SuperShotgun, Weapon_Machinegun, Weapon_Chaingun,
-// Weapon_HyperBlaster, Weapon_RocketLauncher, Weapon_Grenade,
-// Weapon_GrenadeLauncher, Weapon_Railgun, Weapon_BFG, Weapon_ChainFist,
+// p_xatrix_weapon.cpp): Pickup_Weapon, Use_Weapon, Drop_Weapon,
+// Weapon_Blaster, Weapon_Shotgun, Weapon_SuperShotgun, Weapon_Machinegun,
+// Weapon_Chaingun, Weapon_HyperBlaster, Weapon_RocketLauncher,
+// Weapon_Grenade, Weapon_GrenadeLauncher, Weapon_Railgun, Weapon_BFG are all
+// REAL now -- p_weapon.ts landed every one of them (Weapon_Generic/
+// Weapon_Repeating-based state machines); this file's own copies were stale
+// throwing stubs that had never been reconciled to import the real thing
+// (found while chasing the q2repro/1038 protocol unit's end-to-end boot
+// gate: a spawned player's default blaster hits Weapon_Blaster on the very
+// first per-frame Think_Weapon call). Hoisted wrappers per this section's
+// existing TDZ convention, not plain re-exports -- same reasoning as
+// Pickup_Weapon's own comment just below.
+// STILL STUBBED (p_rogue_weapon.cpp/p_xatrix_weapon.cpp's own weapons,
+// neither file ported anywhere in this port line yet): Weapon_ChainFist,
 // Weapon_Disintegrator, Weapon_ETF_Rifle, Weapon_Heatbeam, Weapon_Tesla,
-// Weapon_ProxLauncher, Weapon_Ionripper, Weapon_Phalanx, Weapon_Trap,
-// CTFWeapon_Grapple (ctf/g_ctf.cpp:1453).
+// Weapon_ProxLauncher. Weapon_Ionripper/Weapon_Phalanx/Weapon_Trap ARE real
+// (imported from p_xatrix_weapon.ts, see below). CTFWeapon_Grapple
+// (ctf/g_ctf.cpp:1453) is real too (imported from ctf/g_ctf.ts, see below).
 // Rogue spawning/effects (genuinely complex; the WEAPONS and
 // FUNC/TRIG/TARG/SPAWN clusters' dependencies are not landed yet -- see
 // rogue/g_rogue_items.ts's own header for the current state): Use_Nuke and
@@ -295,7 +305,22 @@ import { G_Spawn, G_FreeEdict, G_UseTargets, G_PrintActivationMessage } from "./
 import { AngleVectors, G_ProjectSource, vec3_add, vec3_dot, vec3_length, vec3_muls, vec3_normalized, vec3_sub } from "./q_vec3";
 import { RegisterThink, RegisterTouch, RegisterUse, type ThinkFn, type TouchFn, type UseFn } from "./g_save_registry";
 import { ArmorIndex, PowerArmorType } from "./g_combat";
-import { Pickup_Weapon as P_Pickup_Weapon } from "./p_weapon";
+import {
+  Pickup_Weapon as P_Pickup_Weapon,
+  Use_Weapon as P_Use_Weapon,
+  Drop_Weapon as P_Drop_Weapon,
+  Weapon_Blaster as P_Weapon_Blaster,
+  Weapon_Shotgun as P_Weapon_Shotgun,
+  Weapon_SuperShotgun as P_Weapon_SuperShotgun,
+  Weapon_Machinegun as P_Weapon_Machinegun,
+  Weapon_Chaingun as P_Weapon_Chaingun,
+  Weapon_HyperBlaster as P_Weapon_HyperBlaster,
+  Weapon_RocketLauncher as P_Weapon_RocketLauncher,
+  Weapon_Grenade as P_Weapon_Grenade,
+  Weapon_GrenadeLauncher as P_Weapon_GrenadeLauncher,
+  Weapon_Railgun as P_Weapon_Railgun,
+  Weapon_BFG as P_Weapon_BFG,
+} from "./p_weapon";
 import { GetUnicastKey } from "./g_weapon";
 import { P_SendLevelPOI, P_UseCoopInstancedItems } from "./p_client";
 import {
@@ -445,49 +470,58 @@ const STAT_SELECTED_ITEM_NAME = 51;
 // file header "STUB INVENTORY"
 // ---------------------------------------------------------------------------
 
-// Real implementation lives in p_weapon.ts (its C++ home); hoisted wrapper
-// per the TDZ convention for cycle-safe itemlist references.
+// Real implementations live in p_weapon.ts (their C++ home); hoisted
+// wrappers per the TDZ convention for cycle-safe itemlist references (same
+// precedent as Pickup_Weapon below, and Tag_PickupToken/DoRandomRespawn
+// further down this file). These were previously throwing stubs citing
+// p_weapon.ts as "pending" -- p_weapon.ts has since landed every one of
+// these for real (Weapon_Generic/Weapon_Repeating-based state machines);
+// this file just hadn't been reconciled to import them yet. Found and fixed
+// while chasing the q2repro (1038/kex) protocol unit's end-to-end boot gate
+// (a fresh player's default blaster hitting Weapon_Blaster on the very
+// first Think_Weapon call after spawn was the actual next blocker once the
+// protocol/client-parsing work in this unit's own scope was fixed).
 function Pickup_Weapon(ent: EdictT, other: EdictT): boolean {
   return P_Pickup_Weapon(ent, other);
 }
-function Use_Weapon(_ent: EdictT, _item: GitemT): void {
-  throw new Error("Use_Weapon: not yet ported (pending p_weapon.ts, see p_weapon.cpp:585)");
+function Use_Weapon(ent: EdictT, item: GitemT): void {
+  P_Use_Weapon(ent, item);
 }
-function Drop_Weapon(_ent: EdictT, _item: GitemT): void {
-  throw new Error("Drop_Weapon: not yet ported (pending p_weapon.ts, see p_weapon.cpp:636)");
+function Drop_Weapon(ent: EdictT, item: GitemT): void {
+  P_Drop_Weapon(ent, item);
 }
-function Weapon_Blaster(_ent: EdictT): void {
-  throw new Error("Weapon_Blaster: not yet ported (pending p_weapon.ts, see p_weapon.cpp:1363)");
+function Weapon_Blaster(ent: EdictT): void {
+  P_Weapon_Blaster(ent);
 }
-function Weapon_Shotgun(_ent: EdictT): void {
-  throw new Error("Weapon_Shotgun: not yet ported (pending p_weapon.ts, see p_weapon.cpp:1719)");
+function Weapon_Shotgun(ent: EdictT): void {
+  P_Weapon_Shotgun(ent);
 }
-function Weapon_SuperShotgun(_ent: EdictT): void {
-  throw new Error("Weapon_SuperShotgun: not yet ported (pending p_weapon.ts, see p_weapon.cpp:1767)");
+function Weapon_SuperShotgun(ent: EdictT): void {
+  P_Weapon_SuperShotgun(ent);
 }
-function Weapon_Machinegun(_ent: EdictT): void {
-  throw new Error("Weapon_Machinegun: not yet ported (pending p_weapon.ts, see p_weapon.cpp:1541)");
+function Weapon_Machinegun(ent: EdictT): void {
+  P_Weapon_Machinegun(ent);
 }
-function Weapon_Chaingun(_ent: EdictT): void {
-  throw new Error("Weapon_Chaingun: not yet ported (pending p_weapon.ts, see p_weapon.cpp:1669)");
+function Weapon_Chaingun(ent: EdictT): void {
+  P_Weapon_Chaingun(ent);
 }
-function Weapon_HyperBlaster(_ent: EdictT): void {
-  throw new Error("Weapon_HyperBlaster: not yet ported (pending p_weapon.ts, see p_weapon.cpp:1444)");
+function Weapon_HyperBlaster(ent: EdictT): void {
+  P_Weapon_HyperBlaster(ent);
 }
-function Weapon_RocketLauncher(_ent: EdictT): void {
-  throw new Error("Weapon_RocketLauncher: not yet ported (pending p_weapon.ts, see p_weapon.cpp:1310)");
+function Weapon_RocketLauncher(ent: EdictT): void {
+  P_Weapon_RocketLauncher(ent);
 }
-function Weapon_Grenade(_ent: EdictT): void {
-  throw new Error("Weapon_Grenade: not yet ported (pending p_weapon.ts, see p_weapon.cpp:1215)");
+function Weapon_Grenade(ent: EdictT): void {
+  P_Weapon_Grenade(ent);
 }
-function Weapon_GrenadeLauncher(_ent: EdictT): void {
-  throw new Error("Weapon_GrenadeLauncher: not yet ported (pending p_weapon.ts, see p_weapon.cpp:1262)");
+function Weapon_GrenadeLauncher(ent: EdictT): void {
+  P_Weapon_GrenadeLauncher(ent);
 }
-function Weapon_Railgun(_ent: EdictT): void {
-  throw new Error("Weapon_Railgun: not yet ported (pending p_weapon.ts, see p_weapon.cpp:1824)");
+function Weapon_Railgun(ent: EdictT): void {
+  P_Weapon_Railgun(ent);
 }
-function Weapon_BFG(_ent: EdictT): void {
-  throw new Error("Weapon_BFG: not yet ported (pending p_weapon.ts, see p_weapon.cpp:1889)");
+function Weapon_BFG(ent: EdictT): void {
+  P_Weapon_BFG(ent);
 }
 function Weapon_ChainFist(_ent: EdictT): void {
   throw new Error("Weapon_ChainFist: not yet ported (pending p_rogue_weapon.ts, see rogue/p_rogue_weapon.cpp:148)");

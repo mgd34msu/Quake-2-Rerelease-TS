@@ -598,11 +598,33 @@ function syncEdictKexToEngine(kexEnt: KexEdictT, eng: Edict): void {
 // The handful of fields ONLY the engine computes (SV_LinkEdict / the
 // implicit relink inside PF_setmodel) -- copied back so kex game code
 // reading its own edict afterward sees engine-accurate values.
+//
+// BUG FIX: `kexEnt.s.modelindex` was missing from this list. PF_setmodel
+// (sv_game.ts:169-183) writes `ent.s.modelindex = i` onto the ENGINE-side
+// `eng` view only (`setmodel`'s call site below passes `eng`, never
+// `kexEnt`, into PF_setmodel) -- with no copy-back, every kex entity whose
+// spawn function relies on `gi.setmodel(self, self.model)` to resolve a
+// "*N" inline-model string into a numeric index (func_wall/func_door/
+// func_plat/func_train/etc., all of g_misc.ts's/g_func.ts's MOVETYPE_PUSH
+// movers) kept `s.modelindex === 0` on the kexgame-visible entity forever,
+// even though the engine's own `sv.edicts`/collision view had the correct
+// index. This is invisible until something calls SV_HullForEntity on that
+// entity (a SOLID_BSP entity with modelindex 0 has no BSP submodel to hand
+// back), which only a trace against it -- e.g. a monster's sight-line
+// check in g_ai.ts's `visible()` -- ever triggers, hence "MOVETYPE_PUSH
+// with a non bsp model" surfacing deep in monster AI on a plain func_wall.
+// Found while wiring the q2repro (1038/kex) protocol unit's end-to-end
+// boot gate (base1 has monsters that eventually run sight checks against
+// nearby func_wall geometry). Not a carried-over C++ bug: the real engine
+// has one edict_t, not two synced views, so this two-object split is
+// entirely this port's own architecture, and copying every engine-computed
+// field back is exactly what this function already exists to do.
 function syncLinkResultsToKex(eng: Edict, kexEnt: KexEdictT): void {
   VectorCopy(eng.absmin, kexEnt.absmin);
   VectorCopy(eng.absmax, kexEnt.absmax);
   VectorCopy(eng.size, kexEnt.size);
   kexEnt.s.solid = eng.s.solid;
+  kexEnt.s.modelindex = eng.s.modelindex;
   VectorCopy(eng.s.old_origin, kexEnt.s.old_origin);
   kexEnt.linkcount = eng.linkcount;
   kexEnt.areanum = eng.areanum;

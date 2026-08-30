@@ -20,7 +20,6 @@ import { frand, crand } from "../qcommon/common";
 import {
   type EntityStateT,
   MAX_QPATH,
-  CS_LIGHTS,
   EntityEventT,
   MZ_SILENCED,
   MZ_BLASTER,
@@ -342,7 +341,7 @@ export function CL_RunLightStyles(): void {
 }
 
 export function CL_SetLightstyle(i: number): void {
-  const s = cl.configstrings[i + CS_LIGHTS];
+  const s = cl.configstrings[i + cls.csr.lights];
 
   const j = s.length;
   if (j >= MAX_QPATH) {

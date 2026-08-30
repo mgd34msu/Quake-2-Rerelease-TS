@@ -52,8 +52,8 @@ import { describe, test, expect } from "bun:test";
 import { vec3 } from "../src/shared/math";
 import { CplaneT, CvarT, Info_SetValueForKey as Info_SetValueForKey_pure, Info_ValueForKey as Info_ValueForKey_pure } from "../src/shared/q_shared";
 import type { KexEdictT, KexGameExports, KexGameImports, KexPlayerStateT, KexPmoveStateT, KexTraceT, KexUsercmdT } from "../src/kexapi/game";
-import { EffectsT, GAME_API_VERSION, MAX_STATS, SolidT } from "../src/kexapi/game";
-import { type ClientPersistantT, type ClientRespawnT, type EdictT, type GClientT, AmmoT, EntFlagsT, ItemIdT } from "../src/kexgame/g_local";
+import { EffectsT, GAME_API_VERSION, MAX_STATS, SolidT, SvflagsT } from "../src/kexapi/game";
+import { type ClientPersistantT, type ClientRespawnT, type EdictT, type GClientT, AmmoT, EntFlagsT, ItemIdT, MovetypeT } from "../src/kexgame/g_local";
 import { defaultEdict, gi, globals, game, level, g_edicts, SetGameImports, SetGameExports, SetGEdicts } from "../src/kexgame/g_main_globals";
 import { GTIME_ZERO, Gtime_from_ms, Gtime_from_sec } from "../src/kexgame/gtime";
 import {
@@ -950,7 +950,7 @@ describe("respawn", () => {
     expect(() => respawn(ent)).not.toThrow();
   });
 
-  test("spectator client in deathmatch: reaches PutClientInServer's spectator-bound state before the p_view.ts-owned P_AssignClientSkinnum stub (p_client.cpp:2201-2207)", () => {
+  test("established spectator in deathmatch: PutClientInServer's deathmatch reset clears pers.spectator, so respawn() now runs the full active-player spawn path (p_client.cpp:2201-2207,2336-2339,2382-2383)", () => {
     const { edicts, rec } = setupWorld(1, 8, 8);
     rec.cvars.set("deathmatch", Object.assign(new CvarT(), { name: "deathmatch", string: "1", value: 1 }));
 
@@ -960,41 +960,47 @@ describe("respawn", () => {
     spot.s.origin = vec3(0, 0, 0);
 
     const ent = wireClient(edicts, 1);
-    // both pers.spectator AND resp.spectator are already true here (an
-    // ESTABLISHED spectator respawning) -- deliberately NOT the
-    // "resp.spectator should be the opposite of pers.spectator" state
-    // spectator_respawn's own doc comment describes for a fresh
-    // pers.spectator TRANSITION, since that specific state would still
-    // route through InitClientPersistant's weapon-granting block (its own
-    // guard reads `!client.resp.spectator`, not `!client.pers.spectator` --
-    // p_client.cpp:820-821) and hit the p_weapon.ts-owned NoAmmoWeaponChange
-    // dependency. Confirming this DOES avoid that dependency is itself part
-    // of what this test checks (see the specific error message asserted
-    // below -- it must be P_AssignClientSkinnum's, never
-    // NoAmmoWeaponChange's).
+    // both pers.spectator AND resp.spectator start true here (an
+    // ESTABLISHED spectator respawning). RECONCILIATION FINDING (updated --
+    // see below): this does NOT keep respawn() on the spectator branch.
+    // PutClientInServer's deathmatch reset (p_client.cpp:2336-2339: "deathmatch
+    // wipes most client data every spawn") unconditionally sets
+    // `client.pers.health = 0` before the `if (client.pers.health <= 0)
+    // InitClientPersistant(ent, client)` gate a few lines later
+    // (p_client.cpp:2382-2383) -- so InitClientPersistant ALWAYS runs for a
+    // deathmatch respawn, and it unconditionally replaces `client.pers` with
+    // `defaultClientPersistant()` (p_client.ts's own InitClientPersistant),
+    // which resets `pers.spectator` to false. By the time PutClientInServer
+    // reaches `if (client.pers.spectator)`, it is always false in deathmatch,
+    // so this scenario actually exercises the ACTIVE-PLAYER spawn path (KillBox
+    // + ChangeWeapon included), not the spectator early-return -- both of
+    // which are real, non-throwing code today.
     ent.client!.pers.spectator = true;
     ent.client!.resp.spectator = true;
     ent.client!.landmark_name = null;
 
-    // RECONCILIATION FINDING (see p_client.ts's own file header): p_view.ts's
-    // own P_AssignClientSkinnum is a "narrow, cited stub" per that file's
-    // header, implying a rare/conditional path -- but its packing tail is
-    // UNCONDITIONALLY reached by every real player spawn. `MODELINDEX_PLAYER`
+    // RECONCILIATION FINDING: p_view.ts's own P_AssignClientSkinnum was a
+    // "narrow, cited stub" per that file's (former) header, implying a
+    // rare/conditional path -- but its packing tail is UNCONDITIONALLY
+    // reached by every real player spawn. `MODELINDEX_PLAYER`
     // (kexapi/game.ts) is `MAX_MODELS_OLD - 1` = `256 - 1` = 255, exactly the
     // one value P_AssignClientSkinnum's own early-return guard
     // (`ent.s.modelindex !== 255`) does NOT return on -- and PutClientInServer
     // always sets `ent.s.modelindex = MODELINDEX_PLAYER` (p_client.cpp:2203)
-    // immediately before calling it. So this is not a narrow/rare stub for
-    // ANY real player-shaped spawn in this port line yet; it is reached
-    // every time. This test documents that reality rather than working
-    // around it: it asserts the exact throw, and the real state
-    // PutClientInServer DOES manage to set before reaching it.
-    expect(() => respawn(ent)).toThrow(/P_AssignClientSkinnum/);
+    // immediately before calling it. packClientSkinnum (p_view.ts) is now a
+    // real, faithful pack (the player_skinnum_t bit-layout reference this was
+    // waiting on is present in the vendored qsrc rerelease tree -- see that
+    // function's own doc comment), so respawn() now runs PutClientInServer to
+    // completion instead of stopping at the former stub.
+    expect(() => respawn(ent)).not.toThrow();
 
-    expect(ent.client!.pers.connected).toBe(true); // InitClientPersistant ran to completion (spectator skips the weapon block)
-    expect(ent.movetype).toBe(4); // MOVETYPE_WALK (g_local.ts MovetypeT) -- set at p_client.cpp:2158, before the throw
+    expect(ent.client!.pers.connected).toBe(true); // p_client.ts's own "fix level switch issue" (p_client.cpp:2388-2389)
+    expect(ent.client!.pers.spectator).toBe(false); // reset by InitClientPersistant's defaultClientPersistant()
+    expect(ent.client!.resp.spectator).toBe(false); // p_client.cpp:2489 unconditionally clears it on the active-player path
+    expect(ent.movetype).toBe(MovetypeT.MOVETYPE_WALK); // p_client.cpp:2166-ish -- never overwritten on this path
+    expect(ent.solid).toBe(SolidT.SOLID_BBOX); // set alongside movetype, same reasoning
     expect(ent.deadflag).toBe(false);
-    expect(rec.linked).not.toContain(ent); // gi.linkentity(ent) (p_client.cpp:2280) is never reached
+    expect(rec.linked).toContain(ent); // gi.linkentity(ent) IS reached on the active-player path (KillBox et al.)
   });
 });
 

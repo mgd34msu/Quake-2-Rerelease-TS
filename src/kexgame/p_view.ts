@@ -47,6 +47,12 @@
 //     own p_view.cpp:1250-1334): every field they touch
 //     (num_lag_origins/next_lag_origin/is_lag_compensated/lag_restore_origin/
 //     cmd.server_frame, game.max_lag_origins/lag_origins) is already ported.
+//   - P_AssignClientSkinnum's packClientSkinnum tail (p_client.cpp:1741-1766):
+//     the player_skinnum_t bitfield union (game.h:1363-1373) this was
+//     waiting on for an exact bit-layout reference is present in the
+//     vendored ~/Projects/qsrc/quake2-rerelease-dll/rerelease/game.h tree --
+//     see packClientSkinnum's own doc comment below for the field-by-field
+//     citation. No longer a stub.
 //
 // NARROW STUBS (throw, cited; reached only on a genuinely guarded path that
 // this unit's own default-cvar/default-fixture test suite does not exercise):
@@ -71,13 +77,6 @@
 //     the svc_fog packet-writing tail (reached when they differ -- nothing in
 //     this port line's trigger_fog-equivalent code exists yet to make them
 //     differ) is a narrow stub.
-//   - P_AssignClientSkinnum's packing tail (p_client.cpp:1741-1766): the
-//     `ent.s.modelindex !== 255` early return is real; the KexPlayerSkinnumT
-//     bitfield pack (client_num/vwep_index/viewheight/team_index/poi_icon ->
-//     .skinnum) has no ported bit-layout helper anywhere in this port line
-//     (the type only declares named fields + the raw int32, no pack/unpack
-//     function) and inventing one without the real union's bit widths would
-//     risk a silent wire-format bug, so it stays a narrow, cited stub.
 //   - Compass_Update (g_items.cpp:1499-1541, this file's own porting-target
 //     for the ClientEndServerFrame call site) landed for real once
 //     g_local_types.ts's LevelLocalsT.poi_points got its real
@@ -255,10 +254,47 @@ function sendFogTransition(_ent: EdictT, _instant: boolean): void {
   throw new Error("P_ForceFogTransition (svc_fog write): not yet ported (pending p_client.ts, see p_client.cpp:1788-1910)");
 }
 
-function packClientSkinnum(_ent: EdictT): void {
-  throw new Error(
-    "P_AssignClientSkinnum (bitfield pack): not yet ported -- no ported player_skinnum_t bit-layout helper exists (pending p_client.ts, see p_client.cpp:1741)",
-  );
+// [Paril-KEX] player s.skinnum's encode additional data: game.h:1363-1373's
+// `player_skinnum_t` union, verified against
+// ~/Projects/qsrc/quake2-rerelease-dll/rerelease/game.h (the exact
+// bit-layout reference this file's header previously said didn't exist
+// anywhere in this port line -- it does, in the vendored qsrc rerelease
+// tree, so what was a narrow, cited stub is now a real, faithful pack):
+//   byte 0 (bits 0-7):   client_num  (uint8)
+//   byte 1 (bits 8-15):  vwep_index  (uint8)
+//   byte 2 (bits 16-23): viewheight  (int8, signed)
+//   byte 3 low nibble (bits 24-27):  team_index (uint8:4)
+//   byte 3 high nibble (bits 28-31): poi_icon   (uint8:4)
+// JS's `|`/`<<` operators already produce a signed 32-bit result, matching
+// the union's `int32_t skinnum` member with no extra sign-handling needed.
+function packClientSkinnum(ent: EdictT): void {
+  const client = ent.client;
+  if (client === null) return;
+
+  // p_client.cpp:1746-1747: `packed.client_num = ent->client - game.clients;`
+  // -- this port's equivalent client-index derivation (edict N's client is
+  // game.clients[N-1]; the same `ent.s.number - 1` convention cl_ents.ts's
+  // CS_PLAYERSKINS remap uses client-side for the identical pointer-
+  // arithmetic-turned-array-index fact).
+  const clientNum = ent.s.number - 1;
+
+  // p_client.cpp:1748-1751.
+  const vwepIndex = client.pers.weapon !== null ? client.pers.weapon.vwep_index - level.vwep_offset + 1 : 0;
+
+  // p_client.cpp:1752.
+  const viewheight = client.ps.viewoffset[2] + client.ps.pmove.viewheight;
+
+  // p_client.cpp:1754-1758.
+  let teamIndex: number;
+  if (cvarBool("coop", "0", CvarFlagsT.CVAR_LATCH)) teamIndex = 1; // all players are teamed in coop
+  else if (G_TeamplayEnabled()) teamIndex = client.resp.ctf_team;
+  else teamIndex = 0;
+
+  // p_client.cpp:1760-1763.
+  const poiIcon = ent.deadflag ? 1 : 0;
+
+  // p_client.cpp:1765: `ent->s.skinnum = packed.skinnum;`
+  ent.s.skinnum = (clientNum & 0xff) | ((vwepIndex & 0xff) << 8) | ((viewheight & 0xff) << 16) | ((teamIndex & 0xf) << 24) | ((poiIcon & 0xf) << 28);
 }
 
 // ---------------------------------------------------------------------------

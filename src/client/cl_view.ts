@@ -2,7 +2,7 @@
 
 import { CDAudio_Play } from "../platform/cd_ogg";
 import { type Vec3, vec3, VectorAdd, VectorClear, VectorScale } from "../shared/math";
-import { CS_CDTRACK, CVAR_ARCHIVE, Com_sprintf, CS_IMAGES, CS_MODELS, CS_PLAYERSKINS, CS_SKY, CS_SKYAXIS, CS_SKYROTATE, type CvarT, MAX_CLIENTS, MAX_IMAGES, MAX_MODELS, YAW } from "../shared/q_shared";
+import { CS_CDTRACK, CVAR_ARCHIVE, Com_sprintf, CS_SKY, CS_SKYAXIS, CS_SKYROTATE, type CvarT, MAX_CLIENTS, YAW } from "../shared/q_shared";
 import { Cmd_AddCommand, Cmd_Argc, Cmd_Argv } from "../qcommon/cmd";
 import { Cvar_Get } from "../qcommon/cvar";
 import { Com_Error, Com_Printf } from "../qcommon/common";
@@ -247,7 +247,7 @@ Call before entering a new level, or after changing dlls
 =================
 */
 export function CL_PrepRefresh(): void {
-  if (!cl.configstrings[CS_MODELS + 1][0]) return; // no map loaded
+  if (!cl.configstrings[cls.csr.models + 1][0]) return; // no map loaded
 
   // ref_gl/ is not ported (PORTING.md); `re` stays null with no GL renderer
   // constructed, so this early-outs instead of null-derefing -- reported
@@ -259,7 +259,7 @@ export function CL_PrepRefresh(): void {
   SCR_AddDirtyPoint(viddef.width - 1, viddef.height - 1);
 
   // let the render dll load the map
-  const mapstring = cl.configstrings[CS_MODELS + 1];
+  const mapstring = cl.configstrings[cls.csr.models + 1];
   const mapname = mapstring.slice(5, mapstring.length - 4); // skip "maps/", cut off ".bsp"
 
   // register models, pics, and skins
@@ -279,8 +279,8 @@ export function CL_PrepRefresh(): void {
   setNumClWeaponmodels(1);
   cl_weaponmodels[0] = "weapon.md2";
 
-  for (let i = 1; i < MAX_MODELS && cl.configstrings[CS_MODELS + i][0]; i++) {
-    const fullName = cl.configstrings[CS_MODELS + i];
+  for (let i = 1; i < cls.csr.max_models && cl.configstrings[cls.csr.models + i][0]; i++) {
+    const fullName = cl.configstrings[cls.csr.models + i];
     const name = fullName.slice(0, 37); // never go beyond one line
     if (name[0] !== "*") Com_Printf(`${name}\r`);
     SCR_UpdateScreen();
@@ -301,14 +301,14 @@ export function CL_PrepRefresh(): void {
 
   Com_Printf("images\r");
   SCR_UpdateScreen();
-  for (let i = 1; i < MAX_IMAGES && cl.configstrings[CS_IMAGES + i][0]; i++) {
-    cl.image_precache[i] = re.RegisterPic(cl.configstrings[CS_IMAGES + i]);
+  for (let i = 1; i < cls.csr.max_images && cl.configstrings[cls.csr.images + i][0]; i++) {
+    cl.image_precache[i] = re.RegisterPic(cl.configstrings[cls.csr.images + i]);
     Sys_SendKeyEvents(); // pump message loop
   }
 
   Com_Printf("                                     \r");
   for (let i = 0; i < MAX_CLIENTS; i++) {
-    if (!cl.configstrings[CS_PLAYERSKINS + i][0]) continue;
+    if (!cl.configstrings[cls.csr.playerskins + i][0]) continue;
     Com_Printf(`client ${i}\r`);
     SCR_UpdateScreen();
     Sys_SendKeyEvents(); // pump message loop

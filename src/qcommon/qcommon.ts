@@ -24,6 +24,14 @@ export const CPUSTRING = "portable";
 
 export const PROTOCOL_VERSION = 34;
 
+// PROTOCOL_VERSION_RERELEASE (qsrc/q2repro/inc/common/protocol.h:32) -- the
+// 1038 wire format q2proto's q2repro codec implements (see
+// src/qcommon/protocol/q2repro.ts). Hosted here alongside PROTOCOL_VERSION
+// (rather than staying q2repro.ts's private duplicate) so cl_parse.ts's
+// CL_ParseServerData can select a codec/csr off the same literal q2repro.ts
+// writes onto the wire.
+export const PROTOCOL_VERSION_RERELEASE = 1038;
+
 export const PORT_MASTER = 27900;
 export const PORT_CLIENT = 27901;
 export const PORT_SERVER = 27910;

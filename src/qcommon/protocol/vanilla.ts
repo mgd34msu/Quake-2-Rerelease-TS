@@ -67,6 +67,7 @@ import {
   MSG_ReadByte,
   MSG_ReadShort,
   MSG_ReadLong,
+  MSG_ReadString,
   MSG_ReadChar,
   MSG_ReadAngle,
   MSG_ReadAngle16,
@@ -126,7 +127,7 @@ import {
 import { net_message } from "../net_chan";
 import { EntityStateT, PlayerStateT, type UsercmdT, MAX_STATS } from "../../shared/q_shared";
 import { VectorCopy } from "../../shared/math";
-import type { ProtocolCodec, ServerDataParamsT, FrameWriteParamsT, FrameHeaderT } from "./codec";
+import type { ProtocolCodec, ServerDataParamsT, ServerDataReadResultT, FrameWriteParamsT, FrameHeaderT } from "./codec";
 
 // Reused across writeSpawnBaseline calls (MSG_WriteDeltaEntity only ever
 // reads `from`'s fields, never writes them, so one shared zero-valued
@@ -379,6 +380,21 @@ function readDeltaUsercmd(msg: SizeBuf, from: UsercmdT, move: UsercmdT): void {
 // Extracted verbatim from src/client/cl_ents.ts's CL_ParseEntityBits,
 // including its file-local bit-count profiling counter.
 const bitcounts = new Int32Array(32); // just for protocol profiling
+
+// Extracted verbatim (byte-for-byte) from src/client/cl_parse.ts's original
+// CL_ParseServerData -- the six MSG_Read* calls after the already-consumed
+// leading protocol-number long (see this codec's writeServerData doc comment
+// for the write-side mirror of this same extraction). `serverState` has no
+// wire representation on this protocol (q2repro-only field, see
+// ServerDataReadResultT's doc comment); left 0.
+function readServerData(): ServerDataReadResultT {
+  const servercount = MSG_ReadLong(net_message);
+  const attractloop = MSG_ReadByte(net_message) !== 0;
+  const gamedir = MSG_ReadString(net_message);
+  const clientnum = MSG_ReadShort(net_message);
+  const levelname = MSG_ReadString(net_message);
+  return { servercount, attractloop, gamedir, clientnum, levelname, serverState: 0 };
+}
 
 function readEntityBits(): { number: number; bits: number } {
   let total = MSG_ReadByte(net_message);
@@ -644,6 +660,7 @@ export const VANILLA_CODEC: ProtocolCodec = {
   writeFrame,
   writeDeltaUsercmd,
   readDeltaUsercmd,
+  readServerData,
   readEntityBits,
   readDeltaEntity,
   readPlayerStateDelta,

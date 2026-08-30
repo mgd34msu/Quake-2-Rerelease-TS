@@ -164,7 +164,7 @@
 
 import type { SizeBuf } from "../sizebuf";
 import { MSG_WriteByte, MSG_WriteShort, MSG_WriteLong, MSG_WriteFloat, MSG_WriteString, MSG_WriteDeltaUsercmd, SZ_Write } from "../sizebuf";
-import { MSG_ReadByte, MSG_ReadShort, MSG_ReadLong, MSG_ReadFloat, MSG_ReadDeltaUsercmd, MSG_ReadData } from "../sizebuf";
+import { MSG_ReadByte, MSG_ReadShort, MSG_ReadLong, MSG_ReadFloat, MSG_ReadString, MSG_ReadDeltaUsercmd, MSG_ReadData } from "../sizebuf";
 import {
   U_ORIGIN1,
   U_ORIGIN2,
@@ -218,10 +218,11 @@ import {
   SvcOpsT,
   ComError,
   ERR_DROP,
+  PROTOCOL_VERSION_RERELEASE,
 } from "../qcommon";
 import { net_message } from "../net_chan";
 import { EntityStateT, PlayerStateT, type UsercmdT, ANGLE2SHORT, SHORT2ANGLE, RF_BEAM } from "../../shared/q_shared";
-import type { ProtocolCodec, ServerDataParamsT, FrameWriteParamsT, FrameHeaderT } from "./codec";
+import type { ProtocolCodec, ServerDataParamsT, ServerDataReadResultT, FrameWriteParamsT, FrameHeaderT } from "./codec";
 import { VANILLA_CODEC } from "./vanilla";
 
 // ---------------------------------------------------------------------------
@@ -275,8 +276,10 @@ const EPS_GUNRATE = 1 << 7;
 const Q2PRO_GUNINDEX_BITS = 13;
 const Q2PRO_GUNINDEX_MASK = (1 << Q2PRO_GUNINDEX_BITS) - 1;
 
-// PROTOCOL_VERSION_RERELEASE (qsrc/q2repro/inc/common/protocol.h:32).
-const PROTOCOL_Q2REPRO = 1038;
+// PROTOCOL_VERSION_RERELEASE (qsrc/q2repro/inc/common/protocol.h:32), hosted
+// centrally in qcommon.ts (added alongside PROTOCOL_VERSION) so cl_parse.ts
+// can select this codec off the same literal.
+const PROTOCOL_Q2REPRO = PROTOCOL_VERSION_RERELEASE;
 
 // ---------------------------------------------------------------------------
 // Value quantization helpers (inc/q2proto/q2proto_valenc.h + src/q2proto_sound.c
@@ -885,6 +888,41 @@ function readDeltaUsercmd(msg: SizeBuf, from: UsercmdT, move: UsercmdT): void {
 // client-side reads (net_message singleton -- see codec.ts's asymmetry note)
 // ---------------------------------------------------------------------------
 
+// q2proto_q2repro_continue_serverdata, q2proto_proto_q2repro.c:122-166 (the
+// wire-read half; feature-flag/context bookkeeping the C does afterward has
+// no counterpart here -- this engine advertises none of q2pro's extended
+// protocol features either, per writeServerData's file header note, so there
+// is nothing for a real q2repro server's response to turn on). Field order
+// after the already-consumed leading protocol-number long matches
+// writeServerData's own byte order exactly (both were derived from the same
+// q2proto source): i32 servercount, bool attractloop, string gamedir, i16
+// clientnum, string levelname, u16 protocol_version (q2pro extended minor
+// version -- this engine has no minor-version concept to react to, so it is
+// read to stay byte-aligned and then discarded, same treatment
+// writeServerData gives it on the write side by always emitting 0), u8
+// q2pro.server_state (kept -- ServerDataReadResultT.serverState), u16
+// q2repro_flags (q2proto_proto_q2repro.c:133-143 unpacks this into six
+// separate q2pro/q2repro extension booleans this engine implements none of;
+// discarded whole, matching writeServerData always emitting 0 for it), u8
+// server_fps (q2proto_proto_q2repro.c:144 -- real q2repro clients resync
+// their logic-tick rate from this; this engine's client, like its server
+// side, runs prediction/interpolation on a fixed-tick assumption until
+// ARCHITECTURE.md phase 3's tick-rate binding lands -- server.ts's own
+// framerate/frametime doc comment documents the same pre-existing gap on the
+// write side -- so it is read to stay byte-aligned and then discarded).
+function readServerData(): ServerDataReadResultT {
+  const servercount = MSG_ReadLong(net_message);
+  const attractloop = MSG_ReadByte(net_message) !== 0;
+  const gamedir = MSG_ReadString(net_message);
+  const clientnum = MSG_ReadShort(net_message);
+  const levelname = MSG_ReadString(net_message);
+  MSG_ReadShort(net_message); // protocol_version (q2pro extended minor version): unused
+  const serverState = MSG_ReadByte(net_message);
+  MSG_ReadShort(net_message); // q2repro_flags: no q2pro/q2repro extension this engine acts on
+  MSG_ReadByte(net_message); // server_fps: see doc comment above -- fixed-tick assumption, discarded
+  return { servercount, attractloop, gamedir, clientnum, levelname, serverState };
+}
+
 function readEntityBits(): { number: number; bits: number } {
   return readEntityBitsWide();
 }
@@ -1245,6 +1283,7 @@ export const Q2REPRO_CODEC: ProtocolCodec = {
   writeFrame,
   writeDeltaUsercmd,
   readDeltaUsercmd,
+  readServerData,
   readEntityBits,
   readDeltaEntity,
   readFrameHeader,

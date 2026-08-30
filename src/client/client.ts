@@ -37,11 +37,7 @@ import {
   MAX_QPATH,
   MAX_CLIENTS,
   MAX_EDICTS,
-  MAX_MODELS,
-  MAX_SOUNDS,
-  MAX_IMAGES,
   MAX_ITEMS,
-  MAX_CONFIGSTRINGS,
   CmodelT,
   EntityStateT,
   PlayerStateT,
@@ -55,6 +51,7 @@ import { type ModelS, type ImageS, type RefExports, RefdefT, MAX_DLIGHTS } from 
 import type { SfxT } from "./snd_loc";
 import type { ProtocolCodec } from "../qcommon/protocol/codec";
 import { VANILLA_CODEC } from "../qcommon/protocol/vanilla";
+import { type CsRemapT, CS_REMAP_OLD, CS_REMAP_RERELEASE, MAX_MODELS_WIDE, MAX_SOUNDS_WIDE, MAX_IMAGES_WIDE } from "../shared/cs_remap";
 
 //=============================================================================
 
@@ -174,16 +171,24 @@ export class ClStateT {
   gamedir = ""; // MAX_QPATH
   playernum = 0;
 
-  configstrings: string[] = new Array(MAX_CONFIGSTRINGS).fill(""); // [MAX_CONFIGSTRINGS][MAX_QPATH]
+  // Sized at the widest known family's configstring count (CS_REMAP_RERELEASE
+  // .end / MAX_*_WIDE from cs_remap.ts), not this connection's cls.csr: this
+  // mirrors server.ts's identical sv.configstrings sizing rationale (see that
+  // file's comment) -- a client that connects to a classic (protocol 34)
+  // server after having connected to a kex one (or vice versa) must never
+  // carry over an undersized array from the previous connection's family.
+  // Index math everywhere else uses cls.csr.*, never these arrays' raw
+  // .length. [MAX_CONFIGSTRINGS_WIDE][CS_MAX_STRING_LENGTH_WIDE]
+  configstrings: string[] = new Array(CS_REMAP_RERELEASE.end).fill("");
 
   //
   // locally derived information from server state
   //
-  model_draw: (ModelS | null)[] = new Array(MAX_MODELS).fill(null);
-  model_clip: (CmodelT | null)[] = new Array(MAX_MODELS).fill(null);
+  model_draw: (ModelS | null)[] = new Array(MAX_MODELS_WIDE).fill(null);
+  model_clip: (CmodelT | null)[] = new Array(MAX_MODELS_WIDE).fill(null);
 
-  sound_precache: (SfxT | null)[] = new Array(MAX_SOUNDS).fill(null);
-  image_precache: (ImageS | null)[] = new Array(MAX_IMAGES).fill(null);
+  sound_precache: (SfxT | null)[] = new Array(MAX_SOUNDS_WIDE).fill(null);
+  image_precache: (ImageS | null)[] = new Array(MAX_IMAGES_WIDE).fill(null);
 
   clientinfo: ClientinfoT[] = Array.from({ length: MAX_CLIENTS }, () => new ClientinfoT());
   baseclientinfo: ClientinfoT = new ClientinfoT();
@@ -227,11 +232,11 @@ export class ClStateT {
     this.servercount = 0;
     this.gamedir = "";
     this.playernum = 0;
-    this.configstrings = new Array(MAX_CONFIGSTRINGS).fill("");
-    this.model_draw = new Array(MAX_MODELS).fill(null);
-    this.model_clip = new Array(MAX_MODELS).fill(null);
-    this.sound_precache = new Array(MAX_SOUNDS).fill(null);
-    this.image_precache = new Array(MAX_IMAGES).fill(null);
+    this.configstrings = new Array(CS_REMAP_RERELEASE.end).fill("");
+    this.model_draw = new Array(MAX_MODELS_WIDE).fill(null);
+    this.model_clip = new Array(MAX_MODELS_WIDE).fill(null);
+    this.sound_precache = new Array(MAX_SOUNDS_WIDE).fill(null);
+    this.image_precache = new Array(MAX_IMAGES_WIDE).fill(null);
     this.clientinfo = Array.from({ length: MAX_CLIENTS }, () => new ClientinfoT());
     this.baseclientinfo = new ClientinfoT();
   }
@@ -296,6 +301,13 @@ export class ClStaticT {
   // and the same server-wide-not-per-client simplification documented there.
   codec: ProtocolCodec = VANILLA_CODEC;
 
+  // The active configstring-index layout (shared/cs_remap.ts's CsRemapT),
+  // selected alongside `codec` at CL_ParseServerData time (cl_parse.ts) --
+  // mirrors server.ts's svs.csr placement/lifecycle exactly, including
+  // resetting to CS_REMAP_OLD in clear() below (server.ts's own comment:
+  // "every csr.end/csr.models/etc bound momentarily wrong" between clears).
+  csr: CsRemapT = CS_REMAP_OLD;
+
   challenge = 0; // from the server to use for connecting
 
   download: number | null = null; // FILE* -- file transfer from server
@@ -326,6 +338,7 @@ export class ClStaticT {
     this.netchan = new NetchanT();
     this.serverProtocol = 0;
     this.codec = VANILLA_CODEC;
+    this.csr = CS_REMAP_OLD;
     this.challenge = 0;
     this.download = null;
     this.downloadtempname = "";

@@ -164,6 +164,25 @@ export interface FrameHeaderT {
   surpressCount: number;
 }
 
+// Added for the client-side svc_serverdata READ (.orch/phase5-design.md
+// phase 5's client-parity follow-up -- see cl_parse.ts's CL_ParseServerData).
+// The leading protocol-number long is read by the CALLER (it's what selects
+// which codec's readServerData to invoke in the first place -- the same
+// asymmetry writeServerData already has with its protocol-number literal,
+// just mirrored on the read side); this covers every field after it. Mirrors
+// ServerDataParamsT's shape exactly (minus the number literal), plus
+// `serverState` doubling as q2repro's q2pro.server_state on read too (0/
+// unused for vanilla, matching writeServerData's already-established
+// "q2repro-only fields are simply unread/unset by VANILLA_CODEC" precedent).
+export interface ServerDataReadResultT {
+  servercount: number;
+  attractloop: boolean;
+  gamedir: string;
+  clientnum: number;
+  levelname: string;
+  serverState: number;
+}
+
 export interface ProtocolCodec {
   // Identifies the codec for logging/diagnostics; not itself part of the
   // wire format. "vanilla" for protocol 34 (this step); "q2repro"/1038 is
@@ -232,6 +251,12 @@ export interface ProtocolCodec {
   readDeltaUsercmd(msg: SizeBuf, from: UsercmdT, move: UsercmdT): void;
 
   // ---- client-side reads (net_message singleton; see asymmetry note) ----
+
+  // Reads the svc_serverdata handshake body AFTER the leading protocol-
+  // number long (the caller already read and branched on that -- see this
+  // file's ServerDataReadResultT doc comment). Reads from the net_message
+  // singleton like every other client-side read op here.
+  readServerData(): ServerDataReadResultT;
 
   // Reads the leading bits/number prefix of an entity delta (MOREBITS chain
   // + 8/16-bit entity number).

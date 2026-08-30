@@ -53,8 +53,6 @@ import {
   RF_SHELL_BLUE,
   RF_SHELL_DOUBLE,
   RF_SHELL_HALF_DAM,
-  CS_PLAYERSKINS,
-  CS_MODELS,
   Q_strcasecmp,
 } from "../shared/q_shared";
 import type { ModelS } from "./ref";
@@ -512,7 +510,7 @@ INTERPOLATE BETWEEN FRAMES TO GET RENDERING PARMS
 function S_RegisterSexedModel(ent: EntityStateT, base: string): ModelS | null {
   // determine what model the client is using
   let model = "";
-  const n = CS_PLAYERSKINS + ent.number - 1;
+  const n = cls.csr.playerskins + ent.number - 1;
   const cs = cl.configstrings[n] ?? "";
   if (cs) {
     const bs = cs.indexOf("\\");
@@ -782,7 +780,7 @@ function CL_AddPacketEntities(frame: FrameT): void {
 
       // PMM - check for the defender sphere shell .. make it translucent
       // replaces the previous version which used the high bit on modelindex2 to determine transparency
-      if (Q_strcasecmp(cl.configstrings[CS_MODELS + s1.modelindex2] ?? "", "models/items/shell/tris.md2") === 0) {
+      if (Q_strcasecmp(cl.configstrings[cls.csr.models + s1.modelindex2] ?? "", "models/items/shell/tris.md2") === 0) {
         ent.alpha = 0.32;
         ent.flags = RF_TRANSLUCENT;
       }

@@ -626,15 +626,19 @@ describe("Bot_SetWeapon (bot_exports.cpp:12-61)", () => {
     expect(bot.client!.no_weapon_chains).toBe(false);
   });
 
-  test("a real weapon item dispatches to the real (still-unported) Use_Weapon and throws", () => {
-    // Documents a genuine, pre-existing gap this unit did not create:
-    // g_items.ts's own Use_Weapon is a cited throwing stub (pending
-    // p_weapon.ts's Weapon_Blaster wiring, see g_items.cpp:426). This
-    // proves Bot_SetWeapon's real dispatch reaches the real itemlist entry.
+  test("a real weapon item dispatches to the real Use_Weapon and switches for real", () => {
+    // g_items.ts's own Use_Weapon used to be a cited throwing stub (pending
+    // p_weapon.ts's Weapon_Blaster wiring, see g_items.cpp:426) -- g_items.ts
+    // has since been reconciled to import p_weapon.ts's real Use_Weapon (see
+    // that file's own "STUB INVENTORY" note), so this now proves
+    // Bot_SetWeapon's real dispatch reaches the real itemlist entry AND
+    // completes a real weapon switch (no ammo required for the blaster, so
+    // Weapon_AttemptSwitch succeeds and Use_Weapon sets client.newweapon).
     const bot = makeBot(1);
     bot.client!.pers.inventory[ItemIdT.IT_WEAPON_BLASTER] = 1;
-    expect(() => Bot_SetWeapon(bot, ItemIdT.IT_WEAPON_BLASTER, false)).toThrow(/Use_Weapon/);
-    expect(bot.client!.no_weapon_chains).toBe(true); // set for real before the throwing call
+    expect(() => Bot_SetWeapon(bot, ItemIdT.IT_WEAPON_BLASTER, false)).not.toThrow();
+    expect(bot.client!.no_weapon_chains).toBe(true); // set for real before dispatching to item.use
+    expect(bot.client!.newweapon).toBe(itemlist[ItemIdT.IT_WEAPON_BLASTER]!); // Use_Weapon's successful-switch assignment
   });
 
   test("instantSwitch dispatch: real item.use + ChangeWeapon, with the g_instant_weapon_switch cvar poked and restored", () => {

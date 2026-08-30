@@ -20,7 +20,7 @@ import { Cmd_AddCommand, Cmd_Argc, Cmd_Argv, Cmd_RemoveCommand } from "../qcommo
 import { Cvar_Get } from "../qcommon/cvar";
 import { FS_FCloseFile, FS_FOpenFile } from "../qcommon/files";
 import { type Vec3, vec3, DotProduct, VectorCopy, VectorNormalize, VectorSubtract } from "../shared/math";
-import { ATTN_STATIC, CS_PLAYERSKINS, CVAR_ARCHIVE, Com_PageInMemory, Com_sprintf, ERR_DROP, ERR_FATAL, type EntityStateT } from "../shared/q_shared";
+import { ATTN_STATIC, CVAR_ARCHIVE, Com_PageInMemory, Com_sprintf, ERR_DROP, ERR_FATAL, type EntityStateT } from "../shared/q_shared";
 import { cl, cl_entities, cl_parse_entities, clCvars, cls, ConnstateT, MAX_PARSE_ENTITIES } from "./client";
 import { CL_GetEntitySoundOrigin } from "./cl_ents";
 import {
@@ -483,7 +483,7 @@ export function S_IssuePlaysound(ps: PlaysoundT): void {
 function S_RegisterSexedSound(ent: EntityStateT, base: string): SfxT | null {
   // determine what model the client is using
   let model = "";
-  const n = CS_PLAYERSKINS + ent.number - 1;
+  const n = cls.csr.playerskins + ent.number - 1;
   const cs = cl.configstrings[n];
   if (cs) {
     const backslash = cs.indexOf("\\");
