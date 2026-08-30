@@ -93,13 +93,13 @@
 //     `trigger_fog_touch`/`SP_trigger_fog` that writes
 //     `client.pers.wanted_fog`/`.wanted_heightfog` for real, so any map
 //     with a `trigger_fog` volume can now make the guard's two sides
-//     differ and reach this stub in real gameplay. The stub itself (the
-//     svc_fog wire packet: a ~14-field optional bitmask write, `bits |=
-//     BIT_DENSITY/BIT_R/BIT_G/BIT_B/BIT_TIME/BIT_HEIGHTFOG_*`, each field
-//     conditionally present) is a real, nontrivial protocol-format port,
-//     not a comment fix -- left as a throwing stub and reported precisely
-//     in .orch/followups.md rather than silently left under the old,
-//     now-incorrect "unreachable" framing.
+//     differ and reach this stub in real gameplay. RESOLVED (2026-08-30,
+//     KEX demo playback unit): `sendFogTransition` below now ports the
+//     real svc_fog wire packet (a ~14-field optional bitmask write),
+//     cross-checked against q2proto's independent read-side decoder
+//     (~/Projects/q2proto/src/q2proto_proto_q2repro.c:818-882) rather than
+//     just the write-side C source, since that's the only way to confirm
+//     field widths/order without a real client to observe.
 //   - Compass_Update (g_items.cpp:1499-1541, this file's own porting-target
 //     for the ClientEndServerFrame call site) landed for real once
 //     g_local_types.ts's LevelLocalsT.poi_points got its real
@@ -153,6 +153,7 @@ import {
   RenderfxT,
   ServerCommandT,
   SoundchanT,
+  SvcFogDataBitsT,
   SvflagsT,
   type Vec4,
   WaterLevelT,
@@ -286,17 +287,166 @@ export function SetXyspeed(value: number): void {
 // CTFOpenJoinMenu/CTFAdmin) -- not gated behind ctf/teamplay cvars at all.
 
 // sendFogTransition -- the svc_fog wire-protocol write, p_client.cpp:
-// 1794-1910's packet-building tail. Genuinely unported (not a placement
-// mismatch): a ~14-field optional bitmask packet format
-// (BIT_DENSITY/BIT_R/BIT_G/BIT_B/BIT_TIME/BIT_HEIGHTFOG_* etc.), each
-// field conditionally written only when it differs from the client's
-// current fog state. NOW REACHABLE in real gameplay since
-// g_trigger.ts's trigger_fog landed for real (see this file's own header,
-// "P_ForceFogTransition's protocol body" -- corrected 2026-08-30
-// stale-comment sweep); tracked in .orch/followups.md as a real protocol
-// port for a dedicated unit, not fixed here.
-function sendFogTransition(_ent: EdictT, _instant: boolean): void {
-  throw new Error("P_ForceFogTransition (svc_fog write): not yet ported -- see p_client.cpp:1788-1910's packet-building tail; now reachable via g_trigger.ts's real trigger_fog, see file header");
+// 1794-1910's packet-building tail, ported for real (2026-08-30, KEX demo
+// playback unit). A ~14-field optional bitmask packet: each field is
+// conditionally written only when it differs between `client.fog`/
+// `client.heightfog` (the client's currently-acknowledged fog state) and
+// `client.pers.wanted_fog`/`wanted_heightfog` (the state a `trigger_fog`
+// volume -- g_trigger.ts's real `trigger_fog_touch`/`SP_trigger_fog` --
+// wants it to become). Byte layout verified against q2proto's independent
+// reference decoder, ~/Projects/q2proto/src/q2proto_proto_q2repro.c:818-882
+// `q2proto_q2repro_client_read_fog` (the read side this write side must
+// match bit-for-bit): bits byte (+ a second bits byte iff BIT_MORE_BITS is
+// set), then density(float)+skyfactor(byte), r/g/b(byte each), time(short),
+// hf_falloff(float), hf_density(float), start r/g/b(byte each),
+// start_dist(long), end r/g/b(byte each), end_dist(long) -- each field
+// present only when its bit is set, in that exact order. The matching
+// read-side decoder lives in qcommon/protocol/q2repro.ts's `readFog`
+// (protocol 1038's own home for this format) and is reused as-is by
+// qcommon/protocol/kexdemo.ts's demo-playback reader, mirroring
+// q2proto_proto_kex.c:266-267's own reuse of the identical q2repro decoder
+// for KEX-native demos.
+function sendFogTransition(ent: EdictT, instant: boolean): void {
+  const client = ent.client;
+  if (client === null) return;
+
+  const wantedFog = client.pers.wanted_fog;
+  const currentFog = client.fog;
+  const wantedHf = client.pers.wanted_heightfog;
+  const hf = client.heightfog;
+
+  let bits = 0;
+  let density = 0;
+  let skyfactor = 0;
+  let red = 0;
+  let green = 0;
+  let blue = 0;
+  let time = 0;
+  let hf_falloff = 0;
+  let hf_density = 0;
+  let hf_start_r = 0;
+  let hf_start_g = 0;
+  let hf_start_b = 0;
+  let hf_start_dist = 0;
+  let hf_end_r = 0;
+  let hf_end_g = 0;
+  let hf_end_b = 0;
+  let hf_end_dist = 0;
+
+  // check regular fog
+  if (wantedFog[0] !== currentFog[0] || wantedFog[4] !== currentFog[4]) {
+    bits |= SvcFogDataBitsT.BIT_DENSITY;
+    density = wantedFog[0];
+    skyfactor = wantedFog[4] * 255;
+  }
+  if (wantedFog[1] !== currentFog[1]) {
+    bits |= SvcFogDataBitsT.BIT_R;
+    red = wantedFog[1] * 255;
+  }
+  if (wantedFog[2] !== currentFog[2]) {
+    bits |= SvcFogDataBitsT.BIT_G;
+    green = wantedFog[2] * 255;
+  }
+  if (wantedFog[3] !== currentFog[3]) {
+    bits |= SvcFogDataBitsT.BIT_B;
+    blue = wantedFog[3] * 255;
+  }
+
+  if (!instant && Gtime_nonzero(client.pers.fog_transition_time)) {
+    bits |= SvcFogDataBitsT.BIT_TIME;
+    time = clamp(Gtime_milliseconds(client.pers.fog_transition_time), 0, 65535);
+  }
+
+  // check heightfog stuff
+  if (hf.falloff !== wantedHf.falloff) {
+    bits |= SvcFogDataBitsT.BIT_HEIGHTFOG_FALLOFF;
+    hf_falloff = wantedHf.falloff ? wantedHf.falloff : 0;
+  }
+  if (hf.density !== wantedHf.density) {
+    bits |= SvcFogDataBitsT.BIT_HEIGHTFOG_DENSITY;
+    hf_density = wantedHf.density ? wantedHf.density : 0;
+  }
+
+  if (hf.start[0] !== wantedHf.start[0]) {
+    bits |= SvcFogDataBitsT.BIT_HEIGHTFOG_START_R;
+    hf_start_r = wantedHf.start[0] * 255;
+  }
+  if (hf.start[1] !== wantedHf.start[1]) {
+    bits |= SvcFogDataBitsT.BIT_HEIGHTFOG_START_G;
+    hf_start_g = wantedHf.start[1] * 255;
+  }
+  if (hf.start[2] !== wantedHf.start[2]) {
+    bits |= SvcFogDataBitsT.BIT_HEIGHTFOG_START_B;
+    hf_start_b = wantedHf.start[2] * 255;
+  }
+  if (hf.start[3] !== wantedHf.start[3]) {
+    bits |= SvcFogDataBitsT.BIT_HEIGHTFOG_START_DIST;
+    hf_start_dist = wantedHf.start[3];
+  }
+
+  if (hf.end[0] !== wantedHf.end[0]) {
+    bits |= SvcFogDataBitsT.BIT_HEIGHTFOG_END_R;
+    hf_end_r = wantedHf.end[0] * 255;
+  }
+  if (hf.end[1] !== wantedHf.end[1]) {
+    bits |= SvcFogDataBitsT.BIT_HEIGHTFOG_END_G;
+    hf_end_g = wantedHf.end[1] * 255;
+  }
+  if (hf.end[2] !== wantedHf.end[2]) {
+    bits |= SvcFogDataBitsT.BIT_HEIGHTFOG_END_B;
+    hf_end_b = wantedHf.end[2] * 255;
+  }
+  if (hf.end[3] !== wantedHf.end[3]) {
+    bits |= SvcFogDataBitsT.BIT_HEIGHTFOG_END_DIST;
+    hf_end_dist = wantedHf.end[3];
+  }
+
+  if (bits & 0xff00) bits |= SvcFogDataBitsT.BIT_MORE_BITS;
+
+  gi.WriteByte(ServerCommandT.svc_fog);
+
+  if (bits & SvcFogDataBitsT.BIT_MORE_BITS) gi.WriteShort(bits);
+  else gi.WriteByte(bits);
+
+  if (bits & SvcFogDataBitsT.BIT_DENSITY) {
+    gi.WriteFloat(density);
+    gi.WriteByte(skyfactor);
+  }
+  if (bits & SvcFogDataBitsT.BIT_R) gi.WriteByte(red);
+  if (bits & SvcFogDataBitsT.BIT_G) gi.WriteByte(green);
+  if (bits & SvcFogDataBitsT.BIT_B) gi.WriteByte(blue);
+  if (bits & SvcFogDataBitsT.BIT_TIME) gi.WriteShort(time);
+
+  if (bits & SvcFogDataBitsT.BIT_HEIGHTFOG_FALLOFF) gi.WriteFloat(hf_falloff);
+  if (bits & SvcFogDataBitsT.BIT_HEIGHTFOG_DENSITY) gi.WriteFloat(hf_density);
+
+  if (bits & SvcFogDataBitsT.BIT_HEIGHTFOG_START_R) gi.WriteByte(hf_start_r);
+  if (bits & SvcFogDataBitsT.BIT_HEIGHTFOG_START_G) gi.WriteByte(hf_start_g);
+  if (bits & SvcFogDataBitsT.BIT_HEIGHTFOG_START_B) gi.WriteByte(hf_start_b);
+  if (bits & SvcFogDataBitsT.BIT_HEIGHTFOG_START_DIST) gi.WriteLong(hf_start_dist);
+
+  if (bits & SvcFogDataBitsT.BIT_HEIGHTFOG_END_R) gi.WriteByte(hf_end_r);
+  if (bits & SvcFogDataBitsT.BIT_HEIGHTFOG_END_G) gi.WriteByte(hf_end_g);
+  if (bits & SvcFogDataBitsT.BIT_HEIGHTFOG_END_B) gi.WriteByte(hf_end_b);
+  if (bits & SvcFogDataBitsT.BIT_HEIGHTFOG_END_DIST) gi.WriteLong(hf_end_dist);
+
+  gi.unicast(ent, true, 0);
+
+  // ent->client->fog = ent->client->pers.wanted_fog; hf = wanted_hf; --
+  // C struct-copy assignments. This port's fields are plain mutable
+  // arrays/objects (reference types), so a bare `client.fog = wantedFog`
+  // would alias the two fields instead of copying them -- a later write to
+  // `pers.wanted_fog` (e.g. another trigger_fog touch) would then also
+  // silently mutate `client.fog`, breaking this function's own
+  // already-converged early-return guard. Copied element-by-element/
+  // field-by-field to match the C value semantics exactly.
+  client.fog = [wantedFog[0], wantedFog[1], wantedFog[2], wantedFog[3], wantedFog[4]];
+  client.heightfog = {
+    falloff: wantedHf.falloff,
+    density: wantedHf.density,
+    start: [wantedHf.start[0], wantedHf.start[1], wantedHf.start[2], wantedHf.start[3]],
+    end: [wantedHf.end[0], wantedHf.end[1], wantedHf.end[2], wantedHf.end[3]],
+  };
 }
 
 // [Paril-KEX] player s.skinnum's encode additional data: game.h:1363-1373's
@@ -1484,7 +1634,7 @@ function G_SaveLagCompensation(ent: EdictT): void {
 }
 
 // ---------------------------------------------------------------------------
-// P_ForceFogTransition -- real guard, narrow stub tail (see file header)
+// P_ForceFogTransition (see file header for the svc_fog wire-format citation)
 // ---------------------------------------------------------------------------
 
 function fogArrayEquals(a: readonly number[], b: readonly number[]): boolean {
@@ -1495,9 +1645,7 @@ function heightFogEquals(a: { start: readonly number[]; end: readonly number[]; 
   return a.falloff === b.falloff && a.density === b.density && fogArrayEquals(a.start, b.start) && fogArrayEquals(a.end, b.end);
 }
 
-/** p_client.cpp:1788-1910+: `[Paril-KEX] void P_ForceFogTransition(edict_t *ent, bool instant)`.
- *  See file header: the early-return guard is real; the svc_fog write is a
- *  narrow, cited stub. */
+/** p_client.cpp:1788-1910+: `[Paril-KEX] void P_ForceFogTransition(edict_t *ent, bool instant)`. */
 export function P_ForceFogTransition(ent: EdictT, instant: boolean): void {
   const client = ent.client;
   if (client === null) return;

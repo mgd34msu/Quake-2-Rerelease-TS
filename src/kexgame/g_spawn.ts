@@ -243,18 +243,16 @@
 //   this port line, the faithful behavior given current state is a true
 //   no-op, ported as such (not a throw).
 // - `InitHintPaths()` (rogue/g_rogue_newai.cpp:816) is called on EVERY
-//   non-deathmatch spawn (the common single-player/coop case), so it is
-//   also ported as real, narrow logic rather than a stub: its actual body
-//   just checks whether any INUSE entity has classname "hint_path" and
-//   returns immediately if none exists. WAS provably unreachable beyond
-//   that early-out (hint_path's own SP_ function used to be a registered
-//   throwing stub) -- NO LONGER TRUE as of the 2026-08-30 stale-comment
-//   sweep: rogue/g_rogue_newai.ts has since landed a real, exported
-//   `SP_hint_path`, wired into this file's own registry for real, so a map
-//   CAN spawn a `hint_path` entity today. `InitHintPaths` itself does much
-//   more than this early-out in that case (hint-chain bookkeeping) and is
-//   NOT fully ported -- see this file's own `InitHintPaths` function for
-//   the KNOWN GAP note (a real feature port, out of this sweep's scope).
+//   non-deathmatch spawn (the common single-player/coop case). WAS a local
+//   partial port here (early-out only, `hint_paths_present`/hint-chain
+//   bookkeeping unported) because `hint_path`'s own SP_ function used to be
+//   a registered throwing stub, making the rest provably unreachable.
+//   RESOLVED (2026-08-30, KEX demo playback unit): rogue/g_rogue_newai.ts
+//   has since landed a real, exported `SP_hint_path` (wired into this
+//   file's own registry) AND a real, exported `InitHintPaths` (the full
+//   hint-chain-building body); this file's own local partial port is
+//   removed in favor of a delegating import of the real one, closing the
+//   gap .orch/followups.md previously flagged.
 // - `PrecacheForRandomRespawn()` (rogue/g_rogue_newdm.cpp:141): WAS a
 //   throwing stub (reached only when `deathmatch && g_dm_random_items`,
 //   which defaults to "0"). rogue/g_rogue_newdm.ts has since landed a
@@ -348,7 +346,7 @@ import {
 import { SpawnFlags_from, SpawnFlags_and, SpawnFlags_not, SpawnFlags_has } from "./spawnflags";
 import { clamp } from "./q_std";
 import { gi, g_edicts, game, globals, level, defaultEdict } from "./g_main_globals";
-import { G_Spawn, G_FreeEdict, G_FindByString } from "./g_utils";
+import { G_Spawn, G_FreeEdict } from "./g_utils";
 import { GetItemByIndex, PrecacheItem, SetItemNames, FindItemByClassname, itemlist, SpawnItem } from "./g_items";
 import { setup_shadow_lights } from "./g_misc";
 import { StatusbarT } from "./g_statusbar";
@@ -476,7 +474,7 @@ import { SP_monster_fixbot } from "./m_xatrix_fixbot";
 import { SP_monster_gekk } from "./m_xatrix_gekk";
 import { SP_func_plat2 } from "./rogue/g_rogue_func";
 import { SP_misc_nuke_core } from "./rogue/g_rogue_misc";
-import { SP_hint_path } from "./rogue/g_rogue_newai";
+import { InitHintPaths, SP_hint_path } from "./rogue/g_rogue_newai";
 import { SP_func_door_secret2, SP_func_force_wall } from "./rogue/g_rogue_newfnc";
 import { SP_target_anger, SP_target_blacklight, SP_target_killplayers, SP_target_orb, SP_target_steam } from "./rogue/g_rogue_newtarg";
 import { SP_info_teleport_destination, SP_trigger_disguise, SP_trigger_teleport } from "./rogue/g_rogue_newtrig";
@@ -1448,27 +1446,16 @@ function CTFSpawn(): void {
   // line -- see file header.
 }
 
-// KNOWN GAP (found during the 2026-08-30 stale-comment sweep, not fixed by
-// it): this comment used to claim `hint_path`'s own SP_ function was still
-// a registered throwing stub, making the early-out below provably
-// unreachable. That is no longer true -- rogue/g_rogue_newai.ts has since
-// landed a real, exported `SP_hint_path`, and this file's own `spawns`
-// registry (see the "hint_path" entry above) already wires it in for real,
-// so a map CAN successfully spawn `hint_path` entities today. The real
-// InitHintPaths() (rogue/g_rogue_newai.cpp:814-855) does substantially more
-// than this early-out once `found !== null`: it sets `hint_paths_present`,
-// then walks every hint_path entity building `hint_path_start`/chain-link
-// bookkeeping (`MAX_HINT_CHAINS` navigation chains) that this port line has
-// nowhere to store yet. Porting that is a real feature port (monster
-// navigation-hint chains), not a comment fix -- out of this sweep's scope;
-// left as a real correctness gap and reported to .orch/followups.md rather
-// than silently building on top of the now-incorrect old comment.
-function InitHintPaths(): void {
-  const found = G_FindByString(null, "classname", "hint_path");
-  if (found === null) return;
-  // See the KNOWN GAP note above: this branch IS reachable now, and the
-  // real function does much more here than return -- not yet ported.
-}
+// InitHintPaths: formerly a local partial port here (an early-out-only
+// stub that never built the hint-chain bookkeeping) -- rogue/g_rogue_newai.ts
+// has since landed a real, exported `InitHintPaths` (rogue/g_rogue_newai.cpp:
+// 814-855: sets `hint_paths_present` and walks every hint_path entity
+// building `hint_path_start`/chain-link bookkeeping); swapped for a
+// delegating import (2026-08-30 KEX demo playback unit, closing the gap
+// .orch/followups.md flagged). `SP_hint_path` (imported above) already
+// wires a real spawn function into this file's own `spawns` registry, so a
+// map CAN spawn `hint_path` entities and reach this real function's
+// hint-chain-building branch, not just the early-out.
 
 // PrecacheForRandomRespawn: formerly a local throwing stub here --
 // rogue/g_rogue_newdm.ts has since landed with a real, exported version;

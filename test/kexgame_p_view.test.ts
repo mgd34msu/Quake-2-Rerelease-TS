@@ -59,7 +59,7 @@ import { describe, test, expect } from "bun:test";
 import { vec3 } from "../src/shared/math";
 import { CplaneT, CvarT } from "../src/shared/q_shared";
 import type { KexGameExports, KexGameImports, KexTraceT, KexPlayerStateT, KexPmoveStateT, KexUsercmdT } from "../src/kexapi/game";
-import { GAME_API_VERSION, MAX_STATS, RenderfxT, SolidT } from "../src/kexapi/game";
+import { GAME_API_VERSION, MAX_STATS, RenderfxT, SolidT, ServerCommandT } from "../src/kexapi/game";
 import { PITCH, ROLL, YAW } from "../src/kexgame/q_std";
 import {
   type EdictT,
@@ -76,8 +76,11 @@ import {
 import { defaultEdict, gi, globals, game, level, g_edicts, SetGameImports, SetGameExports, SetGEdicts } from "../src/kexgame/g_main_globals";
 import { Gtime_add, Gtime_from_ms, Gtime_subtract } from "../src/kexgame/gtime";
 import { AngleVectors, vec3_dot, vec3_normalized, vec3_sub } from "../src/kexgame/q_vec3";
-import { ClientEndServerFrame, P_DamageFeedback, SV_CalcBlend } from "../src/kexgame/p_view";
+import { ClientEndServerFrame, P_DamageFeedback, P_ForceFogTransition, SV_CalcBlend } from "../src/kexgame/p_view";
 import { G_CheckChaseStats, G_GetAmmoStat, G_SetAmmoStat, G_SetSpectatorStats, G_SetStats, NUM_AMMO_STATS, PlayerStatT } from "../src/kexgame/p_hud";
+import { net_message } from "../src/qcommon/net_chan";
+import { SZ_Clear, MSG_BeginReading, MSG_WriteByte, MSG_WriteShort, MSG_WriteFloat, MSG_WriteLong, MSG_ReadByte } from "../src/qcommon/sizebuf";
+import { readFog } from "../src/qcommon/protocol/q2repro";
 
 // ---------------------------------------------------------------------------
 // fake KexGameImports / KexGameExports fixture (mirrors
@@ -88,10 +91,11 @@ interface Recorder {
   soundCalls: string[];
   imageindexCalls: string[];
   cvars: Map<string, CvarT>;
+  unicastCalls: Array<{ reliable: boolean }>;
 }
 
 function makeRecorder(): Recorder {
-  return { soundCalls: [], imageindexCalls: [], cvars: new Map() };
+  return { soundCalls: [], imageindexCalls: [], cvars: new Map(), unicastCalls: [] };
 }
 
 const noHitTrace: KexTraceT = {
@@ -176,12 +180,27 @@ function makeFakeGameImports(rec: Recorder): KexGameImports {
       return 0;
     },
     multicast() {},
-    unicast() {},
+    unicast(_ent, reliable) {
+      rec.unicastCalls.push({ reliable });
+    },
     WriteChar() {},
-    WriteByte() {},
-    WriteShort() {},
-    WriteLong() {},
-    WriteFloat() {},
+    // Route the svc_fog wire bytes into the real net_message SizeBuf so
+    // this suite's P_ForceFogTransition tests below can round-trip them
+    // through q2repro.ts's real `readFog` decoder -- every other test in
+    // this file ignores gi.Write*, so this is harmless outside those tests
+    // (each clears net_message itself before asserting).
+    WriteByte(c) {
+      MSG_WriteByte(net_message, c);
+    },
+    WriteShort(c) {
+      MSG_WriteShort(net_message, c);
+    },
+    WriteLong(c) {
+      MSG_WriteLong(net_message, c);
+    },
+    WriteFloat(f) {
+      MSG_WriteFloat(net_message, f);
+    },
     WriteString() {},
     WritePosition() {},
     WriteDir() {},
@@ -981,5 +1000,143 @@ describe("Spectator stats / chase handling (p_hud.cpp:1094-1134)", () => {
 
     expect(chaser.client!.ps.stats[PlayerStatT.STAT_HEALTH]).toBe(88);
     expect(chaser.client!.ps.stats[PlayerStatT.STAT_SPECTATOR]).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P_ForceFogTransition / sendFogTransition (p_client.cpp:1788-1910's
+// svc_fog wire write) -- round-tripped through qcommon/protocol/q2repro.ts's
+// real `readFog` decoder (the gap 2 fix, KEX demo playback unit)
+// ---------------------------------------------------------------------------
+
+describe("P_ForceFogTransition (p_client.cpp:1788-1910)", () => {
+  test("no-op when wanted fog/heightfog already match the client's current state", () => {
+    const { edicts } = setupWorld(1, 8, 8);
+    const ent = makePlayerEdict(edicts, 1);
+    const client = ent.client!;
+    // fog/heightfog and pers.wanted_fog/wanted_heightfog both start at their
+    // makeClient()/makeClientPersistant() zero defaults -- already equal.
+
+    SZ_Clear(net_message);
+    P_ForceFogTransition(ent, false);
+
+    expect(net_message.cursize).toBe(0); // nothing written at all
+  });
+
+  test("global fog change (density/skyfactor/r/g/b) writes svc_fog and readFog decodes it back exactly", () => {
+    const { edicts } = setupWorld(1, 8, 8);
+    const ent = makePlayerEdict(edicts, 1);
+    const client = ent.client!;
+
+    client.pers.wanted_fog = [0.5, 50 / 255, 100 / 255, 200 / 255, 25 / 255];
+    // heightfog left equal (defaults) -- no HEIGHTFOG_* bits should be set.
+
+    SZ_Clear(net_message);
+    P_ForceFogTransition(ent, false);
+
+    expect(net_message.cursize).toBeGreaterThan(0);
+    MSG_BeginReading(net_message);
+    expect(MSG_ReadByte(net_message)).toBe(ServerCommandT.svc_fog);
+
+    const fog = readFog();
+    const BITS = { DENSITY: 1, R: 2, G: 4, B: 8, MORE: 128 };
+    expect(fog.bits & BITS.DENSITY).toBeTruthy();
+    expect(fog.bits & BITS.R).toBeTruthy();
+    expect(fog.bits & BITS.G).toBeTruthy();
+    expect(fog.bits & BITS.B).toBeTruthy();
+    expect(fog.bits & BITS.MORE).toBeFalsy(); // no heightfog bits set
+    expect(fog.density).toBeCloseTo(0.5, 6);
+    expect(fog.skyfactor).toBe(25);
+    expect(fog.red).toBe(50);
+    expect(fog.green).toBe(100);
+    expect(fog.blue).toBe(200);
+    expect(fog.time).toBe(0); // BIT_TIME not set
+
+    // sendFogTransition's post-write struct-copy: client.fog now matches
+    // the wanted value (and is a genuine copy, not an alias -- see p_view.ts's
+    // own comment on this exact point).
+    expect(client.fog).toEqual(client.pers.wanted_fog);
+    expect(client.fog).not.toBe(client.pers.wanted_fog);
+  });
+
+  test("fog_transition_time sets BIT_TIME with the clamped millisecond value, but only when instant=false", () => {
+    const { edicts } = setupWorld(1, 8, 8);
+    const ent = makePlayerEdict(edicts, 1);
+    const client = ent.client!;
+
+    client.pers.wanted_fog = [0.25, 0, 0, 0, 0];
+    client.pers.fog_transition_time = Gtime_from_ms(2500);
+
+    SZ_Clear(net_message);
+    P_ForceFogTransition(ent, false);
+    MSG_BeginReading(net_message);
+    expect(MSG_ReadByte(net_message)).toBe(ServerCommandT.svc_fog);
+    const fog = readFog();
+    expect(fog.bits & 16).toBeTruthy(); // BIT_TIME
+    expect(fog.time).toBe(2500);
+
+    // instant=true suppresses BIT_TIME even though fog_transition_time is
+    // still nonzero -- re-diverge fog first (the prior call already
+    // converged client.fog to the wanted value, per the C++'s own
+    // early-return guard).
+    client.pers.wanted_fog = [0.75, 0, 0, 0, 0];
+    SZ_Clear(net_message);
+    P_ForceFogTransition(ent, true);
+    MSG_BeginReading(net_message);
+    expect(MSG_ReadByte(net_message)).toBe(ServerCommandT.svc_fog);
+    const fog2 = readFog();
+    expect(fog2.bits & 16).toBeFalsy(); // BIT_TIME NOT set (instant)
+  });
+
+  test("heightfog field changes set BIT_MORE_BITS (a second bits byte) and decode exactly", () => {
+    const { edicts } = setupWorld(1, 8, 8);
+    const ent = makePlayerEdict(edicts, 1);
+    const client = ent.client!;
+
+    client.pers.wanted_heightfog = {
+      falloff: 0.5,
+      density: 0.25,
+      start: [10 / 255, 20 / 255, 30 / 255, 100],
+      end: [40 / 255, 50 / 255, 60 / 255, 500],
+    };
+
+    SZ_Clear(net_message);
+    P_ForceFogTransition(ent, false);
+    MSG_BeginReading(net_message);
+    expect(MSG_ReadByte(net_message)).toBe(ServerCommandT.svc_fog);
+
+    const fog = readFog();
+    const BITS = {
+      MORE: 128,
+      HF_FALLOFF: 32,
+      HF_DENSITY: 64,
+      HF_START_R: 256,
+      HF_START_G: 512,
+      HF_START_B: 1024,
+      HF_START_DIST: 2048,
+      HF_END_R: 4096,
+      HF_END_G: 8192,
+      HF_END_B: 16384,
+      HF_END_DIST: 32768,
+    };
+    expect(fog.bits & BITS.MORE).toBeTruthy();
+    for (const bit of Object.values(BITS)) {
+      if (bit === BITS.MORE) continue;
+      expect(fog.bits & bit).toBeTruthy();
+    }
+    expect(fog.hf_falloff).toBeCloseTo(0.5, 6);
+    expect(fog.hf_density).toBeCloseTo(0.25, 6);
+    expect(fog.hf_start_r).toBe(10);
+    expect(fog.hf_start_g).toBe(20);
+    expect(fog.hf_start_b).toBe(30);
+    expect(fog.hf_start_dist).toBe(100);
+    expect(fog.hf_end_r).toBe(40);
+    expect(fog.hf_end_g).toBe(50);
+    expect(fog.hf_end_b).toBe(60);
+    expect(fog.hf_end_dist).toBe(500);
+
+    expect(client.heightfog).toEqual(client.pers.wanted_heightfog);
+    expect(client.heightfog).not.toBe(client.pers.wanted_heightfog);
+    expect(client.heightfog.start).not.toBe(client.pers.wanted_heightfog.start);
   });
 });

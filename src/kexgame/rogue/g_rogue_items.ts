@@ -65,37 +65,45 @@
 // `CreateMonster`/`CreateFlyMonster`, unrelated functions from the same
 // C++ source file -- the earlier "STILL genuinely unported" note in this
 // same paragraph was wrong, having checked only that file and not
-// m_medic.ts. HOWEVER, m_medic.ts's versions use a MATERIALLY DIFFERENT
-// calling convention than this file's own local stubs below expect:
-// `FindSpawnPoint` there is `(startpoint, mins, maxs, _maxMoveUp, drop =
-// true): Vec3 | null` (5 params, direct return) vs. the real C++'s 6-param
-// `(startPoint, mins, maxs, spawnPoint&, dist, inSolidCheck): bool`
-// out-param style this file's stub mirrors -- `_maxMoveUp` does not
-// obviously correspond to `dist` positionally, and it is not safe to
-// assume they are interchangeable without re-deriving m_medic.ts's
-// version against the real C++ body line-by-line. Reconciling the two
-// signatures (and verifying which callers of each need which semantics)
-// is real, careful work belonging to a dedicated unit, not a safe
-// same-session swap -- left as local throwing stubs here, NOT swapped
-// yet, and reported precisely (not vaguely) in .orch/followups.md.
+// m_medic.ts. That same earlier pass also mis-cited the real C++
+// signature as `(startPoint, mins, maxs, spawnPoint&, dist,
+// inSolidCheck): bool` -- the ACTUAL header declaration
+// (g_local.h:2589) is `bool FindSpawnPoint(const vec3_t &startpoint,
+// const vec3_t &mins, const vec3_t &maxs, vec3_t &spawnpoint, float
+// maxMoveUp, bool drop = true)`, i.e. `maxMoveUp`/`drop`, not
+// `dist`/`inSolidCheck` -- which DOES correspond positionally to
+// m_medic.ts's `(startpoint, mins, maxs, _maxMoveUp, drop = true): Vec3 |
+// null` (`_maxMoveUp` <-> `maxMoveUp`, `drop` <-> `drop`, `null` standing
+// in for `false`, matching this port line's C-bool-to-nullable-return
+// convention). RECONCILED (2026-08-30, KEX demo playback unit):
+// `FindSpawnPoint`/`CheckGroundSpawnPoint`/`SpawnGrow_Spawn` are now real
+// imports from m_medic.ts; `Use_Doppleganger` below is rewritten to the
+// direct-return calling convention (`const spawnPt = FindSpawnPoint(...);
+// if (spawnPt === null) return;`), matching m_medic.ts's own call sites
+// (e.g. `HandleReinforcements`) and the C++ call site
+// (rogue/g_rogue_items.cpp:78, which omits `drop`, taking the header's
+// `= true` default -- m_medic.ts's own default matches).
+// `CheckGroundSpawnPoint`/`SpawnGrow_Spawn`'s stub signatures already
+// matched m_medic.ts's real ones exactly (same param names/order/types);
+// only `FindSpawnPoint`'s call site needed rewriting.
 //
 // ============================================================================
-// NOT SWAPPED (out of this unit's edit scope) -- reported to the coordinator
+// SWAPPED -- g_items.ts (2026-08-30, KEX demo playback unit)
 // ============================================================================
-// g_items.ts's own local throwing stub for `Use_Doppleganger` is a
-// SEPARATE copy from the real one below (not the same function object) --
-// NOT swapped for an import from here (this file's own `Use_Doppleganger`
-// itself still can't run for real either -- see the CORRECTION above).
-// `Use_Nuke`'s own g_items.ts stub WAS swapped (real import from
-// g_items.ts's own dependency, `fire_nuke`, landing directly there) in the
-// 2026-08-30 cleanup sweep -- see g_items.ts's own header.
+// g_items.ts's own local throwing stub for `Use_Doppleganger` was a
+// SEPARATE copy from the real one below (not the same function object).
+// Now swapped for a delegating import from here, matching `Use_Nuke`'s
+// own precedent exactly (g_items.ts's local `Use_Nuke` already delegates
+// to `RogueUse_Nuke`, the real import aliased from this file) -- see
+// g_items.ts's own header.
 
-import { type Vec3, vec3 } from "../../shared/math";
+import { vec3 } from "../../shared/math";
 import { PITCH, YAW, ROLL } from "../../shared/q_shared";
 import type { EdictT, GClientT, GitemT } from "../g_local";
 import { AngleVectors, vec3_add, vec3_muls } from "../q_vec3";
 import { fire_doppleganger } from "./g_rogue_newdm";
 import { fire_nuke } from "./g_rogue_newweap";
+import { CheckGroundSpawnPoint, FindSpawnPoint, SpawnGrow_Spawn } from "../m_medic";
 
 function requireClient(ent: EdictT, fnName: string): GClientT {
   if (ent.client === null) {
@@ -110,27 +118,25 @@ function requireClient(ent: EdictT, fnName: string): GClientT {
 // exported `fire_nuke`; imported for real above (2026-08-30 stale-comment
 // sweep).
 
-/** rogue/g_rogue_spawn.cpp:79: `bool FindSpawnPoint(const vec3_t
- *  &startPoint, const vec3_t &mins, const vec3_t &maxs, vec3_t
- *  &spawnPoint, float dist, bool inSolidCheck)` -- func/trig/targ/spawn
- *  cluster, not this unit's file scope. */
-function FindSpawnPoint(_startPoint: Vec3, _mins: Vec3, _maxs: Vec3, _spawnPointOut: [Vec3], _dist: number): boolean {
-  throw new Error("FindSpawnPoint: not yet ported (pending g_rogue_spawn.ts, see rogue/g_rogue_spawn.cpp:79)");
-}
-
-/** rogue/g_rogue_spawn.cpp:139: `bool CheckGroundSpawnPoint(const vec3_t
- *  &origin, const vec3_t &entMins, const vec3_t &entMaxs, float height,
- *  int drop)` -- func/trig/targ/spawn cluster, not this unit's file scope. */
-function CheckGroundSpawnPoint(_origin: Vec3, _entMins: Vec3, _entMaxs: Vec3, _height: number, _drop: number): boolean {
-  throw new Error("CheckGroundSpawnPoint: not yet ported (pending g_rogue_spawn.ts, see rogue/g_rogue_spawn.cpp:139)");
-}
-
-/** rogue/g_rogue_spawn.cpp:200: `edict_t *SpawnGrow_Spawn(const vec3_t
- *  &startpos, float start_size, float end_size)` -- func/trig/targ/spawn
- *  cluster, not this unit's file scope. */
-function SpawnGrow_Spawn(_startpos: Vec3, _start_size: number, _end_size: number): void {
-  throw new Error("SpawnGrow_Spawn: not yet ported (pending g_rogue_spawn.ts, see rogue/g_rogue_spawn.cpp:200)");
-}
+// FindSpawnPoint/CheckGroundSpawnPoint/SpawnGrow_Spawn (rogue/g_rogue_spawn.cpp:
+// 79/139/200): formerly local throwing stubs here, cited to a signature
+// (`FindSpawnPoint(startPoint, mins, maxs, spawnPointOut: [Vec3], dist):
+// boolean`, an out-param+bool-return shape) that does NOT match the real
+// C++ declaration (g_local.h:2589: `bool FindSpawnPoint(startpoint, mins,
+// maxs, spawnpoint, maxMoveUp, drop = true)` -- 6 params, `drop` defaulted
+// true, still out-param+bool on the C++ side) OR m_medic.ts's real, exported
+// port of it (`FindSpawnPoint(startpoint, mins, maxs, _maxMoveUp, drop =
+// true): Vec3 | null` -- direct-return, `null` standing in for the C++'s
+// `false`). RECONCILED (2026-08-30, KEX demo playback unit): imported for
+// real from m_medic.ts above; `Use_Doppleganger` below is rewritten to the
+// direct-return calling convention m_medic.ts's own call sites already use
+// (e.g. `HandleReinforcements`), matching the C++'s own call site
+// (rogue/g_rogue_items.cpp:78, which omits the `drop` argument entirely,
+// taking the header's `= true` default -- m_medic.ts's `drop = true`
+// default matches). `CheckGroundSpawnPoint`/`SpawnGrow_Spawn`'s stub
+// signatures already matched m_medic.ts's real ones exactly (same
+// param names/order/types); only `FindSpawnPoint`'s call site needed
+// rewriting.
 
 /** rogue/g_rogue_items.cpp:51-63: `void Use_Nuke(edict_t *ent, gitem_t *item)`. */
 export function Use_Nuke(ent: EdictT, item: GitemT): void {
@@ -160,9 +166,8 @@ export function Use_Doppleganger(ent: EdictT, item: GitemT): void {
 
   const createPt = vec3_add(ent.s.origin, vec3_muls(forward, 48));
 
-  const spawnPtBox: [Vec3] = [vec3()];
-  if (!FindSpawnPoint(createPt, ent.mins, ent.maxs, spawnPtBox, 32)) return;
-  const spawnPt = spawnPtBox[0];
+  const spawnPt = FindSpawnPoint(createPt, ent.mins, ent.maxs, 32);
+  if (spawnPt === null) return;
 
   if (!CheckGroundSpawnPoint(spawnPt, ent.mins, ent.maxs, 64, -1)) return;
 

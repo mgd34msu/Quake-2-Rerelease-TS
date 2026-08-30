@@ -10,6 +10,25 @@ import { cl, cls, ConnstateT, svc_strings, clCvars, cl_entities, type Clientinfo
 import type { ProtocolCodec } from "../qcommon/protocol/codec";
 import { VANILLA_CODEC } from "../qcommon/protocol/vanilla";
 import { Q2REPRO_CODEC } from "../qcommon/protocol/q2repro";
+import {
+  KEX_DEMO_CODEC,
+  PROTOCOL_KEX_DEMOS,
+  PROTOCOL_KEX,
+  setKexProtocol,
+  isKexDemoProtocol,
+  readSoundKex,
+  readSplitclientKex,
+  readConfigblastKex,
+  readSpawnbaselineblastKex,
+  readDamageKex,
+  readLocprintKex,
+  readFog,
+  readPoiKex,
+  readHelpPathKex,
+  readMuzzleflash3Kex,
+  readAchievementKex,
+} from "../qcommon/protocol/kexdemo";
+import { ServerCommandT } from "../kexapi/game";
 import { type CsRemapT, CS_REMAP_OLD, CS_REMAP_RERELEASE } from "../shared/cs_remap";
 import {
   EntityStateT,
@@ -294,6 +313,22 @@ export function CL_ParseDownload(): void {
 // TypeScript's definite-assignment analysis for the fallthrough return below
 // without needing an explicit unreachable branch.
 export function selectServerCodec(protocol: number): { codec: ProtocolCodec; csr: CsRemapT } {
+  // KEX demo playback unit (.orch/RESUME.md "v1.0.0 REQUIRES ... KEX demo
+  // playback"): protocol numbers 2022 (PROTOCOL_KEX_DEMOS, real recorded
+  // demos) and 2023 (PROTOCOL_KEX, live native-engine traffic -- never
+  // emitted by this engine's own server, but decodable) both select
+  // kexdemo.ts's KEX_DEMO_CODEC, exactly mirroring
+  // q2proto_proto_kex.c:341-342's own protocol-number range check (this is
+  // the ENTIRE detection mechanism -- verified against q2repro's own demo.c:
+  // there is no separate file-header magic; a real client detects a KEX
+  // stream purely from its first svc_serverdata message's protocol number,
+  // same as any other connect). `setKexProtocol` records which of the two
+  // was seen -- kexdemo.ts's readDeltaEntity/readSoundKex need it to decide
+  // origin/old_origin/SND_POS precision (see that file's own header).
+  if (protocol === PROTOCOL_KEX_DEMOS || protocol === PROTOCOL_KEX) {
+    setKexProtocol(protocol);
+    return { codec: KEX_DEMO_CODEC, csr: CS_REMAP_RERELEASE };
+  }
   if (protocol === PROTOCOL_VERSION_RERELEASE) {
     return { codec: Q2REPRO_CODEC, csr: CS_REMAP_RERELEASE };
   }
@@ -624,6 +659,17 @@ export function CL_ParseStartSoundPacket(): void {
   S_StartSound(pos, ent, channel, cl.sound_precache[sound_num], volume, attenuation, ofs);
 }
 
+// KEX demo playback unit: the KEX-format svc_sound counterpart to
+// CL_ParseStartSoundPacket above -- see kexdemo.ts's readSoundKex for the
+// byte-layout citation (genuinely different from vanilla's: u16 index,
+// SND_KEX_LARGE_ENT-widened entchan, demo-precision SND_POS).
+function CL_ParseStartSoundPacketKex(): void {
+  const sound = readSoundKex();
+  if (sound.entity > MAX_EDICTS) Com_Error(ERR_DROP, "CL_ParseStartSoundPacketKex: ent = %i", sound.entity);
+  if (!cl.sound_precache[sound.index]) return;
+  S_StartSound(sound.pos, sound.entity, sound.channel, cl.sound_precache[sound.index], sound.volume, sound.attenuation, sound.timeofs);
+}
+
 export function SHOWNET(s: string): void {
   if (clCvars.cl_shownet && clCvars.cl_shownet.value >= 2) {
     Com_Printf("%3i:%s\n", net_message.readcount - 1, s);
@@ -715,7 +761,13 @@ export function CL_ParseServerMessage(): void {
         break;
 
       case SvcOpsT.svc_sound:
-        CL_ParseStartSoundPacket();
+        // KEX demo playback unit: KEX's svc_sound is a genuinely different
+        // byte layout (u16 index, SND_KEX_LARGE_ENT-widened entchan,
+        // demo-precision SND_POS) from vanilla's -- see kexdemo.ts's own
+        // readSoundKex header comment. Never reached for a genuine vanilla
+        // stream (cls.codec stays VANILLA_CODEC/Q2REPRO_CODEC there).
+        if (cls.codec === KEX_DEMO_CODEC) CL_ParseStartSoundPacketKex();
+        else CL_ParseStartSoundPacket();
         break;
 
       case SvcOpsT.svc_spawnbaseline:
@@ -723,6 +775,15 @@ export function CL_ParseServerMessage(): void {
         break;
 
       case SvcOpsT.svc_temp_entity:
+        // KEX demos (2022) use the SAME "short" temp-entity layout as
+        // vanilla (kex.c:213-220's own protocol branch) -- CL_ParseTEnt is
+        // reused unchanged. Live-2023 traffic uses a different float layout
+        // this port does not implement (kexdemo.ts SCOPE CUTS; this
+        // engine's own server never speaks 2023, so no real code path here
+        // can produce it) -- throws rather than silently misdecoding.
+        if (cls.codec === KEX_DEMO_CODEC && !isKexDemoProtocol()) {
+          Com_Error(ERR_DROP, "CL_ParseServerMessage: KEX protocol 2023's float svc_temp_entity format is not implemented");
+        }
         CL_ParseTEnt();
         break;
 
@@ -751,6 +812,61 @@ export function CL_ParseServerMessage(): void {
         cl.layout = s;
         break;
       }
+
+      // KEX demo playback unit: the KEX-only auxiliary opcodes (kex.c's
+      // dispatch table, opcodes 21-33 minus the unused 24/28/29 gaps --
+      // kexdemo.ts's file header). Numerically these are ServerCommandT's
+      // values (kexapi/game.ts), which share SvcOpsT's own numbering for
+      // every opcode both enums define (verified: svc_bad..svc_frame are
+      // identical in both) -- mixing case labels from the two enums against
+      // this same `cmd: number` switch is safe. Every case here is
+      // UNREACHABLE for a genuine vanilla (protocol 34) stream: vanilla's
+      // own game/server code never emits a byte value this high. Each
+      // reader below consumes exactly its message's bytes (keeping the
+      // stream byte-aligned, this unit's "parse all messages without
+      // error" bar) but does not yet apply its content to client state --
+      // narrower than full 1038/KEX live-network client support (a real,
+      // separate, larger gap this unit does not close -- see this file's
+      // own report).
+      case ServerCommandT.svc_splitclient:
+        readSplitclientKex();
+        break;
+
+      case ServerCommandT.svc_configblast:
+        readConfigblastKex(); // decoded for real; NOT applied to cl.configstrings (see report)
+        break;
+
+      case ServerCommandT.svc_spawnbaselineblast:
+        readSpawnbaselineblastKex(); // decoded for real; NOT applied to cl_entities baselines (see report)
+        break;
+
+      case ServerCommandT.svc_damage:
+        readDamageKex();
+        break;
+
+      case ServerCommandT.svc_locprint:
+        readLocprintKex();
+        break;
+
+      case ServerCommandT.svc_fog:
+        readFog();
+        break;
+
+      case ServerCommandT.svc_poi:
+        readPoiKex();
+        break;
+
+      case ServerCommandT.svc_help_path:
+        readHelpPathKex();
+        break;
+
+      case ServerCommandT.svc_muzzleflash3:
+        readMuzzleflash3Kex();
+        break;
+
+      case ServerCommandT.svc_achievement:
+        readAchievementKex();
+        break;
 
       case SvcOpsT.svc_playerinfo:
       case SvcOpsT.svc_packetentities:

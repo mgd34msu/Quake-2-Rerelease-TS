@@ -106,12 +106,12 @@
 //     reached by Pickup_Health/MegaHealth_think on every mega-health pickup.
 //   - Pickup_Nuke/Use_IR/Use_Double/Pickup_Doppleganger (all
 //     rogue/g_rogue_items.cpp): each is pure inventory/cvar/timer logic with
-//     no further cross-deps. Their sibling Use_Nuke (which calls fire_nuke)
-//     is now a real delegating import too (rogue/g_rogue_newweap.ts landed);
-//     Use_Doppleganger (which also needs FindSpawnPoint+
-//     CheckGroundSpawnPoint+SpawnGrow_Spawn -- real in m_medic.ts, but
-//     under a materially different calling convention needing
-//     reconciliation, not a plain import) stays a stub.
+//     no further cross-deps. Their siblings Use_Nuke (which calls
+//     fire_nuke) and Use_Doppleganger (which needs FindSpawnPoint+
+//     CheckGroundSpawnPoint+SpawnGrow_Spawn) are now both real delegating
+//     imports too (rogue/g_rogue_newweap.ts landed; m_medic.ts's real trio
+//     reconciled into rogue/g_rogue_items.ts's own Use_Doppleganger,
+//     2026-08-30 KEX demo playback unit -- see that file's own header).
 //   - Pickup_Sphere + Use_Defender/Use_Hunter/Use_Vengeance (all
 //     rogue/g_rogue_items.cpp): the owned_sphere guard + inventory decrement
 //     wrapper logic is ported for real; the actual
@@ -155,14 +155,15 @@
 // rogue/g_rogue_sphere.ts's `Sphere_Spawn`/`Own_Sphere`) have since landed
 // for real, so all four are now delegating-wrapper imports from
 // rogue/g_rogue_items.ts's/rogue/g_rogue_sphere.ts's real, exported copies
-// (2026-08-30 stale-comment sweep). Use_Doppleganger remains a genuine
-// local throwing stub: it needs FindSpawnPoint/CheckGroundSpawnPoint/
-// SpawnGrow_Spawn (rogue/g_rogue_spawn.cpp:79/139/200). These are NOT
-// actually unported (m_medic.ts has real, cited versions of all three) but
-// use a materially different calling convention than this stub's callers
-// expect, so swapping them in is real reconciliation work, not a same-day
-// safe import -- see rogue/g_rogue_items.ts's
-// own header for the current state of that gap.
+// (2026-08-30 stale-comment sweep). Use_Doppleganger is ALSO now a
+// delegating-wrapper import (2026-08-30, KEX demo playback unit):
+// rogue/g_rogue_items.ts's own copy needed FindSpawnPoint/
+// CheckGroundSpawnPoint/SpawnGrow_Spawn (rogue/g_rogue_spawn.cpp:
+// 79/139/200), real in m_medic.ts but under a materially different
+// calling convention than that file's own former local stubs mirrored --
+// reconciled there (direct-return calling convention, matching m_medic.ts's
+// own call sites); see rogue/g_rogue_items.ts's own header for the
+// derivation.
 // CTF (ctf/g_ctf.cpp, not ported anywhere yet): CTFPickup_Flag, CTFDrop_Flag,
 // CTFPickup_Tech, CTFDrop_Tech, CTFFlagSetup.
 // P_UseCoopInstancedItems (p_client.cpp:90, guarded by coop, default ON):
@@ -337,7 +338,7 @@ import {
   Weapon_Tesla as P_Weapon_Tesla,
   Weapon_ProxLauncher as P_Weapon_ProxLauncher,
 } from "./rogue/p_rogue_weapon";
-import { Use_Nuke as RogueUse_Nuke } from "./rogue/g_rogue_items";
+import { Use_Nuke as RogueUse_Nuke, Use_Doppleganger as RogueUse_Doppleganger } from "./rogue/g_rogue_items";
 import { Defender_Launch as RogueDefender_Launch, Hunter_Launch as RogueHunter_Launch, Vengeance_Launch as RogueVengeance_Launch } from "./rogue/g_rogue_sphere";
 import { ChaseNext as RealChaseNext } from "./g_chase";
 import { GetUnicastKey } from "./g_weapon";
@@ -583,18 +584,19 @@ function Weapon_ProxLauncher(ent: EdictT): void {
 function Use_Nuke(ent: EdictT, item: GitemT): void {
   RogueUse_Nuke(ent, item);
 }
-// Use_Doppleganger: STILL a real local throwing stub -- needs
+// Use_Doppleganger: formerly a local throwing stub here -- needed
 // FindSpawnPoint/CheckGroundSpawnPoint/SpawnGrow_Spawn
-// (rogue/g_rogue_spawn.cpp:79/139/200). These are NOT actually unported
-// (m_medic.ts has real, cited versions of all three, verified 2026-08-30)
-// but use a materially different calling convention than this call site
-// needs (out-param+bool vs. direct-return, differing parameter lists) --
-// reconciling them is real work for a dedicated unit, not a same-session
-// safe swap. See rogue/g_rogue_items.ts's own "CORRECTION" note for detail.
-function Use_Doppleganger(_ent: EdictT, _item: GitemT): void {
-  throw new Error(
-    "Use_Doppleganger: not yet ported (needs FindSpawnPoint (rogue/g_rogue_spawn.cpp:79)/CheckGroundSpawnPoint (rogue/g_rogue_spawn.cpp:139)/SpawnGrow_Spawn (rogue/g_rogue_spawn.cpp:200) reconciled against m_medic.ts's differently-shaped real versions; fire_doppleganger (rogue/g_rogue_newdm.cpp:242) is real)",
-  );
+// (rogue/g_rogue_spawn.cpp:79/139/200), real in m_medic.ts but under a
+// materially different calling convention (out-param+bool vs.
+// direct-return) than rogue/g_rogue_items.ts's own former local stubs
+// mirrored. RECONCILED (2026-08-30, KEX demo playback unit):
+// rogue/g_rogue_items.ts's own `Use_Doppleganger` now calls the real
+// m_medic.ts trio with the correct direct-return calling convention (see
+// that file's own header for the derivation) -- delegating wrapper, real
+// import aliased above, same shape as this file's own `Use_Nuke` wrapper
+// just above.
+function Use_Doppleganger(ent: EdictT, item: GitemT): void {
+  RogueUse_Doppleganger(ent, item);
 }
 // Defender_Launch/Hunter_Launch/Vengeance_Launch: formerly local throwing
 // stubs here -- rogue/g_rogue_sphere.ts has since landed with real,

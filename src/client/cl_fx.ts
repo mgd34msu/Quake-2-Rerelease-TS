@@ -662,7 +662,19 @@ export function CL_ParseMuzzleFlash2(): void {
   const forward = vec3();
   const right = vec3();
   AngleVectors(cl_entities[ent].current.angles, forward, right, null);
-  const offset = monsterFlashOffset()[flash_number];
+  // monsterFlashOffset() (src/game/m_flash.ts) is the CLASSIC MZ2_* table
+  // (baseq2 + rogue/xatrix mission-pack additions); it has no entries for
+  // muzzleflash indices the KEX re-release's own expanded monster roster
+  // introduced. Found via a real retail KEX-format demo file crashing
+  // playback outright on an unmapped `flash_number` (KEX demo playback
+  // unit's own task report) -- `?? vec3(0,0,0)` is a narrow crash guard,
+  // NOT a full port of the rerelease's own offset table (a separate, much
+  // larger unit: enumerating every new monster's own muzzle offsets from
+  // the rerelease source). Falling back to a zero offset only affects the
+  // exact visual/light POSITION of an unrecognized flash type; every other
+  // effect this function drives off `flash_number` (sound, particle color,
+  // etc., in the switch below) is unaffected and still runs for real.
+  const offset = monsterFlashOffset()[flash_number] ?? vec3(0, 0, 0);
   const origin = vec3();
   origin[0] = cl_entities[ent].current.origin[0] + forward[0] * offset[0] + right[0] * offset[1];
   origin[1] = cl_entities[ent].current.origin[1] + forward[1] * offset[0] + right[1] * offset[1];

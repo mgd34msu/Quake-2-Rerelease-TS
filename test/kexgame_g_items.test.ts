@@ -31,9 +31,9 @@ every documented deviation/stub this suite's design routes around):
 
 import { describe, test, expect } from "bun:test";
 import { vec3 } from "../src/shared/math";
-import { CplaneT, CvarT } from "../src/shared/q_shared";
+import { CplaneT, CvarT, YAW } from "../src/shared/q_shared";
 import type { KexTraceT, KexGameExports, KexGameImports, KexPlayerStateT, KexPmoveStateT, KexUsercmdT } from "../src/kexapi/game";
-import { GAME_API_VERSION, MAX_STATS, MAX_CLIENTS, SolidT } from "../src/kexapi/game";
+import { GAME_API_VERSION, MAX_STATS, MAX_CLIENTS, SolidT, ContentsT } from "../src/kexapi/game";
 import {
   type EdictT,
   type GClientT,
@@ -72,10 +72,13 @@ import {
 interface Recorder {
   soundCalls: { soundindex: number }[];
   cvars: Map<string, CvarT>;
-}
-
-function makeRecorder(): Recorder {
-  return { soundCalls: [], cvars: new Map() };
+  // Overridable per-test (defaults below match the pre-existing fixture's
+  // behavior exactly) -- Use_Doppleganger's FindSpawnPoint/
+  // CheckGroundSpawnPoint chain (rogue/g_rogue_items.ts) needs a trace/
+  // pointcontents result that actually represents solid ground to exercise
+  // its real, reconciled body end to end, not just its early-return paths.
+  traceResult: KexTraceT;
+  pointcontentsResult: ContentsT;
 }
 
 const noHitTrace: KexTraceT = {
@@ -90,6 +93,10 @@ const noHitTrace: KexTraceT = {
   plane2: new CplaneT(),
   surface2: null,
 };
+
+function makeRecorder(): Recorder {
+  return { soundCalls: [], cvars: new Map(), traceResult: noHitTrace, pointcontentsResult: 0 };
+}
 
 function makeFakeGameImports(rec: Recorder): KexGameImports {
   function getCvar(name: string, value: string): CvarT {
@@ -135,13 +142,13 @@ function makeFakeGameImports(rec: Recorder): KexGameImports {
     },
     setmodel() {},
     trace() {
-      return noHitTrace;
+      return rec.traceResult;
     },
     clip() {
       return noHitTrace;
     },
     pointcontents() {
-      return 0;
+      return rec.pointcontentsResult;
     },
     inPVS() {
       return false;
@@ -1046,5 +1053,68 @@ describe("SetRespawn ordering", () => {
     const solid: SolidT = ent.solid;
     expect(solid).toBe(SolidT.SOLID_NOT);
     expect(ent.think).toBe(DoRespawn);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Use_Doppleganger (rogue/g_rogue_items.cpp:65-88) -- gap fix (2026-08-30,
+// KEX demo playback unit): this file's own local `Use_Doppleganger` used to
+// be an unconditional throwing stub; it now delegates to
+// rogue/g_rogue_items.ts's real, reconciled implementation (FindSpawnPoint/
+// CheckGroundSpawnPoint/SpawnGrow_Spawn imported for real from m_medic.ts,
+// with the calling convention mismatch fixed -- see that file's own header
+// for the derivation). Reached through the real itemlist entry, matching
+// how a real Use_Item command would call it.
+// ---------------------------------------------------------------------------
+
+describe("Use_Doppleganger (rogue/g_rogue_items.cpp:65-88)", () => {
+  test("valid ground spot: spawns a doppleganger and decrements inventory", () => {
+    const { edicts, rec } = setupWorld(1, 16);
+    const ent = makePlayerEdict(edicts, 1);
+    ent.s.origin = vec3(0, 0, 100);
+    ent.client!.v_angle[YAW] = 90;
+
+    const item = itemlist[ItemIdT.IT_ITEM_DOPPELGANGER]!;
+    ent.client!.pers.inventory[item.id] = 1;
+
+    // A trace that reports solid ground directly below wherever it's cast,
+    // hitting the world entity -- satisfies CheckSpawnPoint's `tr.ent ===
+    // world` check and M_droptofloor_generic's `fraction !== 1` check in one
+    // shot. pointcontents SOLID at every corner satisfies
+    // M_CheckBottom_Fast_Generic (the CheckGroundSpawnPoint half).
+    rec.traceResult = {
+      allsolid: false,
+      startsolid: false,
+      fraction: 0.5,
+      endpos: vec3(48, 0, 90),
+      plane: new CplaneT(),
+      surface: null,
+      contents: 0,
+      ent: g_edicts[0]!,
+      plane2: new CplaneT(),
+      surface2: null,
+    };
+    rec.pointcontentsResult = ContentsT.CONTENTS_SOLID;
+
+    expect(() => item.use!(ent, item)).not.toThrow();
+
+    expect(ent.client!.pers.inventory[item.id]).toBe(0);
+    const spawned = edicts.filter((e) => e.inuse && e.classname === "doppleganger");
+    expect(spawned.length).toBe(1);
+  });
+
+  test("no valid ground spot nearby: returns early without throwing or decrementing inventory", () => {
+    const { edicts } = setupWorld(1, 8);
+    const ent = makePlayerEdict(edicts, 1);
+    ent.s.origin = vec3(0, 0, 100);
+    ent.client!.v_angle[YAW] = 0;
+    // default fixture trace (fraction: 1, no hit) / pointcontents (0, not
+    // solid) -- the real game's own "nowhere to put it" case.
+
+    const item = itemlist[ItemIdT.IT_ITEM_DOPPELGANGER]!;
+    ent.client!.pers.inventory[item.id] = 1;
+
+    expect(() => item.use!(ent, item)).not.toThrow();
+    expect(ent.client!.pers.inventory[item.id]).toBe(1); // unchanged: never reached the decrement
   });
 });

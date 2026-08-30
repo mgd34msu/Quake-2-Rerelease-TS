@@ -611,6 +611,30 @@ describe("SpawnEntities (g_spawn.cpp:1145-1275)", () => {
     const inhibited = g_edicts.find((e) => e.classname === "freed");
     expect(inhibited).toBeDefined();
   });
+
+  // gap fix (2026-08-30, KEX demo playback unit): SpawnEntities used to call
+  // a local no-op-beyond-the-early-out InitHintPaths (see this file's own
+  // header for the prior gap) -- it now delegates to
+  // rogue/g_rogue_newai.ts's real, exported InitHintPaths, which links
+  // hint_path chains (hint_chain/hint_chain_id) once the map has finished
+  // spawning. Not deathmatch (deathmatchEnabled() false by default, matching
+  // g_spawn.cpp:1262's "InitHintPaths() reached in the non-deathmatch
+  // branch" placement).
+  test("non-deathmatch spawn links hint_path chains via the real InitHintPaths", () => {
+    const entities =
+      '{ "classname" "worldspawn" }\n' +
+      '{ "classname" "hint_path" "target" "h_b" "spawnflags" "1" }\n' +
+      '{ "classname" "hint_path" "targetname" "h_b" "spawnflags" "1" }\n';
+
+    SpawnEntities("test_map", entities, "");
+
+    const hintPaths = g_edicts.filter((e) => e.classname === "hint_path");
+    expect(hintPaths.length).toBe(2);
+    const [nodeA, nodeB] = hintPaths;
+    expect(nodeA!.hint_chain).toBe(nodeB!);
+    expect(nodeA!.hint_chain_id).toBe(0);
+    expect(nodeB!.hint_chain_id).toBe(0);
+  });
 });
 
 // ---------------------------------------------------------------------------

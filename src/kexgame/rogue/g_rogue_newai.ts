@@ -99,16 +99,13 @@
 //
 // g_spawn.cpp:1262's `SpawnEntities` calls `InitHintPaths()` once, after all
 // map entities have spawned, "to enable quick exits if valid" (this file's
-// own comment on `InitHintPaths`). `InitHintPaths` is exported below but NOT
-// wired into any caller by this unit (g_spawn.ts's `SpawnEntities` is off
-// limits) -- the coordinator needs to add one call,
-// `InitHintPaths()` (imported from "./rogue/g_rogue_newai"), at the end of
-// g_spawn.ts's `SpawnEntities`, matching g_spawn.cpp:1262's placement.
-// Until that lands, `hint_paths_present` stays false forever (no code path
-// sets it otherwise), so `monsterlost_checkhint`'s early return remains the
-// only reachable branch in practice -- functionally identical to the pin it
-// replaces, but no longer hard-coded: once the coordinator wires
-// `InitHintPaths`, hint chains activate with zero further changes here.
+// own comment on `InitHintPaths`). RESOLVED (2026-08-30, KEX demo playback
+// unit): g_spawn.ts's `SpawnEntities` now imports `InitHintPaths` from here
+// and calls it at the same placement as g_spawn.cpp:1262 (in the
+// non-deathmatch branch, replacing g_spawn.ts's own former local partial
+// port). `hint_paths_present` is now set for real on any map with a
+// `hint_path` entity, so `monsterlost_checkhint`'s hint-chain search is
+// live code, not dead code, as of this unit landing.
 //
 // ============================================================================
 // DEVIATIONS
@@ -683,8 +680,9 @@ export function SP_hint_path(self: EdictT): void {
 /**
  * rogue/g_rogue_newai.cpp:816-891 `void InitHintPaths()`. Called by
  * `SpawnEntities` (g_spawn.cpp:1262) once per level, after all entities have
- * spawned -- see file header's "SP LIST" section for the not-yet-wired
- * caller.
+ * spawned -- wired in as a delegating import at g_spawn.ts's own
+ * `InitHintPaths` call site (2026-08-30, KEX demo playback unit; see this
+ * file's own header "SP LIST" section for the prior gap).
  */
 export function InitHintPaths(): void {
   hint_paths_present = false;

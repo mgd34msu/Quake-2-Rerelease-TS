@@ -221,6 +221,7 @@ import {
   PROTOCOL_VERSION_RERELEASE,
 } from "../qcommon";
 import { net_message } from "../net_chan";
+import { SvcFogDataBitsT, type SvcFogDataT } from "../../kexapi/game";
 import { EntityStateT, PlayerStateT, type UsercmdT, ANGLE2SHORT, SHORT2ANGLE, RF_BEAM } from "../../shared/q_shared";
 import type { ProtocolCodec, ServerDataParamsT, ServerDataReadResultT, FrameWriteParamsT, FrameHeaderT } from "./codec";
 import { VANILLA_CODEC } from "./vanilla";
@@ -246,18 +247,27 @@ const U_MOREBITS4 = 1 << 31;
 // "lo" word into one plain `number` for the ProtocolCodec.readEntityBits()
 // return value (safe: JS numbers are exact integers up to 2^53, well past
 // the 2^34 this format ever needs). See combineBits/bitsHasHi below.
-const HI_SCALE = 1;
-const HI_MOREFX16 = 2;
-function combineBits(lo: number, hi: number): number {
+// Exported (not just this file's own use): qcommon/protocol/kexdemo.ts's KEX
+// demo/native codec shares this exact 40-bit entity-bits header format
+// (verified byte-identical against q2proto_internal_common.c's
+// q2proto_common_client_read_entity_bits, which EVERY protocol q2proto
+// supports -- vanilla/r1q2/q2pro/q2pro_extdemo/q2repro/kex -- calls
+// unchanged) and adds two more hi-word flags of its own (U_KEX_OWNER=bit34,
+// U_KEX_OLDFRAME=bit35) in the same already-reserved hi-byte this file's
+// own HI_SCALE(bit32)/HI_MOREFX16(bit33) already occupy -- see kexdemo.ts's
+// own header for the citation.
+export const HI_SCALE = 1;
+export const HI_MOREFX16 = 2;
+export function combineBits(lo: number, hi: number): number {
   return (lo >>> 0) + hi * 4294967296; // 2**32
 }
-function bitsHasHi(bits: number, hiFlag: number): boolean {
+export function bitsHasHi(bits: number, hiFlag: number): boolean {
   return (Math.floor(bits / 4294967296) & hiFlag) !== 0;
 }
 
 // q2proto_internal_protocol.h:305,307 -- packed into the U_SOUND u16 word.
-const SOUND_FLAG_VOLUME = 1 << 14;
-const SOUND_FLAG_ATTENUATION = 1 << 15;
+export const SOUND_FLAG_VOLUME = 1 << 14;
+export const SOUND_FLAG_ATTENUATION = 1 << 15;
 
 // q2proto_internal_protocol.h:270-280 -- the svc_frame "extraflags" byte.
 const EPS_GUNOFFSET = 1 << 0;
@@ -273,8 +283,8 @@ const EPS_STATS = 1 << 5;
 const EPS_GUNRATE = 1 << 7;
 
 // q2proto_internal_protocol.h:363,365
-const Q2PRO_GUNINDEX_BITS = 13;
-const Q2PRO_GUNINDEX_MASK = (1 << Q2PRO_GUNINDEX_BITS) - 1;
+export const Q2PRO_GUNINDEX_BITS = 13;
+export const Q2PRO_GUNINDEX_MASK = (1 << Q2PRO_GUNINDEX_BITS) - 1;
 
 // PROTOCOL_VERSION_RERELEASE (qsrc/q2repro/inc/common/protocol.h:32), hosted
 // centrally in qcommon.ts (added alongside PROTOCOL_VERSION) so cl_parse.ts
@@ -298,7 +308,7 @@ function encodeAlpha(x: number): number {
   if (v > 255) v = 255;
   return v;
 }
-function decodeAlpha(b: number): number {
+export function decodeAlpha(b: number): number {
   return b === 0 ? 0 : b / 255;
 }
 function encodeScale(x: number): number {
@@ -308,7 +318,7 @@ function encodeScale(x: number): number {
   if (v > 255) v = 255;
   return v;
 }
-function decodeScale(b: number): number {
+export function decodeScale(b: number): number {
   return b === 0 ? 0 : b / 16;
 }
 
@@ -324,7 +334,7 @@ function encodeLoopVolume(x: number): number {
   if (v === 255) v = 0;
   return v;
 }
-function decodeLoopVolume(b: number): number {
+export function decodeLoopVolume(b: number): number {
   return b === 0 ? 0 : b / 255;
 }
 
@@ -341,7 +351,7 @@ function encodeLoopAttenuation(x: number): number {
   if (v === ENCODE_LOOP_NONE) v = 0;
   return v;
 }
-function decodeLoopAttenuation(b: number): number {
+export function decodeLoopAttenuation(b: number): number {
   return b === ENCODE_LOOP_NONE ? ATTN_LOOP_NONE : b / 64;
 }
 
@@ -357,9 +367,9 @@ function clampInt16(x: number): number {
 function encodeFixed16(x: number, scale: number): number {
   return clampInt16(Math.trunc(x * scale));
 }
-const VIEWOFFSET_SCALE = 16; // q2proto_valenc.h:142,145
+export const VIEWOFFSET_SCALE = 16; // q2proto_valenc.h:142,145
 const GUNOFFSET_SCALE = 512; // q2proto_valenc.h:151,154
-const KICK_ANGLE_SCALE = 1024; // q2proto_valenc.h:160,163
+export const KICK_ANGLE_SCALE = 1024; // q2proto_valenc.h:160,163
 const GUNANGLE_SCALE = 4096; // q2proto_valenc.h:169,172
 
 // q2proto_common_choose_width_flags (q2proto_internal_common.h:38-48).
@@ -377,7 +387,7 @@ function widthOf(value: number, uint16Safe: boolean): 0 | 1 | 2 {
 function pmShortToFloat(short: number): number {
   return short * 0.125;
 }
-function pmFloatToShort(f: number): number {
+export function pmFloatToShort(f: number): number {
   return clampInt16(Math.round(f * 8));
 }
 
@@ -408,7 +418,7 @@ function writeEntityBitsWide(msg: SizeBuf, lo0: number, hi: number, entnum: numb
   else MSG_WriteByte(msg, entnum);
 }
 
-function readEntityBitsWide(): { number: number; bits: number } {
+export function readEntityBitsWide(): { number: number; bits: number } {
   let lo = MSG_ReadByte(net_message);
   if (lo & U_MOREBITS1) lo |= MSG_ReadByte(net_message) << 8;
   if (lo & U_MOREBITS2) lo |= MSG_ReadByte(net_message) << 16;
@@ -1269,6 +1279,84 @@ function readFramePlayerstate(from: PlayerStateT, to: PlayerStateT): void {
 
 function readPacketEntitiesBegin(): void {
   // no opcode to consume -- see writePacketEntitiesBegin.
+}
+
+// q2proto_q2repro_client_read_fog, q2proto_proto_q2repro.c:818-882: the
+// svc_fog message body (the leading svc_fog opcode byte itself is consumed
+// by the caller, matching every other read* function in this file). NOT
+// part of the ProtocolCodec interface -- like svc_damage/svc_poi/etc, this
+// is a one-off auxiliary server command with a single, protocol-version-
+// independent wire shape (not an entity/playerstate delta encoding that
+// genuinely varies per protocol), so it follows the same
+// write-it-directly-with-gi/read-it-directly-with-MSG_Read* convention
+// those messages already use elsewhere in this port line rather than
+// growing the codec seam for a single message type.
+//
+// Exported so qcommon/protocol/kexdemo.ts's KEX-native demo codec can reuse
+// it verbatim -- q2proto_proto_kex.c:266-267 does exactly this on the C
+// side (`case Q2P_SVC_FOG: return q2proto_q2repro_client_read_fog(...)`):
+// the KEX-native demo format's own svc_fog carries the identical byte
+// layout as protocol 1038's network svc_fog, because kex.c's demo reader
+// never defines its own fog decoder -- it calls straight into q2repro's.
+//
+// Byte layout (matches this file's own p_view.ts-facing write side,
+// src/kexgame/p_view.ts's sendFogTransition, field-for-field and in the
+// same order): bits (u8), + a second bits byte (u8, shifted left 8 and
+// OR'd in) iff BIT_MORE_BITS is set; then, only for each set bit:
+// BIT_DENSITY -> density(float) + skyfactor(u8); BIT_R/G/B -> one u8 each;
+// BIT_TIME -> u16; BIT_HEIGHTFOG_FALLOFF/DENSITY -> float each;
+// BIT_HEIGHTFOG_START_R/G/B -> one u8 each; BIT_HEIGHTFOG_START_DIST ->
+// i32 (unscaled, q2proto_var_coord_set_int_unscaled); BIT_HEIGHTFOG_END_*
+// mirror the START_* fields exactly.
+export function readFog(): SvcFogDataT {
+  let bits = MSG_ReadByte(net_message);
+  if (bits & SvcFogDataBitsT.BIT_MORE_BITS) {
+    bits |= MSG_ReadByte(net_message) << 8;
+  }
+
+  const fog: SvcFogDataT = {
+    bits,
+    density: 0,
+    skyfactor: 0,
+    red: 0,
+    green: 0,
+    blue: 0,
+    time: 0,
+    hf_falloff: 0,
+    hf_density: 0,
+    hf_start_r: 0,
+    hf_start_g: 0,
+    hf_start_b: 0,
+    hf_start_dist: 0,
+    hf_end_r: 0,
+    hf_end_g: 0,
+    hf_end_b: 0,
+    hf_end_dist: 0,
+  };
+
+  if (bits & SvcFogDataBitsT.BIT_DENSITY) {
+    fog.density = MSG_ReadFloat(net_message);
+    fog.skyfactor = MSG_ReadByte(net_message);
+  }
+  if (bits & SvcFogDataBitsT.BIT_R) fog.red = MSG_ReadByte(net_message);
+  if (bits & SvcFogDataBitsT.BIT_G) fog.green = MSG_ReadByte(net_message);
+  if (bits & SvcFogDataBitsT.BIT_B) fog.blue = MSG_ReadByte(net_message);
+  if (bits & SvcFogDataBitsT.BIT_TIME) fog.time = MSG_ReadShort(net_message);
+
+  if (bits & SvcFogDataBitsT.BIT_HEIGHTFOG_FALLOFF) fog.hf_falloff = MSG_ReadFloat(net_message);
+  if (bits & SvcFogDataBitsT.BIT_HEIGHTFOG_DENSITY) fog.hf_density = MSG_ReadFloat(net_message);
+
+  if (bits & SvcFogDataBitsT.BIT_HEIGHTFOG_START_R) fog.hf_start_r = MSG_ReadByte(net_message);
+  if (bits & SvcFogDataBitsT.BIT_HEIGHTFOG_START_G) fog.hf_start_g = MSG_ReadByte(net_message);
+  if (bits & SvcFogDataBitsT.BIT_HEIGHTFOG_START_B) fog.hf_start_b = MSG_ReadByte(net_message);
+  if (bits & SvcFogDataBitsT.BIT_HEIGHTFOG_START_DIST) fog.hf_start_dist = MSG_ReadLong(net_message);
+
+  if (bits & SvcFogDataBitsT.BIT_HEIGHTFOG_END_R) fog.hf_end_r = MSG_ReadByte(net_message);
+  if (bits & SvcFogDataBitsT.BIT_HEIGHTFOG_END_G) fog.hf_end_g = MSG_ReadByte(net_message);
+  if (bits & SvcFogDataBitsT.BIT_HEIGHTFOG_END_B) fog.hf_end_b = MSG_ReadByte(net_message);
+  if (bits & SvcFogDataBitsT.BIT_HEIGHTFOG_END_DIST) fog.hf_end_dist = MSG_ReadLong(net_message);
+
+  return fog;
 }
 
 export const Q2REPRO_CODEC: ProtocolCodec = {

@@ -322,6 +322,15 @@ export class ClStaticT {
   demowaiting = false; // don't record until a non-delta message is received
   demofile: number | null = null;
 
+  // KEX demo playback unit (.orch/RESUME.md): true while messages are being
+  // pumped from a demo file/buffer rather than a live network connection
+  // (src/client/cl_demo.ts). There is no vanilla-v3.19 precedent for this
+  // field -- the original client never played demos back itself (see
+  // cl_demo.ts's own file header); this mirrors q2repro's own
+  // cls.demo.playback flag (demo.c), narrowed to the one thing this port's
+  // own callers actually need to know.
+  demoplayback = false;
+
   // mirrors `memset(&cls, 0, sizeof(cls))` less the demo-recording block
   // (CL_Disconnect/CL_ClearState never clear demo state mid-connection)
   clear(): void {
@@ -349,6 +358,7 @@ export class ClStaticT {
     this.demorecording = false;
     this.demowaiting = false;
     this.demofile = null;
+    this.demoplayback = false;
   }
 }
 
