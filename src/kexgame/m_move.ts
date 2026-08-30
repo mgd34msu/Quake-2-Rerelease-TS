@@ -162,6 +162,7 @@ import {
   random_time,
 } from "./g_local";
 import { M_CheckGround as RealM_CheckGround, M_CatagorizePosition as RealM_CatagorizePosition } from "./g_monster";
+import { visible, FacingIdeal, FoundTarget, range_to } from "./g_ai";
 import { gi, level, g_edicts } from "./g_main_globals";
 import { GTIME_ZERO, Gtime_add, Gtime_subtract, Gtime_scale, Gtime_from_ms, Gtime_from_sec, type GTime } from "./gtime";
 import { SpawnFlags_has } from "./spawnflags";
@@ -264,29 +265,8 @@ function LerpAngle(a2: number, a1In: number, frac: number): number {
 //   - `range_to`: only reached from M_MoveToPath after its own `!self.enemy`
 //     early-out, which every test fixture here takes instead.
 
-function visible(self: EdictT, other: EdictT, _through_glass: boolean): boolean {
-  throw new Error(
-    `visible: not yet ported (pending g_ai.ts, see g_local.h:2307 / g_ai.cpp:392) -- called for ${self.classname ?? "?"} vs ${other.classname ?? "?"}`,
-  );
-}
-
-function FacingIdeal(self: EdictT): boolean {
-  throw new Error(
-    `FacingIdeal: not yet ported (pending g_ai.ts, see g_local.h:2308 / g_ai.cpp:895) -- called against ${self.classname ?? "?"}`,
-  );
-}
-
-function FoundTarget(self: EdictT): void {
-  throw new Error(
-    `FoundTarget: not yet ported (pending g_ai.ts, see g_local.h:2304 / g_ai.cpp:484) -- called against ${self.classname ?? "?"}`,
-  );
-}
-
-function range_to(self: EdictT, other: EdictT): number {
-  throw new Error(
-    `range_to: not yet ported (pending g_ai.ts, see g_local.h:2302 / g_ai.cpp:380) -- called for ${self.classname ?? "?"} vs ${other.classname ?? "?"}`,
-  );
-}
+// (g_ai.ts landed -- the four former throwing stubs are now real imports;
+// see the import at the top of the file.)
 
 // ---------------------------------------------------------------------------
 // EXTERNAL DEPENDENCIES NOT YET PORTED (rogue/g_rogue_newai.cpp)
