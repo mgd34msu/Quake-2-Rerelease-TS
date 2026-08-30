@@ -11,7 +11,7 @@ here.
 */
 
 import { ERR_FATAL, PRINT_ALL } from "../shared/q_shared";
-import { ri, vid, TRANSPARENT_COLOR } from "./r_local";
+import { ri, vid, TRANSPARENT_COLOR, d_8to24table } from "./r_local";
 import { R_FindImage } from "./r_image";
 import { ImageT, ImagetypeT } from "./r_model";
 
@@ -180,6 +180,118 @@ export function Draw_StretchPic(x: number, y: number, w: number, h: number, name
     return;
   }
   Draw_StretchPicImplementation(x, y, w, h, pic);
+}
+
+/*
+=============
+Draw_ColorPic
+
+No classic-engine precedent: ref_soft/r_draw.c never had a tinted pic draw
+(SCR_DrawColorPic is a rerelease-only cgame API import). The framebuffer
+here holds 8-bit palette indices, not RGB, so exact color modulation is
+impossible -- there is no legacy fallback to match either, since vanilla
+Q2's software renderer's only "blend" precedent is Draw_FadeScreen's fixed
+ordered-dither checkerboard (writes index 0 to 3-of-every-4 pixels rather
+than true alpha blending).
+
+Approach taken here, staying in that same spirit:
+  1. Nearest-palette-color remap: for the given tint, build (and cache,
+     keyed by r,g,b) a 256-entry table mapping each source palette index i
+     to the index of the closest palette entry to (paletteRGB[i] * tint /
+     255) by squared RGB distance. This approximates "multiply the pic's
+     colors by the tint" as well as an 8-bit indexed palette can.
+  2. Alpha is not part of the remap (there is no "half tinted" palette
+     entry to remap to) -- instead it is applied as coverage via a 4x4
+     ordered (Bayer) dither, a direct generalization of Draw_FadeScreen's
+     own fixed checkerboard: alpha=255 always draws the remapped pixel,
+     alpha=0 never does, and values between dither between the remapped
+     pixel and whatever was already in the framebuffer.
+=============
+*/
+const colorRemapCache = new Map<number, Uint8Array>();
+
+function buildColorRemap(r: number, g: number, b: number): Uint8Array {
+  const key = (r << 16) | (g << 8) | b;
+  const cached = colorRemapCache.get(key);
+  if (cached) return cached;
+
+  const palette = new Uint8Array(d_8to24table.buffer, d_8to24table.byteOffset, d_8to24table.byteLength);
+  const table = new Uint8Array(256);
+  for (let i = 0; i < 256; i++) {
+    const tr = (palette[i * 4 + 0] * r) / 255;
+    const tg = (palette[i * 4 + 1] * g) / 255;
+    const tb = (palette[i * 4 + 2] * b) / 255;
+
+    let best = 0;
+    let bestDist = Infinity;
+    for (let j = 0; j < 256; j++) {
+      const dr = palette[j * 4 + 0] - tr;
+      const dg = palette[j * 4 + 1] - tg;
+      const db = palette[j * 4 + 2] - tb;
+      const dist = dr * dr + dg * dg + db * db;
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = j;
+      }
+    }
+    table[i] = best;
+  }
+  colorRemapCache.set(key, table);
+  return table;
+}
+
+// 4x4 Bayer ordered-dither matrix, values 0-15. See Draw_ColorPic's doc
+// comment above -- this generalizes Draw_FadeScreen's fixed 2-level
+// checkerboard into a coverage fraction usable for arbitrary alpha.
+const BAYER_4X4 = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+
+export function Draw_ColorPic(x: number, y: number, w: number, h: number, name: string, color: { r: number; g: number; b: number; a: number }): void {
+  // C declares these parameters int; JS callers can pass fractional
+  // values (typed-array writes at fractional indices are silently dropped),
+  // so truncate at the boundary exactly as the C parameter types did.
+  x = x | 0;
+  y = y | 0;
+  w = w | 0;
+  h = h | 0;
+  const pic = Draw_FindPic(name);
+  if (!pic) {
+    ri.Con_Printf(PRINT_ALL, `Can't find pic: ${name}\n`);
+    return;
+  }
+  const picPixels = pic.pixels[0];
+  if (!picPixels) return;
+
+  if (x < 0 || x + w > vid.width || y + h > vid.height) {
+    ri.Sys_Error(ERR_FATAL, "Draw_ColorPic: bad coordinates");
+  }
+
+  const remap = buildColorRemap(color.r & 255, color.g & 255, color.b & 255);
+  const alphaThreshold = (color.a & 255) >> 4; // 0-15, matches BAYER_4X4's range
+
+  let height = h;
+  let skip = 0;
+  if (y < 0) {
+    skip = -y;
+    height += y;
+    y = 0;
+  }
+
+  let destOfs = y * vid.rowbytes + x;
+  const fstep = ((pic.width * 0x10000) / w) | 0;
+
+  for (let v = 0; v < height; v++, destOfs += vid.rowbytes) {
+    const sv = (((skip + v) * pic.height) / h) | 0;
+    const sourceOfs = sv * pic.width;
+    const rowDither = (y + v) & 3;
+    let f = 0;
+    for (let u = 0; u < w; u++) {
+      const tinted = remap[picPixels[sourceOfs + (f >> 16)]];
+      f += fstep;
+      if (alphaThreshold >= 15 || BAYER_4X4[rowDither * 4 + (u & 3)] < alphaThreshold) {
+        vid.buffer[destOfs + u] = tinted;
+      }
+    }
+  }
 }
 
 /*

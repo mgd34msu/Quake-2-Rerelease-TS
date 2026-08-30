@@ -16,6 +16,20 @@
 export type ModelS = unknown;
 export type ImageS = unknown;
 
+// Color-modulated pic draw. Added for the rerelease cgame API's
+// SCR_DrawColorPic import (kexapi/game.ts's KexCgameImports), which has no
+// counterpart in classic Q2's ref.h -- DrawPic/DrawStretchPic are always
+// drawn full-white (uncolored). r/g/b/a are 0-255 like kexapi/game.ts's
+// RgbaT (a structurally-identical shape kept separate here rather than
+// imported, since ref.ts is a lower engine layer than kexapi/game.ts and
+// must not depend on it).
+export interface DrawColorT {
+  r: number;
+  g: number;
+  b: number;
+  a: number;
+}
+
 import { type Vec3, vec3 } from "../shared/math";
 import type { CvarT } from "../shared/q_shared";
 
@@ -130,6 +144,10 @@ export interface RefExports {
   DrawGetPicSize(name: string): { w: number; h: number }; // will return 0 0 if not found
   DrawPic(x: number, y: number, name: string): void;
   DrawStretchPic(x: number, y: number, w: number, h: number, name: string): void;
+  // Like DrawStretchPic, but the pic is drawn tinted/modulated by `color`
+  // instead of full-white. See DrawColorT's doc comment above for why this
+  // exists (SCR_DrawColorPic has no classic-engine precedent).
+  DrawColorPic(x: number, y: number, w: number, h: number, name: string, color: DrawColorT): void;
   DrawChar(x: number, y: number, c: number): void;
   DrawTileClear(x: number, y: number, w: number, h: number, name: string): void;
   DrawFill(x: number, y: number, w: number, h: number, c: number): void;

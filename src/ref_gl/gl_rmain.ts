@@ -69,7 +69,7 @@ gl_image.ts's identical `GL_Upload8` precedent for the same kind of gap.
 */
 
 import { CString } from "bun:ffi";
-import type { RefExports, RefImports, EntityT, RefdefT, ParticleT } from "../client/ref";
+import type { RefExports, RefImports, EntityT, RefdefT, ParticleT, DrawColorT } from "../client/ref";
 import { API_VERSION } from "../client/ref";
 import { type Vec3, vec3, DotProduct, VectorCopy, VectorScale, VectorMA, VectorNormalize, AngleVectors, RotatePointAroundVector, PerpendicularVector, BOX_ON_PLANE_SIDE } from "../shared/math";
 import { CplaneT, CONTENTS_SOLID, RDF_NOWORLDMODEL, RF_BEAM, RF_FULLBRIGHT, RF_TRANSLUCENT, ERR_DROP, PRINT_ALL, CVAR_ARCHIVE, CVAR_USERINFO, Q_stricmp, Q_ftol } from "../shared/q_shared";
@@ -146,7 +146,7 @@ import {
   GL_SetTexturePalette,
 } from "./gl_image";
 import { loadQGLFromSystem, QGL_Shutdown, type GLGetProcAddressFn } from "./qgl";
-import { Draw_Char, Draw_Fill, Draw_FadeScreen, Draw_FindPic, Draw_GetPicSize, Draw_InitLocal, Draw_Pic, Draw_StretchPic, Draw_StretchRaw, Draw_TileClear, SetRawPalette } from "./gl_draw";
+import { Draw_Char, Draw_ColorPic, Draw_Fill, Draw_FadeScreen, Draw_FindPic, Draw_GetPicSize, Draw_InitLocal, Draw_Pic, Draw_StretchPic, Draw_StretchRaw, Draw_TileClear, SetRawPalette } from "./gl_draw";
 import { R_ScaleTurbsinForRInit, R_SetSky } from "./gl_warp";
 import { R_DrawWorld, R_DrawAlphaSurfaces, R_MarkLeaves, R_DrawBrushModel } from "./gl_rsurf";
 import { R_LightPoint, R_PushDlights, R_RenderDlights } from "./gl_light";
@@ -1394,6 +1394,7 @@ export function GetRefAPI(imp: RefImports): RefExports {
     DrawGetPicSize: (name: string) => Draw_GetPicSize(name),
     DrawPic: (x: number, y: number, name: string) => Draw_Pic(x, y, name),
     DrawStretchPic: (x: number, y: number, w: number, h: number, name: string) => Draw_StretchPic(x, y, w, h, name),
+    DrawColorPic: (x: number, y: number, w: number, h: number, name: string, color: DrawColorT) => Draw_ColorPic(x, y, w, h, name, color),
     DrawChar: (x: number, y: number, c: number) => Draw_Char(x, y, c),
     DrawTileClear: (x: number, y: number, w: number, h: number, name: string) => Draw_TileClear(x, y, w, h, name),
     DrawFill: (x: number, y: number, w: number, h: number, c: number) => Draw_Fill(x, y, w, h, c),

@@ -28,9 +28,84 @@ import { Com_Printf, Com_Error as Engine_Com_Error } from "../../qcommon/common"
 import { Loc_Localize } from "../../qcommon/loc";
 import { ERR_DROP } from "../../qcommon/qcommon";
 import { Cvar_Get, Cvar_Set, Cvar_ForceSet } from "../../qcommon/cvar";
-import type { KexCgameImports } from "../../kexapi/game";
+import type { KexCgameImports, Vec2T } from "../../kexapi/game";
+import { TextAlignT } from "../../kexapi/game";
+import { Key_GetBinding } from "../keys_impl";
 import { GetClassicCgameAPI } from "./classic";
 import { GetCGameAPI as GetKexCgameAPI } from "../../kexgame/cgame/cg_main";
+
+// ---------------------------------------------------------------------------
+// Fallback text metrics (kfont-less path) -- see the SCR_DrawFontString /
+// SCR_MeasureFontString / SCR_FontLineHeight doc comments below for the
+// full q2repro-vs-here comparison. CONCHAR_WIDTH/HEIGHT mirror q2repro's
+// client.h constants of the same name: the fixed 8x8 cell every conchars.pcx
+// glyph occupies, matching the `<< 3` (*8) arithmetic already used
+// throughout console_impl.ts/cl_scrn.ts/cl_inv.ts for the same texture.
+// ---------------------------------------------------------------------------
+const CONCHAR_WIDTH = 8;
+const CONCHAR_HEIGHT = 8;
+
+// [Paril-KEX] SCR_SetAltTypeface state. Tracked (not discarded) even though
+// nothing reads it back into a draw call yet: q2repro's own
+// CG_SCR_SetAltTypeface is `// We don't support alternate type faces` (a
+// documented no-op there too), and the alt typeface is a kfont-only concept
+// (a second glyph set inside the .kfont asset) -- see this file's kfont doc
+// comment below for why no .kfont asset exists to select between here
+// either. Kept as real state (not a bare no-op) so the kfont upgrade path
+// this comment points at only has to start reading this flag, not add it.
+let altTypefaceEnabled = false;
+// Exposed for tests; the flag has no reader yet (see comment above).
+export function CG_IsAltTypefaceEnabled(): boolean {
+  return altTypefaceEnabled;
+}
+
+function drawConchar(x: number, y: number, num: number): void {
+  if (!re) return;
+  re.DrawChar(x, y, num);
+}
+
+// SCR_MeasureFontString's fallback body, factored out so SCR_DrawFontString
+// (which needs the total width for CENTER/RIGHT alignment) and
+// SCR_FontLineHeight can both call it without duplicating the split-on-'\n'
+// walk. See the doc comment on SCR_MeasureFontString below for the
+// side-by-side with q2repro's CG_SCR_MeasureFontString.
+function measureFontStringFallback(str: string, scale: number): Vec2T {
+  const lines = str.split("\n");
+  let maxWidth = 0;
+  for (const line of lines) {
+    const width = line.length * CONCHAR_WIDTH * scale;
+    if (width > maxWidth) maxWidth = width;
+  }
+  return { x: maxWidth, y: lines.length * CONCHAR_HEIGHT * scale };
+}
+
+// SCR_DrawFontString's fallback body. KNOWN GAP (documented, not silently
+// dropped): re.DrawChar(x, y, c) -- the only char-drawing primitive this
+// port's renderer surface has (ref.ts's RefExports) -- takes no scale and
+// no color, unlike q2repro's R_DrawStretchChar(x, y, w, h, flags, c, color,
+// font) which the real conchars fallback (SCR_DrawStringMultiStretch) uses.
+// So: position/line-wrap/alignment math below is scale-correct (matches
+// q2repro's own math exactly, see SCR_MeasureFontString's doc comment), but
+// each glyph itself always draws at its native 8x8 size in the conchars
+// texture's baked color, ignoring `scale`'s effect on glyph size, `color`,
+// and `shadow`. This is the exact same gap this file's own SCR_DrawChar
+// wrapper above already documents and defers to "once scaled/kfont-aware
+// char drawing lands with the kex module" -- not a new gap introduced here.
+function drawFontStringFallback(str: string, x: number, y: number, scale: number, align: TextAlignT): void {
+  const lines = str.split("\n");
+  let lineY = y;
+  for (const line of lines) {
+    let lineX = x;
+    if (align !== TextAlignT.LEFT) {
+      const width = line.length * CONCHAR_WIDTH * scale;
+      lineX = align === TextAlignT.CENTER ? x - width / 2 : x - width;
+    }
+    for (let i = 0; i < line.length; i++) {
+      drawConchar(lineX + i * CONCHAR_WIDTH * scale, lineY, line.charCodeAt(i));
+    }
+    lineY += CONCHAR_HEIGHT * scale;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Import table (engine -> cgame)
@@ -175,43 +250,100 @@ export function buildCgameImports(): CgameImports {
     CL_GetClientDogtag(_index) {
       return "";
     },
-    // TODO(phase 6, kex cgame): key-bind display is not used by the
-    // classic HUD/layout-string interpreter.
-    CL_GetKeyBinding(_binding) {
-      return "";
+    // Key-bind display for the kex HUD (centerprint control hints).
+    // Key_GetBinding (src/client/keys_impl.ts) is a new function added for
+    // this: classic Q2's keys.c never had a binding->keyname reverse
+    // lookup, only q2repro's rerelease client added it for this exact
+    // import. Mirrors q2repro's CG_CL_GetKeyBinding, which is a
+    // one-line pass-through to the same-named Key_GetBinding.
+    CL_GetKeyBinding(binding) {
+      return Key_GetBinding(binding);
     },
 
-    // TODO(phase 4 continuation): once cl_scrn.ts's pic registration
-    // (SCR_TouchPics et al) moves behind this interface instead of calling
-    // re.RegisterPic/re.DrawGetPicSize directly.
-    Draw_RegisterPic(_name) {
-      return false;
+    // re.RegisterPic returns the opaque ImageS handle (or null); q2repro's
+    // CG_Draw_RegisterPic (R_RegisterPic != 0) reduces that to a bool the
+    // same way.
+    Draw_RegisterPic(name) {
+      if (!re) return false;
+      return re.RegisterPic(name) !== null;
     },
-    Draw_GetPicSize(w, h, _name) {
-      w[0] = 0;
-      h[0] = 0;
+    // KexCgameImports models this as two length-1 arrays standing in for
+    // C's `int *w, int *h` out-parameters (see this file's existing style
+    // for that convention). ref.ts's RefExports.DrawGetPicSize's own doc
+    // comment promises "0 0 if not found" but its actual GL/soft
+    // implementations return {w:-1,h:-1} on a miss (Draw_GetPicSize in
+    // gl_draw.ts/r_draw.ts) -- a pre-existing mismatch in ref.ts, not
+    // introduced here; clamped to 0 below so this import keeps the
+    // contract KexCgameImports's own doc comment states.
+    Draw_GetPicSize(w, h, name) {
+      if (!re) {
+        w[0] = 0;
+        h[0] = 0;
+        return;
+      }
+      const size = re.DrawGetPicSize(name);
+      w[0] = size.w > 0 ? size.w : 0;
+      h[0] = size.h > 0 ? size.h : 0;
     },
 
-    // TODO(phase 6, kex cgame / ref color-tint support): RefExports (ref.ts)
-    // has no colored/tinted pic-draw primitive yet -- only DrawPic/
-    // DrawStretchPic, which are uncolored. Wire once one exists.
-    SCR_DrawColorPic(_x, _y, _w, _h, _name, _color) {
-      // no-op
+    // Dispatches straight to the new RefExports.DrawColorPic primitive
+    // (ref.ts) -- see gl_draw.ts's Draw_ColorPic / r_draw.ts's
+    // Draw_ColorPic doc comments for the GL vertex-color and software
+    // palette-remap+dither approaches respectively. Mirrors q2repro's
+    // CG_SCR_DrawColorPic (R_RegisterImage + R_DrawStretchPic with a color
+    // arg) at the same call shape, minus the alpha-scale cvar
+    // (apply_scr_alpha) this port's scr_alpha equivalent doesn't exist yet.
+    SCR_DrawColorPic(x, y, w, h, name, color) {
+      if (!re) return;
+      re.DrawColorPic(x, y, w, h, name, color);
     },
 
-    // TODO(phase 7, KEX subsystems: localization/kfont). The classic HUD
-    // never used a kfont; these four are purely a kex-cgame concept.
-    SCR_SetAltTypeface(_enabled) {
-      // no-op
+    // [Paril-KEX] kfont stuff. FINDING (this unit's brief asked for it to be
+    // reported): q2repro's SCR_Init loads `fonts/qconfont.kfont` (see
+    // src/client/screen.c's SCR_Init and src/refresh/draw.c's
+    // SCR_LoadKFont); every one of these four functions branches on
+    // `scr.kfont.pic` and falls back to the plain conchars.pcx path
+    // (SCR_DrawStringMultiStretch / CONCHAR_WIDTH*scale math) whenever that
+    // load failed or never ran. The user's baseq2/rogue/xatrix/ctf/lmctf
+    // data at /home/buzzkill/q2ts is 3.21-era: grepping every .pak there for
+    // "kfont"/"qconfont" (buzzpak.pak, pak0-2.pak, etc.) finds nothing --
+    // no .kfont asset exists in this install, matching a case q2repro
+    // itself handles by design (its own load path is a graceful
+    // `if (!file) return` in SCR_LoadKFont before ever writing kfont.pic).
+    // This port therefore implements ONLY the conchars-fallback branch of
+    // all four functions below (the branch that's actually reachable with
+    // today's data), with the kfont branch called out as the upgrade path
+    // rather than faked: adding it for real means porting the .kfont binary
+    // format (SCR_LoadKFont), a kfont-glyph draw primitive
+    // (R_DrawKFontChar) neither ref_gl/ nor ref_soft/ has a counterpart for
+    // yet, and shipping a rerelease asset pak this install doesn't have.
+    //
+    // SCR_SetAltTypeface: state-only (see CG_IsAltTypefaceEnabled above) --
+    // matches q2repro's own CG_SCR_SetAltTypeface, which is *also* a
+    // documented no-op (`// We don't support alternate type faces`) even
+    // WITH a kfont loaded; alt-typeface selection is a kfont-internal
+    // second glyph set this port has no reader for regardless of the
+    // asset-availability finding above.
+    SCR_SetAltTypeface(enabled) {
+      altTypefaceEnabled = enabled;
     },
-    SCR_DrawFontString(_str, _x, _y, _scale, _color, _shadow, _align) {
-      // no-op
+    // See drawFontStringFallback's doc comment (top of file) for the
+    // known scale/color/shadow gap in the glyph draw itself; the
+    // position/wrap/align math here is exact.
+    SCR_DrawFontString(str, x, y, scale, _color, _shadow, align) {
+      drawFontStringFallback(str, x, y, scale, align);
     },
-    SCR_MeasureFontString(_str, _scale) {
-      return { x: 0, y: 0 };
+    // Fallback body factored into measureFontStringFallback (top of file);
+    // matches q2repro's CG_SCR_MeasureFontString's own kfont-less branch
+    // line for line (split on '\n', width = maxlen * CONCHAR_WIDTH * scale
+    // per line, height = num_lines * FontLineHeight(scale)).
+    SCR_MeasureFontString(str, scale) {
+      return measureFontStringFallback(str, scale);
     },
-    SCR_FontLineHeight(_scale) {
-      return 0;
+    // Matches q2repro's CG_SCR_FontLineHeight's own kfont-less branch
+    // (`return CONCHAR_HEIGHT * scale;`).
+    SCR_FontLineHeight(scale) {
+      return CONCHAR_HEIGHT * scale;
     },
 
     // Matches q2repro's own CG_CL_GetTextInput, which is a `// FIXME: Hook
@@ -231,10 +363,18 @@ export function buildCgameImports(): CgameImports {
       return Loc_Localize(base, true, args, num_args);
     },
 
-    // TODO(phase 7, KEX subsystems: localization/kfont). Key-bind display
-    // for centerprints; unused by the classic layout-string interpreter.
-    SCR_DrawBind(_isplit, _binding, _purpose, _x, _y, _scale) {
-      return 0;
+    // Key-bind display for centerprints. `isplit` is unused here (matches
+    // q2repro's own CG_SCR_DrawBind, which accepts but never reads it
+    // either -- this port has no split-screen support to key it on).
+    // Mirrors CG_SCR_DrawBind's composition exactly: "[key] purpose" when
+    // bound, "<unbound> purpose" when not, CENTER-aligned, drawn white, no
+    // drop shadow; returns CONCHAR_HEIGHT as the caller's y-advance.
+    SCR_DrawBind(_isplit, binding, purpose, x, y, scale) {
+      const key = Key_GetBinding(binding);
+      const localizedPurpose = Loc_Localize(purpose, true, [], 0);
+      const str = key ? `[${key}] ${localizedPurpose}` : `<unbound> ${localizedPurpose}`;
+      drawFontStringFallback(str, x, y, scale, TextAlignT.CENTER);
+      return CONCHAR_HEIGHT;
     },
 
     // Matches q2repro's own CG_CL_InAutoDemoLoop, which is a `// FIXME:

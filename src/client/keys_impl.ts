@@ -475,6 +475,29 @@ export function Key_KeynumToString(keynum: number): string {
 
 /*
 ===================
+Key_GetBinding
+
+Reverse lookup: given a bound command string (eg "+moveup"), returns the
+display name (Key_KeynumToString) of the first key bound to it, or "" if
+no key is bound to that command. Mirrors q2repro's client/keys.c
+Key_GetBinding (added for the rerelease cgame API's CL_GetKeyBinding
+import; classic Q2 keys.c never had this function). Linear scan over all
+256 keynums, case-insensitive compare, first match wins -- identical to
+upstream.
+===================
+*/
+export function Key_GetBinding(binding: string): string {
+  for (let key = 0; key < 256; key++) {
+    const bound = keybindings[key];
+    if (bound && Q_stricmp(bound, binding) === 0) {
+      return Key_KeynumToString(key);
+    }
+  }
+  return "";
+}
+
+/*
+===================
 Key_SetBinding
 ===================
 */

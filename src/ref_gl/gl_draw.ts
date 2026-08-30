@@ -175,6 +175,62 @@ export function Draw_StretchPic(x: number, y: number, w: number, h: number, pic:
 
 /*
 =============
+Draw_ColorPic
+
+Like Draw_StretchPic, but modulated by a color instead of drawn full-white.
+No classic-engine precedent (ref_gl/gl_draw.c never had a tinted pic draw);
+added for the rerelease cgame API's SCR_DrawColorPic. Mirrors how
+Draw_FadeScreen already tints its quad here: qglColor4f() before the quad,
+reset to (1,1,1,1) after so every other draw call downstream keeps getting
+full-white vertices (matches this file's existing convention -- see
+Draw_FadeScreen and Draw_Fill below, both of which reset color the same
+way). Blending is enabled only when the tint carries alpha < 255, same
+condition Draw_FadeScreen uses to decide whether GL_BLEND needs to be on.
+=============
+*/
+export function Draw_ColorPic(x: number, y: number, w: number, h: number, pic: string, color: { r: number; g: number; b: number; a: number }): void {
+  // C declares these parameters int; truncate at the boundary as the
+  // parameter types did (matches ref_soft/r_draw.ts).
+  x = x | 0;
+  y = y | 0;
+  w = w | 0;
+  h = h | 0;
+  const gl = Draw_FindPic(pic);
+  if (!gl) {
+    ri.Con_Printf(PRINT_ALL, `Can't find pic: ${pic}\n`);
+    return;
+  }
+
+  if (scrap_dirty) Scrap_Upload();
+
+  const disableAlphaTest = mcdOrRenditionAlphaTestQuirk() && !gl.has_alpha;
+  if (disableAlphaTest) qgl.qglDisable(GL_ALPHA_TEST);
+
+  const translucent = color.a < 255;
+  if (translucent) qgl.qglEnable(GL_BLEND);
+
+  qgl.qglColor4f(color.r / 255, color.g / 255, color.b / 255, color.a / 255);
+
+  GL_Bind(gl.texnum);
+  qgl.qglBegin(GL_QUADS);
+  qgl.qglTexCoord2f(gl.sl, gl.tl);
+  qgl.qglVertex2f(x, y);
+  qgl.qglTexCoord2f(gl.sh, gl.tl);
+  qgl.qglVertex2f(x + w, y);
+  qgl.qglTexCoord2f(gl.sh, gl.th);
+  qgl.qglVertex2f(x + w, y + h);
+  qgl.qglTexCoord2f(gl.sl, gl.th);
+  qgl.qglVertex2f(x, y + h);
+  qgl.qglEnd();
+
+  qgl.qglColor4f(1, 1, 1, 1);
+  if (translucent) qgl.qglDisable(GL_BLEND);
+
+  if (disableAlphaTest) qgl.qglEnable(GL_ALPHA_TEST);
+}
+
+/*
+=============
 Draw_Pic
 =============
 */
