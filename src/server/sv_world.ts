@@ -495,11 +495,21 @@ Returns a headnode that can be used for testing or clipping an
 object of mins/maxs size.
 Offset is filled in to contain the adjustment that must be added to the
 testing object's origin to get a point to use with the returned hull.
+
+`triggers`: when true, a SOLID_TRIGGER entity's own BSP model (not just its
+mins/maxs bbox) is used, matching q2repro's SV_HullForEntity(ent, triggers)
+-- q2repro's own comment: SV_Clip "can be used to clip to SOLID_TRIGGER by
+its BSP tree". SV_Trace/SV_ClipMoveToEntities's sweep against the whole
+entity list always passes false here (a trigger volume is treated as its
+axial bbox during a multi-entity sweep, same as this port's pre-existing
+behavior); SV_Clip's single-entity clip passes true, since gi.clip is used
+throughout g_trigger.ts/g_utils.ts specifically to test whether another
+entity's box is inside a (possibly non-axial) trigger brush.
 ================
 */
-function SV_HullForEntity(ent: Edict): number {
+function SV_HullForEntity(ent: Edict, triggers = false): number {
   // decide which clipping hull to use, based on the size
-  if (ent.solid === SolidT.SOLID_BSP) {
+  if (ent.solid === SolidT.SOLID_BSP || (triggers && ent.solid === SolidT.SOLID_TRIGGER)) {
     // explicit hulls in the BSP model
     const model = sv.models[ent.s.modelindex];
     if (!model) {
@@ -510,6 +520,24 @@ function SV_HullForEntity(ent: Edict): number {
 
   // create a temp hull from bounding box sizes
   return CM_HeadnodeForBox(ent.mins, ent.maxs);
+}
+
+/*
+====================
+SV_ClipToEntity
+
+Exact clip of a single mins/maxs box move against one entity's hull.
+Factored out of SV_ClipMoveToEntities's per-entity loop body so SV_Clip
+(below) can reuse the exact same headnode-lookup + angle-zeroing +
+CM_TransformedBoxTrace call, instead of duplicating it -- SV_Clip and
+SV_ClipMoveToEntities's inner loop were two copies of this same four-line
+sequence before this refactor (flagged per this unit's brief).
+====================
+*/
+function SV_ClipToEntity(start: Vec3, mins: Vec3, maxs: Vec3, end: Vec3, touch: Edict, contentmask: number, triggers: boolean): TraceT {
+  const headnode = SV_HullForEntity(touch, triggers);
+  const angles = touch.solid !== SolidT.SOLID_BSP ? vec3_origin : touch.s.angles; // boxes don't rotate
+  return CM_TransformedBoxTrace(start, end, mins, maxs, headnode, contentmask, touch.s.origin, angles);
 }
 
 //===========================================================================
@@ -538,14 +566,13 @@ function SV_ClipMoveToEntities(clip: MoveClipT): void {
 
     if (!(clip.contentmask & CONTENTS_DEADMONSTER) && touch.svflags & SVF_DEADMONSTER) continue;
 
-    // might intersect, so do an exact clip
-    const headnode = SV_HullForEntity(touch);
-    const angles = touch.solid !== SolidT.SOLID_BSP ? vec3_origin : touch.s.angles; // boxes don't rotate
-
+    // might intersect, so do an exact clip. `triggers=false`: a multi-entity
+    // sweep treats a SOLID_TRIGGER entity as its axial bbox, not its BSP
+    // model -- see SV_HullForEntity's header comment.
     const trace =
       touch.svflags & SVF_MONSTER
-        ? CM_TransformedBoxTrace(clip.start, clip.end, clip.mins2, clip.maxs2, headnode, clip.contentmask, touch.s.origin, angles)
-        : CM_TransformedBoxTrace(clip.start, clip.end, clip.mins, clip.maxs, headnode, clip.contentmask, touch.s.origin, angles);
+        ? SV_ClipToEntity(clip.start, clip.mins2, clip.maxs2, clip.end, touch, clip.contentmask, false)
+        : SV_ClipToEntity(clip.start, clip.mins, clip.maxs, clip.end, touch, clip.contentmask, false);
 
     if (trace.allsolid || trace.startsolid || trace.fraction < clip.trace.fraction) {
       if (clip.trace.startsolid) {
@@ -640,4 +667,31 @@ export function SV_Trace(start: Vec3, mins: Vec3 | null, maxs: Vec3 | null, end:
   SV_ClipMoveToEntities(clip);
 
   return toGTrace(clip.trace, clip.traceEnt);
+}
+
+/*
+==================
+SV_Clip
+
+Like SV_Trace(), but clip to ONE specified entity only -- no world sweep,
+no other entities considered. Can be used to clip to SOLID_TRIGGER by its
+BSP tree (q2repro's world.c:622-648 SV_Clip docstring, reproduced above;
+this is the kex/[Paril-KEX] `gi.clip` entry point -- the legacy game import
+table has no equivalent, see kex.ts's binding header).
+
+`clipEntity === ` the world edict is special-cased to a straight world BSP
+trace, matching q2repro's `if (clip == ge->edicts) CM_BoxTrace(...)`.
+==================
+*/
+export function SV_Clip(start: Vec3, mins: Vec3 | null, maxs: Vec3 | null, end: Vec3, clipEntity: Edict, contentmask: number): GTraceT {
+  const realMins = mins ?? vec3_origin;
+  const realMaxs = maxs ?? vec3_origin;
+
+  const worldEnt = worldEdict();
+  const trace =
+    worldEnt && clipEntity === worldEnt
+      ? CM_BoxTrace(start, end, realMins, realMaxs, 0, contentmask)
+      : SV_ClipToEntity(start, realMins, realMaxs, end, clipEntity, contentmask, true);
+
+  return toGTrace(trace, clipEntity);
 }

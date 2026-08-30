@@ -871,10 +871,13 @@ export function SV_Init(): void {
   setMaxclients(Cvar_Get("maxclients", "1", CVAR_SERVERINFO | CVAR_LATCH));
 
   // mirrors q2repro's sv_tick_rate (src/server/main.c ~line 2211, default
-  // "40", CVAR_LATCH); see server.ts's sv_tick_rate declaration for why our
-  // default is "10" instead. Latched like maxclients -- SV_InitGame reads
-  // the settled value the same way it reads maxclients (Cvar_GetLatchedVars).
-  setSvTickRate(Cvar_Get("sv_tick_rate", "10", CVAR_LATCH));
+  // "40", CVAR_LATCH). Family dispatch (sv_init.ts's SV_SpawnServer, via
+  // sv_game.ts's currentGameFamily()) now exists to pin legacy trees back to
+  // BASE_FRAMERATE(10) regardless of this value -- see server.ts's
+  // sv_tick_rate declaration for the history of why the default used to be
+  // "10" instead. Latched like maxclients -- SV_InitGame reads the settled
+  // value the same way it reads maxclients (Cvar_GetLatchedVars).
+  setSvTickRate(Cvar_Get("sv_tick_rate", "40", CVAR_LATCH));
 
   hostname = Cvar_Get("hostname", "noname", CVAR_SERVERINFO | CVAR_ARCHIVE);
   timeout = Cvar_Get("timeout", "125", 0);

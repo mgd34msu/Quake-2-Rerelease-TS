@@ -50,6 +50,27 @@ import { CS_REMAP_OLD, CS_REMAP_RERELEASE } from "../shared/cs_remap";
 
 export const geHolder: { ge: GameExports | null } = { ge: null };
 
+/** The two peer game-API families this engine dispatches on -- see
+ * ARCHITECTURE.md's "Core model: one engine, five first-class game modules".
+ */
+export type GameFamily = "kex" | "legacy";
+
+/*
+===============
+currentGameFamily
+
+Single source of truth for "which game family is the 'game' cvar naming
+right now" -- SV_InitGameProgs below (module load + configstring remap
+selection) and sv_init.ts's SV_SpawnServer (tick-rate dispatch) both need
+this same answer and previously each re-read the "game" cvar and
+re-derived it independently. Centralized here instead of re-reading the
+cvar at each call site.
+===============
+*/
+export function currentGameFamily(): GameFamily {
+  return Cvar_VariableString("game") === "kex" ? "kex" : "legacy";
+}
+
 /*
 ===============
 PF_Unicast
@@ -329,8 +350,9 @@ export function SV_InitGameProgs(): void {
   // hardcoded constant) -- the only missing piece was actually choosing
   // cs_remap_rerelease for the kex module, done here.
   const gameName = Cvar_VariableString("game");
-  svs.csr = gameName === "kex" ? CS_REMAP_RERELEASE : CS_REMAP_OLD;
-  const ge = gameName === "kex" ? LoadKexGame() : LoadLegacyGame(gameName);
+  const family = currentGameFamily();
+  svs.csr = family === "kex" ? CS_REMAP_RERELEASE : CS_REMAP_OLD;
+  const ge = family === "kex" ? LoadKexGame() : LoadLegacyGame(gameName);
 
   if (ge.apiversion !== GAME_API_VERSION) {
     Com_Error(ERR_DROP, "game is version %i, not %i", ge.apiversion, GAME_API_VERSION);

@@ -63,7 +63,8 @@ import { cl, cls, ConnstateT, cl_entities, cl_parse_entities, MAX_PARSE_ENTITIES
 import { net_message } from "../qcommon/net_chan";
 import { MSG_ReadByte, MSG_ReadLong, MSG_ReadData } from "../qcommon/sizebuf";
 import { SvcOpsT, UPDATE_MASK, ERR_DROP, U_REMOVE } from "../qcommon/qcommon";
-import { Com_Error, Com_Printf } from "../qcommon/common";
+import { Com_Error, Com_Printf, Com_ServerState } from "../qcommon/common";
+import { sv, ServerStateT } from "../server/server";
 import { SHOWNET } from "./cl_parse";
 import {
   CL_RocketTrail,
@@ -105,6 +106,39 @@ export function setVidrefVal(v: number): void {
 export let cl_mod_powerscreen: ModelS | null = null;
 export function setClModPowerscreen(v: ModelS | null): void {
   cl_mod_powerscreen = v;
+}
+
+/*
+=================
+CL_FrameTimeMs
+
+The original engine hardcodes every `serverframe` -> milliseconds
+conversion to `* 100` (BASE_FRAMERATE 10, i.e. FRAMETIME 100ms):
+protocol 34's `svc_frame` message carries only a raw frame *counter*, no
+tick-duration field, so a receiving client has no wire-level way to know
+the sending server's actual frame period -- assuming the fixed legacy
+10 Hz was safe because every pre-rerelease server ran at exactly that
+rate. That assumption breaks now that a kex-family local server can run
+at any `sv_tick_rate` in [10,60] (sv_init.ts's SV_SpawnServer, family
+dispatch via sv_game.ts's currentGameFamily()): a 40 Hz local server's
+frames are 25ms apart, not 100ms, and calculating servertime/lerpfrac
+against a hardcoded 100 would run playback 4x too slow.
+
+Documented, flagged seam for now: when this process IS the server (a
+listen/singleplayer game -- `Com_ServerState()` mirrors `sv.state`, set by
+Com_SetServerState in sv_init.ts/sv_main.ts), the client reads `sv.frametime`
+directly out of the server module rather than off the wire, exactly like
+cl_main.ts already reaches into `../server/sv_main` for SV_Shutdown/
+allow_download*. Connected to a REMOTE server, there is still no wire
+signal, so this falls back to the legacy 100ms assumption (correct for
+every legacy-family remote server; wrong today for a remote kex-family
+server running a non-default tick rate -- a real gap, not silently papered
+over here, that needs the 1038 codec to carry the server's actual frame
+time on the wire; see ARCHITECTURE.md phase 5 "Protocol layer").
+=================
+*/
+function CL_FrameTimeMs(): number {
+  return Com_ServerState() !== ServerStateT.ss_dead ? sv.frametime : 100;
 }
 
 /*
@@ -381,7 +415,8 @@ export function CL_ParseFrame(): void {
 
   cl.frame.serverframe = MSG_ReadLong(net_message);
   cl.frame.deltaframe = MSG_ReadLong(net_message);
-  cl.frame.servertime = cl.frame.serverframe * 100;
+  const frameTimeMs = CL_FrameTimeMs();
+  cl.frame.servertime = cl.frame.serverframe * frameTimeMs;
 
   // BIG HACK to let old demos continue to work
   if (cls.serverProtocol !== 26) cl.surpressCount = MSG_ReadByte(net_message);
@@ -416,7 +451,7 @@ export function CL_ParseFrame(): void {
 
   // clamp time
   if (cl.time > cl.frame.servertime) cl.time = cl.frame.servertime;
-  else if (cl.time < cl.frame.servertime - 100) cl.time = cl.frame.servertime - 100;
+  else if (cl.time < cl.frame.servertime - frameTimeMs) cl.time = cl.frame.servertime - frameTimeMs;
 
   // read areabits
   const len = MSG_ReadByte(net_message);
@@ -980,16 +1015,17 @@ Emits all entities, particles, and lights to the refresh
 export function CL_AddEntities(): void {
   if (cls.state !== ConnstateT.ca_active) return;
 
+  const frameTimeMs = CL_FrameTimeMs();
   if (cl.time > cl.frame.servertime) {
     if (clCvars.cl_showclamp?.value) Com_Printf("high clamp %i\n", cl.time - cl.frame.servertime);
     cl.time = cl.frame.servertime;
     cl.lerpfrac = 1.0;
-  } else if (cl.time < cl.frame.servertime - 100) {
-    if (clCvars.cl_showclamp?.value) Com_Printf("low clamp %i\n", cl.frame.servertime - 100 - cl.time);
-    cl.time = cl.frame.servertime - 100;
+  } else if (cl.time < cl.frame.servertime - frameTimeMs) {
+    if (clCvars.cl_showclamp?.value) Com_Printf("low clamp %i\n", cl.frame.servertime - frameTimeMs - cl.time);
+    cl.time = cl.frame.servertime - frameTimeMs;
     cl.lerpfrac = 0;
   } else {
-    cl.lerpfrac = 1.0 - (cl.frame.servertime - cl.time) * 0.01;
+    cl.lerpfrac = 1.0 - (cl.frame.servertime - cl.time) / frameTimeMs;
   }
 
   if (clCvars.cl_timedemo?.value) cl.lerpfrac = 1.0;

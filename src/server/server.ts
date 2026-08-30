@@ -347,17 +347,16 @@ export let sv_airaccelerate: CvarT | null = null; // development tool
 export let sv_enforcetime: CvarT | null = null;
 
 // mirrors q2repro's sv_tick_rate (src/server/main.c ~line 2211, default
-// "40", CVAR_LATCH). Our default is "10", NOT 40: q2repro's dispatch
-// (src/server/init.c:136-148) only ever honors this cvar for the rerelease
-// ("kex") game family -- every other family is pinned to BASE_FRAMERATE
-// (10) regardless of what the cvar holds, unless the game library
-// advertises GMF_VARIABLE_FPS. This port has no kex family binding yet
-// (ARCHITECTURE.md phase 3) -- every loadable game tree today is a legacy
-// tree hardcoded to FRAMETIME = 0.1s (75 files) -- so defaulting to "40"
-// would silently desync the engine's frame clock from every game tree's
-// own assumption of 10Hz. The default flips to "40" (matching q2repro) once
-// the kex binding lands and family dispatch actually exists to pin legacy
-// trees back to 10 regardless of this value.
+// "40", CVAR_LATCH). q2repro's dispatch (src/server/init.c:136-148) only
+// ever honors this cvar for the rerelease ("kex") game family -- every
+// other family is pinned to BASE_FRAMERATE (10) regardless of what the
+// cvar holds, unless the game library advertises GMF_VARIABLE_FPS. Family
+// dispatch now lives in sv_init.ts's SV_SpawnServer (keyed off
+// sv_game.ts's currentGameFamily()): the kex family honors this cvar
+// (clamped [10,60]), every legacy tree (still hardcoded to FRAMETIME =
+// 0.1s, 75 files) is pinned to 10 regardless of what it holds. Default is
+// "40" to match q2repro now that the pin exists to protect the legacy
+// trees from it.
 export let sv_tick_rate: CvarT | null = null;
 
 export function setSvPaused(v: CvarT | null): void {

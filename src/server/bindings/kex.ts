@@ -182,9 +182,6 @@
 // ============================================================================
 // OTHER DOCUMENTED, INTENTIONAL GAPS (TODOs cited at their call site too)
 // ============================================================================
-// - `clip` (single-entity clip, as opposed to a whole-world trace): the
-//   engine has no `SV_Clip` equivalent. Documented stub, always reports a
-//   clean miss. TODO(phase 7).
 // - `trace`'s `plane2`/`surface2` (the second-best surface hit): the
 //   engine's CM_BoxTrace/CM_TransformedBoxTrace track only one plane/
 //   surface. Null/default. TODO(phase 7).
@@ -221,24 +218,42 @@
 //   forwards to the same print path `Client_Print` uses -- matching
 //   q2repro's own `PF_Loc_Print` (server/game.c:790-809), which calls
 //   `Loc_Localize(base, true, args, num_args, ...)` and prints the result.
-// - The ten `Draw_*` debug-draw primitives, `ReportMatchDetails_Multicast`,
-//   `SendToClipBoard`, `GetExtension`: no-ops. ARCHITECTURE.md phase 7 /
-//   genuinely out of scope for a headless dedicated boot.
+// - The ten `Draw_*` debug-draw primitives: q2repro's own implementation
+//   (server/game.c, USE_REF block) calls straight into the CLIENT
+//   renderer's debug-primitive list (R_AddDebugLine etc.) in the SAME
+//   process -- there is no svc_* message or wire protocol involved, ever
+//   (confirmed by reading q2repro's PF_Draw_* bodies; nothing there touches
+//   MSG_Write*/SV_Multicast). A headless dedicated boot has no renderer to
+//   call into, matching q2repro's own #else (non-USE_REF) fallback, which
+//   makes all ten literal no-ops. This binding upgrades that fallback from
+//   silent no-op to a real buffer -- src/server/sv_debugdraw.ts records
+//   shape + color + lifetime for each call and exposes SV_DebugDraw_Drain/
+//   SV_DebugDraw_Tick. See that file's header for the full ruling. Actual
+//   rendering is NOT implemented; the buffer is the seam for a future
+//   renderer/transport unit, not a fake visual.
+// - `ReportMatchDetails_Multicast`, `SendToClipBoard`, `GetExtension`:
+//   no-ops. ARCHITECTURE.md phase 7 / genuinely out of scope for a headless
+//   dedicated boot.
 // - `TagMalloc`/`TagFree`/`FreeTags`: no manual tag-allocator on this side
 //   of the port (same rationale legacy.ts's own header gives for omitting
 //   these three entirely from `GameImports` -- kex's `KexGameImports`
 //   keeps them in the interface, so they are implemented here as no-ops/
 //   `null` rather than omitted).
-// - `tick_rate`/`frame_time_s`/`frame_time_ms`: snapshotted once from
-//   `sv.framerate`/`sv.frametime` at `BuildKexImports()` time (matching how
-//   the real C engine hands these to the game module once via
-//   `game_import_t`, not a live callback). `sv.framerate` stays the
-//   engine's global 10 Hz default until ARCHITECTURE.md phase 3 ("Variable
-//   tick", `sv_tick_rate` defaulting to 40 for the kex module) lands --
-//   kex's own internal step logic (`g_frames_per_frame`, etc.) already
-//   tolerates whatever `gi.tick_rate` it's handed, so this is a known,
-//   documented deviation from kex's native 40 Hz default, not a bug
-//   introduced here.
+// - `tick_rate`/`frame_time_s`/`frame_time_ms`: unlike the real C engine,
+//   which hands these to the game module once via a `game_import_t` struct
+//   copy, this port's `KexGameImports` is a live JS object held onto by
+//   kexgame code for the entire game session -- and `SV_InitGameProgs`
+//   (sv_game.ts) calls `LoadKexGame()`/`BuildKexImports()` from
+//   `SV_InitGame`, which runs BEFORE `SV_SpawnServer` (sv_init.ts) derives
+//   the real `sv.framerate`/`sv.frametime` for the level about to load (see
+//   that function's family-dispatch comment). A plain snapshot taken at
+//   `BuildKexImports()` time would therefore freeze `gi.tick_rate` at
+//   whatever `sv.framerate` happened to hold before the first map of a new
+//   game ever set it for real. These three fields are defined as getters
+//   below instead, so every read (kexgame reads `gi.tick_rate` inline at
+//   arbitrary call sites -- m_rogue_turret.ts, g_ai.ts, g_func.ts,
+//   p_weapon.ts, g_monster.ts, m_move.ts) always sees the engine's current
+//   `sv.framerate`/`sv.frametime`, not a stale pre-spawn value.
 // - `ClientThink`'s usercmd translation (`toKexUsercmd`): legacy `UsercmdT`
 //   has no `server_frame` field (a kex/[Paril-KEX] wire-integrity addition);
 //   the current server frame number (`sv.framenum`) is substituted as the
@@ -291,7 +306,19 @@ import { FS_WriteFile, FS_ReadRawFile } from "../../qcommon/files";
 import { sv } from "../server";
 import { SV_Multicast, SV_StartSound, SV_BroadcastPrintf } from "../sv_send";
 import { SV_ModelIndex, SV_SoundIndex, SV_ImageIndex } from "../sv_init";
-import { SV_LinkEdict, SV_UnlinkEdict, SV_AreaEdicts, SV_Trace, SV_PointContents } from "../sv_world";
+import { SV_LinkEdict, SV_UnlinkEdict, SV_AreaEdicts, SV_Trace, SV_Clip, SV_PointContents } from "../sv_world";
+import {
+  SV_DebugDraw_Line,
+  SV_DebugDraw_Point,
+  SV_DebugDraw_Circle,
+  SV_DebugDraw_Bounds,
+  SV_DebugDraw_Sphere,
+  SV_DebugDraw_OrientedWorldText,
+  SV_DebugDraw_StaticWorldText,
+  SV_DebugDraw_Cylinder,
+  SV_DebugDraw_Ray,
+  SV_DebugDraw_Arrow,
+} from "../sv_debugdraw";
 import {
   PF_Configstring,
   PF_Unicast,
@@ -611,21 +638,6 @@ function toKexTrace(gt: GTraceT): KexTraceT {
   };
 }
 
-function noHitKexTrace(end: Vec3): KexTraceT {
-  return {
-    allsolid: false,
-    startsolid: false,
-    fraction: 1.0,
-    endpos: end,
-    plane: new CplaneT(),
-    surface: null,
-    contents: 0,
-    ent: null,
-    plane2: new CplaneT(),
-    surface2: null,
-  };
-}
-
 function toKexUsercmd(cmd: UsercmdT): KexUsercmdT {
   return {
     msec: cmd.msec,
@@ -696,9 +708,22 @@ translation performed below.
 */
 export function BuildKexImports(): KexGameImports {
   return {
-    tick_rate: sv.framerate,
-    frame_time_s: sv.frametime / 1000,
-    frame_time_ms: sv.frametime,
+    // Getters, not plain fields: read `sv.framerate`/`sv.frametime` live on
+    // every access rather than snapshotting them once at this function's
+    // call time. See this file's header comment ("tick_rate"/"frame_time_s"/
+    // "frame_time_ms") for why a plain snapshot would be stale -- this
+    // function runs (via SV_InitGameProgs, from SV_InitGame) before
+    // sv_init.ts's SV_SpawnServer derives the real per-family framerate for
+    // the level about to load.
+    get tick_rate() {
+      return sv.framerate;
+    },
+    get frame_time_s() {
+      return sv.frametime / 1000;
+    },
+    get frame_time_ms() {
+      return sv.frametime;
+    },
 
     Broadcast_Print: (printlevel, message) => SV_BroadcastPrintf(printlevel, "%s", message),
     Com_Print: (msg) => Com_Printf("%s", msg),
@@ -740,11 +765,12 @@ export function BuildKexImports(): KexGameImports {
     },
 
     trace: (start, mins, maxs, end, passent, contentmask) => toKexTrace(SV_Trace(start, mins, maxs, end, resolveEngineView(passent), contentmask)),
-    // [Paril-KEX] single-entity clip -- the engine has no SV_Clip. Documented
-    // stub, always a clean miss. TODO(phase 7): CM_TransformedBoxTrace
-    // against just `entity`'s headnode (mirrors sv_world.ts's
-    // SV_ClipMoveToEntities per-entity branch).
-    clip: (_entity, _start, _mins, _maxs, end, _contentmask) => noHitKexTrace(end),
+    // [Paril-KEX] single-entity clip -- sv_world.ts's SV_Clip (ported from
+    // q2repro's world.c SV_Clip/PF_Clip). `entity` is typed nullable in
+    // KexGameImports even though no kex call site passes null; treated the
+    // same as every other nullable-entity import here (world edict, index 0).
+    clip: (entity, start, mins, maxs, end, contentmask) =>
+      toKexTrace(SV_Clip(start, mins, maxs, end, entity ? mustResolveEngineView(entity, "clip") : engineViewForIndex(0), contentmask)),
     pointcontents: (point) => SV_PointContents(point),
     // `portals` ignored -- see file header (matches q2repro's own PF_inVIS).
     inPVS: (p1, p2, _portals) => PF_inPVS(p1, p2),
@@ -816,17 +842,39 @@ export function BuildKexImports(): KexGameImports {
     Loc_Print: (ent, level, base, args, num_args) =>
       kexClientPrint(ent, level, Loc_Localize(base, true, args, num_args)),
 
-    // Debug draw: ARCHITECTURE.md phase 7 (versioned extension). No-ops.
-    Draw_Line: () => {},
-    Draw_Point: () => {},
-    Draw_Circle: () => {},
-    Draw_Bounds: () => {},
-    Draw_Sphere: () => {},
-    Draw_OrientedWorldText: () => {},
-    Draw_StaticWorldText: () => {},
-    Draw_Cylinder: () => {},
-    Draw_Ray: () => {},
-    Draw_Arrow: () => {},
+    // Debug draw: buffered, not rendered -- see sv_debugdraw.ts and this
+    // file's header ("The ten `Draw_*` debug-draw primitives") for the
+    // q2repro-mechanism finding and the ruling.
+    Draw_Line: (start, end, color, lifeTime, depthTest) => {
+      SV_DebugDraw_Line(start, end, color, lifeTime, depthTest);
+    },
+    Draw_Point: (point, size, color, lifeTime, depthTest) => {
+      SV_DebugDraw_Point(point, size, color, lifeTime, depthTest);
+    },
+    Draw_Circle: (origin, radius, color, lifeTime, depthTest) => {
+      SV_DebugDraw_Circle(origin, radius, color, lifeTime, depthTest);
+    },
+    Draw_Bounds: (mins, maxs, color, lifeTime, depthTest) => {
+      SV_DebugDraw_Bounds(mins, maxs, color, lifeTime, depthTest);
+    },
+    Draw_Sphere: (origin, radius, color, lifeTime, depthTest) => {
+      SV_DebugDraw_Sphere(origin, radius, color, lifeTime, depthTest);
+    },
+    Draw_OrientedWorldText: (origin, text, color, size, lifeTime, depthTest) => {
+      SV_DebugDraw_OrientedWorldText(origin, text, color, size, lifeTime, depthTest);
+    },
+    Draw_StaticWorldText: (origin, angles, text, color, size, lifeTime, depthTest) => {
+      SV_DebugDraw_StaticWorldText(origin, angles, text, color, size, lifeTime, depthTest);
+    },
+    Draw_Cylinder: (origin, halfHeight, radius, color, lifeTime, depthTest) => {
+      SV_DebugDraw_Cylinder(origin, halfHeight, radius, color, lifeTime, depthTest);
+    },
+    Draw_Ray: (origin, direction, length, size, color, lifeTime, depthTest) => {
+      SV_DebugDraw_Ray(origin, direction, length, size, color, lifeTime, depthTest);
+    },
+    Draw_Arrow: (start, end, size, lineColor, arrowColor, lifeTime, depthTest) => {
+      SV_DebugDraw_Arrow(start, end, size, lineColor, arrowColor, lifeTime, depthTest);
+    },
 
     ReportMatchDetails_Multicast: () => {},
 

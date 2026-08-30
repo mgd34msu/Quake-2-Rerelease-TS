@@ -27,7 +27,7 @@ import type { GameExports } from "../game/game";
 import { sv, svs, master_adr, ServerStateT, ClientStateT, ClientT, sv_airaccelerate, sv_noreload, maxclients, sv_tick_rate } from "./server";
 import { SV_Shutdown } from "./sv_main";
 import { SV_Multicast, SV_BroadcastCommand, SV_SendClientMessages } from "./sv_send";
-import { geHolder, SV_InitGameProgs } from "./sv_game";
+import { geHolder, SV_InitGameProgs, currentGameFamily } from "./sv_game";
 import { SV_ReadLevelFile } from "./sv_ccmds";
 import { SV_ClearWorld } from "./sv_world";
 import { SetPmAirAccelerate } from "../qcommon/pmove";
@@ -152,6 +152,26 @@ export function SV_CheckForSavegame(): void {
 
 /*
 ================
+SV_ComputeFramerate
+
+Mirrors q2repro's set_frame_time() family dispatch (src/server/init.c:
+136-148): the kex family honors `sv_tick_rate` (clamped to
+Com_ComputeFrametime's Q_clip(rate/BASE_FRAMERATE, 1, MAX_FRAMEDIV=6)
+range, i.e. BASE_FRAMERATE(10) * 1..6 = 10..60); every legacy family
+(baseq2/ctf/xatrix/rogue -- still hardcoded to FRAMETIME = 0.1s in
+g_local.ts) is pinned to BASE_FRAMERATE(10) regardless of what the cvar
+holds. Split out of SV_SpawnServer as its own exported function so the
+family-dispatch decision is directly unit-testable without spinning up a
+full map load.
+================
+*/
+export function SV_ComputeFramerate(): number {
+  const tickRate = Math.min(60, Math.max(10, sv_tick_rate ? sv_tick_rate.value : 10));
+  return currentGameFamily() === "kex" ? tickRate : 10;
+}
+
+/*
+================
 SV_SpawnServer
 
 Change the server to a new map, taking all connected
@@ -185,21 +205,11 @@ export function SV_SpawnServer(server: string, spawnpoint: string, serverstate: 
   // set framerate parameters -- mirrors q2repro's set_frame_time() dispatch
   // (src/server/init.c:136-148), called right after the same memset there.
   // sv.clear() just re-asserted the 10Hz defaults (see its own comment);
-  // this re-derives them from the latched cvar the same way maxclients'
-  // already-latched value is read directly below (`maxclients.value`, no
-  // extra Cvar_GetLatchedVars() call needed here -- SV_InitGame already
-  // settled it before SV_SpawnServer runs). Clamp mirrors
-  // Com_ComputeFrametime's Q_clip(rate/BASE_FRAMERATE, 1, MAX_FRAMEDIV=6):
-  // valid rates are BASE_FRAMERATE(10) * 1..6, i.e. 10..60. q2repro
-  // init.c:136-148 pins legacy-family games to BASE_FRAMERATE regardless of
-  // sv_tick_rate (their FRAMETIME constant assumes 0.1s ticks); the only
-  // family this port has today IS legacy, so the derived value is
-  // overridden to 10 until the kex binding introduces family dispatch --
-  // otherwise `sv_tick_rate 40` would desync engine time from the frozen
-  // game trees.
-  const tickRate = Math.min(60, Math.max(10, sv_tick_rate ? sv_tick_rate.value : 10));
-  const legacyFamily = true; // kex binding does not exist yet
-  sv.framerate = legacyFamily ? 10 : tickRate;
+  // SV_ComputeFramerate re-derives them from the latched cvar the same way
+  // maxclients' already-latched value is read directly below
+  // (`maxclients.value`, no extra Cvar_GetLatchedVars() call needed here --
+  // SV_InitGame already settled it before SV_SpawnServer runs).
+  sv.framerate = SV_ComputeFramerate();
   sv.frametime = 1000 / sv.framerate;
 
   // save name for levels that don't set message
