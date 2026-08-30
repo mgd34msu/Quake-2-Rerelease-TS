@@ -146,7 +146,7 @@ import {
   GL_SetTexturePalette,
 } from "./gl_image";
 import { loadQGLFromSystem, QGL_Shutdown, type GLGetProcAddressFn } from "./qgl";
-import { Draw_Char, Draw_ColorPic, Draw_Fill, Draw_FadeScreen, Draw_FindPic, Draw_GetPicSize, Draw_InitLocal, Draw_Pic, Draw_StretchPic, Draw_StretchRaw, Draw_TileClear, SetRawPalette } from "./gl_draw";
+import { Draw_Char, Draw_ColorPic, Draw_Fill, Draw_FadeScreen, Draw_FindPic, Draw_GetPicSize, Draw_InitLocal, Draw_Pic, Draw_StretchPic, Draw_StretchPicRegion, Draw_StretchRaw, Draw_TileClear, SetRawPalette } from "./gl_draw";
 import { R_ScaleTurbsinForRInit, R_SetSky } from "./gl_warp";
 import { R_DrawWorld, R_DrawAlphaSurfaces, R_MarkLeaves, R_DrawBrushModel } from "./gl_rsurf";
 import { R_LightPoint, R_PushDlights, R_RenderDlights } from "./gl_light";
@@ -931,6 +931,8 @@ function R_Register(): void {
   glCvars.gl_texturealphamode = ri.Cvar_Get("gl_texturealphamode", "default", CVAR_ARCHIVE);
   glCvars.gl_texturesolidmode = ri.Cvar_Get("gl_texturesolidmode", "default", CVAR_ARCHIVE);
   glCvars.gl_lockpvs = ri.Cvar_Get("gl_lockpvs", "0", 0);
+  // q2repro src/refresh/main.c: gl_lightgrid = Cvar_Get("gl_lightgrid", "1", 0);
+  glCvars.gl_lightgrid = ri.Cvar_Get("gl_lightgrid", "1", 0);
 
   glCvars.gl_vertex_arrays = ri.Cvar_Get("gl_vertex_arrays", "0", CVAR_ARCHIVE);
 
@@ -1395,6 +1397,8 @@ export function GetRefAPI(imp: RefImports): RefExports {
     DrawPic: (x: number, y: number, name: string) => Draw_Pic(x, y, name),
     DrawStretchPic: (x: number, y: number, w: number, h: number, name: string) => Draw_StretchPic(x, y, w, h, name),
     DrawColorPic: (x: number, y: number, w: number, h: number, name: string, color: DrawColorT) => Draw_ColorPic(x, y, w, h, name, color),
+    DrawStretchPicRegion: (x: number, y: number, w: number, h: number, name: string, srcX: number, srcY: number, srcW: number, srcH: number, color: DrawColorT) =>
+      Draw_StretchPicRegion(x, y, w, h, name, srcX, srcY, srcW, srcH, color),
     DrawChar: (x: number, y: number, c: number) => Draw_Char(x, y, c),
     DrawTileClear: (x: number, y: number, w: number, h: number, name: string) => Draw_TileClear(x, y, w, h, name),
     DrawFill: (x: number, y: number, w: number, h: number, c: number) => Draw_Fill(x, y, w, h, c),

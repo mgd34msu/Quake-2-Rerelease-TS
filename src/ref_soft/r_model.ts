@@ -1073,6 +1073,73 @@ function Mod_LoadPlanes(l: LumpT): void {
 
 /*
 =================
+PrescanClassicSurfaceExtents
+
+Runs CalcSurfaceExtents's own texture-axis bounding-box math over every
+face in the raw LUMP_FACES data, WITHOUT allocating any MsurfaceT objects,
+purely to detect up front whether any face would exceed the classic
+256-unit cap (excluding SURF_WARP/SURF_SKY, same exclusion CalcSurfaceExtents
+itself applies). See Mod_LoadBrushModel's call site for why this exists
+(graceful up-front refusal, mirroring the DECOUPLED_LM check immediately
+above it) -- this only reports; CalcSurfaceExtents remains the sole place
+that actually fills in texturemins/extents once loading proceeds.
+=================
+*/
+function PrescanClassicSurfaceExtents(mod: ModelT, l: LumpT): void {
+  if (l.filelen % DFACE_T_SIZE) return; // Mod_LoadFaces reports this exact error itself
+  const count = l.filelen / DFACE_T_SIZE;
+
+  let violations = 0;
+  let worstExtent = 0;
+
+  for (let surfnum = 0; surfnum < count; surfnum++) {
+    const base = l.fileofs + surfnum * DFACE_T_SIZE;
+    const firstedge = mod_view.getInt32(base + 4, true);
+    const numedges = mod_view.getInt16(base + 8, true);
+    const ti = mod_view.getInt16(base + 10, true);
+    if (ti < 0 || ti >= loadmodel.numtexinfo) continue; // Mod_LoadFaces reports this exact error itself
+    const tex = loadmodel.texinfo[ti];
+    if (tex.flags & (SURF_WARP | SURF_SKY)) continue;
+
+    const mins = [999999, 999999];
+    const maxs = [-99999, -99999];
+
+    for (let i = 0; i < numedges; i++) {
+      const e = loadmodel.surfedges[firstedge + i];
+      const v = e >= 0 ? loadmodel.vertexes[loadmodel.edges[e].v[0]] : loadmodel.vertexes[loadmodel.edges[-e].v[1]];
+
+      for (let j = 0; j < 2; j++) {
+        const val = v.position[0] * tex.vecs[j][0] + v.position[1] * tex.vecs[j][1] + v.position[2] * tex.vecs[j][2] + tex.vecs[j][3];
+        if (val < mins[j]) mins[j] = val;
+        if (val > maxs[j]) maxs[j] = val;
+      }
+    }
+
+    for (let j = 0; j < 2; j++) {
+      const bmin = Math.floor(mins[j] / 16);
+      const bmax = Math.ceil(maxs[j] / 16);
+      const extent = (bmax - bmin) * 16;
+      if (extent > 256) {
+        violations++;
+        if (extent > worstExtent) worstExtent = extent;
+      }
+    }
+  }
+
+  if (violations > 0) {
+    ri.Con_Printf(
+      PRINT_ALL,
+      `${mod.name}: this map's geometry exceeds the software renderer's 256-unit surface-extents cap on ${violations} surface(s) (worst: ${worstExtent} units) -- q2repro has no software renderer to port a raised cap from, so this content (e.g. the Q64/N64 remaster map set) is not supported here\n`,
+    );
+    ri.Sys_Error(
+      ERR_DROP,
+      `${mod.name}: surface extents exceed the software renderer's 256-unit cap on ${violations} surface(s) (worst: ${worstExtent} units) -- load this map with the OpenGL renderer instead`,
+    );
+  }
+}
+
+/*
+=================
 Mod_LoadBrushModel
 =================
 */
@@ -1169,6 +1236,33 @@ function Mod_LoadBrushModel(mod: ModelT, buffer: Uint8Array): void {
     );
     ri.Sys_Error(ERR_DROP, `${mod.name}: decoupled lightmaps are not supported by the software renderer -- load this map with the OpenGL renderer instead`);
   }
+
+  // Graceful up-front refusal for classic (non-BSPX) content whose raw
+  // geometry/texture-axis extents genuinely exceed vanilla's 256-unit
+  // surface-cache cap -- verified real, unrelated to BSPX: baseq2/maps/
+  // q64/*.bsp (the N64 remaster set, no BSPX at all) violates the cap on
+  // 150-275 surfaces per map (measured: outpost.bsp 177/4205, core.bsp
+  // 259/4528, dm1.bsp 35/824). q2repro has no software renderer to port a
+  // raised-cap fix from (verified, same as the DECOUPLED_LM check above),
+  // and raising the cap here for real would mean growing this renderer's
+  // own fixed-size surface cache / blocklights buffers (r_light.ts/
+  // r_surf.ts) well past their vanilla-derived sizes to admit textures the
+  // classic PC engine's surface cache was never built for (Q64's geometry
+  // was authored for the N64's own bespoke renderer, not this one) -- that
+  // is new capability, not a faithful port, so the cap stays put (rule 17:
+  // preserve the ORIGINAL's observed behavior, which is refusal).
+  //
+  // What changes here is only WHEN and HOW the refusal happens: without
+  // this prescan, Mod_LoadFaces below throws the bare "Bad surface
+  // extents" message (CalcSurfaceExtents) mid-loop, after already
+  // allocating and partially populating loadmodel.surfaces -- a "mid-load
+  // throw" with no map-name or fault context, same complaint the
+  // DECOUPLED_LM block above exists to avoid. This prescan runs the same
+  // extents math BEFORE Mod_LoadFaces allocates anything, so a Q64-style
+  // map is refused cleanly and up front, exactly like DECOUPLED_LM is
+  // above (loadmodel.numsurfaces stays 0). CalcSurfaceExtents's own check
+  // is left in place unchanged as a defensive backstop.
+  PrescanClassicSurfaceExtents(mod, header.lumps[LUMP_FACES]);
 
   Mod_LoadFaces(header.lumps[LUMP_FACES]);
   Mod_LoadMarksurfaces(header.lumps[LUMP_LEAFFACES]);

@@ -246,6 +246,12 @@ export const glCvars: {
   gl_saturatelighting: CvarT | null;
   gl_lockpvs: CvarT | null;
 
+  // q2repro src/refresh/main.c: `gl_lightgrid = Cvar_Get("gl_lightgrid", "1", 0);`
+  // -- not a vanilla cvar (vanilla gl_light.c has no LIGHTGRID_OCTREE
+  // consumption at all); added here solely to gate world.c's
+  // GL_LightGridPoint port in gl_light.ts's R_LightPoint.
+  gl_lightgrid: CvarT | null;
+
   vid_fullscreen: CvarT | null;
   vid_gamma: CvarT | null;
 
@@ -310,6 +316,8 @@ export const glCvars: {
   gl_texturesolidmode: null,
   gl_saturatelighting: null,
   gl_lockpvs: null,
+
+  gl_lightgrid: null,
 
   vid_fullscreen: null,
   vid_gamma: null,

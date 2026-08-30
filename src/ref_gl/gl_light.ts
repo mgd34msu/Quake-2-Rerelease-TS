@@ -19,12 +19,13 @@ file's only functions that call real GL entry points, so they import that
 same binding rather than adding a third one.
 */
 
-import { type Vec3, vec3, vec3_origin, DotProduct, VectorCopy, VectorSubtract, VectorLength, VectorMA, VectorScale } from "../shared/math";
+import { type Vec3, vec3, vec3_origin, DotProduct, VectorCopy, VectorAdd, VectorSubtract, VectorLength, VectorMA, VectorScale } from "../shared/math";
 import { ERR_DROP, SURF_SKY, SURF_TRANS33, SURF_TRANS66, SURF_WARP, Q_ftol } from "../shared/q_shared";
 import type { DlightT } from "../client/ref";
 import { ri, glCvars, r_newrefdef, r_framecount, currententity, vpn, vright, vup, r_origin, r_worldmodel } from "./gl_local";
 import { qgl } from "./gl_image";
 import { type MnodeOrLeaf, type MsurfaceT, type MplaneT, MAXLIGHTMAPS, isMleaf, SURF_DRAWTURB, SURF_DRAWSKY, surfaceLightmapDims } from "./gl_model";
+import { type LightgridT, lookupLightgrid } from "../qcommon/bspx";
 
 // OpenGL 1.1 enum values gl_light.c's R_RenderDlight/R_RenderDlights need;
 // no shared GL-enum module exists yet across gl_*.ts (every other landed
@@ -306,6 +307,117 @@ function RecursiveLightPoint(node: MnodeOrLeaf, start: Vec3, end: Vec3): number 
   return backChild ? RecursiveLightPoint(backChild, mid, end) : -1;
 }
 
+function lerpVector2(a: Vec3, b: Vec3, t0: number, t1: number, out: Vec3): void {
+  // q2repro inc/shared/shared.h: #define LerpVector2(a,b,c,d,e) ((e)[0]=(c)*(a)[0]+(d)*(b)[0], ...)
+  out[0] = t0 * a[0] + t1 * b[0];
+  out[1] = t0 * a[1] + t1 * b[1];
+  out[2] = t0 * a[2] + t1 * b[2];
+}
+
+/*
+===============
+LightGridPoint
+
+Ported from q2repro's src/refresh/world.c GL_LightGridPoint: looks up the
+8 octree samples surrounding `start` via qcommon/bspx.ts's lookupLightgrid
+(the TS port of BSP_LookupLightgrid), averages over any occluded corners,
+then trilinearly interpolates across the cube. Returns false (leaving
+`color` untouched) when the grid is empty, gl_lightgrid is off, or every
+corner sample is occluded -- callers fall back to the classic per-face
+lightmap sample in that case, matching GL_LightPoint_'s call order.
+
+DEVIATION (rule 16/17, documented): the C GL_LightGridPoint ends with
+`GL_AdjustColor(color)`, which folds in q2repro's per-pixel-lighting
+infrastructure (gl_static.entity_modulate, lm.add/lm.scale) that this
+vanilla-derived renderer never ported (gl_light.ts has no equivalent
+state). This port keeps only GL_AdjustColor's final `VectorScale(color,
+1/255, color)` step, which brings the grid's raw byte-range samples into
+the same units RecursiveLightPoint's classic branch already uses for
+`pointcolor` (that branch's own texel accumulation multiplies by
+`(1.0 / 255)` inline). This keeps the two branches' outputs on a
+consistent scale for the dlight-add and gl_modulate steps that follow in
+R_LightPoint, at the cost of dropping q2repro's extra per-pixel-lighting
+brightness adjustment (which has no observable effect here since this
+renderer has no per-pixel-lighting path to modulate).
+===============
+*/
+export function LightGridPoint(grid: LightgridT, start: Vec3, color: Vec3): boolean {
+  if (!grid.numleafs || !(glCvars.gl_lightgrid && glCvars.gl_lightgrid.value)) return false;
+
+  const point = vec3((start[0] - grid.mins[0]) * grid.scale[0], (start[1] - grid.mins[1]) * grid.scale[1], (start[2] - grid.mins[2]) * grid.scale[2]);
+
+  // C: `VectorCopy(point, point_i)` assigns float vec3_t into a uint32_t[3]
+  // -- an implicit truncating conversion. Grid-relative points are expected
+  // non-negative, so Math.trunc reproduces that truncation; an out-of-range
+  // negative point simply misses lookupLightgrid's bounds check below,
+  // matching the C lookup's own failure mode for out-of-grid points.
+  const point_i: [number, number, number] = [Math.trunc(point[0]), Math.trunc(point[1]), Math.trunc(point[2])];
+
+  const samples: Vec3[] = [vec3(), vec3(), vec3(), vec3(), vec3(), vec3(), vec3(), vec3()];
+  const avg = vec3();
+  let mask = 0;
+  let numsamples = 0;
+
+  for (let i = 0; i < 8; i++) {
+    const tmp: [number, number, number] = [point_i[0] + ((i >> 0) & 1), point_i[1] + ((i >> 1) & 1), point_i[2] + ((i >> 2) & 1)];
+
+    const s = lookupLightgrid(grid, tmp);
+    if (!s) continue;
+
+    let j = 0;
+    for (; j < grid.numstyles && s[j].style !== 255; j++) {
+      const style = r_newrefdef.lightstyles[s[j].style];
+      if (!style) break;
+      VectorMA(samples[i], style.white, vec3(s[j].rgb[0], s[j].rgb[1], s[j].rgb[2]), samples[i]);
+    }
+
+    // count non-occluded samples
+    if (j) {
+      mask |= 1 << i;
+      VectorAdd(avg, samples[i], avg);
+      numsamples++;
+    }
+  }
+
+  if (!mask) return false;
+
+  // replace occluded samples with average
+  if (mask !== 255) {
+    VectorScale(avg, 1.0 / numsamples, avg);
+    for (let i = 0; i < 8; i++) {
+      if (!(mask & (1 << i))) VectorCopy(avg, samples[i]);
+    }
+  }
+
+  // trilinear interpolation
+  const fx = point[0] - point_i[0];
+  const fy = point[1] - point_i[1];
+  const fz = point[2] - point_i[2];
+
+  const bx = 1.0 - fx;
+  const by = 1.0 - fy;
+  const bz = 1.0 - fz;
+
+  const lerp_x: Vec3[] = [vec3(), vec3(), vec3(), vec3()];
+  const lerp_y: Vec3[] = [vec3(), vec3()];
+
+  lerpVector2(samples[0], samples[1], bx, fx, lerp_x[0]);
+  lerpVector2(samples[2], samples[3], bx, fx, lerp_x[1]);
+  lerpVector2(samples[4], samples[5], bx, fx, lerp_x[2]);
+  lerpVector2(samples[6], samples[7], bx, fx, lerp_x[3]);
+
+  lerpVector2(lerp_x[0], lerp_x[1], by, fy, lerp_y[0]);
+  lerpVector2(lerp_x[2], lerp_x[3], by, fy, lerp_y[1]);
+
+  lerpVector2(lerp_y[0], lerp_y[1], bz, fz, color);
+
+  // GL_AdjustColor's final normalization step only -- see the deviation
+  // note in this function's header comment.
+  VectorScale(color, 1.0 / 255, color);
+
+  return true;
+}
+
 /*
 ===============
 R_LightPoint
@@ -321,7 +433,15 @@ export function R_LightPoint(p: Vec3, color: Vec3): void {
 
   const r = r_worldmodel.nodes.length > 0 ? RecursiveLightPoint(r_worldmodel.nodes[0], p, end) : -1;
 
-  if (r === -1) VectorCopy(vec3_origin, color);
+  // q2repro's GL_LightPoint_ always runs its BSP trace first (for
+  // lightspot/lightplane side effects, mirrored above by
+  // RecursiveLightPoint), then tries LIGHTGRID_OCTREE BEFORE falling back
+  // to the trace's own per-face lightmap sample (GL_SampleLightPoint,
+  // mirrored by RecursiveLightPoint's `pointcolor` here).
+  const grid = r_worldmodel.bspx ? r_worldmodel.bspx.lightgrid : null;
+  if (grid && LightGridPoint(grid, p, color)) {
+    // grid hit -- color already filled in by LightGridPoint.
+  } else if (r === -1) VectorCopy(vec3_origin, color);
   else VectorCopy(pointcolor, color);
 
   //
