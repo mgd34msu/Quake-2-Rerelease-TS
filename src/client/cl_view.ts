@@ -1,0 +1,555 @@
+// cl_view.c -- player rendering positioning
+
+import { CDAudio_Play } from "../platform/cd_ogg";
+import { type Vec3, vec3, VectorAdd, VectorClear, VectorScale } from "../shared/math";
+import { CS_CDTRACK, CVAR_ARCHIVE, Com_sprintf, CS_IMAGES, CS_MODELS, CS_PLAYERSKINS, CS_SKY, CS_SKYAXIS, CS_SKYROTATE, type CvarT, MAX_CLIENTS, MAX_IMAGES, MAX_MODELS, YAW } from "../shared/q_shared";
+import { Cmd_AddCommand, Cmd_Argc, Cmd_Argv } from "../qcommon/cmd";
+import { Cvar_Get } from "../qcommon/cvar";
+import { Com_Error, Com_Printf } from "../qcommon/common";
+import { ERR_DROP } from "../qcommon/qcommon";
+import { CM_InlineModel } from "../qcommon/cmodel";
+import { DlightT, EntityT, LightstyleT, MAX_DLIGHTS, MAX_ENTITIES, MAX_LIGHTSTYLES, MAX_PARTICLES, ParticleT } from "./ref";
+import {
+  cl,
+  cls,
+  clCvars,
+  cl_weaponmodels,
+  ConnstateT,
+  gun_frame,
+  gun_model,
+  MAX_CLIENTWEAPONMODELS,
+  num_cl_weaponmodels,
+  re,
+  setGunFrame,
+  setGunModel,
+  setNumClWeaponmodels,
+} from "./client";
+import { crosshair, crosshair_height, crosshair_pic, crosshair_width, scr_vrect, setCrosshair } from "./screen";
+import { entitycmpfnc, SCR_AddDirtyPoint, SCR_TouchPics, SCR_UpdateScreen } from "./cl_scrn";
+import { CL_AddEntities } from "./cl_ents";
+import { CL_RegisterTEntModels } from "./cl_tent";
+import { CL_LoadClientinfo, CL_ParseClientinfo } from "./cl_parse";
+import { Sys_SendKeyEvents } from "./cl_input";
+import { Con_ClearNotify } from "./console_impl";
+import { viddef } from "./vid";
+import { Sys_Milliseconds } from "../platform/sys";
+
+//=============
+//
+// development tools for weapons
+//
+//=============
+// gun_frame/gun_model are extern in client.h, defined in cl_view.c in the
+// original; owned by client.ts per that file's ownership note (this module
+// reads/writes them through its setGunFrame/setGunModel setters).
+
+let cl_testparticles: CvarT | null = null;
+let cl_testentities: CvarT | null = null;
+let cl_testlights: CvarT | null = null;
+let cl_testblend: CvarT | null = null;
+
+let cl_stats: CvarT | null = null;
+
+export let r_numdlights = 0;
+export const r_dlights: DlightT[] = Array.from({ length: MAX_DLIGHTS }, () => new DlightT());
+
+export let r_numentities = 0;
+export const r_entities: EntityT[] = Array.from({ length: MAX_ENTITIES }, () => new EntityT());
+
+export let r_numparticles = 0;
+export const r_particles: ParticleT[] = Array.from({ length: MAX_PARTICLES }, () => new ParticleT());
+
+export const r_lightstyles: LightstyleT[] = Array.from({ length: MAX_LIGHTSTYLES }, () => new LightstyleT());
+
+/*
+====================
+V_ClearScene
+
+Specifies the model that will be used as the world
+====================
+*/
+export function V_ClearScene(): void {
+  r_numdlights = 0;
+  r_numentities = 0;
+  r_numparticles = 0;
+}
+
+/*
+=====================
+V_AddEntity
+
+=====================
+*/
+export function V_AddEntity(ent: EntityT): void {
+  if (r_numentities >= MAX_ENTITIES) return;
+  const dst = r_entities[r_numentities++];
+  dst.model = ent.model;
+  dst.angles.set(ent.angles);
+  dst.origin.set(ent.origin);
+  dst.frame = ent.frame;
+  dst.oldorigin.set(ent.oldorigin);
+  dst.oldframe = ent.oldframe;
+  dst.backlerp = ent.backlerp;
+  dst.skinnum = ent.skinnum;
+  dst.lightstyle = ent.lightstyle;
+  dst.alpha = ent.alpha;
+  dst.skin = ent.skin;
+  dst.flags = ent.flags;
+}
+
+/*
+=====================
+V_AddParticle
+
+=====================
+*/
+export function V_AddParticle(org: Vec3, color: number, alpha: number): void {
+  if (r_numparticles >= MAX_PARTICLES) return;
+  const p = r_particles[r_numparticles++];
+  p.origin.set(org);
+  p.color = color;
+  p.alpha = alpha;
+}
+
+/*
+=====================
+V_AddLight
+
+=====================
+*/
+export function V_AddLight(org: Vec3, intensity: number, r: number, g: number, b: number): void {
+  if (r_numdlights >= MAX_DLIGHTS) return;
+  const dl = r_dlights[r_numdlights++];
+  dl.origin.set(org);
+  dl.intensity = intensity;
+  dl.color[0] = r;
+  dl.color[1] = g;
+  dl.color[2] = b;
+}
+
+/*
+=====================
+V_AddLightStyle
+
+=====================
+*/
+export function V_AddLightStyle(style: number, r: number, g: number, b: number): void {
+  if (style < 0 || style > MAX_LIGHTSTYLES) Com_Error(ERR_DROP, "Bad light style %i", style);
+  const ls = r_lightstyles[style];
+  ls.white = r + g + b;
+  ls.rgb[0] = r;
+  ls.rgb[1] = g;
+  ls.rgb[2] = b;
+}
+
+/*
+================
+V_TestParticles
+
+If cl_testparticles is set, create 4096 particles in the view
+================
+*/
+function V_TestParticles(): void {
+  r_numparticles = MAX_PARTICLES;
+  for (let i = 0; i < r_numparticles; i++) {
+    const d = i * 0.25;
+    const r = 4 * ((i & 7) - 3.5);
+    const u = 4 * (((i >> 3) & 7) - 3.5);
+    const p = r_particles[i];
+
+    for (let j = 0; j < 3; j++) {
+      p.origin[j] = cl.refdef.vieworg[j] + cl.v_forward[j] * d + cl.v_right[j] * r + cl.v_up[j] * u;
+    }
+
+    p.color = 8;
+    p.alpha = cl_testparticles?.value ?? 0;
+  }
+}
+
+/*
+================
+V_TestEntities
+
+If cl_testentities is set, create 32 player models
+================
+*/
+function V_TestEntities(): void {
+  r_numentities = 32;
+  // memset(r_entities, 0, sizeof(r_entities)) in the C zeroes the whole
+  // backing array; here only the active range (0..r_numentities) is reset
+  // field-by-field since r_entities holds preallocated objects rather than
+  // raw memory, and nothing ever reads past r_numentities.
+  for (let i = 0; i < r_numentities; i++) {
+    const ent = r_entities[i];
+    ent.model = null;
+    VectorClear(ent.angles);
+    ent.frame = 0;
+    VectorClear(ent.oldorigin);
+    ent.oldframe = 0;
+    ent.backlerp = 0;
+    ent.skinnum = 0;
+    ent.lightstyle = 0;
+    ent.alpha = 0;
+    ent.skin = null;
+    ent.flags = 0;
+  }
+
+  for (let i = 0; i < r_numentities; i++) {
+    const ent = r_entities[i];
+
+    const r = 64 * ((i % 4) - 1.5);
+    const f = 64 * Math.floor(i / 4) + 128;
+
+    for (let j = 0; j < 3; j++) {
+      ent.origin[j] = cl.refdef.vieworg[j] + cl.v_forward[j] * f + cl.v_right[j] * r;
+    }
+
+    ent.model = cl.baseclientinfo.model;
+    ent.skin = cl.baseclientinfo.skin;
+  }
+}
+
+/*
+================
+V_TestLights
+
+If cl_testlights is set, create 32 lights models
+================
+*/
+function V_TestLights(): void {
+  r_numdlights = 32;
+  for (let i = 0; i < r_numdlights; i++) {
+    const dl = r_dlights[i];
+    VectorClear(dl.origin);
+    VectorClear(dl.color);
+    dl.intensity = 0;
+
+    const r = 64 * ((i % 4) - 1.5);
+    const f = 64 * Math.floor(i / 4) + 128;
+
+    for (let j = 0; j < 3; j++) {
+      dl.origin[j] = cl.refdef.vieworg[j] + cl.v_forward[j] * f + cl.v_right[j] * r;
+    }
+    dl.color[0] = ((i % 6) + 1) & 1;
+    dl.color[1] = (((i % 6) + 1) & 2) >> 1;
+    dl.color[2] = (((i % 6) + 1) & 4) >> 2;
+    dl.intensity = 200;
+  }
+}
+
+//===================================================================
+
+/*
+=================
+CL_PrepRefresh
+
+Call before entering a new level, or after changing dlls
+=================
+*/
+export function CL_PrepRefresh(): void {
+  if (!cl.configstrings[CS_MODELS + 1][0]) return; // no map loaded
+
+  // ref_gl/ is not ported (PORTING.md); `re` stays null with no GL renderer
+  // constructed, so this early-outs instead of null-derefing -- reported
+  // deviation from the C, which never null-checks `re` (mirrors
+  // CL_RegisterTEntModels's guard in cl_tent.ts).
+  if (!re) return;
+
+  SCR_AddDirtyPoint(0, 0);
+  SCR_AddDirtyPoint(viddef.width - 1, viddef.height - 1);
+
+  // let the render dll load the map
+  const mapstring = cl.configstrings[CS_MODELS + 1];
+  const mapname = mapstring.slice(5, mapstring.length - 4); // skip "maps/", cut off ".bsp"
+
+  // register models, pics, and skins
+  Com_Printf(`Map: ${mapname}\r`);
+  SCR_UpdateScreen();
+  re.BeginRegistration(mapname);
+  Com_Printf("                                     \r");
+
+  // precache status bar pics
+  Com_Printf("pics\r");
+  SCR_UpdateScreen();
+  SCR_TouchPics();
+  Com_Printf("                                     \r");
+
+  CL_RegisterTEntModels();
+
+  setNumClWeaponmodels(1);
+  cl_weaponmodels[0] = "weapon.md2";
+
+  for (let i = 1; i < MAX_MODELS && cl.configstrings[CS_MODELS + i][0]; i++) {
+    const fullName = cl.configstrings[CS_MODELS + i];
+    const name = fullName.slice(0, 37); // never go beyond one line
+    if (name[0] !== "*") Com_Printf(`${name}\r`);
+    SCR_UpdateScreen();
+    Sys_SendKeyEvents(); // pump message loop
+    if (name[0] === "#") {
+      // special player weapon model
+      if (num_cl_weaponmodels < MAX_CLIENTWEAPONMODELS) {
+        cl_weaponmodels[num_cl_weaponmodels] = fullName.slice(1);
+        setNumClWeaponmodels(num_cl_weaponmodels + 1);
+      }
+    } else {
+      cl.model_draw[i] = re.RegisterModel(fullName);
+      if (name[0] === "*") cl.model_clip[i] = CM_InlineModel(fullName);
+      else cl.model_clip[i] = null;
+    }
+    if (name[0] !== "*") Com_Printf("                                     \r");
+  }
+
+  Com_Printf("images\r");
+  SCR_UpdateScreen();
+  for (let i = 1; i < MAX_IMAGES && cl.configstrings[CS_IMAGES + i][0]; i++) {
+    cl.image_precache[i] = re.RegisterPic(cl.configstrings[CS_IMAGES + i]);
+    Sys_SendKeyEvents(); // pump message loop
+  }
+
+  Com_Printf("                                     \r");
+  for (let i = 0; i < MAX_CLIENTS; i++) {
+    if (!cl.configstrings[CS_PLAYERSKINS + i][0]) continue;
+    Com_Printf(`client ${i}\r`);
+    SCR_UpdateScreen();
+    Sys_SendKeyEvents(); // pump message loop
+    CL_ParseClientinfo(i);
+    Com_Printf("                                     \r");
+  }
+
+  CL_LoadClientinfo(cl.baseclientinfo, "unnamed\\male/grunt");
+
+  // set sky textures and speed
+  Com_Printf("sky\r");
+  SCR_UpdateScreen();
+  const rotate = parseFloat(cl.configstrings[CS_SKYROTATE]);
+  const axisParts = cl.configstrings[CS_SKYAXIS].trim().split(/\s+/).map(Number);
+  const axis = vec3();
+  axis[0] = axisParts[0] ?? 0;
+  axis[1] = axisParts[1] ?? 0;
+  axis[2] = axisParts[2] ?? 0;
+  re.SetSky(cl.configstrings[CS_SKY], rotate, axis);
+  Com_Printf("                                     \r");
+
+  // the renderer can now free unneeded stuff
+  re.EndRegistration();
+
+  // clear any lines of console text
+  Con_ClearNotify();
+
+  SCR_UpdateScreen();
+  cl.refresh_prepped = true;
+  cl.force_refdef = true; // make sure we have a valid refdef
+
+  // start the cd track
+  CDAudio_Play(parseInt(cl.configstrings[CS_CDTRACK], 10) || 0, true);
+  // dropped: no CD audio backend is ported. cdaudio.ts documents this as a
+  // future src/platform/cdaudio.ts unit (none of CDAudio_Init/Play/Stop/
+  // Update/Activate/Shutdown are defined anywhere in the C tree either --
+  // they're per-platform: linux/cd_linux.c, win32/cd_win.c, null/cd_null.c).
+}
+
+/*
+====================
+CalcFov
+====================
+*/
+function CalcFov(fov_x: number, width: number, height: number): number {
+  if (fov_x < 1 || fov_x > 179) Com_Error(ERR_DROP, "Bad fov: %f", fov_x);
+
+  const x = width / Math.tan((fov_x / 360) * Math.PI);
+  let a = Math.atan(height / x);
+  a = (a * 360) / Math.PI;
+
+  return a;
+}
+
+//============================================================================
+
+// gun frame debugging functions
+function V_Gun_Next_f(): void {
+  setGunFrame(gun_frame + 1);
+  Com_Printf("frame %i\n", gun_frame);
+}
+
+function V_Gun_Prev_f(): void {
+  let frame = gun_frame - 1;
+  if (frame < 0) frame = 0;
+  setGunFrame(frame);
+  Com_Printf("frame %i\n", gun_frame);
+}
+
+function V_Gun_Model_f(): void {
+  if (Cmd_Argc() !== 2) {
+    setGunModel(null);
+    return;
+  }
+  const name = Com_sprintf("models/%s/tris.md2", Cmd_Argv(1));
+  setGunModel(re?.RegisterModel(name) ?? null);
+}
+
+//============================================================================
+
+// entitycmpfnc's true home is client/cl_scrn.c, and cl_scrn.ts (landed
+// separately) already exports it for exactly this qsort call -- imported
+// above rather than re-implemented here. See that file's own header for its
+// reported deviation (ModelS/ImageS are opaque `unknown` handles with no
+// address arithmetic in this port, so it returns a stable 0/equal instead
+// of the C's pointer-difference comparison).
+
+/*
+=================
+SCR_DrawCrosshair
+
+SCR_DrawCrosshair's true home is also client/cl_view.c (confirmed here),
+but the crosshair cvar and crosshair_pic/crosshair_width/crosshair_height
+state were already declared in screen.ts by a prior unit anticipating
+cl_scrn.c's real home for this state; V_Init registers the cvar through
+screen.ts's setCrosshair rather than a new local binding to match that
+placement.
+=================
+*/
+export function SCR_DrawCrosshair(): void {
+  if (!crosshair?.value) return;
+
+  if (crosshair.modified) {
+    crosshair.modified = false;
+    SCR_TouchPics();
+  }
+
+  if (!crosshair_pic) return;
+
+  re?.DrawPic(scr_vrect.x + ((scr_vrect.width - crosshair_width) >> 1), scr_vrect.y + ((scr_vrect.height - crosshair_height) >> 1), crosshair_pic);
+}
+
+/*
+==================
+V_RenderView
+
+==================
+*/
+export function V_RenderView(stereo_separation: number): void {
+  if (cls.state !== ConnstateT.ca_active) return;
+
+  if (!cl.refresh_prepped) return; // still loading
+
+  if (clCvars.cl_timedemo?.value) {
+    if (!cl.timedemo_start) cl.timedemo_start = Sys_Milliseconds();
+    cl.timedemo_frames++;
+  }
+
+  // an invalid frame will just use the exact previous refdef
+  // we can't use the old frame if the video mode has changed, though...
+  if (cl.frame.valid && (cl.force_refdef || !clCvars.cl_paused?.value)) {
+    cl.force_refdef = false;
+
+    V_ClearScene();
+
+    // build a refresh entity list and calc cl.sim*
+    // this also calls CL_CalcViewValues which loads
+    // v_forward, etc.
+    CL_AddEntities();
+
+    if (cl_testparticles?.value) V_TestParticles();
+    if (cl_testentities?.value) V_TestEntities();
+    if (cl_testlights?.value) V_TestLights();
+    if (cl_testblend?.value) {
+      cl.refdef.blend[0] = 1;
+      cl.refdef.blend[1] = 0.5;
+      cl.refdef.blend[2] = 0.25;
+      cl.refdef.blend[3] = 0.5;
+    }
+
+    // offset vieworg appropriately if we're doing stereo separation
+    if (stereo_separation !== 0) {
+      const tmp = vec3();
+      VectorScale(cl.v_right, stereo_separation, tmp);
+      VectorAdd(cl.refdef.vieworg, tmp, cl.refdef.vieworg);
+    }
+
+    // never let it sit exactly on a node line, because a water plane can
+    // dissapear when viewed with the eye exactly on it.
+    // the server protocol only specifies to 1/8 pixel, so add 1/16 in each axis
+    cl.refdef.vieworg[0] += 1.0 / 16;
+    cl.refdef.vieworg[1] += 1.0 / 16;
+    cl.refdef.vieworg[2] += 1.0 / 16;
+
+    cl.refdef.x = scr_vrect.x;
+    cl.refdef.y = scr_vrect.y;
+    cl.refdef.width = scr_vrect.width;
+    cl.refdef.height = scr_vrect.height;
+    cl.refdef.fov_y = CalcFov(cl.refdef.fov_x, cl.refdef.width, cl.refdef.height);
+    cl.refdef.time = cl.time * 0.001;
+
+    cl.refdef.areabits = cl.frame.areabits;
+
+    if (!clCvars.cl_add_entities?.value) r_numentities = 0;
+    if (!clCvars.cl_add_particles?.value) r_numparticles = 0;
+    if (!clCvars.cl_add_lights?.value) r_numdlights = 0;
+    if (!clCvars.cl_add_blend?.value) {
+      VectorClear(cl.refdef.blend);
+    }
+
+    cl.refdef.num_entities = r_numentities;
+    cl.refdef.entities = r_entities;
+    cl.refdef.num_particles = r_numparticles;
+    cl.refdef.particles = r_particles;
+    cl.refdef.num_dlights = r_numdlights;
+    cl.refdef.dlights = r_dlights;
+    cl.refdef.lightstyles = r_lightstyles;
+
+    cl.refdef.rdflags = cl.frame.playerstate.rdflags;
+
+    // sort entities for better cache locality
+    const activeEntities = r_entities.slice(0, r_numentities);
+    activeEntities.sort(entitycmpfnc);
+    for (let i = 0; i < r_numentities; i++) r_entities[i] = activeEntities[i];
+  }
+
+  re?.RenderFrame(cl.refdef);
+  if (cl_stats?.value) Com_Printf("ent:%i  lt:%i  part:%i\n", r_numentities, r_numdlights, r_numparticles);
+  // log_stats_file is only written by the renderer (ref_gl/ref_soft's
+  // R_RenderFrame), which this build does not link (PORTING.md: ref_gl is
+  // not ported) -- dropped, mirrors common.ts's own note on log_stats_file.
+
+  SCR_AddDirtyPoint(scr_vrect.x, scr_vrect.y);
+  SCR_AddDirtyPoint(scr_vrect.x + scr_vrect.width - 1, scr_vrect.y + scr_vrect.height - 1);
+
+  SCR_DrawCrosshair();
+}
+
+/*
+=============
+V_Viewpos_f
+=============
+*/
+export function V_Viewpos_f(): void {
+  Com_Printf(
+    "(%i %i %i) : %i\n",
+    Math.trunc(cl.refdef.vieworg[0]),
+    Math.trunc(cl.refdef.vieworg[1]),
+    Math.trunc(cl.refdef.vieworg[2]),
+    Math.trunc(cl.refdef.viewangles[YAW]),
+  );
+}
+
+/*
+=============
+V_Init
+=============
+*/
+export function V_Init(): void {
+  Cmd_AddCommand("gun_next", V_Gun_Next_f);
+  Cmd_AddCommand("gun_prev", V_Gun_Prev_f);
+  Cmd_AddCommand("gun_model", V_Gun_Model_f);
+
+  Cmd_AddCommand("viewpos", V_Viewpos_f);
+
+  setCrosshair(Cvar_Get("crosshair", "0", CVAR_ARCHIVE));
+
+  cl_testblend = Cvar_Get("cl_testblend", "0", 0);
+  cl_testparticles = Cvar_Get("cl_testparticles", "0", 0);
+  cl_testentities = Cvar_Get("cl_testentities", "0", 0);
+  cl_testlights = Cvar_Get("cl_testlights", "0", 0);
+
+  cl_stats = Cvar_Get("cl_stats", "0", 0);
+}
