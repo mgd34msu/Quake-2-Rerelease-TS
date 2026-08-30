@@ -262,6 +262,7 @@ import {
   SolidT,
   SoundchanT,
   SvflagsT,
+  SvcPoiFlagsT,
   WaterLevelT,
 } from "../kexapi/game";
 import {
@@ -282,6 +283,7 @@ import {
   PLAYER_MAXS,
   PLAYER_MINS,
   PlayerNoiseT,
+  POI_OBJECTIVE,
   SPAWNFLAG_ITEM_DROPPED,
   SPAWNFLAG_ITEM_DROPPED_PLAYER,
   StuckResultT,
@@ -416,6 +418,38 @@ function GetItemByIndex(id: ItemIdT): GitemT {
   // C++ dereferences the returned pointer unchecked at these call sites.
   if (!item) throw new Error(`GetItemByIndex(${id}): null item (C++ would crash here)`);
   return item;
+}
+
+// ---------------------------------------------------------------------------
+// P_SendLevelPOI -- real, this file's own C++ home (see file header)
+// ---------------------------------------------------------------------------
+// p_view.ts's own "NARROW STUBS" note previously flagged this as unreachable
+// (Compass_Update's own early return meant `level.poi_points[...]` was never
+// populated). Now that g_local_types.ts's LevelLocalsT.poi_points carries
+// its real `(Vec3[] | null)[]` shape and g_items.ts's Compass_Update/
+// Use_Compass are real, this is exported for real here and imported into
+// g_items.ts (which calls it from both functions, same as the C++).
+
+/** p_client.cpp:1771-1782: `void P_SendLevelPOI(edict_t *ent)`.
+ *  [Paril-KEX] send player level POI. */
+export function P_SendLevelPOI(ent: EdictT): void {
+  if (!level.valid_poi) return;
+
+  // C++ dereferences ent->client unchecked here (every real call site --
+  // Compass_Update, Use_Compass -- is only ever reached for a spawned
+  // player). Matches this file's established "safe-crash" primitive for an
+  // upstream unchecked pointer rather than silently changing behavior.
+  const client = ent.client;
+  if (client === null) throw new Error("P_SendLevelPOI: ent.client is null (invariant violated)");
+
+  gi.WriteByte(ServerCommandT.svc_poi);
+  gi.WriteShort(POI_OBJECTIVE);
+  gi.WriteShort(10000);
+  gi.WritePosition(client.help_poi_location);
+  gi.WriteShort(client.help_poi_image);
+  gi.WriteByte(208);
+  gi.WriteByte(SvcPoiFlagsT.POI_FLAG_NONE);
+  gi.unicast(ent, true, 0);
 }
 
 // Hoisted wrapper, NOT a const alias: a top-level `const X = imported` binding

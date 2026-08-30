@@ -53,6 +53,7 @@ import { SV_BroadcastPrintf, SV_SendClientMessages, SV_FlushRedirect } from "./s
 import { SV_ExecuteClientMessage } from "./sv_user";
 import { SV_RecordDemoMessage } from "./sv_ents";
 import { SV_InitOperatorCommands } from "./sv_ccmds";
+import { Nav_Init, Nav_Unload, Nav_Frame } from "./nav";
 
 //============================================================================
 
@@ -657,6 +658,13 @@ SV_RunGameFrame
 =================
 */
 export function SV_RunGameFrame(): void {
+  // main.c:1727: "run nav stuff before frame runs" -- Nav_Frame() runs
+  // unconditionally, every time this function does (q2repro's own snippet
+  // has no pause guard around either Nav_Frame() or the ge->RunFrame(true)
+  // that follows it), unlike the `!paused` gate below that guards only the
+  // engine's own ge.RunFrame() call.
+  Nav_Frame();
+
   if (host_speeds && host_speeds.value) comTiming.time_before_game = Sys_Milliseconds();
 
   // we always need to bump framenum, even if we
@@ -883,6 +891,13 @@ export function SV_Init(): void {
 
   setSvNoreload(Cvar_Get("sv_noreload", "0", 0));
 
+  // main.c:2227 (inside this same function): Nav_Init() only registers the
+  // nav_debug/nav_debug_range cvars in q2repro, both USE_REF-gated (no
+  // renderer on this headless port) -- see nav.ts's header. Called here
+  // anyway so the lifecycle call graph (SV_Init -> Nav_Init) stays visible
+  // and documented rather than silently dropped.
+  Nav_Init();
+
   setSvAiraccelerate(Cvar_Get("sv_airaccelerate", "0", CVAR_LATCH));
 
   public_server = Cvar_Get("public", "0", 0);
@@ -934,8 +949,10 @@ export function SV_Shutdown(finalmsg: string, reconnect: boolean): void {
   // until then.
   SV_ShutdownGameProgs();
 
-  // free current level
+  // free current level (main.c:2328-2329: "CM_FreeMap(&sv.cm); Nav_Unload();"
+  // right before the memset `sv.clear()` mirrors below)
   if (sv.demofile !== null) FS_FCloseFile(sv.demofile);
+  Nav_Unload();
   sv.clear();
   Com_SetServerState(sv.state);
 

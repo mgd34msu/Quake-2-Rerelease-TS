@@ -410,7 +410,13 @@ export interface LevelLocalsT {
   current_poi_image: number;
   current_poi_stage: number;
   current_dynamic_poi: EdictT | null;
-  poi_points: (Vec3 | null)[]; // length MAX_SPLIT_PLAYERS; temporary storage for POIs in coop
+  // g_local.h:1235: `vec3_t *poi_points[MAX_SPLIT_PLAYERS]` -- one nullable,
+  // heap-allocated PER-PLAYER path-point buffer (temporary storage for
+  // compass POIs in coop), NOT one point per player slot. Each non-null
+  // entry is an array of MAX_TEMP_POI_POINTS+1 (129) points, allocated on
+  // first Use_Compass and index-walked/pointer-arithmetic'd throughout
+  // Compass_Update/Use_Compass (g_items.cpp:1495-1624; see g_items.ts).
+  poi_points: (Vec3[] | null)[]; // length MAX_SPLIT_PLAYERS
 
   start_items: string | null;
   no_grapple: boolean; // disable grappling hook

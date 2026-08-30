@@ -702,7 +702,7 @@ function defaultLevelLocals(): LevelLocalsT {
     current_poi_image: 0,
     current_poi_stage: 0,
     current_dynamic_poi: null,
-    poi_points: new Array<Vec3 | null>(MAX_SPLIT_PLAYERS).fill(null),
+    poi_points: new Array<Vec3[] | null>(MAX_SPLIT_PLAYERS).fill(null),
 
     start_items: null,
     no_grapple: false,

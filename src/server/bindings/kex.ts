@@ -206,14 +206,21 @@
 //   1024 -- the same ceiling SV_AreaEdicts's own `Com_Printf("...MAXCOUNT")`
 //   already assumes internally; not re-widened here, same capacity-gap
 //   rationale as above).
-// - `GetPathToGoal`, `Bot_MoveToPoint`, `Bot_FollowActor`,
-//   `Bot_RegisterEdict`/`Bot_UnRegisterEdict`: no-ops / `false` /
-//   `GoalReturnCode.Error`. Nav/bots are ARCHITECTURE.md phase 7.
-// - `Loc_Print`: real localization ($key resolution, loc_file cvar) is
-//   ARCHITECTURE.md phase 7 ("Localization"). This binding does the
-//   observable minimum -- substitute `{0}`, `{1}`, ... placeholders in
-//   `base` with `args`, then forward to the same print path `Client_Print`
-//   uses -- so callers see SOME text rather than a raw template string.
+// - `GetPathToGoal`/`Bot_RegisterEdict`/`Bot_UnRegisterEdict`: real A*
+//   pathfinding and edict registration, ported to src/server/nav.ts
+//   (server/nav.c) as of ARCHITECTURE.md phase 7's nav-mesh unit. See
+//   nav.ts's own header for the file-format/scope details (debug
+//   visualization dropped, headless boot has no renderer to draw into).
+//   `Bot_MoveToPoint`/`Bot_FollowActor` remain `GoalReturnCode.Error`
+//   unconditionally -- matching q2repro's OWN `PF_Bot_MoveToPoint`/
+//   `PF_Bot_FollowActor` stubs (server/game.c:762-770), not a gap in this
+//   port.
+// - `Loc_Print`: real localization ($key resolution, loc_file cvar, {0}/{1}
+//   positional substitution) now goes through `Loc_Localize`
+//   (src/qcommon/loc.ts, ported from q2repro's src/common/loc.c), then
+//   forwards to the same print path `Client_Print` uses -- matching
+//   q2repro's own `PF_Loc_Print` (server/game.c:790-809), which calls
+//   `Loc_Localize(base, true, args, num_args, ...)` and prints the result.
 // - The ten `Draw_*` debug-draw primitives, `ReportMatchDetails_Multicast`,
 //   `SendToClipBoard`, `GetExtension`: no-ops. ARCHITECTURE.md phase 7 /
 //   genuinely out of scope for a headless dedicated boot.
@@ -276,6 +283,7 @@ import {
   MAX_EDICTS,
 } from "../../shared/q_shared";
 import { Com_Printf } from "../../qcommon/common";
+import { Loc_Localize } from "../../qcommon/loc";
 import { Cvar_Get, Cvar_Set, Cvar_ForceSet } from "../../qcommon/cvar";
 import { Cmd_Argc, Cmd_Argv, Cmd_Args, Cbuf_AddText } from "../../qcommon/cmd";
 import { CM_SetAreaPortalState, CM_AreasConnected } from "../../qcommon/cmodel";
@@ -305,6 +313,7 @@ import {
 } from "../sv_game";
 import { type Edict, LinkT, SolidT as EngineSolidT, MAX_ENT_CLUSTERS, type GameExports, GAME_API_VERSION, type GTraceT } from "../../game/game";
 import { GetGameAPI } from "../../kexgame/g_main";
+import { Nav_RegisterEdict, Nav_UnRegisterEdict, Nav_GetPathToGoal, Nav_SetEdictSource } from "../nav";
 import {
   type KexGameImports,
   type KexGameExports,
@@ -647,14 +656,6 @@ function kexCenterPrint(ent: KexEdictT | null, message: string): void {
   PF_centerprintf(mustResolveEngineView(ent, "Center_Print"), message);
 }
 
-function substituteLocArgs(base: string, args: string[], num_args: number): string {
-  let out = base;
-  for (let i = 0; i < num_args; i++) {
-    out = out.split(`{${i}}`).join(args[i] ?? "");
-  }
-  return out;
-}
-
 //---------------------------------------------------------------
 // BoxEdicts -- see file header for the filter/maxcount semantics
 //---------------------------------------------------------------
@@ -810,10 +811,10 @@ export function BuildKexImports(): KexGameImports {
     // Nav: ARCHITECTURE.md phase 7.
     GetPathToGoal: () => false,
 
-    // Localization: ARCHITECTURE.md phase 7 ("loc.c equivalent"). Minimum
-    // observable behavior: substitute {0}/{1}/... placeholders, forward to
-    // the same print path Client_Print uses.
-    Loc_Print: (ent, level, base, args, num_args) => kexClientPrint(ent, level, substituteLocArgs(base, args, num_args)),
+    // Localization: real Loc_Localize (src/qcommon/loc.ts), same
+    // allow_in_place=true call site q2repro's PF_Loc_Print uses.
+    Loc_Print: (ent, level, base, args, num_args) =>
+      kexClientPrint(ent, level, Loc_Localize(base, true, args, num_args)),
 
     // Debug draw: ARCHITECTURE.md phase 7 (versioned extension). No-ops.
     Draw_Line: () => {},
@@ -869,6 +870,14 @@ run. See this file's header ("TRANSITIONAL BRIDGE") for the full design.
 ===============
 */
 export function adaptKexGameExports(kexGe: KexGameExports): GameExports {
+  // nav.ts's Nav_SetupEntities needs to walk "the currently spawned game's
+  // edicts" (q2repro's global `ge->num_edicts`/`EDICT_NUM`, server/nav.c:
+  // 1419-1450) but nav.ts is engine-core and has no ambient reference to
+  // this specific kex game instance -- so bindings/kex.ts (the one place
+  // that DOES hold `kexGe`) supplies it via this provider seam. See
+  // nav.ts's own header ("A NEW SEAM NOT IN THE C SOURCE").
+  Nav_SetEdictSource(() => kexGe.edicts);
+
   return {
     // A deliberate, documented lie: the real kex module reports 2023
     // internally (checked once inside kexgame's own GetGameAPI, never

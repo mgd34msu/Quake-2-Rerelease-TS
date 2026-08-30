@@ -153,22 +153,35 @@
 // ChaseNext.
 //
 // ============================================================================
-// Compass_Update / Use_Compass -- NOT ported (type-shape gap, not a TODO)
+// Compass_Update / Use_Compass -- real (g_items.cpp:1499-1624)
 // ============================================================================
-// g_local_types.ts's LevelLocalsT.poi_points is typed `(Vec3 | null)[]` (one
-// point per player slot), but g_items.cpp:1499-1624 needs
-// `vec3_t *poi_points[MAX_SPLIT_PLAYERS]` -- a heap-allocated PER-PLAYER
-// ARRAY of up to MAX_TEMP_POI_POINTS+1 points, indexed and pointer-
-// arithmetic'd throughout Compass_Update and Use_Compass (`points[i]`,
-// `points + 1`, `request.pathPoints.array = points + 1`). Reshaping that
-// field is outside this unit's file scope (g_items.ts + g_monster.ts/
-// g_trigger.ts stub swaps + test file only). p_view.ts's own header already
-// anticipated this exact gap for its own (unreachable) Compass_Update call
-// site and confirmed level.poi_points is never populated anywhere in this
-// port line -- so both functions are unreachable by any real call path
-// today either way. Ported as throwing stubs citing this type-shape gap,
-// not silently truncated to "one point" (which would silently change
-// compass pathing behavior the moment poi_points ever gets populated).
+// g_local_types.ts's LevelLocalsT.poi_points was typed `(Vec3 | null)[]`
+// (one point per player slot), but the real C++ field is
+// `vec3_t *poi_points[MAX_SPLIT_PLAYERS]` (g_local.h:1235) -- a nullable,
+// heap-allocated PER-PLAYER ARRAY of up to MAX_TEMP_POI_POINTS+1 points,
+// indexed and pointer-arithmetic'd throughout Compass_Update and
+// Use_Compass (`points[i]`, `points + 1`,
+// `request.pathPoints.array = points + 1`). Fixed to `(Vec3[] | null)[]`
+// (g_local_types.ts) so this port can index it the same way.
+//
+// TagMalloc substitution: C++ lazily allocates each player's buffer with
+// `gi.TagMalloc(sizeof(vec3_t) * (MAX_TEMP_POI_POINTS + 1), TAG_LEVEL)` on
+// first Use_Compass, and it lives until the next level load (TAG_LEVEL).
+// This port instead lazily allocates a plain `Vec3[]` of the same length
+// (`Array.from({ length: MAX_TEMP_POI_POINTS + 1 }, () => vec3())`),
+// stored back into `level.poi_points[...]`, which has the same "freed" (all
+// null) lifecycle at level load (g_main_globals.ts's/g_save.ts's own
+// `defaultLevelLocals`).
+//
+// Pointer-arithmetic substitution: C++ passes `points + 1` directly as
+// `request.pathPoints.array` so GetPathToGoal writes straight into
+// `points[1..]` (same memory, no copy). PathRequestPathArray.array's real
+// type here is `Vec3[] | null` (a JS array, not a raw pointer), so there is
+// no `+ 1` offset view to alias -- Use_Compass below passes a fresh
+// MAX_TEMP_POI_POINTS-length scratch array and copies the result into
+// `points[1..]` afterward, preserving the same index-1-based layout
+// (`points[0]` stays reserved for the "extra point in front of the player"
+// write near the end of Use_Compass, exactly like the C++).
 //
 // ============================================================================
 // QUIRKS (bug-for-bug, not "fixed")
@@ -226,8 +239,14 @@ import {
   CS_WHEEL_AMMO,
   CS_WHEEL_WEAPONS,
   CS_WHEEL_POWERUPS,
+  type PathInfo,
+  PathFlags,
+  PathLinkType,
+  type PathRequest,
+  PathReturnCode,
   PrintTypeT,
   RenderfxT,
+  ServerCommandT,
   SoundchanT,
   SolidT,
   SvflagsT,
@@ -270,10 +289,12 @@ import { gi, g_edicts, level } from "./g_main_globals";
 import { type GTime, GTIME_ZERO, Gtime_from_ms, Gtime_from_sec, Gtime_from_hz, Gtime_add, Gtime_subtract, Gtime_nonzero } from "./gtime";
 import { type SpawnFlags, SPAWNFLAGS_NONE, SpawnFlags_from, SpawnFlags_has, SpawnFlags_or, SpawnFlags_and, SpawnFlags_value } from "./spawnflags";
 import { G_Spawn, G_FreeEdict, G_UseTargets, G_PrintActivationMessage } from "./g_utils";
-import { AngleVectors, G_ProjectSource, vec3_add, vec3_muls } from "./q_vec3";
+import { AngleVectors, G_ProjectSource, vec3_add, vec3_dot, vec3_length, vec3_muls, vec3_normalized, vec3_sub } from "./q_vec3";
 import { RegisterThink, RegisterTouch, RegisterUse, type ThinkFn, type TouchFn, type UseFn } from "./g_save_registry";
 import { ArmorIndex, PowerArmorType } from "./g_combat";
 import { Pickup_Weapon as P_Pickup_Weapon } from "./p_weapon";
+import { GetUnicastKey } from "./g_weapon";
+import { P_SendLevelPOI } from "./p_client";
 import {
   CTFDrop_Flag as CTFDrop_Flag_real,
   CTFDrop_Tech as CTFDrop_Tech_real,
@@ -547,16 +568,151 @@ function ChaseNext(_ent: EdictT): void {
 // header (imported below from ctf/g_ctf.ts, which owns the real `ctfgame`
 // match-state global).
 
-/** g_items.cpp:1499-1624 -- see file header "Compass_Update / Use_Compass". */
-export function Compass_Update(_ent: EdictT, _first: boolean): void {
-  throw new Error(
-    "Compass_Update: not ported -- g_local_types.ts's LevelLocalsT.poi_points is typed (Vec3 | null)[] (one point per player slot), but g_items.cpp needs vec3_t *poi_points[MAX_SPLIT_PLAYERS] (a heap-allocated per-player ARRAY of up to MAX_TEMP_POI_POINTS+1 points, pointer-arithmetic'd throughout this function and Use_Compass). Reshaping that field is outside this unit's file scope; p_view.ts's own header already confirmed level.poi_points is never populated anywhere in this port line, so this is unreachable today either way.",
-  );
+/** g_items.cpp:1495: `constexpr size_t MAX_TEMP_POI_POINTS = 128;`. */
+const MAX_TEMP_POI_POINTS = 128;
+
+/** `game_import_t::traceline` convenience wrapper (g_local.h:136-139) --
+ *  duplicated per-file, matching g_weapon.ts's/g_target.ts's own copies
+ *  (this port line's established "small per-file helper" precedent). */
+function giTraceline(start: Vec3, end: Vec3, passent: EdictT | null, mask: ContentsT): KexTraceT {
+  return gi.trace(start, null, null, end, passent, mask);
 }
 
-/** g_items.cpp:1546 (`static`) -- see Compass_Update's own citation above. */
-function Use_Compass(_ent: EdictT, _inv: GitemT): void {
-  throw new Error("Use_Compass: not ported -- see Compass_Update's own citation just above (same LevelLocalsT.poi_points type-shape gap)");
+/** g_items.cpp:1499-1541: `void Compass_Update(edict_t *ent, bool first)`. */
+export function Compass_Update(ent: EdictT, first: boolean): void {
+  const client = ent.client;
+  if (client === null) return;
+
+  const points = level.poi_points[ent.s.number - 1] ?? null;
+
+  // deleted for some reason
+  if (points === null) return;
+
+  if (!client.help_draw_points) return;
+  if (client.help_draw_time >= level.time) return;
+
+  const current = points[client.help_draw_index]!;
+
+  // don't draw too many points
+  const distance = vec3_length(vec3_sub(current, ent.s.origin));
+  if (distance > 4096 || !gi.inPHS(ent.s.origin, current, false)) {
+    client.help_draw_points = false;
+    return;
+  }
+
+  gi.WriteByte(ServerCommandT.svc_help_path);
+  gi.WriteByte(first ? 1 : 0);
+  gi.WritePosition(current);
+
+  if (client.help_draw_index === client.help_draw_count - 1) {
+    gi.WriteDir(vec3_normalized(vec3_sub(client.help_poi_location, current)));
+  } else {
+    gi.WriteDir(vec3_normalized(vec3_sub(points[client.help_draw_index + 1]!, current)));
+  }
+  gi.unicast(ent, false, 0);
+
+  P_SendLevelPOI(ent);
+
+  gi.local_sound(ent, current, g_edicts[0], SoundchanT.CHAN_AUTO, gi.soundindex("misc/help_marker.wav"), 1.0, ATTN_NORM, 0.0, GetUnicastKey());
+
+  // done
+  if (client.help_draw_index === client.help_draw_count - 1) {
+    client.help_draw_points = false;
+    return;
+  }
+
+  client.help_draw_index++;
+  client.help_draw_time = Gtime_add(level.time, Gtime_from_ms(200));
+}
+
+/** g_items.cpp:1546 (`static`): `static void Use_Compass(edict_t *ent, gitem_t *inv)`. */
+function Use_Compass(ent: EdictT, _inv: GitemT): void {
+  if (!level.valid_poi) {
+    LocClient_Print(ent, PrintTypeT.PRINT_HIGH, "$no_valid_poi");
+    return;
+  }
+
+  if (level.current_dynamic_poi !== null) {
+    const dynamicPoi = level.current_dynamic_poi;
+    if (dynamicPoi.use !== null) dynamicPoi.use(dynamicPoi, ent, ent);
+  }
+
+  const client = ent.client;
+  if (client === null) throw new Error("Use_Compass: ent.client is null (invariant violated)");
+
+  client.help_poi_location = level.current_poi;
+  client.help_poi_image = level.current_poi_image;
+
+  let points = level.poi_points[ent.s.number - 1] ?? null;
+
+  if (points === null) {
+    points = Array.from({ length: MAX_TEMP_POI_POINTS + 1 }, () => vec3());
+    level.poi_points[ent.s.number - 1] = points;
+  }
+
+  // Pointer-arithmetic substitution (see file header): C++ passes
+  // `points + 1` directly; this port passes a fresh scratch array and
+  // copies the result into `points[1..]` below.
+  const pathScratch: Vec3[] = Array.from({ length: MAX_TEMP_POI_POINTS }, () => vec3());
+
+  const request: PathRequest = {
+    start: ent.s.origin,
+    goal: level.current_poi,
+    moveDist: 64,
+    pathFlags: PathFlags.All,
+    debugging: { drawTime: 0 },
+    nodeSearch: { ignoreNodeFlags: true, minHeight: 128, maxHeight: 128, radius: 1024 },
+    traversals: { dropHeight: 0, jumpHeight: 0 },
+    pathPoints: { array: pathScratch, count: MAX_TEMP_POI_POINTS },
+  };
+
+  const info: PathInfo = {
+    numPathPoints: 0,
+    pathDistSqr: 0,
+    firstMovePoint: vec3(),
+    secondMovePoint: vec3(),
+    pathLinkType: PathLinkType.Walk,
+    returnCode: PathReturnCode.StartPathErrors,
+  };
+
+  if (gi.GetPathToGoal(request, info)) {
+    // TODO: optimize points?
+    for (let i = 0; i < pathScratch.length; i++) points[i + 1] = pathScratch[i]!;
+
+    client.help_draw_points = true;
+    client.help_draw_count = Math.min(info.numPathPoints, MAX_TEMP_POI_POINTS);
+    client.help_draw_index = 1;
+
+    // remove points too close to the player so they don't have to backtrack
+    for (let i = 1; i < 1 + client.help_draw_count; i++) {
+      const distance = vec3_length(vec3_sub(points[i]!, ent.s.origin));
+      if (distance > 192) break;
+      client.help_draw_index = i;
+    }
+
+    // create an extra point in front of us if we're facing away from the first real point
+    const d = vec3_dot(vec3_normalized(vec3_sub(points[client.help_draw_index]!, ent.s.origin)), client.v_forward);
+
+    if (d < 0.3) {
+      const p = vec3_add(ent.s.origin, vec3_muls(client.v_forward, 64));
+      const traceStart = vec3_add(ent.s.origin, vec3(0, 0, ent.viewheight));
+      const tr = giTraceline(traceStart, p, null, MASK_SOLID);
+
+      client.help_draw_index--;
+      client.help_draw_count++;
+
+      let endpos = tr.endpos;
+      if (tr.fraction < 1.0) endpos = vec3_add(endpos, vec3_muls(tr.plane.normal, 8));
+
+      points[client.help_draw_index] = endpos;
+    }
+
+    client.help_draw_time = GTIME_ZERO;
+    Compass_Update(ent, true);
+  } else {
+    P_SendLevelPOI(ent);
+    gi.local_sound(ent, null, ent, SoundchanT.CHAN_AUTO, gi.soundindex("misc/help_marker.wav"), 1.0, ATTN_NORM, 0.0, GetUnicastKey());
+  }
 }
 
 // ---------------------------------------------------------------------------

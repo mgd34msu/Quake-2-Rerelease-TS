@@ -78,11 +78,16 @@
 //     (the type only declares named fields + the raw int32, no pack/unpack
 //     function) and inventing one without the real union's bit widths would
 //     risk a silent wire-format bug, so it stays a narrow, cited stub.
-//   - P_SendLevelPOI (p_client.cpp:1771-1782), used by Compass_Update:
-//     Compass_Update's own early return (`if (!points) return;`, p_view.cpp's
-//     porting-target is actually g_items.cpp:1499) makes this unreachable by
-//     default -- `level.poi_points[...]` is never populated anywhere in this
-//     port line (no POI-setting call site exists yet).
+//   - Compass_Update (g_items.cpp:1499-1541, this file's own porting-target
+//     for the ClientEndServerFrame call site) landed for real once
+//     g_local_types.ts's LevelLocalsT.poi_points got its real
+//     `(Vec3[] | null)[]` shape and g_items.ts ported Compass_Update/
+//     Use_Compass/P_SendLevelPOI's call chain -- imported here
+//     (`import { Compass_Update } from "./g_items"`) rather than re-ported,
+//     per this port line's "one implementation per symbol" rule. This
+//     file's own former local copy (a stub duplicate, never reachable while
+//     poi_points stayed unpopulated) is removed. See g_items.ts's own
+//     header for the citation.
 //
 // CTF_GRAPPLE_STATE_FLY/PULL/HANG (ctf/g_ctf.h:16-20): a plain 3-value enum
 // with no CTF-module state attached to its own numbering -- ported here as
@@ -145,6 +150,7 @@ import {
   WeaponstateT,
 } from "./g_local";
 import { gi, g_edicts, game, level } from "./g_main_globals";
+import { Compass_Update } from "./g_items";
 import { type GTime, Gtime_add, Gtime_from_hz, Gtime_from_ms, Gtime_milliseconds, Gtime_nonzero, Gtime_seconds, Gtime_subtract, GTIME_ZERO } from "./gtime";
 import { AngleVectors, vec3_add, vec3_dot, vec3_length, vec3_muls, vec3_normalized, vec3_sub } from "./q_vec3";
 import { PITCH, ROLL, YAW, brandom, clamp, crandom_open } from "./q_std";
@@ -253,10 +259,6 @@ function packClientSkinnum(_ent: EdictT): void {
   throw new Error(
     "P_AssignClientSkinnum (bitfield pack): not yet ported -- no ported player_skinnum_t bit-layout helper exists (pending p_client.ts, see p_client.cpp:1741)",
   );
-}
-
-function sendLevelPOI(_ent: EdictT): void {
-  throw new Error("P_SendLevelPOI: not yet ported (pending p_client.ts, see p_client.cpp:1771)");
 }
 
 // ---------------------------------------------------------------------------
@@ -1447,29 +1449,6 @@ export function P_ForceFogTransition(ent: EdictT, instant: boolean): void {
 export function P_AssignClientSkinnum(ent: EdictT): void {
   if (ent.s.modelindex !== 255) return;
   packClientSkinnum(ent);
-}
-
-// ---------------------------------------------------------------------------
-// Compass_Update -- real guard, narrow stub tail (see file header)
-// ---------------------------------------------------------------------------
-
-function compassUpdateBody(_ent: EdictT, _first: boolean): void {
-  throw new Error(
-    "Compass_Update body: not yet ported -- level.poi_points is a single Vec3 slot per player, not the multi-point vec3_t* path buffer the real body walks (pending g_items.ts, see g_items.cpp:1498-1541)",
-  );
-}
-
-/** g_items.cpp:1498-1541: `void Compass_Update(edict_t *ent, bool first)`. */
-export function Compass_Update(ent: EdictT, first: boolean): void {
-  const client = ent.client;
-  if (client === null) return;
-
-  const points = level.poi_points[ent.s.number - 1];
-
-  // deleted for some reason
-  if (points === null || points === undefined) return;
-
-  compassUpdateBody(ent, first);
 }
 
 // ---------------------------------------------------------------------------

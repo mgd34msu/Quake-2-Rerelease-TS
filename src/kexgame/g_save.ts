@@ -210,6 +210,7 @@ import { vec3, type Vec3 } from "../shared/math";
 import {
   MAX_CLIENTS,
   MAX_EDICTS,
+  MAX_SPLIT_PLAYERS,
   MAX_STATS,
   ButtonT,
   CvarFlagsT,
@@ -4546,7 +4547,11 @@ function defaultLevelLocals(): LevelLocalsT {
     current_poi_image: 0,
     current_poi_stage: 0,
     current_dynamic_poi: null,
-    poi_points: new Array<Vec3 | null>(MAX_CLIENTS).fill(null),
+    // g_local.h:1235: `vec3_t *poi_points[MAX_SPLIT_PLAYERS]` -- was
+    // incorrectly sized MAX_CLIENTS (256) here; the real C++ array is
+    // MAX_SPLIT_PLAYERS (8). Not saved (see this file's own "NOT saved"
+    // comment above), so this default is only ever the fresh-level value.
+    poi_points: new Array<Vec3[] | null>(MAX_SPLIT_PLAYERS).fill(null),
     start_items: null,
     no_grapple: false,
     gravity: 0,

@@ -31,6 +31,7 @@ import { geHolder, SV_InitGameProgs } from "./sv_game";
 import { SV_ReadLevelFile } from "./sv_ccmds";
 import { SV_ClearWorld } from "./sv_world";
 import { SetPmAirAccelerate } from "../qcommon/pmove";
+import { Nav_Load, Nav_Unload } from "./nav";
 
 function requireGe(): GameExports {
   const ge = geHolder.ge;
@@ -169,6 +170,12 @@ export function SV_SpawnServer(server: string, spawnpoint: string, serverstate: 
   sv.state = ServerStateT.ss_dead;
   Com_SetServerState(sv.state);
 
+  // free current level's nav data (init.c:124-125: "CM_FreeMap(&sv.cm);
+  // Nav_Unload();", right before the memset `sv.clear()` mirrors below).
+  // Idempotent (a no-op if nothing is loaded), so it's safe here regardless
+  // of whether the previous level ever called Nav_Load at all.
+  Nav_Unload();
+
   // wipe the entire per-level structure
   sv.clear();
   svs.realtime = 0;
@@ -233,6 +240,13 @@ export function SV_SpawnServer(server: string, spawnpoint: string, serverstate: 
     const loaded = CM_LoadMap(sv.configstrings[svs.csr.models + 1], false);
     sv.models[1] = loaded.model;
     checksum = loaded.checksum;
+
+    // init.c:165-166: "sv.cm = cmd->cm; Nav_Load(cmd->server);" -- only on
+    // the real-map (ss_game) path, never for the cinematic/demo/pic
+    // fake-map branch above. Missing bots/navigation/<map>.nav is the
+    // common case and is handled gracefully inside Nav_Load itself (see
+    // nav.ts's header): it does not throw or block server startup.
+    Nav_Load(server);
   }
   sv.configstrings[svs.csr.mapchecksum] = `${checksum}`;
 

@@ -25,6 +25,7 @@
 
 import { cl, cls, re } from "../client";
 import { Com_Printf, Com_Error as Engine_Com_Error } from "../../qcommon/common";
+import { Loc_Localize } from "../../qcommon/loc";
 import { ERR_DROP } from "../../qcommon/qcommon";
 import { Cvar_Get, Cvar_Set, Cvar_ForceSet } from "../../qcommon/cvar";
 import type { KexCgameImports } from "../../kexapi/game";
@@ -224,11 +225,10 @@ export function buildCgameImports(): CgameImports {
       return 0;
     },
 
-    // TODO(phase 7, KEX subsystems: localization). No loc.c port exists
-    // yet; returns the base string unlocalized rather than faking a
-    // translation.
-    Localize(base, _args, _num_args) {
-      return base;
+    // Real Loc_Localize (src/qcommon/loc.ts), same allow_in_place=true call
+    // site q2repro's CG_Localize uses (client/cgame.c:325-331).
+    Localize(base, args, num_args) {
+      return Loc_Localize(base, true, args, num_args);
     },
 
     // TODO(phase 7, KEX subsystems: localization/kfont). Key-bind display

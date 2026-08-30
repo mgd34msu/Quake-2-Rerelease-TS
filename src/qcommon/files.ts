@@ -59,6 +59,7 @@ import { Com_Error, Com_Printf, Com_DPrintf, dedicated } from "./common";
 import { ERR_FATAL, BASEDIRNAME } from "./qcommon";
 import type * as CvarModule from "./cvar";
 import type * as CmdModule from "./cmd";
+import type * as LocModule from "./loc";
 
 // cvar.ts and cmd.ts are reached lazily (via Bun's synchronous require, not a
 // static top-level import) rather than statically imported here. cmd.ts's
@@ -75,11 +76,19 @@ import type * as CmdModule from "./cmd";
 // own natural (working) static paths, so the lazy require just returns the
 // same cached module. `import type` above is compile-time only (erased),
 // so it adds no runtime edge.
+//
+// loc.ts joins this list for the same structural reason: it statically
+// imports Cvar_Get from cvar.ts, so a static files.ts -> loc.ts edge would
+// recreate the identical files.ts -> cvar.ts -> cmd.ts -> sizebuf.ts ->
+// common.ts -> files.ts cycle one hop further out.
 function cvarMod(): typeof CvarModule {
   return require("./cvar");
 }
 function cmdMod(): typeof CmdModule {
   return require("./cmd");
+}
+function locMod(): typeof LocModule {
+  return require("./loc");
 }
 
 //=============================================================================
@@ -878,4 +887,10 @@ export function FS_InitFilesystem(): void {
   if (fs_gamedirvar && fs_gamedirvar.string.length) {
     FS_SetGamedir(fs_gamedirvar.string);
   }
+
+  // q2repro's files.c:4046 -- Loc_Init() is the last statement of FS_Init(),
+  // not part of Qcommon_Init's subsystem block. Mirrored at the same
+  // relative position here (see loc.ts's header comment for why this is a
+  // lazy require rather than a static import).
+  locMod().Loc_Init();
 }
