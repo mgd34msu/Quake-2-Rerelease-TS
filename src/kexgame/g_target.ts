@@ -168,6 +168,8 @@ import { gi, g_edicts, game, globals, level } from "./g_main_globals";
 import { T_Damage, T_RadiusDamage } from "./g_combat";
 import { G_FindByString, G_FreeEdict, G_PickTarget, G_SetMovedir, G_Spawn, G_UseTargets, KillBox } from "./g_utils";
 import { fire_blaster, GetUnicastKey, markPierce, restorePierce, pierceTrace } from "./g_weapon";
+import { BeginIntermission, MoveClientToIntermission, G_EndOfUnitMessage } from "./p_hud";
+import { G_SetClientFrame } from "./p_view";
 import { GTIME_ZERO, Gtime_add, Gtime_from_ms, Gtime_from_sec, Gtime_nonzero, Gtime_seconds, Gtime_subtract } from "./gtime";
 import { SpawnFlags_from, SpawnFlags_has, type SpawnFlags } from "./spawnflags";
 import { RotatePointAroundVector, vec3_add, vec3_equals, vec3_length, vec3_lengthSquared, vec3_muls, vec3_normalized, vec3_origin, vec3_sub } from "./q_vec3";
@@ -274,20 +276,8 @@ const CONFIG_STORY_INDEX = CONFIG_HEALTH_BAR_NAME_INDEX + 1;
 function ED_CallSpawn(_ent: EdictT): void {
   throw new Error("ED_CallSpawn: not yet ported (pending g_spawn.ts, see g_spawn.cpp)");
 }
-function BeginIntermission(_self: EdictT): void {
-  throw new Error("BeginIntermission: not yet ported (pending p_client.ts, see p_client.cpp)");
-}
-function MoveClientToIntermission(_client: EdictT): void {
-  throw new Error("MoveClientToIntermission: not yet ported (pending p_client.ts, see p_client.cpp)");
-}
 function respawn(_client: EdictT): void {
   throw new Error("respawn: not yet ported (pending p_client.ts, see p_client.cpp)");
-}
-function G_SetClientFrame(_self: EdictT): void {
-  throw new Error("G_SetClientFrame: not yet ported (pending p_view.ts, see p_view.cpp)");
-}
-function G_EndOfUnitMessage(): void {
-  throw new Error("G_EndOfUnitMessage: not yet ported (pending p_client.ts, see p_client.cpp)");
 }
 function P_UseCoopInstancedItems(): boolean {
   throw new Error("P_UseCoopInstancedItems: not yet ported (pending p_client.ts, see p_client.cpp)");

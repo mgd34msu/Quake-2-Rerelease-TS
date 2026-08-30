@@ -377,7 +377,7 @@ function makeMonster(index: number, classname = "monster_test"): EdictT {
 // trace fakes
 // ---------------------------------------------------------------------------
 
-/** A world made of one flat floor at world Z `floorZ`: any box trace whose
+/** A world made of one flat floor at world Z `floorZ`: each box trace whose
  *  bottom (origin.z + mins.z) would cross below `floorZ` gets clipped there;
  *  everything else (including all-horizontal moves, since flat ground never
  *  obstructs horizontal motion in these tests) passes through untouched. */
