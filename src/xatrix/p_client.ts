@@ -250,6 +250,14 @@ function copyEntityState(src: EntityStateT, dst: EntityStateT): void {
   dst.solid = src.solid;
   dst.sound = src.sound;
   dst.event = src.event;
+  dst.alpha = src.alpha;
+  dst.scale = src.scale;
+  dst.instance_bits = src.instance_bits;
+  dst.loop_volume = src.loop_volume;
+  dst.loop_attenuation = src.loop_attenuation;
+  dst.owner = src.owner;
+  dst.old_frame = src.old_frame;
+  dst.morefx = src.morefx;
 }
 
 // Recovers a game-private EdictT from an `unknown` PmoveT.touchents/

@@ -28,6 +28,14 @@ export function cloneEntityStateInto(src: EntityStateT, dst: EntityStateT): void
   dst.solid = src.solid;
   dst.sound = src.sound;
   dst.event = src.event;
+  dst.alpha = src.alpha;
+  dst.scale = src.scale;
+  dst.instance_bits = src.instance_bits;
+  dst.loop_volume = src.loop_volume;
+  dst.loop_attenuation = src.loop_attenuation;
+  dst.owner = src.owner;
+  dst.old_frame = src.old_frame;
+  dst.morefx = src.morefx;
 }
 
 export function cloneEntityState(src: EntityStateT): EntityStateT {
@@ -51,10 +59,14 @@ export function clonePlayerState(ps: PlayerStateT): PlayerStateT {
   VectorCopy(ps.gunangles, c.gunangles);
   VectorCopy(ps.gunoffset, c.gunoffset);
   c.gunindex = ps.gunindex;
+  c.gunskin = ps.gunskin;
   c.gunframe = ps.gunframe;
+  c.gunrate = ps.gunrate;
   c.blend.set(ps.blend);
+  c.damage_blend.set(ps.damage_blend);
   c.fov = ps.fov;
   c.rdflags = ps.rdflags;
   c.stats.set(ps.stats);
+  c.team_id = ps.team_id;
   return c;
 }

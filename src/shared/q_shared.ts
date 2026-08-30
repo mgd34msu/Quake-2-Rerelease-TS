@@ -811,6 +811,27 @@ export class EntityStateT {
   solid = 0; // for client side prediction, 8*(bits 0-4) is x/y radius
   sound = 0; // for looping sounds, to guarantee shutoff
   event = 0; // impulse events -- muzzle flashes, footsteps, etc
+
+  // KEX additions (q2repro inc/shared/shared.h:1736-1772). Additive and
+  // behavior-neutral for now: nothing sets these to non-zero, and nothing
+  // transmits them over the wire yet (sv_ents.ts delta logic, sizebuf.ts,
+  // and cl_ents.ts parsing are untouched -- see phase2-design.md).
+  alpha = 0; // [Paril-KEX] alpha scalar; 0 = default (EF_TRANSLUCENT -> 0.3, else 1.0)
+  scale = 0; // [Paril-KEX] model scale scalar; 0 = default
+  instance_bits = 0; // [Paril-KEX] server-managed per-player visibility mask; do not set directly
+  loop_volume = 0; // [Paril-KEX] looping sound volume; 0 = default (1.0)
+  loop_attenuation = 0; // [Paril-KEX] looping sound attenuation; 0 = default (3.0), -1 = none
+  owner = 0; // [Paril-KEX] for client-side owner collision skipping
+  old_frame = 0; // [Paril-KEX] for custom interpolation
+
+  // DESIGN DEVIATION: KEX's effects_t is a uint64 (shared.h). Converting
+  // `effects` itself to bigint would invade the frozen legacy game trees and
+  // the hot bitop paths that read/write it as a plain number. Instead this
+  // port splits the value: `effects` stays the low 32 bits (legacy contract
+  // untouched), and `morefx` holds the high 32 bits (KEX-only). The kex
+  // binding composes/splits the uint64 at the API boundary. Precedent:
+  // Q2PRO's extended protocol uses the same effects/morefx split.
+  morefx = 0;
 }
 
 //==============================================
@@ -828,15 +849,24 @@ export class PlayerStateT {
   gunangles: Vec3 = new Float32Array(3);
   gunoffset: Vec3 = new Float32Array(3);
   gunindex = 0;
+  gunskin = 0; // KEX addition (q2repro shared.h:1780-1815)
   gunframe = 0;
+  gunrate = 0; // KEX addition
 
-  blend: Float32Array = new Float32Array(4); // rgba full screen effect
+  // rgba full screen effect. Named `blend` here (matches this port's
+  // established naming); KEX renames this field `screen_blend` -- the kex
+  // binding maps blend <-> screen_blend at the boundary. Do not rename.
+  blend: Float32Array = new Float32Array(4);
+  // KEX addition: separate damage-flash blend, same vec4 representation as `blend`.
+  damage_blend: Float32Array = new Float32Array(4);
 
   fov = 0; // horizontal field of view
 
   rdflags = 0; // refdef flags
 
   stats: Int16Array = new Int16Array(MAX_STATS); // fast status bar updates
+
+  team_id = 0; // KEX addition: team identifier
 }
 
 // ==================
