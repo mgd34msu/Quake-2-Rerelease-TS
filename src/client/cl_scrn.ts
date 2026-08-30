@@ -58,8 +58,7 @@ import { SCR_DrawCinematic } from "./cl_cin";
 import { V_RenderView } from "./cl_view";
 import { M_Draw } from "./menu";
 import type { EntityT } from "./ref";
-import { CG_DrawHUD } from "./cgame/host";
-import { sb_nums } from "./cgame/classic_hud";
+import { CG_DrawHUD, CG_TouchPics } from "./cgame/host";
 
 function atof(s: string): number {
   const n = Number.parseFloat(s);
@@ -669,21 +668,16 @@ function SCR_TileClear(): void {
 // sb_nums (the digit-icon status bar numbers), SizeHUDString, DrawHUDString,
 // and SCR_DrawField moved to ./cgame/classic_hud.ts along with
 // SCR_ExecuteLayoutString/SCR_DrawStats/SCR_DrawLayout (ARCHITECTURE.md
-// phase 4 classic-cgame extraction) -- sb_nums is re-imported below because
-// SCR_TouchPics (this file) still needs the same pic names to precache.
-// SCR_TouchPics itself stays here rather than moving: unlike SCR_DrawField's
-// pure stat-bar concern, it also owns crosshair pic setup (crosshair_pic/
-// crosshair_width via screen.ts), a cl_view.c concern with no relation to
-// the layout interpreter -- splitting the sb_nums half out from under the
-// crosshair half would leave this function's remaining crosshair-only
-// SCOPE looking arbitrarily half-moved for no behavioral benefit. It is
-// also an Init-time precache call (cl_view.ts's V_Init/VID_Init), not a
-// per-frame HUD draw, so it doesn't fit CgameExports.DrawHUD's shape either;
-// it is exactly the kind of thing KexCgameExports.TouchPics() exists for
-// (kexapi/game.ts), but CgameExports hasn't grown that member yet -- left
-// as a TODO alongside CgameExports's existing Init()/TouchPics() TODOs in
-// host.ts/classic.ts for the same "Init-time cgame registration hasn't
-// moved behind the interface yet" reason.
+// phase 4 classic-cgame extraction). SCR_TouchPics' own sb_nums precache
+// loop has now moved again, behind CgameExports.TouchPics() (host.ts) --
+// each registered cgame precaches its own status-bar/HUD pics (classic.ts's
+// TouchPics for the sb_nums digits, the kex cgame's own CG_TouchPics for its
+// sb_nums + "inventory" pic), dispatched through CG_TouchPics() (host.ts)
+// below. SCR_TouchPics itself stays here rather than moving entirely: it
+// also owns crosshair pic setup (crosshair_pic/crosshair_width via
+// screen.ts), a cl_view.c concern with no relation to either cgame's own
+// HUD/layout data -- see this file's prior note on why splitting that half
+// out under the crosshair-only SCOPE would have no behavioral benefit.
 
 /*
 ===============
@@ -695,7 +689,7 @@ Allows rendering code to cache all needed sbar graphics
 export function SCR_TouchPics(): void {
   if (!re) return;
 
-  for (let i = 0; i < 2; i++) for (let j = 0; j < 11; j++) re.RegisterPic(sb_nums[i][j]);
+  CG_TouchPics();
 
   if (crosshair && crosshair.value) {
     let cv = crosshair.value;

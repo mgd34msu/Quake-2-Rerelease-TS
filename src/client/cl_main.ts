@@ -60,6 +60,7 @@ import { SizeBuf, SZ_Init, SZ_Clear, SZ_Print, MSG_WriteByte, MSG_WriteChar, MSG
 import { FS_Gamedir, FS_CreatePath, FS_FOpenFileWrite, FS_Write, FS_FCloseFile, FS_ExecAutoexec } from "../qcommon/files";
 import { CM_LoadMap } from "../qcommon/cmodel";
 import { SV_Shutdown } from "../server/sv_main";
+import { CG_SetActiveCgameKind } from "./cgame/host";
 import { allow_download, allow_download_players, allow_download_models, allow_download_sounds, allow_download_maps } from "../server/sv_main";
 import {
   Com_sprintf,
@@ -595,6 +596,16 @@ export function CL_Disconnect(): void {
   }
 
   cls.state = ConnstateT.ca_disconnected;
+
+  // Revert to the default cgame (host.ts's CG_SetActiveCgameKind own doc
+  // comment): a disconnect ends this connection's family entirely, so the
+  // next connect() (whatever family it turns out to be) should not inherit
+  // a stale "kex" selection left over from this one. CL_ParseServerData
+  // re-selects the correct kind for the new connection regardless, but
+  // leaving the OLD kind active in between (e.g. while sitting at the
+  // console, disconnected) would mean CG_DrawHUD -- if ever called in that
+  // state -- runs the wrong cgame.
+  CG_SetActiveCgameKind("classic");
 }
 
 export function CL_Disconnect_f(): void {

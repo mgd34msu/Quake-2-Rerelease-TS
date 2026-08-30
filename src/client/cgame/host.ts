@@ -40,10 +40,13 @@ import { Com_Printf, Com_Error as Engine_Com_Error } from "../../qcommon/common"
 import { Loc_Localize } from "../../qcommon/loc";
 import { ERR_DROP } from "../../qcommon/qcommon";
 import { Cvar_Get, Cvar_Set, Cvar_ForceSet } from "../../qcommon/cvar";
-import type { KexCgameImports, Vec2T } from "../../kexapi/game";
-import { TextAlignT } from "../../kexapi/game";
-import type { PlayerStateT } from "../../shared/q_shared";
+import type { KexCgameImports, Vec2T, KexPlayerStateT, KexPmoveStateT, CgServerDataT, VrectT } from "../../kexapi/game";
+import { TextAlignT, KexPmTypeT, MAX_STATS as KEX_MAX_STATS } from "../../kexapi/game";
+import type { PlayerStateT, PmoveStateT } from "../../shared/q_shared";
+import { PmTypeT, SHORT2ANGLE } from "../../shared/q_shared";
+import type { Vec3 } from "../../shared/math";
 import { Key_GetBinding } from "../keys_impl";
+import { viddef } from "../vid";
 import { GetClassicCgameAPI } from "./classic";
 import { GetCGameAPI as GetKexCgameAPI } from "../../kexgame/cgame/cg_main";
 
@@ -461,11 +464,23 @@ export interface ClassicHudDataT {
 // rect/scale parameters, so there is nothing for them to carry yet. Grows
 // toward KexCgameExports.DrawHUD's full signature in phase 6 when the kex
 // cgame needs those remaining parameters for real.
+// TouchPics: added alongside the real DrawHUD wiring below (ARCHITECTURE.md
+// phase 6 closure) -- cl_scrn.ts's SCR_TouchPics precache call is the real
+// KexCgameExports.TouchPics() equivalent this file's own top-of-file comment
+// (and cl_scrn.ts's matching TODO on SCR_TouchPics itself) already flagged as
+// "exactly the kind of thing KexCgameExports.TouchPics() exists for ...
+// CgameExports hasn't grown that member yet". It has now: the sb_nums
+// status-bar digit precache (the HUD-owned half of SCR_TouchPics) moves
+// behind this member for both cgames; the crosshair pic setup (a cl_view.c
+// concern unrelated to either cgame's own layout/HUD data) stays in
+// SCR_TouchPics itself, matching that file's own note that splitting sb_nums
+// out from under crosshair-only SCOPE would leave no behavioral benefit.
 export interface CgameExports {
   apiversion: number;
   Init(): void;
   Shutdown(): void;
   DrawHUD(playernum: number, ps: PlayerStateT, data: ClassicHudDataT): void;
+  TouchPics(): void;
 }
 
 // Own versioning for this minimal seam -- not yet KexCgameExports.apiversion
@@ -489,19 +504,152 @@ export const CGAME_API_VERSION = 1;
 // GetClassicCgameAPI means adapting that richer shape down to CgameExports's
 // narrower one; this function is that adapter.
 //
-// DrawHUD is the one member the adapter cannot make real yet: KexPlayerStateT
-// (64 stats, weapon-wheel/coop-respawn/hit-marker fields) and the classic
-// PlayerStateT that `cl.frame.playerstate` actually holds are DIFFERENT
-// TYPES with no conversion function anywhere in this port line -- that
-// conversion is protocol-layer work (ARCHITECTURE.md phase 5; see
-// buildCgameImports()'s own CL_ServerProtocol stub above, TODO'd to the
-// identical phase for the identical reason). Fabricating a placeholder
-// KexPlayerStateT out of the classic one would silently draw a WRONG hud
-// rather than no hud, so this adapter's DrawHUD is a documented no-op
-// instead -- degrades visually, does not crash. Init/Shutdown/apiversion
-// need none of that missing state and are wired for real. This is exactly
-// the "kex cgame becomes active only when the kex binding drives the
-// client, future wiring" boundary from this unit's brief.
+// DrawHUD used to be a documented no-op here: KexPlayerStateT and the
+// classic PlayerStateT `cl.frame.playerstate` actually holds are different
+// types, and nothing in this port line converted between them client-side.
+// That conversion now exists below (kexPlayerStateViewFromClassic /
+// kexServerDataViewFromClassic), built as the DIRECT INVERSE of
+// src/server/bindings/kex.ts's syncPlayerStateKexToEngine (server-side,
+// kex -> engine): where that function narrows/loses precision going one
+// way, this one widens/pads coming back, and both directions are documented
+// against the same field table so a future reader can check them side by
+// side.
+//
+// ---------------------------------------------------------------------------
+// kexPmTypeFromEngine: the exact inverse of kex.ts's toEnginePmType, which
+// collapses two kex-only pm_types (PM_GRAPPLE, PM_NOCLIP) onto legacy
+// PM_NORMAL/PM_SPECTATOR because the classic PmTypeT has no equivalent.
+// Reversing that collapse is inherently lossy the other way too: legacy
+// PM_SPECTATOR could have come from either kex PM_NOCLIP or kex
+// PM_SPECTATOR -- this picks PM_SPECTATOR, the direct name match, as the
+// "closest faithful thing" (preferences.md rule 3); PM_NOCLIP is simply
+// never reconstructed from a classic ps. Every other member is a 1:1 name
+// match on both enums and round-trips exactly.
+// ---------------------------------------------------------------------------
+function kexPmTypeFromEngine(t: PmTypeT): KexPmTypeT {
+  switch (t) {
+    case PmTypeT.PM_NORMAL:
+      return KexPmTypeT.PM_NORMAL;
+    case PmTypeT.PM_SPECTATOR:
+      return KexPmTypeT.PM_SPECTATOR;
+    case PmTypeT.PM_DEAD:
+      return KexPmTypeT.PM_DEAD;
+    case PmTypeT.PM_GIB:
+      return KexPmTypeT.PM_GIB;
+    case PmTypeT.PM_FREEZE:
+      return KexPmTypeT.PM_FREEZE;
+  }
+}
+
+// origin/velocity: kex.ts's forward direction is
+// `clampInt16(Math.round(kexFloat * 8))` (float units -> 12.3 fixed-point
+// int16); the inverse is qcommon/pmove.ts's own established "int16 fixed ->
+// float" idiom, `fixed * 0.125` (see pmove.ts's pml.origin/pml.velocity
+// assignments) -- not reintroducing a new `/ 8` convention.
+function unfixed3(src: Int16Array): Vec3 {
+  return new Float32Array([src[0] * 0.125, src[1] * 0.125, src[2] * 0.125]);
+}
+
+// delta_angles: kex.ts's forward direction is `ANGLE2SHORT(kexFloatDegrees)`;
+// SHORT2ANGLE (q_shared.ts) is that function's own documented inverse.
+function shortAngles3(src: Int16Array): Vec3 {
+  return new Float32Array([SHORT2ANGLE(src[0]), SHORT2ANGLE(src[1]), SHORT2ANGLE(src[2])]);
+}
+
+function kexPmoveStateViewFromClassic(src: PmoveStateT): KexPmoveStateT {
+  return {
+    pm_type: kexPmTypeFromEngine(src.pm_type),
+    origin: unfixed3(src.origin),
+    velocity: unfixed3(src.velocity),
+    pm_flags: src.pm_flags,
+    pm_time: src.pm_time,
+    gravity: src.gravity,
+    delta_angles: shortAngles3(src.delta_angles),
+    // viewheight (kex-only, int8_t): kex.ts's syncPlayerStateKexToEngine
+    // documents this field as having no counterpart on this port's classic
+    // PmoveStateT and drops it going kex -> engine; there is therefore
+    // nothing to recover going the other way either. Defaults to 0 (the
+    // classic engine's own implicit viewheight before ducking/crouch
+    // adjustment), same "documented, not silently different" gap.
+    viewheight: 0,
+  };
+}
+
+// KexPlayerStateT view assembled from the classic PlayerStateT the real
+// client actually populates (cl.frame.playerstate). Field-by-field against
+// kex.ts's syncPlayerStateKexToEngine's own doc comment:
+//   - pmove: kexPmoveStateViewFromClassic above.
+//   - viewangles/viewoffset/kick_angles/gunangles/gunoffset, gunindex,
+//     gunskin, gunframe, gunrate, fov, rdflags, team_id: identical shape on
+//     both sides (ARCHITECTURE.md's "wide core" widening) -- copied
+//     directly, same as the forward direction.
+//   - screen_blend <- blend, damage_blend <- damage_blend: same vec4 shape,
+//     kex's own field-rename convention (q_shared.ts's PlayerStateT.blend
+//     doc comment), copied by value (not aliased) so callers can't mutate
+//     the source ps through the view.
+//   - stats: this port's classic PlayerStateT.stats is a vanilla
+//     Int16Array(32) (q_shared.ts MAX_STATS); kex's own stats array is
+//     Int16Array(64) (kexapi/game.ts MAX_STATS). The reverse of kex.ts's
+//     documented 64->32 TRUNCATION is a 32->64 WIDEN: the first 32 slots
+//     are copied as-is, the remaining 32 (kex-only stats: weapon-wheel,
+//     coop-respawn, hit-marker, etc. -- see kexapi/game.ts's PlayerStatT)
+//     are zero-filled (Int16Array's own default), matching kex.ts's own
+//     "TODO(phase-2b): widen PlayerStateT.stats to 64" note -- until that
+//     lands, any kex-only stat read off this view is legitimately 0, not a
+//     guess.
+function kexPlayerStateViewFromClassic(src: PlayerStateT): KexPlayerStateT {
+  const stats = new Int16Array(KEX_MAX_STATS);
+  stats.set(src.stats);
+  return {
+    pmove: kexPmoveStateViewFromClassic(src.pmove),
+    viewangles: new Float32Array(src.viewangles),
+    viewoffset: new Float32Array(src.viewoffset),
+    kick_angles: new Float32Array(src.kick_angles),
+    gunangles: new Float32Array(src.gunangles),
+    gunoffset: new Float32Array(src.gunoffset),
+    gunindex: src.gunindex,
+    gunskin: src.gunskin,
+    gunframe: src.gunframe,
+    gunrate: src.gunrate,
+    screen_blend: new Float32Array(src.blend),
+    damage_blend: new Float32Array(src.damage_blend),
+    fov: src.fov,
+    rdflags: src.rdflags,
+    stats,
+    team_id: src.team_id,
+  };
+}
+
+// CgServerDataT (kexapi/game.ts) is the same {layout, inventory} shape as
+// this file's own ClassicHudDataT, minus the Int32Array/Int16Array mismatch
+// ClassicHudDataT's own doc comment cites (cl.inventory is Int32Array;
+// CgServerDataT.inventory is Int16Array). CL_ParseInventory only ever writes
+// MSG_ReadShort() results into cl.inventory (cl_parse.ts), so every value is
+// already in int16 range -- constructing a new Int16Array from the Int32Array
+// values is a lossless narrowing, not a truncation, and needs no cast (the
+// Int16Array constructor accepts any ArrayLike<number> source).
+function kexServerDataViewFromClassic(data: ClassicHudDataT): CgServerDataT {
+  return { layout: data.layout, inventory: new Int16Array(data.inventory) };
+}
+
+// hud_vrect/hud_safe/scale/isplit: the real kex client (q2repro's
+// cgame.c-equivalent caller) computes these once per frame from the video
+// mode and a splitscreen layout; no such caller-side computation exists yet
+// in this port line (classic_hud.ts's own top-of-file comment notes the same
+// gap for ITS geometry -- "no CgameImports counterpart exists yet", reading
+// viddef directly instead). This adapter follows that same established
+// precedent: hud_vrect covers the full viddef surface, hud_safe is identical
+// to hud_vrect (no console-style safe-zone/overscan-inset concept exists in
+// this PC-only port), scale is 1 (no hud-scale cvar has been ported), and
+// isplit is always 0 (this port has no splitscreen support -- the same
+// "isplit is unused/hardcoded 0" precedent buildCgameImports()'s own
+// SCR_DrawBind above already documents for KexCgameImports's isplit
+// parameter). Follow-up: replace with a real per-frame computation if/when
+// splitscreen or HUD-scale cvars land.
+function kexHudVrect(): VrectT {
+  return { x: 0, y: 0, width: viddef.width, height: viddef.height };
+}
+
 function GetKexCgameAsClassicShape(imports: CgameImports): CgameExports {
   const kex = GetKexCgameAPI(imports);
   return {
@@ -513,14 +661,11 @@ function GetKexCgameAsClassicShape(imports: CgameImports): CgameExports {
     apiversion: CGAME_API_VERSION,
     Init: kex.Init,
     Shutdown: kex.Shutdown,
-    DrawHUD(_playernum, _ps, _data) {
-      // TODO(phase 5, protocol layer): no KexPlayerStateT / CgServerDataT /
-      // per-split hud_vrect/hud_safe/scale is derivable from the classic
-      // client state yet -- see comment above. Intentionally not wired;
-      // kex's real CG_DrawHUD (src/kexgame/cgame/cg_screen.ts) is fully
-      // implemented and unit-tested (test/kexgame_cgame.test.ts), it just
-      // has nothing valid to call it with here yet.
+    DrawHUD(playernum, ps, data) {
+      const hud_vrect = kexHudVrect();
+      kex.DrawHUD(0, kexServerDataViewFromClassic(data), hud_vrect, hud_vrect, 1, playernum, kexPlayerStateViewFromClassic(ps));
     },
+    TouchPics: kex.TouchPics,
   };
 }
 
@@ -574,8 +719,14 @@ export function CG_SetActiveCgame(cgame: CgameExports): void {
 // before the first-ever draw). This is the "registry + setActiveCgame"
 // extension point the task brief asked for -- q2repro's CG_Load (deciding
 // classic vs. kex from the connected server's declared ruleset) is the real
-// caller this seam is waiting on; nothing calls it yet, so default behavior
-// is unchanged.
+// caller this seam is waiting on. Now called for real from two sites:
+// cl_parse.ts's CL_ParseServerData (picks "kex" when the freshly-read
+// protocol is PROTOCOL_VERSION_RERELEASE/1038, "classic" otherwise -- mirrors
+// q2repro's cgame.c:425-437 "rerelease server -> load the game's cgame;
+// classic server -> builtin classic" precedent) and cl_main.ts's
+// CL_Disconnect (resets to "classic", the module's own default, on
+// disconnect so a dropped kex connection doesn't leave a stale kex cgame
+// active for the next, possibly-classic, connection).
 export function CG_SetActiveCgameKind(kind: CgameKind): void {
   activeCgameKind = kind;
   activeCgame = null; // force ensureActiveCgame() to rebuild under the new kind
@@ -597,3 +748,15 @@ export function CG_DrawHUD(): void {
   const data: ClassicHudDataT = { layout: cl.layout, inventory: cl.inventory };
   ensureActiveCgame().DrawHUD(cl.playernum, cl.frame.playerstate, data);
 }
+
+// The engine side of CgameExports.TouchPics -- called from cl_scrn.ts's
+// SCR_TouchPics (see that file's own note on why the sb_nums precache moved
+// behind this member while the crosshair precache stayed put) and from
+// cl_view.ts's CL_PrepRefresh path that already calls SCR_TouchPics.
+export function CG_TouchPics(): void {
+  ensureActiveCgame().TouchPics();
+}
+
+// Exposed for test/cgame_activation.test.ts's ps-view/server-data conversion
+// spot checks -- pure functions, no engine state touched.
+export { kexPlayerStateViewFromClassic, kexServerDataViewFromClassic, kexPmTypeFromEngine };

@@ -35,6 +35,7 @@ describe("cgame host", () => {
       DrawHUD() {
         called = true;
       },
+      TouchPics() {},
     };
 
     CG_SetActiveCgame(fake);
@@ -64,6 +65,7 @@ describe("cgame host", () => {
         reachedClassic = true;
         classic.DrawHUD(playernum, ps, data);
       },
+      TouchPics: classic.TouchPics,
     });
 
     expect(() => CG_DrawHUD()).not.toThrow();

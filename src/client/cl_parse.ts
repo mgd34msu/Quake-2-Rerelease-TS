@@ -29,6 +29,7 @@ import { FS_LoadFile, FS_Gamedir, FS_CreatePath, FS_FOpenFileWrite, FS_Write, FS
 import { COM_StripExtension } from "../shared/math";
 import { CM_InlineModel } from "../qcommon/cmodel";
 import { CL_ClearState, CL_RequestNextDownload, CL_WriteDemoMessage } from "./cl_main";
+import { CG_SetActiveCgameKind } from "./cgame/host";
 import { SCR_PlayCinematic } from "./cl_cin";
 import { SCR_CenterPrint } from "./cl_scrn";
 import { con } from "./console";
@@ -326,6 +327,16 @@ export function CL_ParseServerData(): void {
   const { codec, csr } = selectServerCodec(i);
   cls.codec = codec;
   cls.csr = csr;
+
+  // Activate the cgame that matches the family this connection just
+  // selected -- q2repro's cgame.c:425-437 precedent ("rerelease server ->
+  // load the game's cgame; classic server -> builtin classic"). Keyed off
+  // `csr` (the actual family selectServerCodec chose), not the raw
+  // `protocol` number read above: CS_REMAP_RERELEASE is the one value
+  // selectServerCodec ever returns for the kex family, so this stays correct
+  // even through the "BIG HACK" listen-server demo-compat branch above,
+  // which can return CS_REMAP_OLD for reasons unrelated to `i`'s own value.
+  CG_SetActiveCgameKind(csr === CS_REMAP_RERELEASE ? "kex" : "classic");
 
   const sd = codec.readServerData();
   cl.servercount = sd.servercount;

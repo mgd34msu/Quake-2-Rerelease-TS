@@ -13,13 +13,14 @@
 // inventory when STAT_LAYOUTS bit 1 is set. Do not reorder or add
 // conditions without re-checking against SCR_UpdateScreen's history.
 //
-// Init/Shutdown are still no-ops: cl_scrn.ts's SCR_Init still owns all of
-// the classic HUD's cvar/pic registration directly (SCR_TouchPics stays
-// there too -- it also precaches the crosshair pic, a non-HUD concern this
-// unit's brief scoped out; see cl_scrn.ts's own note on it).
+// Init/Shutdown are still no-ops: cl_scrn.ts's SCR_Init still owns the
+// classic HUD's cvar registration directly. TouchPics is now real (see its
+// own comment below) -- cl_scrn.ts's SCR_TouchPics still owns the crosshair
+// pic precache, a non-HUD concern this unit's brief scoped out; see
+// cl_scrn.ts's own note on it.
 
 import { STAT_LAYOUTS } from "../../shared/q_shared";
-import { SCR_DrawStats, SCR_DrawLayout, CL_DrawInventory } from "./classic_hud";
+import { SCR_DrawStats, SCR_DrawLayout, CL_DrawInventory, sb_nums } from "./classic_hud";
 import type { CgameImports, CgameExports } from "./host";
 import { CGAME_API_VERSION } from "./host";
 
@@ -29,7 +30,7 @@ export function GetClassicCgameAPI(imports: CgameImports): CgameExports {
 
     Init() {
       // TODO(phase 4 continuation): no-op until cl_scrn.ts's SCR_Init
-      // (cvar registration, TouchPics, etc.) moves behind this interface.
+      // (cvar registration, etc.) moves behind this interface.
     },
 
     Shutdown() {
@@ -40,6 +41,16 @@ export function GetClassicCgameAPI(imports: CgameImports): CgameExports {
       SCR_DrawStats(imports, ps, playernum);
       if (ps.stats[STAT_LAYOUTS] & 1) SCR_DrawLayout(imports, ps, playernum, data.layout);
       if (ps.stats[STAT_LAYOUTS] & 2) CL_DrawInventory(imports, ps, data.inventory);
+    },
+
+    // The sb_nums half of cl_scrn.ts's former SCR_TouchPics -- moved behind
+    // this member per that file's own TODO ("exactly the kind of thing
+    // KexCgameExports.TouchPics() exists for"). Goes through the host import
+    // surface (Draw_RegisterPic) rather than `re.RegisterPic` directly,
+    // matching every other classic-cgame member's use of `imports` instead
+    // of reaching into client/renderer globals.
+    TouchPics() {
+      for (let i = 0; i < 2; i++) for (let j = 0; j < 11; j++) imports.Draw_RegisterPic(sb_nums[i][j]);
     },
   };
 }
