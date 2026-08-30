@@ -17,6 +17,12 @@ ThreeWave CTF, The Reckoning, Ground Zero) inherited from
 Quake-2-TS v1.1.0 tree (810 tests, four playable games) and is being
 transformed in place toward the target architecture.
 
+The long-horizon goal, recorded in `ARCHITECTURE.md`, is one engine for
+the id-tech family: Quake 1 (original + 2021 re-release, via a
+TypeScript QuakeC VM), Quake 2 (3.21 + 2023 re-release), and Quake 3,
+with a crossover module for cross-game content play. The peer-binding
+core exists to make each family additive.
+
 ## Lineage and attribution
 
 - **id Software** — Quake II (1997) and the v3.21 GPL source release.

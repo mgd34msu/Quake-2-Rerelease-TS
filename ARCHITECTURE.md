@@ -7,12 +7,17 @@ a commitment with a reference implementation to check against.
 
 ## Reference sources (local checkouts)
 
+Active-phase references:
+
 | Path | Role |
 |---|---|
 | `~/Projects/quake2-rerelease-dll/rerelease` | The 2023 game module (C++17, 103,284 lines, GPLv2). Source of truth for the kex game port. |
 | `~/Projects/q2repro` | Q2PRO-derived re-release-compatible engine. Reference specification for all engine behavior. |
 | `~/Projects/q2proto` | Wire-protocol abstraction library. Reference for the protocol layer and protocol 1038 compatibility. |
 | `~/Projects/quake2-rerelease-dll/original` | 1997 C sources (already ported; the legacy modules' provenance). |
+
+The long-horizon reference library lives at `~/Projects/qsrc/` — see
+"The long horizon" below for each tree's role.
 
 ## Core model: one engine, five first-class game modules
 
@@ -160,3 +165,109 @@ test harness for the engine transformation. Rough phase order:
 
 Phases 2-5 are engine surgery under running games; phase 6 is the bulk
 porting effort and can overlap with 7 once the bindings are stable.
+
+---
+
+# The long horizon: one engine for the id-tech family
+
+Everything below phase 8 is future work, recorded now because it is the
+real justification for the peer-binding architecture: the core is being
+built wide so that game families are additive. The target is a single
+engine hosting Quake 1 (original + 2021 re-release), Quake 2 (3.21 +
+2023 re-release), and Quake 3 — with cross-game content play.
+
+## The three unification layers
+
+"Play X in Y" decomposes into three problems with different difficulty
+and different proof status:
+
+1. **Universal assets** — any map and model format loads and renders
+   anywhere: BSP29/BSP38/BSP46, MDL/SPR/MD2/MD3, three palettes and
+   lighting models, Q3 shader scripts and bezier patches. Proven
+   territory: Nightdive's KEX engine runs both re-releases on one core;
+   FTEQW has loaded Q1/Q2/Q3 content in one open engine for years.
+   Known hard spots: Q1 BSP29 carries precomputed collision hulls for
+   only three fixed box sizes, so arbitrary-size entities need
+   brush-level collision reconstruction (BSPX `BRUSHLIST` extension;
+   FTEQW is the reference implementation). Q3's shader system is the
+   largest single renderer lift in the whole vision and goes last.
+2. **Selectable rulesets** — whose pmove, weapons, and match rules run
+   is a module choice, achievable by construction in this architecture:
+   modules are peers over one core, and any module can run on any map
+   the engine loads. Q1 bunny-hopping, Q2 movement, and Q3
+   strafe-jumping are three pmove providers in the slot the kex/legacy
+   bindings already define.
+3. **Content crossover** — a map spawns entities by classname; cross-
+   play requires the running module to implement whatever spawns, plus
+   per-family classname translation tables. The endgame is a
+   **crossover module**: the union bestiary and arsenal across all
+   families. The 2023 re-release module is already this pattern in
+   miniature (four games' content merged, including a ported Q1
+   shambler); the crossover module extends it. Difficulty ranking of
+   the canonical pairs: Q3-maps-under-Q2-rules (easiest: patch
+   collision + a small item table), Q2-content-in-Q1-maps (BSPX
+   collision + translation table), Q1-campaign-under-Q3-rules (hardest
+   framing: Q3 has no monsters, so the crossover module carries the
+   entire Q1 bestiary itself).
+
+Layers 1 and 2 are engineering with existence proofs. Layer 3's full
+matrix has never been shipped polished by anyone — that part is new
+territory.
+
+## Module family roadmap
+
+Each step ships something playable on its own; the order forces the
+core wide early.
+
+1. **Q2 re-release** (phases 1-8 above) — forces the multi-family core,
+   wide state, cgame host, protocol layer.
+2. **Q1 family** — a QuakeC VM written in TypeScript (progs are ~110
+   opcodes over a flat globals/fields model; same order of code as our
+   BSP/MD2 loaders) plus BSP29/MDL/SPR loaders, the Q1 palette, and a
+   Q1 binding mapping VM builtins onto engine-core services. Runs the
+   original `progs.dat` bytecode — fidelity by interpretation, better
+   than any port. Covers all five Q1 campaigns: base, hipnotic
+   (Scourge of Armagon), rogue (Dissolution of Eternity), and the 2021
+   re-release additions (mg1 / Dimension of the Machine), all of whose
+   QuakeC is GPLv2. Doubles as a QuakeC mod platform.
+3. **Crossover module** — the union content module plus translation
+   tables. All required game logic (Q1 QC, Q2 3.21, Q2RR, Q3) is
+   GPLv2-compatible, so the union can legally live in this tree; Q1
+   monsters port from QuakeC to native TS here (the module needs them
+   at native speed alongside kex content).
+4. **Q3 family** — QVM support (the `lcc`/`q3asm` toolchain in qsrc
+   pins the bytecode format from the producer side), BSP46 + shader
+   system + MD3 renderer work, Q3 binding. Last because the renderer
+   cost dominates and nothing else depends on it.
+
+## Long-horizon reference library (`~/Projects/qsrc/`)
+
+| Tree | Role | License |
+|---|---|---|
+| `quake/` | Q1 original: WinQuake, QuakeWorld, original QuakeC (`qw-qc`) | GPLv2 |
+| `quake-rerelease-qc/` | 2021 re-release QuakeC: base + ctf + hipnotic + rogue + mg1 | GPLv2 |
+| `quake-2/` | 3.21 GPL source (canonical tree for the already-ported legacy modules) | GPLv2 |
+| `quake2-rerelease-dll/` | 2023 game module + original C (co-located copy of the active reference) | GPLv2 |
+| `q2repro/` | Engine reference (co-located copy) | GPLv2 |
+| `quake-iii-arena/` | Q3 source incl. `lcc` + `q3asm` (the QVM toolchain) | GPLv2 |
+| `fteqw/` | Multi-game engine precedent; BSPX BRUSHLIST collision reference | GPLv2 |
+| `quake-tools/` | qcc (reference QuakeC compiler — pins progs.dat from the producer side), QuakeEd, qutils | GPLv2 |
+| `quake-2-tools/` | Q2 bsp compiler, qdata, qe4 | GPLv2 |
+| `gtkradiant/` | Map editor / asset pipeline | GPL |
+| QCVM (github.com/erysdren/QCVM) | Implementation reference for the TS QuakeC VM — MIT, may be translated freely | MIT |
+
+## License rules (binding)
+
+- This tree is GPLv2 throughout (q2repro's license). Every source that
+  feeds it must be GPLv2-compatible; the table above qualifies.
+- **GPLv3 projects are excluded entirely — including as reading
+  references.** Clean-room reimplementation of incompatible-licensed
+  work is legally defensible but launders the author's license choice;
+  we don't do it. Specifically excluded: Paril's quake2c and
+  quake2c-progs. If their ideas are ever genuinely needed, the path is
+  asking the author for permission or relicensing, not "reading."
+  (Running third-party `progs.dat` files as *data* through our VM is
+  fine regardless of their license — the same arm's-length boundary
+  that lets any GPL engine load any game module.)
+- Game assets (paks, models, sounds, maps) remain commercial content,
+  never included.
