@@ -322,7 +322,7 @@ export function selectServerCodec(protocol: number): { codec: ProtocolCodec; csr
   // the ENTIRE detection mechanism -- verified against q2repro's own demo.c:
   // there is no separate file-header magic; a real client detects a KEX
   // stream purely from its first svc_serverdata message's protocol number,
-  // same as any other connect). `setKexProtocol` records which of the two
+  // same as every other connect). `setKexProtocol` records which of the two
   // was seen -- kexdemo.ts's readDeltaEntity/readSoundKex need it to decide
   // origin/old_origin/SND_POS precision (see that file's own header).
   if (protocol === PROTOCOL_KEX_DEMOS || protocol === PROTOCOL_KEX) {
