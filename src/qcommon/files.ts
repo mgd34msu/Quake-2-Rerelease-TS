@@ -60,6 +60,7 @@ import { ERR_FATAL, BASEDIRNAME } from "./qcommon";
 import type * as CvarModule from "./cvar";
 import type * as CmdModule from "./cmd";
 import type * as LocModule from "./loc";
+import { ZipArchive } from "./zipfile";
 
 // cvar.ts and cmd.ts are reached lazily (via Bun's synchronous require, not a
 // static top-level import) rather than statically imported here. cmd.ts's
@@ -97,7 +98,15 @@ function locMod(): typeof LocModule {
 // has not landed.
 
 const IDPAKHEADER = 0x4b434150; // little-endian on-disk bytes 'P','A','C','K'
-const MAX_FILES_IN_PACK = 4096;
+// Vanilla's MAX_FILES_IN_PACK is 4096; the rerelease's baseq2/pak0.pak alone
+// carries 14663 entries (higher-res textures, extra e3/ec/mgu* map bundles),
+// which a real vanilla engine could never load either. q2repro raised this
+// same constant to `1 << 20` for exactly this reason (inc/format/pak.h:31)
+// -- matched here rather than preserved at 4096, per rule 17's fidelity
+// razor (functional parity/interop with real rerelease data outranks a
+// literal constant that would otherwise make this port strictly less
+// capable than the reference engine it's meant to interoperate with).
+const MAX_FILES_IN_PACK = 1 << 20;
 const PACKFILE_NAME_LEN = 56;
 const DPACKFILE_SIZE = PACKFILE_NAME_LEN + 4 + 4; // name + filepos + filelen
 
@@ -120,9 +129,22 @@ interface PackT {
   files: PackFileT[];
 }
 
+// Not a port of any classic pack_t variant: KEX/rerelease-era engines
+// (q2repro's add_game_kpf, src/common/files.c:3676) mount a Q2Game.kpf ZIP
+// archive alongside classic .pak search paths. See zipfile.ts's header
+// comment for why this is a from-scratch reader rather than a ported one.
+interface ZipPackT {
+  filename: string;
+  archive: ZipArchive;
+  numfiles: number;
+}
+
 // "only one of filename / pack will be used" (searchpath_t's C comment)
 // becomes a discriminated union instead of two co-resident nullable fields.
-type SearchPathT = { readonly kind: "dir"; filename: string; next: SearchPathT | null } | { readonly kind: "pack"; pack: PackT; next: SearchPathT | null };
+type SearchPathT =
+  | { readonly kind: "dir"; filename: string; next: SearchPathT | null }
+  | { readonly kind: "pack"; pack: PackT; next: SearchPathT | null }
+  | { readonly kind: "zip"; zip: ZipPackT; next: SearchPathT | null };
 
 interface FileLinkT {
   from: string;
@@ -151,11 +173,23 @@ function basedirString(): string {
 // open file handles -- stands in for the C FILE* returned by fopen()/passed
 // around as FS_FOpenFile's out-parameter.
 
-interface OpenHandleT {
+// Two variants: a real fd (classic dir/.pak reads, unchanged) or an
+// in-memory buffer (zip-backed reads -- a .kpf entry has to be decompressed
+// before it can be read at all, so there's no fd to seek/read against; the
+// whole decompressed entry is produced once by FS_FOpenFile and streamed
+// out of memory here, same read-cursor shape as the fd variant).
+interface FdHandleT {
+  kind: "fd";
   fd: number;
   position: number; // explicit read cursor; node's readSync takes an
   // explicit position rather than relying on the fd's own offset
 }
+interface MemHandleT {
+  kind: "mem";
+  data: Uint8Array;
+  position: number;
+}
+type OpenHandleT = FdHandleT | MemHandleT;
 
 const fs_open_handles = new Map<number, OpenHandleT>();
 let fs_next_handle = 1;
@@ -288,7 +322,7 @@ export function FS_FOpenFileWrite(path: string): number | null {
     return null;
   }
   const handle = fs_next_handle++;
-  fs_open_handles.set(handle, { fd, position: 0 });
+  fs_open_handles.set(handle, { kind: "fd", fd, position: 0 });
   return handle;
 }
 
@@ -304,6 +338,9 @@ shape on the write side.
 export function FS_Write(buffer: Uint8Array, len: number, handle: number): void {
   const h = fs_open_handles.get(handle);
   if (!h) {
+    Com_Error(ERR_FATAL, "FS_Write: bad handle");
+  }
+  if (h.kind !== "fd") {
     Com_Error(ERR_FATAL, "FS_Write: bad handle");
   }
 
@@ -322,7 +359,7 @@ on files returned by FS_FOpenFile...
 export function FS_FCloseFile(handle: number): void {
   const h = fs_open_handles.get(handle);
   if (!h) return;
-  closeSync(h.fd);
+  if (h.kind === "fd") closeSync(h.fd);
   fs_open_handles.delete(handle);
 }
 
@@ -376,7 +413,7 @@ export function FS_FOpenFile(filename: string): FsOpenResult | null {
     }
     Com_DPrintf("link file: %s\n", netpath);
     const handle = fs_next_handle++;
-    fs_open_handles.set(handle, { fd, position: 0 });
+    fs_open_handles.set(handle, { kind: "fd", fd, position: 0 });
     return { handle, length: FS_filelength(fd) };
   }
 
@@ -400,9 +437,28 @@ export function FS_FOpenFile(filename: string): FsOpenResult | null {
           Com_Error(ERR_FATAL, "Couldn't reopen %s", pak.filename);
         }
         const handle = fs_next_handle++;
-        fs_open_handles.set(handle, { fd, position: pak.files[i].filepos });
+        fs_open_handles.set(handle, { kind: "fd", fd, position: pak.files[i].filepos });
         return { handle, length: pak.files[i].filelen };
       }
+    } else if (search.kind === "zip") {
+      // look through the zip archive's entries (case-insensitive, same as
+      // the classic .pak comparison above)
+      const zip = search.zip;
+      const entry = zip.archive.findEntry(filename);
+      if (!entry) continue;
+
+      file_from_pak = 1;
+      Com_DPrintf("PackFile: %s : %s\n", zip.filename, filename);
+
+      // the entry has to be decompressed up front (no fd to stream a
+      // partial read against once it's DEFLATEd) -- see zipfile.ts's
+      // ZipArchive.readFile.
+      const data = zip.archive.readFile(filename);
+      if (!data) Com_Error(ERR_FATAL, "Couldn't extract %s from %s", filename, zip.filename);
+
+      const handle = fs_next_handle++;
+      fs_open_handles.set(handle, { kind: "mem", data, position: 0 });
+      return { handle, length: data.length };
     } else {
       // check a file in the directory tree
       const netpath = `${search.filename}/${filename}`;
@@ -415,7 +471,7 @@ export function FS_FOpenFile(filename: string): FsOpenResult | null {
       }
       Com_DPrintf("FindFile: %s\n", netpath);
       const handle = fs_next_handle++;
-      fs_open_handles.set(handle, { fd, position: 0 });
+      fs_open_handles.set(handle, { kind: "fd", fd, position: 0 });
       return { handle, length: FS_filelength(fd) };
     }
   }
@@ -433,6 +489,19 @@ Properly handles partial reads
 */
 const MAX_READ = 0x10000; // read in blocks of 64k
 
+// readSync's mem-backed counterpart: copies up to `len` bytes starting at
+// h.position into buffer[bufOffset..], returning the count actually copied
+// (0 at end of the decompressed entry) without advancing h.position --
+// callers advance it themselves afterward, same as they do for the fd
+// variant's readSync return value.
+function readMemChunk(h: MemHandleT, buffer: Uint8Array, bufOffset: number, len: number): number {
+  const avail = h.data.length - h.position;
+  const n = Math.min(len, avail);
+  if (n <= 0) return 0;
+  buffer.set(h.data.subarray(h.position, h.position + n), bufOffset);
+  return n;
+}
+
 /*
 FS_ReadRaw -- fread semantics: returns the byte count actually read (0 at a
 clean EOF), never errors. The C call sites this serves (SV_ReadServerFile's
@@ -448,7 +517,7 @@ export function FS_ReadRaw(buffer: Uint8Array, len: number, handle: number): num
   while (total < len) {
     let n: number;
     try {
-      n = readSync(h.fd, buffer, total, len - total, h.position);
+      n = h.kind === "fd" ? readSync(h.fd, buffer, total, len - total, h.position) : readMemChunk(h, buffer, total, len - total);
     } catch {
       n = 0;
     }
@@ -476,7 +545,7 @@ export function FS_Read(buffer: Uint8Array, len: number, handle: number): void {
 
     let read: number;
     try {
-      read = readSync(h.fd, buffer, bufOffset, block, h.position);
+      read = h.kind === "fd" ? readSync(h.fd, buffer, bufOffset, block, h.position) : readMemChunk(h, buffer, bufOffset, block);
     } catch {
       read = -1;
     }
@@ -601,6 +670,42 @@ export function FS_LoadPackFile(packfile: string): PackT | null {
   Com_Printf("Added packfile %s (%i files)\n", packfile, numpackfiles);
 
   return { filename: packfile, handle: fd, numfiles: numpackfiles, files };
+}
+
+/*
+================
+add_game_kpf
+
+Not a port of a numbered files.c function: q2repro's KEX-era counterpart
+(src/common/files.c:3676 add_game_kpf) mounts a Q2Game.kpf ZIP archive
+"for localized map messages" -- fonts, shaders, and localization/*.txt in
+the real rerelease archive, none of it game-specific. Reads the whole file
+into memory up front (Q2Game.kpf is ~17MB; see zipfile.ts's header comment
+for why there's no streaming path). Silently does nothing if the file
+isn't present or isn't a valid ZIP -- classic (non-rerelease) installs
+have no Q2Game.kpf at all, and that's not an error.
+
+Called once from FS_InitFilesystem, BEFORE the default baseq2
+FS_AddGameDirectory call, so the KPF sits below baseq2's directory/pak
+search entries in priority but above nothing added before it -- mirroring
+q2repro's setup_base_paths call order (add_game_kpf(base) always runs
+before add_game_dir(base, BASEGAME), and each prepends to the search list,
+so the later call -- baseq2 -- ends up searched first).
+================
+*/
+function add_game_kpf(dir: string): void {
+  const path = `${dir}/Q2Game.kpf`;
+
+  const raw = FS_ReadRawFile(path);
+  if (!raw) return;
+
+  const archive = ZipArchive.open(raw);
+  if (!archive) return;
+
+  const zip: ZipPackT = { filename: path, archive, numfiles: archive.entries.length };
+  fs_searchpaths = { kind: "zip", zip, next: fs_searchpaths };
+
+  Com_Printf("Added kpf %s (%i files)\n", path, zip.numfiles);
 }
 
 /*
@@ -815,6 +920,7 @@ export function FS_Path_f(): void {
   for (let s: SearchPathT | null = fs_searchpaths; s; s = s.next) {
     if (s === fs_base_searchpaths) Com_Printf("----------\n");
     if (s.kind === "pack") Com_Printf("%s (%i files)\n", s.pack.filename, s.pack.numfiles);
+    else if (s.kind === "zip") Com_Printf("%s (%i files)\n", s.zip.filename, s.zip.numfiles);
     else Com_Printf("%s\n", s.filename);
   }
 
@@ -843,7 +949,7 @@ export function FS_NextPath(prevpath: string | null): string | null {
 
   let prev = fs_gamedir;
   for (let s = fs_searchpaths; s; s = s.next) {
-    if (s.kind === "pack") continue;
+    if (s.kind === "pack" || s.kind === "zip") continue;
     if (prevpath === prev) return s.filename;
     prev = s.filename;
   }
@@ -875,6 +981,15 @@ export function FS_InitFilesystem(): void {
   if (fs_cddir && fs_cddir.string.length) {
     FS_AddGameDirectory(`${fs_cddir.string}/${BASEDIRNAME}`);
   }
+
+  // Q2Game.kpf (KEX/rerelease-era fonts/shaders/localization, see
+  // add_game_kpf's comment) -- mounted below the default baseq2 directory
+  // added next so an actual baseq2/pak0.pak entry of the same name always
+  // wins, matching q2repro's setup_base_paths call order. fs_cddir has no
+  // KPF counterpart mounted here: q2repro's only other add_game_kpf call
+  // site is the equivalent of a home directory, a search-path root this
+  // port doesn't have (see FS_InitFilesystem's basedir/cddir cvars above).
+  add_game_kpf(basedirString());
 
   // start up with baseq2 by default
   FS_AddGameDirectory(`${basedirString()}/${BASEDIRNAME}`);

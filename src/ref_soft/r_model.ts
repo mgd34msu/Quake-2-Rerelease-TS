@@ -55,6 +55,7 @@ import {
   dvisNumClusters,
   dvisBitofs,
 } from "../qcommon/qfiles";
+import { parseBspxDirectory, parseDecoupledLM, parseLightgrid, type DecoupledLmResultT, type LightgridT } from "../qcommon/bspx";
 import { type SurfcacheT, ri, r_notexture_mip, r_worldmodel, MAX_LBM_HEIGHT, SetWorldModel, SetOldViewCluster } from "./r_local";
 import type * as RImageModule from "./r_image";
 import type * as RRastModule from "./r_rast";
@@ -339,6 +340,13 @@ export class ModelT {
   skins: (ImageT | null)[] = new Array<ImageT | null>(MAX_MD2SKINS).fill(null);
   extradata: unknown = null; // opaque cache blob owned by the (unported) alias/sprite loaders
   extradatasize = 0;
+
+  // BSPX extension data (see qcommon/bspx.ts). null for every classic BSP
+  // (no BSPX directory at all) and for any BSPX directory that doesn't
+  // carry DECOUPLED_LM/LIGHTGRID_OCTREE. PARSED ONLY -- neither lump is
+  // wired into the actual lightmap-building/sampling pipeline yet (see
+  // Mod_LoadBrushModel's BSPX block below for the exact scope boundary).
+  bspx: { decoupledLm: DecoupledLmResultT | null; lightgrid: LightgridT | null } | null = null;
 
   // mirrors `memset(mod, 0, sizeof(*mod))` (Mod_Free/R_EndRegistration) per
   // PORTING.md's clear()-for-memset convention.
@@ -1099,6 +1107,37 @@ function Mod_LoadBrushModel(mod: ModelT, buffer: Uint8Array): void {
   Mod_LoadSubmodels(header.lumps[LUMP_MODELS]);
   r_numvisleafs = 0;
   R_NumberLeafs(loadmodel.nodes[0]);
+
+  // BSPX extension directory -- not part of any r_model.c this file is
+  // otherwise ported from (vanilla software renderer has no such concept).
+  // Parse-and-report only, see qcommon/bspx.ts's header comment and
+  // ModelT.bspx's comment above for exactly what's not wired up (the
+  // lightmap-building and lighting-sampling pipeline still ignores
+  // decoupled lightmaps and the lightgrid entirely).
+  {
+    const lumpsEnd = header.lumps.reduce((max, l) => Math.max(max, l.fileofs + l.filelen), 0);
+    const bspxDir = parseBspxDirectory(buffer, lumpsEnd, buffer.length);
+    let decoupledLm: DecoupledLmResultT | null = null;
+    let lightgrid: LightgridT | null = null;
+
+    if (bspxDir) {
+      const lightingLump = header.lumps[LUMP_LIGHTING];
+
+      const dlm = bspxDir.lumps.get("DECOUPLED_LM");
+      if (dlm) {
+        decoupledLm = parseDecoupledLM(buffer, dlm.fileofs, dlm.filelen, loadmodel.numsurfaces, lightingLump.filelen);
+        if (decoupledLm) ri.Con_Printf(PRINT_ALL, `${mod.name}: DECOUPLED_LM lump present (${decoupledLm.faces.length} faces)\n`);
+      }
+
+      const lightgridLump = bspxDir.lumps.get("LIGHTGRID_OCTREE");
+      if (lightgridLump) {
+        lightgrid = parseLightgrid(buffer, lightgridLump.fileofs, lightgridLump.filelen, lightingLump.filelen > 0);
+        if (lightgrid) ri.Con_Printf(PRINT_ALL, `${mod.name}: LIGHTGRID_OCTREE lump present (${lightgrid.numleafs} leafs, ${lightgrid.numsamples} samples)\n`);
+      }
+    }
+
+    loadmodel.bspx = decoupledLm || lightgrid ? { decoupledLm, lightgrid } : null;
+  }
 
   //
   // set up the submodels
