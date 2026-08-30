@@ -144,7 +144,7 @@ import {
   WeaponstateT,
 } from "./g_local";
 import { gi, g_edicts, game, level } from "./g_main_globals";
-import { type GTime, Gtime_add, Gtime_divide, Gtime_from_hz, Gtime_from_ms, Gtime_milliseconds, Gtime_nonzero, Gtime_seconds, Gtime_subtract, GTIME_ZERO } from "./gtime";
+import { type GTime, Gtime_add, Gtime_from_hz, Gtime_from_ms, Gtime_milliseconds, Gtime_nonzero, Gtime_seconds, Gtime_subtract, GTIME_ZERO } from "./gtime";
 import { AngleVectors, vec3_add, vec3_dot, vec3_length, vec3_muls, vec3_normalized, vec3_sub } from "./q_vec3";
 import { PITCH, ROLL, YAW, brandom, clamp, crandom_open } from "./q_std";
 import {
@@ -172,9 +172,9 @@ import {
   FRAME_stand40,
 } from "./m_player";
 import { ArmorIndex, PowerArmorType, T_Damage } from "./g_combat";
-import { G_Spawn } from "./g_utils";
 import { G_PlayerNotifyGoal } from "./g_target";
 import { DeathmatchScoreboardMessage, G_CheckChaseStats, G_SetCoopStats, G_SetSpectatorStats, G_SetStats, PlayerStatT } from "./p_hud";
+import { P_CurrentKickAngles, P_CurrentKickOrigin, PlayerNoise } from "./p_weapon";
 
 // ---------------------------------------------------------------------------
 // cvar-read helpers (see g_combat.ts's own precedent for this exact idiom)
@@ -257,102 +257,15 @@ function sendLevelPOI(_ent: EdictT): void {
 }
 
 // ---------------------------------------------------------------------------
-// P_CurrentKickFactor / P_CurrentKickAngles / P_CurrentKickOrigin -- ported
-// here, not a stub (see file header)
+// P_CurrentKickAngles / P_CurrentKickOrigin / PlayerNoise -- MOVED to
+// p_weapon.ts (their real C++ home, p_weapon.cpp); re-exported from there.
+// See this file's own header for the reconciliation note and the
+// SVF_NOCLIENT bug fix caught during the move. P_CurrentKickFactor is not
+// declared in g_local.h (file-local `inline` helper only), so it moved too
+// but is not re-exported here -- nothing outside p_weapon.ts ever needed it.
 // ---------------------------------------------------------------------------
 
-/** p_weapon.cpp:62-68: `float P_CurrentKickFactor(edict_t *ent)`. */
-function P_CurrentKickFactor(ent: EdictT): number {
-  const client = ent.client;
-  if (client === null) return 0;
-  if (client.kick.time < level.time) return 0;
-  return Gtime_seconds(Gtime_subtract(client.kick.time, level.time)) / Gtime_seconds(client.kick.total);
-}
-
-/** p_weapon.cpp:71-74: `vec3_t P_CurrentKickAngles(edict_t *ent)`. */
-function P_CurrentKickAngles(ent: EdictT): Vec3 {
-  const client = ent.client;
-  if (client === null) return vec3();
-  return vec3_muls(client.kick.angles, P_CurrentKickFactor(ent));
-}
-
-/** p_weapon.cpp:76-79: `vec3_t P_CurrentKickOrigin(edict_t *ent)`. */
-function P_CurrentKickOrigin(ent: EdictT): Vec3 {
-  const client = ent.client;
-  if (client === null) return vec3();
-  return vec3_muls(client.kick.origin, P_CurrentKickFactor(ent));
-}
-
-// ---------------------------------------------------------------------------
-// PlayerNoise -- ported here, not a stub (see file header)
-// ---------------------------------------------------------------------------
-
-/** p_weapon.cpp:148-227: `void PlayerNoise(edict_t *who, const vec3_t &where, player_noise_t type)`. */
-export function PlayerNoise(who: EdictT, where: Vec3, type: PlayerNoiseT): void {
-  const client = who.client;
-  if (client === null) return;
-
-  if (type === PlayerNoiseT.PNOISE_WEAPON) {
-    client.invisibility_fade_time = Gtime_add(level.time, client.silencer_shots ? Gtime_divide(INVISIBILITY_TIME, 5) : INVISIBILITY_TIME);
-
-    if (client.silencer_shots) {
-      client.silencer_shots--;
-      return;
-    }
-  }
-
-  if (cvarBool("deathmatch", "0", CvarFlagsT.CVAR_LATCH)) return;
-
-  if ((who.flags & EntFlagsT.FL_NOTARGET) !== 0n) return;
-
-  if (type === PlayerNoiseT.PNOISE_SELF && (client.landmark_free_fall || client.landmark_noise_time >= level.time)) return;
-
-  // ROGUE
-  if ((who.flags & EntFlagsT.FL_DISGUISED) !== 0n) {
-    if (type === PlayerNoiseT.PNOISE_WEAPON) {
-      level.disguise_violator = who;
-      level.disguise_violation_time = Gtime_add(level.time, Gtime_from_ms(500));
-    } else return;
-  }
-  // ROGUE
-
-  if (who.mynoise === null) {
-    const n1 = G_Spawn();
-    n1.classname = "player_noise";
-    n1.mins = vec3(-8, -8, -8);
-    n1.maxs = vec3(8, 8, 8);
-    n1.owner = who;
-    who.mynoise = n1;
-
-    const n2 = G_Spawn();
-    n2.classname = "player_noise";
-    n2.mins = vec3(-8, -8, -8);
-    n2.maxs = vec3(8, 8, 8);
-    n2.owner = who;
-    who.mynoise2 = n2;
-  }
-
-  let noise: EdictT;
-
-  if (type === PlayerNoiseT.PNOISE_SELF || type === PlayerNoiseT.PNOISE_WEAPON) {
-    if (who.mynoise === null) throw new Error("PlayerNoise: mynoise unset after initialization -- unreachable");
-    noise = who.mynoise;
-    client.sound_entity = noise;
-    client.sound_entity_time = level.time;
-  } else {
-    // type === PNOISE_IMPACT
-    if (who.mynoise2 === null) throw new Error("PlayerNoise: mynoise2 unset after initialization -- unreachable");
-    noise = who.mynoise2;
-    client.sound2_entity = noise;
-    client.sound2_entity_time = level.time;
-  }
-
-  VectorCopy(where, noise.s.origin);
-  noise.absmin = vec3_sub(where, noise.maxs);
-  noise.absmax = vec3_add(where, noise.maxs);
-  noise.teleport_time = level.time;
-  gi.linkentity(noise);
-}
+export { P_CurrentKickAngles, P_CurrentKickOrigin, PlayerNoise };
 
 // ---------------------------------------------------------------------------
 // SkipViewModifiers
