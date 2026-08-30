@@ -432,6 +432,12 @@ import { SP_monster_gladb, SP_monster_gladiator } from "./m_gladiator";
 import { SP_monster_gunner } from "./m_gunner";
 import { SP_monster_infantry } from "./m_infantry";
 import { SP_monster_soldier, SP_monster_soldier_hypergun, SP_monster_soldier_lasergun, SP_monster_soldier_light, SP_monster_soldier_ripper, SP_monster_soldier_ss } from "./m_soldier";
+import { SP_monster_chick, SP_monster_chick_heat } from "./m_chick";
+import { SP_monster_flipper } from "./m_flipper";
+import { SP_monster_mutant } from "./m_mutant";
+import { SP_monster_parasite } from "./m_parasite";
+import { SP_monster_boss5, SP_monster_supertank } from "./m_supertank";
+import { SP_monster_tank, SP_monster_tank_stand } from "./m_tank";
 import {
   SP_target_temp_entity,
   SP_target_speaker,
@@ -959,7 +965,6 @@ function DoRandomRespawn(ent: EdictT): ItemIdT {
   throw new Error(`DoRandomRespawn: not yet ported (pending g_rogue_newdm.ts, see rogue/g_rogue_newdm.cpp:126) -- classname "${ent.classname ?? "?"}"`);
 }
 
-const SP_monster_tank = unported("SP_monster_tank", "m_tank.cpp (future src/kexgame/m_tank.ts)");
 const SP_monster_hover = unported("SP_monster_hover", "m_hover.cpp (future src/kexgame/m_hover.ts)");
 const SP_monster_medic = unported("SP_monster_medic", "m_medic.cpp (future src/kexgame/m_medic.ts)");
 
@@ -1087,20 +1092,20 @@ export const spawns: readonly SpawnEntry[] = [
   { name: "monster_tank", spawn: SP_monster_tank },
   { name: "monster_tank_commander", spawn: SP_monster_tank },
   { name: "monster_medic", spawn: SP_monster_medic },
-  { name: "monster_flipper", spawn: unported("SP_monster_flipper", "m_flipper.cpp (future src/kexgame/m_flipper.ts)") },
-  { name: "monster_chick", spawn: unported("SP_monster_chick", "m_chick.cpp (future src/kexgame/m_chick.ts)") },
-  { name: "monster_parasite", spawn: unported("SP_monster_parasite", "m_parasite.cpp (future src/kexgame/m_parasite.ts)") },
+  { name: "monster_flipper", spawn: SP_monster_flipper },
+  { name: "monster_chick", spawn: SP_monster_chick },
+  { name: "monster_parasite", spawn: SP_monster_parasite },
   { name: "monster_flyer", spawn: unported("SP_monster_flyer", "m_flyer.cpp (future src/kexgame/m_flyer.ts)") },
   { name: "monster_brain", spawn: unported("SP_monster_brain", "m_brain.cpp (future src/kexgame/m_brain.ts)") },
   { name: "monster_floater", spawn: unported("SP_monster_floater", "m_float.cpp (future src/kexgame/m_float.ts)") },
   { name: "monster_hover", spawn: SP_monster_hover },
-  { name: "monster_mutant", spawn: unported("SP_monster_mutant", "m_mutant.cpp (future src/kexgame/m_mutant.ts)") },
-  { name: "monster_supertank", spawn: unported("SP_monster_supertank", "m_supertank.cpp (future src/kexgame/m_supertank.ts)") },
+  { name: "monster_mutant", spawn: SP_monster_mutant },
+  { name: "monster_supertank", spawn: SP_monster_supertank },
   { name: "monster_boss2", spawn: unported("SP_monster_boss2", "m_boss2.cpp (future src/kexgame/m_boss2.ts)") },
   { name: "monster_boss3_stand", spawn: unported("SP_monster_boss3_stand", "m_boss3.cpp (future src/kexgame/m_boss3.ts)") },
   { name: "monster_jorg", spawn: unported("SP_monster_jorg", "m_boss31.cpp (future src/kexgame/m_boss31.ts)") },
   { name: "monster_makron", spawn: unported("SP_monster_makron", "m_boss32.cpp (future src/kexgame/m_boss32.ts)") },
-  { name: "monster_tank_stand", spawn: unported("SP_monster_tank_stand", "m_tank.cpp (future src/kexgame/m_tank.ts)") },
+  { name: "monster_tank_stand", spawn: SP_monster_tank_stand },
   { name: "monster_guardian", spawn: unported("SP_monster_guardian", "m_guardian.cpp (future src/kexgame/m_guardian.ts)") },
   { name: "monster_arachnid", spawn: unported("SP_monster_arachnid", "m_arachnid.cpp (future src/kexgame/m_arachnid.ts)") },
   { name: "monster_guncmdr", spawn: unported("SP_monster_guncmdr", "m_guncmdr.cpp (future src/kexgame/m_guncmdr.ts)") },
@@ -1124,9 +1129,9 @@ export const spawns: readonly SpawnEntry[] = [
   { name: "monster_soldier_ripper", spawn: SP_monster_soldier_ripper },
   { name: "monster_fixbot", spawn: unported("SP_monster_fixbot", "xatrix/m_xatrix_fixbot.cpp (future src/xatrix/m_xatrix_fixbot.ts)") },
   { name: "monster_gekk", spawn: unported("SP_monster_gekk", "xatrix/m_xatrix_gekk.cpp (future src/xatrix/m_xatrix_gekk.ts)") },
-  { name: "monster_chick_heat", spawn: unported("SP_monster_chick_heat", "m_chick.cpp (future src/kexgame/m_chick.ts)") },
+  { name: "monster_chick_heat", spawn: SP_monster_chick_heat },
   { name: "monster_gladb", spawn: SP_monster_gladb },
-  { name: "monster_boss5", spawn: unported("SP_monster_boss5", "m_supertank.cpp (future src/kexgame/m_supertank.ts)") },
+  { name: "monster_boss5", spawn: SP_monster_boss5 },
 
   { name: "func_plat2", spawn: unported("SP_func_plat2", "rogue/g_rogue_func.cpp (future src/rogue/g_rogue_func.ts)") },
   { name: "func_door_secret2", spawn: unported("SP_func_door_secret2", "rogue/g_rogue_newfnc.cpp (future src/rogue/g_rogue_newfnc.ts)") },
