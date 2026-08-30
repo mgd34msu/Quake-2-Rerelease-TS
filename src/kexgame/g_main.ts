@@ -251,6 +251,8 @@ import {
 } from "./p_client";
 import { ClientCommand } from "./g_cmds";
 import { ServerCommand } from "./g_svcmds";
+import { SpawnEntities } from "./g_spawn";
+import { WriteGameJson, ReadGameJson, WriteLevelJson, ReadLevelJson, G_CanSave } from "./g_save";
 import { Entity_IsVisibleToPlayer, InitItems } from "./g_items";
 import { ArmorIndex } from "./g_combat";
 import { GetShadowLightData } from "./g_misc";
@@ -1362,25 +1364,28 @@ export function GetGameAPI(imports: KexGameImports): KexGameExports {
     Init: InitGame,
     Shutdown: ShutdownGame,
 
-    SpawnEntities: (_mapname: string, _entstring: string, _spawnpoint: string): void => {
-      throw new Error("SpawnEntities: not yet ported (pending g_spawn.ts, see g_spawn.cpp)");
-    },
+    // g_spawn.ts and g_save.ts landed: real implementations. The C API's
+    // out_size param reports the buffer length; TS strings carry their own
+    // length, so the box is filled for interface fidelity only.
+    SpawnEntities,
 
-    WriteGameJson: (_autosave: boolean, _out_size: [number]): string | null => {
-      throw new Error("WriteGameJson: not yet ported (pending g_save.ts, see g_main.cpp:146 / g_save.cpp)");
+    WriteGameJson: (autosave: boolean, out_size: [number]): string | null => {
+      const json = WriteGameJson(autosave);
+      out_size[0] = json.length;
+      return json;
     },
-    ReadGameJson: (_json: string): void => {
-      throw new Error("ReadGameJson: not yet ported (pending g_save.ts, see g_main.cpp:147 / g_save.cpp)");
+    ReadGameJson: (json: string): void => {
+      ReadGameJson(json);
     },
-    WriteLevelJson: (_transition: boolean, _out_size: [number]): string | null => {
-      throw new Error("WriteLevelJson: not yet ported (pending g_save.ts, see g_main.cpp:148 / g_save.cpp)");
+    WriteLevelJson: (transition: boolean, out_size: [number]): string | null => {
+      const json = WriteLevelJson(transition);
+      out_size[0] = json.length;
+      return json;
     },
-    ReadLevelJson: (_json: string): void => {
-      throw new Error("ReadLevelJson: not yet ported (pending g_save.ts, see g_main.cpp:149 / g_save.cpp)");
+    ReadLevelJson: (json: string): void => {
+      ReadLevelJson(json);
     },
-    CanSave: (): boolean => {
-      throw new Error("CanSave: not yet ported (pending g_save.ts, see g_main.cpp:150 G_CanSave)");
-    },
+    CanSave: G_CanSave,
 
     ClientChooseSlot: (userinfo: string, social_id: string, isBot: boolean, ignore: (KexEdictT | null)[], num_ignore: number, cinematic: boolean): KexEdictT | null => {
       const realIgnore: EdictT[] = ignore
