@@ -402,7 +402,12 @@ function GetItemByIndex(id: ItemIdT): GitemT {
   return item;
 }
 
-const Touch_Item = G_Touch_Item;
+// Hoisted wrapper, NOT a const alias: a top-level `const X = imported` binding
+// inside the g_utils<->p_client<->g_items import cycle is a temporal-dead-zone
+// crash for any entry point that loads g_items first (see g_save.ts's header).
+function Touch_Item(ent: EdictT, other: EdictT, tr: KexTraceT, otherTouchingSelf: boolean): void {
+  G_Touch_Item(ent, other, tr, otherTouchingSelf);
+}
 
 
 
