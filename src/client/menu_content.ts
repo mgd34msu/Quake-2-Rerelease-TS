@@ -43,7 +43,7 @@
 // ctf        | Capture the Flag       | game="ctf",  q2ctf1     | game="kex", q2ctf1   | no
 // mg2        | Call of the Machine    | -- (kex-only content) --| game="kex", mguhub   | yes
 // n64        | Quake II 64            | -- (kex-only content) --| game="kex", q64/rtest| yes
-// lmctf      | Lithium CTF (map pack) | game="lmctf", lmctf09   | -- (classic-only) -- | no
+// lmctf      | Loki's Minions CTF     | game="lmctf", lmctf09   | -- (classic-only) -- | no
 //
 // Every (game, map) pair above was cross-checked against the real
 // mapdb.json (~/q2rets/rerelease/baseq2/pak0.pak, extracted 2026-08-30):
@@ -60,11 +60,17 @@
 // (~/q2ts/lmctf/maplist.txt).
 //
 // "lmctf" GAME TRACK -- see src/server/bindings/legacy.ts's own comment at
-// its LoadLegacyGame dispatch: lmctf is Mike's classic-era third-party CTF
-// map pack, shipped with its own closed-source game DLLs we have no source
-// to port. Selecting it here plays those maps under OUR compiled ctf
-// track (stock CTF rules), not a port of whatever the original lmctf DLL
-// did -- an explicit, documented scope boundary, not a fidelity claim.
+// its LoadLegacyGame dispatch: lmctf is LM_CTF (Loki's Minions CTF), a
+// classic-era third-party CTF mod with real GPL source now available
+// (~/Projects/qsrc/lmctf60) and a real, in-progress port at src/lmctf/
+// (currently: the offhand-hook priority feature plus its supporting
+// foundation, tested in test/lmctf_core.test.ts). Selecting it here still
+// plays those maps under OUR compiled ctf track (stock CTF rules) rather
+// than src/lmctf's own rules, because src/lmctf's GetGameAPI cannot yet
+// complete a map load (SpawnEntities/RunFrame/ClientConnect are not
+// ported) -- an explicit, documented scope boundary, not a fidelity claim,
+// and not a permanent one: repoint legacy.ts's dispatch once src/lmctf/ can
+// actually boot a level.
 //
 // WHY A STATIC TABLE (not fully mapdb-driven)
 // ---------------------------------------------------------------------

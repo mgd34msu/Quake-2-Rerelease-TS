@@ -229,18 +229,34 @@ sv_game.ts's SV_InitGameProgs; the caller retains the apiversion check and
 geHolder assignment.
 ===============
 */
-// "lmctf" is NOT a fifth game tree and has no GPL source anywhere in this
-// port's reference libraries -- it's Mike's own classic-era CTF map pack
-// (~/q2ts/lmctf), which ships its own closed-source game DLLs (gamex86.dll
-// et al.) for a third-party CTF variant we have no source to port. Per
-// src/client/menu_content.ts's Content & Rules selector (its file header
-// has the full mapping table), "lmctf" content plays under OUR compiled
-// ctf track -- Mike's map pack running with stock CTF rules, not a port of
-// whatever the original lmctf DLL actually did differently. This is a
-// content-to-track alias only: gameName "lmctf" still drives
-// FS_SetGamedir("lmctf") (cvar.ts's "game" latch hook), which mounts
-// lmctf's own pak/map data as the active search root; only the compiled
-// game logic served here is redirected to CTF_GetGameAPI.
+// "lmctf" IS now a real fifth game tree in progress at src/lmctf/ -- ported
+// from LM_CTF (Loki's Minions CTF) 5.2/6.0 with QwazyWabbit's C11
+// maintenance, GPL source at ~/Projects/qsrc/lmctf60 (61 C files, ~53k
+// lines; see src/lmctf's own file headers and PORTING.md for the
+// diff-driven-vs-src/ctf method). This corrects an earlier version of this
+// comment, which predates that source becoming available and called the
+// pack "Lithium CTF" with "no GPL source anywhere in this port's reference
+// libraries" -- both no longer accurate.
+//
+// The dispatch below still routes "lmctf" to CTF_GetGameAPI (stock CTF
+// rules, not LM_CTF's real rules) because src/lmctf's GetGameAPI is not yet
+// complete enough to serve live traffic: as of this comment, only the
+// offhand-hook priority feature (g_cmds.ts/p_weapon.ts/g_ctffunc.ts) plus
+// its supporting foundation (g_local.ts/game.ts/g_combat.ts/g_items.ts
+// partial/g_tourney.ts partial) are ported and tested (test/lmctf_core.test.ts).
+// SpawnEntities/RunFrame/ClientConnect/ClientThink/WriteGame/ReadGame/
+// ServerCommand all throw a named "not ported" error (see src/lmctf/g_main.ts's
+// file header) -- confirmed by direct invocation: GetGameAPI()/Init() run
+// cleanly, but SpawnEntities("lmctf09", ...) throws immediately, so a real
+// boot cannot reach map load, let alone "Server Initialization" the way a
+// working game module does. Do not repoint this dispatch at
+// LMCTF_GetGameAPI until SpawnEntities/RunFrame/ClientConnect/ClientThink
+// are real; doing so today would break every "lmctf" boot outright. This is
+// still a content-to-track alias in the meantime: gameName "lmctf" drives
+// FS_SetGamedir("lmctf") (cvar.ts's "game" latch hook), mounting lmctf's own
+// pak/map data as the active search root, while the compiled game logic
+// served here stays CTF_GetGameAPI (Mike's map pack running under stock CTF
+// rules, not LM_CTF's real rules) until src/lmctf/ is complete.
 export function LoadLegacyGame(gameName: string): GameExports {
   const importsObj = BuildLegacyImports();
 
