@@ -322,16 +322,24 @@ describe("GetGameAPI", () => {
     expect(Object.keys(exportsTable).sort()).toEqual(expectedSlots.sort());
   });
 
-  test("SpawnEntities/WriteGameJson/ReadGameJson/WriteLevelJson/ReadLevelJson/CanSave throw, citing g_spawn.ts/g_save.ts", () => {
+  test("spawn/save slots are the real g_spawn/g_save implementations (no longer stubs)", () => {
     resetWorld();
     const exportsTable = GetGameAPI(makeFakeGameImports());
 
-    expect(() => exportsTable.SpawnEntities("q2dm1", "", "")).toThrow(/g_spawn\.ts/);
-    expect(() => exportsTable.WriteGameJson(false, [0])).toThrow(/g_save\.ts/);
-    expect(() => exportsTable.ReadGameJson("{}")).toThrow(/g_save\.ts/);
-    expect(() => exportsTable.WriteLevelJson(false, [0])).toThrow(/g_save\.ts/);
-    expect(() => exportsTable.ReadLevelJson("{}")).toThrow(/g_save\.ts/);
-    expect(() => exportsTable.CanSave()).toThrow(/g_save\.ts/);
+    // SpawnEntities is real: with an unprepared fixture world it fails inside
+    // the real G_Spawn preallocation logic, NOT with a "not yet ported" stub
+    // message -- proving the slot is wired to g_spawn.ts.
+    expect(() => exportsTable.SpawnEntities("q2dm1", "", "")).toThrow(/G_Spawn/);
+    // The save entry points run for real against the fixture world:
+    const outSize: [number] = [0];
+    const json = exportsTable.WriteGameJson(true, outSize);
+    expect(json).not.toBeNull();
+    expect(outSize[0]).toBe(json!.length);
+    expect(json!).toContain("save_version");
+    expect(() => exportsTable.ReadGameJson(json!)).not.toThrow();
+    // CanSave: real G_CanSave gating (deathmatch fixture default forbids
+    // nothing at unit scope; just assert it returns a boolean, not a throw).
+    expect(typeof exportsTable.CanSave()).toBe("boolean");
   });
 
   test("Bot_* / Edict_ForceLookAtPoint slots throw, citing the unported bots/ subsystem", () => {
