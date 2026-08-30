@@ -47,6 +47,8 @@ import { SV_LinkEdict } from "./sv_world";
 import { LoadLegacyGame } from "./bindings/legacy";
 import { LoadKexGame } from "./bindings/kex";
 import { CS_REMAP_OLD, CS_REMAP_RERELEASE } from "../shared/cs_remap";
+import { VANILLA_CODEC } from "../qcommon/protocol/vanilla";
+import { Q2REPRO_CODEC } from "../qcommon/protocol/q2repro";
 
 export const geHolder: { ge: GameExports | null } = { ge: null };
 
@@ -352,6 +354,14 @@ export function SV_InitGameProgs(): void {
   const gameName = Cvar_VariableString("game");
   const family = currentGameFamily();
   svs.csr = family === "kex" ? CS_REMAP_RERELEASE : CS_REMAP_OLD;
+  // ARCHITECTURE.md "Protocol layer" / .orch/phase5-design.md phase 5: mirror
+  // q2repro's own server, which ONLY accepts the rerelease protocol (1038) --
+  // offer Q2REPRO_CODEC for kex games, keep legacy games on VANILLA_CODEC
+  // (protocol 34). This is server-wide (not per-client) selection, same
+  // simplification server.ts's `codec` field doc comment already calls out;
+  // full multi-protocol negotiation (a legacy-34 client and a kex-1038
+  // client connected to the same server simultaneously) is future work.
+  svs.codec = family === "kex" ? Q2REPRO_CODEC : VANILLA_CODEC;
   const ge = family === "kex" ? LoadKexGame() : LoadLegacyGame(gameName);
 
   if (ge.apiversion !== GAME_API_VERSION) {

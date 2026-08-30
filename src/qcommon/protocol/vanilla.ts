@@ -59,6 +59,7 @@ import {
   MSG_WriteChar,
   MSG_WriteShort,
   MSG_WriteLong,
+  MSG_WriteString,
   MSG_WriteAngle16,
   MSG_WriteDeltaEntity,
   MSG_WriteDeltaUsercmd,
@@ -72,6 +73,7 @@ import {
   MSG_ReadCoord,
   MSG_ReadPos,
 } from "../sizebuf";
+import { PROTOCOL_VERSION } from "../qcommon";
 import {
   U_REMOVE,
   U_NUMBER16,
@@ -120,7 +122,7 @@ import {
 import { net_message } from "../net_chan";
 import { EntityStateT, PlayerStateT, type UsercmdT, MAX_STATS } from "../../shared/q_shared";
 import { VectorCopy } from "../../shared/math";
-import type { ProtocolCodec } from "./codec";
+import type { ProtocolCodec, ServerDataParamsT } from "./codec";
 
 // Reused across writeSpawnBaseline calls (MSG_WriteDeltaEntity only ever
 // reads `from`'s fields, never writes them, so one shared zero-valued
@@ -132,6 +134,20 @@ const NULL_ENTITY_STATE = new EntityStateT();
 // ---------------------------------------------------------------------------
 // server -> client writes
 // ---------------------------------------------------------------------------
+
+// Extracted verbatim (byte-for-byte) from src/server/sv_user.ts's SV_New_f --
+// the six MSG_Write* calls that used to write the svc_serverdata message
+// inline. q2repro-only ServerDataParamsT fields (serverState) are simply
+// unread here, matching protocol 34's handshake shape exactly.
+function writeServerData(msg: SizeBuf, params: ServerDataParamsT): void {
+  MSG_WriteByte(msg, SvcOpsT.svc_serverdata);
+  MSG_WriteLong(msg, PROTOCOL_VERSION);
+  MSG_WriteLong(msg, params.servercount);
+  MSG_WriteByte(msg, params.attractloop ? 1 : 0);
+  MSG_WriteString(msg, params.gamedir);
+  MSG_WriteShort(msg, params.clientnum);
+  MSG_WriteString(msg, params.levelname);
+}
 
 function writeDeltaEntity(msg: SizeBuf, from: EntityStateT, to: EntityStateT, force: boolean, newentity: boolean): void {
   MSG_WriteDeltaEntity(from, to, msg, force, newentity);
@@ -544,6 +560,7 @@ function readPlayerStateDelta(msg: SizeBuf, from: PlayerStateT, to: PlayerStateT
 
 export const VANILLA_CODEC: ProtocolCodec = {
   name: "vanilla",
+  writeServerData,
   writeDeltaEntity,
   writeEntityRemove,
   writePacketEntitiesEnd,

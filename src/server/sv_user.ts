@@ -8,12 +8,12 @@
 
 import { Com_sprintf } from "../shared/q_shared";
 import { UsercmdT, MAX_INFO_STRING, MAX_EDICTS, CS_NAME } from "../shared/q_shared";
-import { SysError, ClcOpsT, SvcOpsT, PROTOCOL_VERSION, MAX_MSGLEN, ERR_DROP, UPDATE_MASK } from "../qcommon/qcommon";
+import { SysError, ClcOpsT, SvcOpsT, MAX_MSGLEN, ERR_DROP, UPDATE_MASK } from "../qcommon/qcommon";
 import { Com_Printf, Com_DPrintf, Com_Error, COM_BlockSequenceCRCByte, Info_Print } from "../qcommon/common";
 import { Cmd_TokenizeString, Cmd_Argv, Cmd_Argc, Cbuf_AddText, Cbuf_InsertFromDefer } from "../qcommon/cmd";
 import { Cvar_VariableString, Cvar_Set, Cvar_VariableValue, Cvar_Serverinfo } from "../qcommon/cvar";
 import { FS_FOpenFile, FS_FreeFile, FS_LoadFile, file_from_pak } from "../qcommon/files";
-import { MSG_WriteByte, MSG_WriteLong, MSG_WriteShort, MSG_WriteString, MSG_ReadByte, MSG_ReadLong, MSG_ReadString, SZ_Write } from "../qcommon/sizebuf";
+import { MSG_WriteByte, MSG_WriteShort, MSG_WriteString, MSG_ReadByte, MSG_ReadLong, MSG_ReadString, SZ_Write } from "../qcommon/sizebuf";
 import type { GameExports } from "../game/game";
 import {
   sv,
@@ -98,20 +98,21 @@ export function SV_New_f(): void {
   //
   const gamedir = Cvar_VariableString("gamedir");
 
-  // send the serverdata
-  MSG_WriteByte(cl.netchan.message, SvcOpsT.svc_serverdata);
-  MSG_WriteLong(cl.netchan.message, PROTOCOL_VERSION);
-  MSG_WriteLong(cl.netchan.message, svs.spawncount);
-  MSG_WriteByte(cl.netchan.message, sv.attractloop ? 1 : 0);
-  MSG_WriteString(cl.netchan.message, gamedir);
-
   let playernum: number;
   if (sv.state === ServerStateT.ss_cinematic || sv.state === ServerStateT.ss_pic) playernum = -1;
   else playernum = svs.clients.indexOf(cl); // sv_client - svs.clients
-  MSG_WriteShort(cl.netchan.message, playernum);
 
-  // send full levelname
-  MSG_WriteString(cl.netchan.message, sv.configstrings[CS_NAME]);
+  // send the serverdata (ARCHITECTURE.md "Protocol layer" / .orch/phase5-design.md:
+  // routed through svs.codec so the 1038 codec's handshake shape can differ --
+  // see codec.ts's writeServerData doc comment).
+  svs.codec.writeServerData(cl.netchan.message, {
+    servercount: svs.spawncount,
+    attractloop: sv.attractloop,
+    gamedir,
+    clientnum: playernum,
+    levelname: sv.configstrings[CS_NAME],
+    serverState: sv.state,
+  });
 
   //
   // game server

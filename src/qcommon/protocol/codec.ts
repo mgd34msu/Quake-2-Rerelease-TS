@@ -95,6 +95,26 @@
 import type { SizeBuf } from "../sizebuf";
 import type { EntityStateT, PlayerStateT, UsercmdT } from "../../shared/q_shared";
 
+// Added for the 1038 (q2repro) codec (.orch/phase5-design.md phase 5 unit).
+// q2proto's vanilla_server_write_serverdata/q2repro_server_write_serverdata
+// both take a `q2proto_svc_serverdata_t` value struct; this is the subset of
+// that struct our engine actually has data for at the SV_New_f call site,
+// plus (for 1038 only) the extra q2pro/q2repro handshake fields the vanilla
+// codec's implementation ignores. Kept as one shared param type (rather than
+// a vanilla-only and a q2repro-only variant) so SV_New_f can build a single
+// literal regardless of which codec is active -- q2repro-specific fields are
+// simply unread by VANILLA_CODEC's implementation.
+export interface ServerDataParamsT {
+  servercount: number;
+  attractloop: boolean;
+  gamedir: string;
+  clientnum: number; // playernum; -1 for cinematic/pic servers
+  levelname: string;
+  // q2repro (1038) only -- see q2repro.ts's writeServerData for the exact
+  // wire shape and citations. Ignored by VANILLA_CODEC.
+  serverState: number; // ServerStateT numeric value (sv.state)
+}
+
 export interface ProtocolCodec {
   // Identifies the codec for logging/diagnostics; not itself part of the
   // wire format. "vanilla" for protocol 34 (this step); "q2repro"/1038 is
@@ -102,6 +122,17 @@ export interface ProtocolCodec {
   readonly name: string;
 
   // ---- server -> client writes -------------------------------------------
+
+  // Writes the svc_serverdata handshake message (protocol-number literal +
+  // servercount/attractloop/gamedir/clientnum/levelname, plus whatever extra
+  // fields the concrete protocol's handshake carries). Added alongside the
+  // 1038 codec (.orch/phase5-design.md phase 5): codec.ts's original header
+  // comment excluded svc_serverdata from step 1's seam as "a one-time
+  // connection-handshake literal, not a repeated per-frame wire encoding,
+  // ... deferred to whenever the 1038 handshake is implemented" -- that's
+  // now. VANILLA_CODEC's implementation is byte-identical to the inline
+  // write it replaces in sv_user.ts's SV_New_f (see vanilla.ts).
+  writeServerData(msg: SizeBuf, params: ServerDataParamsT): void;
 
   // Writes one entity_state_t delta (or a forced full state) as used by
   // both packetentities updates and spawn-baseline/demo dumps.
