@@ -47,12 +47,19 @@
 //   `fmt::formatter<edict_t>`-based prints (this port line has no G_Fmt/
 //   fmtlib -- see g_misc.ts's own header note).
 // - `gi.LocClient_Print(other, PRINT_CHAT, "{}: {}!\n", name,
-//   random_element(messages))` / the `target_actor_touch` broadcast loop's
-//   `gi.LocClient_Print(ent, PRINT_CHAT, "{}: {}\n", ..., self->message)`
-//   port as `gi.Client_Print(ent, PrintTypeT.PRINT_CHAT, ...)` template
-//   literals -- `Client_Print` is this port's real KEX per-client print
-//   entry point (kexapi/game.ts), taking a plain string exactly like
-//   `Com_Print`.
+//   random_element(messages))` (actor_pain's taunt line) ports as a
+//   `gi.Client_Print(ent, PrintTypeT.PRINT_CHAT, ...)` template literal:
+//   `name` and every `messages[]` entry are fixed literal strings (`"Watch
+//   it"`, `"#$@*&"`, ...), none `$`-prefixed, so `Loc_Localize` on either
+//   would be a no-op passthrough -- the template literal produces the exact
+//   same bytes.
+// - The `target_actor_touch` broadcast loop's `gi.LocClient_Print(ent,
+//   PRINT_CHAT, "{}: {}\n", ..., self->message)` is NOT the same case:
+//   `self.message` is the generic map-entity `message` spawn field (settable
+//   per-map, like every other edict), so it can be a `$key` in principle.
+//   This now goes through `gi.Loc_Print` for real (same defect class as
+//   g_func.ts's door_touch / g_utils.ts's G_PrintActivationMessage / this
+//   port's other stale "no localization backend" notes -- see those files).
 // - `self.monsterinfo.stand`/`self.monsterinfo.walk` are nullable
 //   (`MonsterinfoStandFn | null`) in this port's `EdictT`, unlike C++'s bare
 //   function pointer called without a null check. Every call site here uses
@@ -489,7 +496,7 @@ const target_actor_touch = RegisterTouch(
       for (let n = 1; n <= game.maxclients; n++) {
         const ent = g_edicts[n];
         if (ent === undefined || !ent.inuse) continue;
-        gi.Client_Print(ent, PrintTypeT.PRINT_CHAT, `${actor_names[other.s.number % actor_names.length]}: ${self.message}\n`);
+        gi.Loc_Print(ent, PrintTypeT.PRINT_CHAT, "{}: {}\n", [actor_names[other.s.number % actor_names.length], self.message ?? ""], 2);
       }
     }
 

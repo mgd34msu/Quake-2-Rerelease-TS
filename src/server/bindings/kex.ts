@@ -370,7 +370,7 @@ import {
   KexPmTypeT,
   SolidT as KexSolidT,
   KexMulticastT,
-  type PrintTypeT,
+  PrintTypeT,
   BoxEdictsResultT,
   type BoxEdictsFilterT,
   GoalReturnCode,
@@ -882,9 +882,33 @@ export function BuildKexImports(): KexGameImports {
     GetPathToGoal: () => false,
 
     // Localization: real Loc_Localize (src/qcommon/loc.ts), same
-    // allow_in_place=true call site q2repro's PF_Loc_Print uses.
-    Loc_Print: (ent, level, base, args, num_args) =>
-      kexClientPrint(ent, level, Loc_Localize(base, true, args, num_args)),
+    // allow_in_place=true call site q2repro's PF_Loc_Print uses
+    // (server/game.c:790-831). The PRINT_BROADCAST branch below (and the
+    // PRINT_NO_NOTIFY mask on the non-broadcast branch) mirror that
+    // function's own branching -- a previous version of this binding always
+    // routed through kexClientPrint regardless of the PRINT_BROADCAST bit,
+    // which silently swallowed `gi.LocBroadcast_Print`-equivalent calls
+    // (ent === null, no per-client target) into a console-only print instead
+    // of reaching any client. `svs.scan_for_say_cmd`'s say/say_team HACK
+    // (game.c:810-820) is not ported: nothing in this codebase sets
+    // `scan_for_say_cmd`/`server_supplied_say` (grepped), so the branch can
+    // never fire.
+    Loc_Print: (ent, level, base, args, num_args) => {
+      const string = Loc_Localize(base, true, args, num_args);
+
+      if (level & PrintTypeT.PRINT_BROADCAST) {
+        // game.c:822-827: restrict to print levels svc_print supports.
+        let broadcast_level = level & ~(PrintTypeT.PRINT_BROADCAST | PrintTypeT.PRINT_NO_NOTIFY);
+        if (broadcast_level > PrintTypeT.PRINT_CHAT && broadcast_level !== PrintTypeT.PRINT_TTS) {
+          broadcast_level = PrintTypeT.PRINT_CHAT;
+        }
+        SV_BroadcastPrintf(broadcast_level, "%s", string);
+      } else {
+        // game.c:829: "TODO implement" -- the bit is only masked off here,
+        // never acted on (PF_Client_Print doesn't understand it either).
+        kexClientPrint(ent, level & ~PrintTypeT.PRINT_NO_NOTIFY, string);
+      }
+    },
 
     // Debug draw: buffered, not rendered -- see sv_debugdraw.ts and this
     // file's header ("The ten `Draw_*` debug-draw primitives") for the

@@ -51,7 +51,7 @@ import {
   readMuzzleflash3Kex,
   readAchievementKex,
 } from "../qcommon/protocol/kexdemo";
-import { ServerCommandT } from "../kexapi/game";
+import { ServerCommandT, PrintTypeT } from "../kexapi/game";
 import { type CsRemapT, CS_REMAP_OLD, CS_REMAP_RERELEASE } from "../shared/cs_remap";
 import {
   EntityStateT,
@@ -870,11 +870,34 @@ function CL_ParseServerMessageLoop(): void {
 
       case SvcOpsT.svc_print: {
         const printLevel = MSG_ReadByte(net_message);
+        const printString = MSG_ReadString(net_message);
+
         if (printLevel === PRINT_CHAT) {
           S_StartLocalSound("misc/talk.wav");
           con.ormask = 128;
         }
-        Com_Printf("%s", MSG_ReadString(net_message));
+
+        // q2repro's CL_HandlePrint (src/client/parse.c:970-1001):
+        // `if (level == PRINT_TYPEWRITER || level == PRINT_CENTER)
+        // cgame->ParseCenterPrint(s, 0, level == PRINT_CENTER); else
+        // Com_Printf(...)`. This port has no kex cgame host with a
+        // ParseCenterPrint member (typewriter char-by-char reveal included)
+        // -- src/client/cgame/host.ts's own header notes those members as
+        // not-yet-ported -- so both re-release print levels fall back to
+        // this codebase's own (vanilla-protocol) centerprint banner,
+        // `SCR_CenterPrint` (already reachable via the legacy svc_centerprint
+        // opcode below). Without this, every server-side re-release
+        // centerprint sent through `gi.Loc_Print`'s PRINT_CENTER/
+        // PRINT_TYPEWRITER levels (svc_print + a level byte, not
+        // svc_centerprint -- see src/server/sv_send.ts's SV_ClientPrintf)
+        // would silently degrade to a plain console line instead of an
+        // on-screen banner, even once the text itself is correctly
+        // localized.
+        if (printLevel === PrintTypeT.PRINT_CENTER || printLevel === PrintTypeT.PRINT_TYPEWRITER) {
+          SCR_CenterPrint(printString);
+        } else {
+          Com_Printf("%s", printString);
+        }
         con.ormask = 0;
         break;
       }

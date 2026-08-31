@@ -353,6 +353,7 @@ function giTraceline(start: Vec3, end: Vec3, passent: EdictT | null, mask: Conte
 const PRINT_HIGH: PrintTypeT = 0;
 const PRINT_MEDIUM: PrintTypeT = 1;
 const PRINT_CHAT: PrintTypeT = 3;
+const PRINT_CENTER: PrintTypeT = 5;
 
 /** `mod_t`'s implicit single-argument constructor (g_local.h:1081-1093) -- see p_weapon.ts's own `modFromId` precedent. */
 function modFromId(id: ModIdT): ModT {
@@ -1912,7 +1913,11 @@ export function CTFScoreboardMessage(_ent: EdictT, _killer: EdictT | null): void
 function CTFHasTech(who: EdictT): void {
   const client = requireClient(who, "CTFHasTech");
   if (Gtime_subtract(level.time, client.ctf_lasttechmsg) > Gtime_from_sec(2)) {
-    gi.Center_Print(who, "$g_already_have_tech");
+    // ctf/g_ctf.cpp:1784: gi.LocCenter_Print(who, "$g_already_have_tech") --
+    // a bare (unlocalized) gi.Center_Print would print the raw "$g_..." key,
+    // same defect class as g_func.ts's door_touch/g_utils.ts's
+    // G_PrintActivationMessage (see those files' fixes).
+    giLocClientPrint(who, PRINT_CENTER, "$g_already_have_tech");
     client.ctf_lasttechmsg = level.time;
   }
 }

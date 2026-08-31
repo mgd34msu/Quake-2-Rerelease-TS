@@ -259,6 +259,7 @@ import {
   ATTN_NORM,
   ATTN_LOOP_NONE,
   CvarFlagsT,
+  PrintTypeT,
 } from "../kexapi/game";
 import {
   type EdictT,
@@ -1655,7 +1656,18 @@ const door_touch: TouchFn = RegisterTouch("door_touch", (self: EdictT, other: Ed
   if (level.time < self.touch_debounce_time) return;
   self.touch_debounce_time = Gtime_add(level.time, Gtime_from_sec(5));
 
-  gi.Center_Print(other, self.message ?? "");
+  // g_func.cpp:1682: `gi.LocCenter_Print(other, "{}", self->message)` -- a
+  // map-authored `message` field can itself be a `$key` (e.g. base1's
+  // "$map_crouch_here" door hint), so it must go through localization, not
+  // the bare (unlocalized) `gi.Center_Print`. The literal `"{}"` base is not
+  // a typo: it's a positional loc format whose single argument is
+  // `self.message`, which `Loc_Localize` recurses into with
+  // `allow_in_place=false` (loc.ts's own `Loc_Localize`, mirroring
+  // loc.c:264-286/334-345) -- exactly "look up `self.message` as a `$key` if
+  // it has one, else pass it through verbatim", same as calling
+  // `Loc_Localize(self.message, ...)` directly, just expressed the way the
+  // C source expresses it.
+  gi.Loc_Print(other, PrintTypeT.PRINT_CENTER, "{}", [self.message ?? ""], 1);
   gi.sound(other, SoundchanT.CHAN_AUTO, gi.soundindex("misc/talk1.wav"), 1, ATTN_NORM, 0);
 });
 

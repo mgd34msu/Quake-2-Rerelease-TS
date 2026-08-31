@@ -445,14 +445,20 @@ function edictFmt(ent: EdictT): string {
   return `${ent.classname} @ (${p[0]} ${p[1]} ${p[2]})`;
 }
 
-/** `gi.LocClient_Print` (g_local.h) has no ported counterpart -- this port
- *  line's `gi` only has `Client_Print` (no localization backend anywhere in
- *  this port), and every call site below passes a `$`-prefixed loc key with
- *  no format arguments. Thin pass-through, matching the "no localization
- *  backend, pass the key through as-is" treatment this codebase has not yet
- *  needed to deviate from anywhere else. */
+/** `gi.LocClient_Print(ent, level, base, args...)` (g_local.h:88-104) is
+ *  `Loc_Print(ent, level, base, args, num_args)` (same macro shape as
+ *  `LocCenter_Print`/`LocBroadcast_Print` -- see g_utils.ts's file header
+ *  for the general note on these three). Every call site below passes a
+ *  `$`-prefixed loc key with no format arguments, so `args`/`num_args` are
+ *  always `[]`/`0` here. NOTE: an earlier version of this comment claimed
+ *  "no localization backend anywhere in this port" and forwarded straight
+ *  to the bare (unlocalized) `gi.Client_Print` on that premise -- that
+ *  premise is false (src/qcommon/loc.ts's `Loc_Localize` is real and
+ *  `gi.Loc_Print` is wired to it, src/server/bindings/kex.ts), and the old
+ *  behavior printed every one of this function's `$key` arguments raw
+ *  instead of localized. */
 function LocClient_Print(ent: EdictT, printlevel: PrintTypeT, message: string): void {
-  gi.Client_Print(ent, printlevel, message);
+  gi.Loc_Print(ent, printlevel, message, [], 0);
 }
 
 /** Several functions below dereference `ent->item` unconditionally in the

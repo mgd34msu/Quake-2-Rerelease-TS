@@ -117,13 +117,29 @@
 // OTHER NOTED DEVIATIONS
 // ============================================================================
 // - `gi.LocBroadcast_Print`/`gi.LocCenter_Print` (used by
-//   G_PrintActivationMessage) have no counterpart in this port's
-//   `KexGameImports` (src/kexapi/game.ts) -- only `Loc_Print`/
-//   `Broadcast_Print`/`Center_Print` exist there. Since `ent.message` is
-//   already a plain resolved string (this port has no loc-key + args pair
-//   for edict messages), `Broadcast_Print(PRINT_CENTER, ...)`/
-//   `Center_Print(...)` are the direct behavioral equivalents with the
-//   localization layer (which has nothing to localize here) skipped.
+//   G_PrintActivationMessage, g_utils.cpp:125-130) have no counterpart in
+//   this port's `KexGameImports` (src/kexapi/game.ts) -- only `Loc_Print`/
+//   `Broadcast_Print`/`Center_Print` exist there. BOTH are just thin
+//   wrappers around `Loc_Print` in the C source (g_local.h:107-128:
+//   `LocBroadcast_Print(level, base, args...)` is
+//   `Loc_Print(nullptr, level | PRINT_BROADCAST, base, args, n)`;
+//   `LocCenter_Print(e, base, args...)` is
+//   `Loc_Print(e, PRINT_CENTER, base, args, n)`), so this port calls
+//   `gi.Loc_Print` directly with the same arguments instead. NOTE: an
+//   earlier version of this comment claimed `ent.message` "is already a
+//   plain resolved string" and used the bare (unlocalized) `Broadcast_Print`/
+//   `Center_Print` on that premise -- that premise is false. `ent.message`
+//   is map-author-supplied data (a level's .map entity `message` key) and
+//   can itself be a `$key` (observed in practice: base1 ships doors with
+//   `message = "$map_crouch_here"`), so it must go through
+//   `Loc_Localize` like the C source does, not print raw. Both call sites
+//   below pass the literal base format `"{}"` with `ent.message` as its
+//   sole argument, exactly mirroring `gi.LocBroadcast_Print(PRINT_CENTER,
+//   "{}", ent->message)`/`gi.LocCenter_Print(activator, "{}", ent->message)`
+//   (g_utils.cpp:128/130) -- see loc.ts's `Loc_Localize` for why a literal
+//   `"{}"` positional wrapper around the (possibly-`$`-prefixed) message is
+//   the correct localize-or-passthrough shape, not a typo for the message
+//   itself.
 // - `coop->integer`: `CvarT` (reused from src/shared/q_shared.ts) has no
 //   `.integer` field -- src/kexapi/game.ts's own file header already
 //   documents this exact mismatch ("kex's cvar_t has an integer: int32_t
@@ -340,11 +356,12 @@ export function G_PrintActivationMessage(ent: EdictT, activator: EdictT | null, 
   if (ent.message === null || activator === null || (activator.svflags & SvflagsT.SVF_MONSTER) !== 0) return;
 
   if (coop_global && coopEnabled()) {
-    // C: gi.LocBroadcast_Print(PRINT_CENTER, "{}", ent->message) -- see file
-    // header's Broadcast_Print/Center_Print deviation note.
-    gi.Broadcast_Print(PrintTypeT.PRINT_CENTER, ent.message);
+    // g_utils.cpp:128: gi.LocBroadcast_Print(PRINT_CENTER, "{}", ent->message)
+    // -- see file header's Broadcast_Print/Center_Print deviation note.
+    gi.Loc_Print(null, PrintTypeT.PRINT_CENTER | PrintTypeT.PRINT_BROADCAST, "{}", [ent.message], 1);
   } else {
-    gi.Center_Print(activator, ent.message);
+    // g_utils.cpp:130: gi.LocCenter_Print(activator, "{}", ent->message)
+    gi.Loc_Print(activator, PrintTypeT.PRINT_CENTER, "{}", [ent.message], 1);
   }
 
   // [Paril-KEX] allow non-noisy centerprints

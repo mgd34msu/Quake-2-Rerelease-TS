@@ -652,7 +652,14 @@ describe("Use_Compass", () => {
 
     useCompass(ent);
 
-    expect(rec.clientPrints).toEqual([{ level: expect.any(Number), message: "$no_valid_poi" }]);
+    // g_items.ts's LocClient_Print now goes through gi.Loc_Print (real
+    // localization), not the bare (unlocalized) gi.Client_Print -- see
+    // that file's header note and src/kexgame/g_utils.ts's own
+    // G_PrintActivationMessage fix for the same defect class ($key reaching
+    // the screen unexpanded). This test previously asserted the OLD,
+    // buggy wiring (a raw "$no_valid_poi" landing in rec.clientPrints).
+    expect(rec.clientPrints).toEqual([]);
+    expect(rec.locPrints).toEqual([{ level: expect.any(Number), base: "$no_valid_poi", args: [] }]);
     expect(ent.client!.help_draw_points).toBe(false);
   });
 
