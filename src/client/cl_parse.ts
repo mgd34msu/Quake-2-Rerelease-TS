@@ -69,6 +69,7 @@ import { Cvar_Set } from "../qcommon/cvar";
 import { Cbuf_AddText, Cbuf_Execute, Cmd_Argc, Cmd_Argv } from "../qcommon/cmd";
 import { FS_LoadFile, FS_Gamedir, FS_CreatePath, FS_FOpenFileWrite, FS_Write, FS_FCloseFile, FS_ReadRawFile, FS_WriteFile, FS_RemoveFile, FS_AddPak, fs_gamedirvar } from "../qcommon/files";
 import { COM_StripExtension } from "../shared/math";
+import { Loc_Localize } from "../qcommon/loc";
 import { CM_InlineModel } from "../qcommon/cmodel";
 import { CL_ClearState, CL_RequestNextDownload, CL_WriteDemoMessage } from "./cl_main";
 import { HTTP_QueueDownload, HTTP_RescanQueue, type HttpDlType } from "./cl_http";
@@ -1121,9 +1122,36 @@ function CL_ParseServerMessageLoop(): void {
         readDamageKex();
         break;
 
-      case ServerCommandT.svc_locprint:
-        readLocprintKex();
+      case ServerCommandT.svc_locprint: {
+        // q2repro parse.c:1226-1248 CL_ParseLocPrint: localize base+args via
+        // Loc_Localize, then route the result through the exact same
+        // print-level dispatch as svc_print's CL_HandlePrint (parse.c:970-
+        // 1001) -- see this switch's svc_print case above for the identical
+        // PRINT_CHAT/PRINT_CENTER/PRINT_TYPEWRITER handling this mirrors.
+        // Divergence-audit visible-wrong fix: this used to decode the
+        // message (readLocprintKex, kexdemo.ts:860-870, a side-effect-free
+        // decoder) purely to stay byte-aligned and discard the result, so
+        // every Loc_Print-driven message from a real external q2repro/
+        // rerelease server, or from KEX demo playback (this port's own
+        // server pre-localizes Loc_Print into svc_print server-side --
+        // bindings/kex.ts:910-925 -- so this path is never reached against
+        // this engine's own server), silently vanished.
+        const { flags, base, args } = readLocprintKex();
+        const localized = CL_TranslatePlayerNameTokens(Loc_Localize(base, true, args, args.length));
+
+        if (flags === PRINT_CHAT) {
+          S_StartLocalSound("misc/talk.wav");
+          con.ormask = 128;
+        }
+
+        if (flags === PrintTypeT.PRINT_CENTER || flags === PrintTypeT.PRINT_TYPEWRITER) {
+          SCR_CenterPrint(localized, flags !== PrintTypeT.PRINT_TYPEWRITER);
+        } else {
+          Com_Printf("%s", localized);
+        }
+        con.ormask = 0;
         break;
+      }
 
       case ServerCommandT.svc_fog:
         readFog();

@@ -17,6 +17,7 @@ import {
   AngleVectors,
 } from "../shared/math";
 import { frand, crand } from "../qcommon/common";
+import { Cvar_Get } from "../qcommon/cvar";
 import {
   type EntityStateT,
   MAX_QPATH,
@@ -537,6 +538,24 @@ export function CL_RunDLights(): void {
   }
 }
 
+// q2repro effects.c:1906 registers this; this port's cl_main.ts CL_InitLocal
+// already does the same (Cvar_Get is idempotent -- an already-registered
+// name just returns the existing cvar, standard Quake2 semantics, see this
+// codebase's own cd_ogg.ts ogg_remap_tracks for the identical pattern), so
+// fetching it here reuses the SAME cvar object rather than re-registering.
+// Divergence-audit visible-wrong fix (partial -- see CL_ParseMuzzleFlash's
+// MZ_RAILGUN case for what this gates, and this unit's report for what
+// remains blocked): the rerelease rail follow-up sound is a self-contained
+// sound-only addition; the md2 flash-model rendering effects.c:240-392
+// otherwise describes needs an explosion-pool/model-registry consumer in
+// cl_tent.ts and a view-weapon overlay renderer, both outside this file's
+// territory.
+let cl_rerelease_effects_cvar: ReturnType<typeof Cvar_Get> = null;
+function clRereleaseEffectsEnabled(): boolean {
+  if (!cl_rerelease_effects_cvar) cl_rerelease_effects_cvar = Cvar_Get("cl_rerelease_effects", "1", 0);
+  return !!cl_rerelease_effects_cvar && cl_rerelease_effects_cvar.value !== 0;
+}
+
 export function CL_ParseMuzzleFlash(): void {
   const i = MSG_ReadShort(net_message);
   if (i < 1 || i >= MAX_EDICTS) {
@@ -632,6 +651,15 @@ export function CL_ParseMuzzleFlash(): void {
       dl.color[1] = 0.5;
       dl.color[2] = 1.0;
       S_StartSound(null, i, CHAN_WEAPON, S_RegisterSound("weapons/railgf1a.wav"), volume, ATTN_NORM, 0);
+      // q2repro effects.c:301-302: rerelease adds a delayed report/echo on
+      // its own channel, gated on cl_rerelease_effects (default on).
+      // CHAN_AUX3 (shared.h's [Paril-KEX] channel additions -- CHAN_AUX=5,
+      // CHAN_FOOTSTEP=6, CHAN_AUX3=7 -- not yet in this port's q_shared.ts
+      // CHAN_* set, out of this file's territory to add) used as the literal
+      // 7 here rather than a named import.
+      if (clRereleaseEffectsEnabled()) {
+        S_StartSound(null, i, 7 /* CHAN_AUX3 */, S_RegisterSound("weapons/railgr1b.wav"), volume, ATTN_NORM, 0.4);
+      }
       break;
     case MZ_ROCKET:
       dl.color[0] = 1;

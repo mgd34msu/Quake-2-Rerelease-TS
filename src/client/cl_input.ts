@@ -148,10 +148,17 @@ function KeyUp(b: KbuttonT): void {
   if (!(b.state & 1)) return; // still up (this should not happen)
 
   // save timestamp
+  //
+  // q2repro input.c:314-321: only accumulate `uptime - b->downtime` when
+  // uptime is PAST downtime; a stale/mismatched up-event timestamp (uptime
+  // <= downtime) adds nothing instead of a negative or wrapped delta. This
+  // port's own KeyUp used to add unconditionally (vanilla's original
+  // behavior), which momentarily nudges CL_KeyState's frame fraction toward
+  // 0 on a stale timestamp -- divergence-audit latent finding.
   c = Cmd_Argv(2);
   const uptime = atoi(c);
-  if (uptime) b.msec += uptime - b.downtime;
-  else b.msec += 10;
+  if (!uptime) b.msec += 10;
+  else if (uptime > b.downtime) b.msec += uptime - b.downtime;
 
   b.state &= ~1; // now up
   b.state |= 4; // impulse up
@@ -439,6 +446,24 @@ export function CL_BaseMove(cmd: UsercmdT): void {
   }
 }
 
+// q2repro input.c:617-623 CL_ClampSpeed: caps the final forward/side move
+// vector to the default (maximum) running speed of 400 units/sec, applied
+// AFTER keyboard + mouse contributions are summed (called from both
+// CL_UpdateCmd, line 678, and CL_FinalizeCmd, line 848) -- divergence-audit
+// latent fix (cheap, same function family as CL_ClampPitch right below).
+// Only forwardmove/sidemove are clamped; upmove is untouched, matching the
+// reference. This port fuses CL_UpdateCmd/CL_FinalizeCmd into one
+// CL_CreateCmd pass, so a single call from CL_FinishMove (after
+// CL_BaseMove and IN_Move have both already contributed) covers both of
+// the reference's call sites.
+export function CL_ClampSpeed(cmd: UsercmdT): void {
+  const speed = 400;
+  if (cmd.forwardmove > speed) cmd.forwardmove = speed;
+  else if (cmd.forwardmove < -speed) cmd.forwardmove = -speed;
+  if (cmd.sidemove > speed) cmd.sidemove = speed;
+  else if (cmd.sidemove < -speed) cmd.sidemove = -speed;
+}
+
 export function CL_ClampPitch(): void {
   let pitch = SHORT2ANGLE(cl.frame.playerstate.pmove.delta_angles[PITCH]);
   if (pitch > 180) pitch -= 360;
@@ -459,7 +484,11 @@ const BUTTON_ANY = 128;
 CL_FinishMove
 ==============
 */
-function CL_FinishMove(cmd: UsercmdT): void {
+function CL_FinishMove(cmd: UsercmdT, jumpLatched: boolean, crouchLatched: boolean): void {
+  // clamp to server-defined max speed, after CL_BaseMove + IN_Move (mouse)
+  // have both already contributed -- see CL_ClampSpeed's own doc comment.
+  CL_ClampSpeed(cmd);
+
   //
   // figure button bits
   //
@@ -480,8 +509,24 @@ function CL_FinishMove(cmd: UsercmdT): void {
   // field at all (its decoder rejects CM_UP), so vertical intent reaches
   // the kex game exclusively through these bits. Harmless to legacy games,
   // which never test bits 3/4, exactly as in q2repro itself.
-  if (in_up.state & 3) cmd.buttons |= ButtonT.BUTTON_JUMP;
-  if (in_down.state & 3) cmd.buttons |= ButtonT.BUTTON_CROUCH;
+  //
+  // `jumpLatched`/`crouchLatched` are `in_up.state & 3`/`in_down.state & 3`
+  // captured by CL_CreateCmd BEFORE CL_BaseMove ran -- divergence-audit
+  // visible-wrong fix. CL_BaseMove computes the legacy analog upmove via
+  // CL_KeyState(in_up)/CL_KeyState(in_down) (below), and CL_KeyState clears
+  // each key's edge-trigger bit as a side effect of being read (this port's
+  // vanilla-derived design; q2repro's own CL_KeyState is const/read-only
+  // and instead clears via a separate KeyClear() called only after
+  // CL_FinalizeCmd has already tested the bits, input.c:465-482 vs.
+  // 869-887). Testing `in_up.state & 3` here directly -- AFTER CL_BaseMove
+  // already ran -- read the bits post-clear, so a jump/crouch tap fully
+  // contained within one frame (press+release before this function runs)
+  // was silently eaten. Reading the pre-CL_BaseMove snapshot instead
+  // reproduces q2repro's "test before clear" ordering without restructuring
+  // this port's single-pass CL_CreateCmd into q2repro's split
+  // CL_UpdateCmd/CL_FinalizeCmd.
+  if (jumpLatched) cmd.buttons |= ButtonT.BUTTON_JUMP;
+  if (crouchLatched) cmd.buttons |= ButtonT.BUTTON_CROUCH;
   in_holster.state &= ~2;
 
   if (anykeydown && cls.key_dest === KeydestT.key_game) cmd.buttons |= BUTTON_ANY;
@@ -513,13 +558,19 @@ export function CL_CreateCmd(): UsercmdT {
   if (frame_msec < 1) frame_msec = 1;
   if (frame_msec > 200) frame_msec = 200;
 
+  // Snapshot the jump/crouch edge-trigger bits BEFORE CL_BaseMove runs --
+  // see CL_FinishMove's own doc comment on `jumpLatched`/`crouchLatched` for
+  // why this ordering matters (divergence-audit visible-wrong fix).
+  const jumpLatched = (in_up.state & 3) !== 0;
+  const crouchLatched = (in_down.state & 3) !== 0;
+
   // get basic movement from keyboard
   CL_BaseMove(cmd);
 
   // allow mice or other external controllers to add to the move
   IN_Move(cmd);
 
-  CL_FinishMove(cmd);
+  CL_FinishMove(cmd, jumpLatched, crouchLatched);
 
   // input.c's CL_FinalizeCmd: "update wheels before we save it off" --
   // mutates `cmd.buttons` (BUTTON_HOLSTER) and may dispatch the eventual
@@ -604,6 +655,39 @@ export function CL_InitInput(): void {
   // CL_InitLocal; see cl_wheel.ts's own doc comment on CL_Wheel_Init for why
   // (cl_main.ts is under concurrent edit by another unit).
   CL_Wheel_Init();
+}
+
+// q2repro input.c build_delta_move/compute_buttons_upmove (933-963): for
+// legacy has_upmove protocols (vanilla/R1Q2/Q2PRO -- exactly the classic
+// clc_move path below, since kex/1038 takes the writeBatchMove branch
+// instead) BUTTON_HOLSTER is stripped outright and BUTTON_JUMP/
+// BUTTON_CROUCH are folded into a synthesized upmove before the buttons
+// byte reaches the wire. This port keeps a real analog cmd.upmove computed
+// from CL_KeyState(in_up)/CL_KeyState(in_down) in CL_BaseMove (unlike
+// q2repro, which dropped that analog path entirely and relies solely on
+// the fold), so the already-correct upmove is left untouched here --
+// folding on top of it would double-count vertical intent. Only the
+// masking half of the reference behavior applies: legacy servers/mods
+// never see these three kex-only bits, matching build_delta_move's
+// `from_buttons &= ~BUTTON_HOLSTER` plus compute_buttons_upmove's
+// `*buttons = prev_buttons & ~(BUTTON_CROUCH | BUTTON_JUMP)`.
+// Divergence-audit latent fix. Returns a shallow clone -- cl.cmds[] entries
+// are shared with local prediction and the kex batched-move writer, both
+// of which need the real (unmasked) buttons byte, so this must never
+// mutate its argument in place.
+export function CL_StripKexButtonsForLegacyWire(src: UsercmdT): UsercmdT {
+  const out = new UsercmdT();
+  out.msec = src.msec;
+  out.angles[0] = src.angles[0];
+  out.angles[1] = src.angles[1];
+  out.angles[2] = src.angles[2];
+  out.forwardmove = src.forwardmove;
+  out.sidemove = src.sidemove;
+  out.upmove = src.upmove;
+  out.impulse = src.impulse;
+  out.lightlevel = src.lightlevel;
+  out.buttons = src.buttons & ~(ButtonT.BUTTON_HOLSTER | ButtonT.BUTTON_JUMP | ButtonT.BUTTON_CROUCH);
+  return out;
 }
 
 /*
@@ -697,19 +781,24 @@ export function CL_SendCmd(): void {
 
   // send this and the previous cmds in the message, so
   // if the last packet was dropped, it can be recovered
+  //
+  // Each cmd is masked through CL_StripKexButtonsForLegacyWire (this
+  // function's own doc comment) before hitting the wire -- see that
+  // comment for why: this is the has_upmove path, and legacy servers/mods
+  // never expect BUTTON_HOLSTER/JUMP/CROUCH in the buttons byte.
   i = (cls.netchan.outgoing_sequence - 2) & (backup - 1);
   let oldcmd = cl.cmds[i];
   const nullcmd = new UsercmdT();
-  cls.codec.writeDeltaUsercmd(buf, nullcmd, oldcmd);
+  cls.codec.writeDeltaUsercmd(buf, CL_StripKexButtonsForLegacyWire(nullcmd), CL_StripKexButtonsForLegacyWire(oldcmd));
 
   i = (cls.netchan.outgoing_sequence - 1) & (backup - 1);
   cmd = cl.cmds[i];
-  cls.codec.writeDeltaUsercmd(buf, oldcmd, cmd);
+  cls.codec.writeDeltaUsercmd(buf, CL_StripKexButtonsForLegacyWire(oldcmd), CL_StripKexButtonsForLegacyWire(cmd));
   oldcmd = cmd;
 
   i = cls.netchan.outgoing_sequence & (backup - 1);
   cmd = cl.cmds[i];
-  cls.codec.writeDeltaUsercmd(buf, oldcmd, cmd);
+  cls.codec.writeDeltaUsercmd(buf, CL_StripKexButtonsForLegacyWire(oldcmd), CL_StripKexButtonsForLegacyWire(cmd));
 
   // calculate a checksum over the move commands
   if (hasChecksum) {

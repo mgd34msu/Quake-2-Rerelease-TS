@@ -17,9 +17,10 @@ library cannot be loaded.
 import { dlopen, ptr, read as ffiRead, type Library, type Pointer } from "bun:ffi";
 import { Com_DPrintf, Com_Printf } from "../qcommon/common";
 import { Cvar_Get } from "../qcommon/cvar";
-import { FS_Gamedir } from "../qcommon/files";
+import { FS_Gamedir, FS_NextPath } from "../qcommon/files";
 import { S_RawSamples } from "../client/snd_dma";
 import { dma, paintedtime, s_rawend } from "../client/snd_loc";
+import { cl } from "../client/client";
 import { CVAR_ARCHIVE, type CvarT } from "../shared/q_shared";
 
 const vorbisSymbols = {
@@ -68,6 +69,7 @@ function cstr(s: string): Uint8Array {
 }
 
 let cd_nocd: CvarT | null = null;
+let ogg_remap_tracks: CvarT | null = null;
 
 let vf: Uint8Array | null = null; // live OggVorbis_File storage
 let trackRate = 0;
@@ -105,15 +107,70 @@ function registerCdCvars(): void {
   // model (cd_nocd, this file's own header comment) with a dedicated music
   // jukebox (ogg_enable/ogg_volume/ogg_shuffle/ogg_menu_track/
   // ogg_remap_tracks) with its own playlist/shuffle/remap logic layered on
-  // the sound engine. This port never adopted that jukebox -- registered
-  // here, consumer unported, so setting them no longer reports "unknown
-  // command" but they don't affect this file's simpler CD-audio replacement
-  // (which cd_nocd alone still gates, unchanged).
+  // the sound engine. This port never adopted that jukebox wholesale, but
+  // ogg_remap_tracks IS consumed below (remapTrack, ogg.c:192-205) since
+  // CDAudio_Play already has a track number in hand to remap -- see that
+  // function's own citation. ogg_enable/ogg_volume/ogg_shuffle/
+  // ogg_menu_track remain unconsumed: shuffle needs the full trackmap/
+  // playlist machinery (OGG_Play's `ogg_shuffle->integer && trackcount`
+  // branch, ogg.c:270-278) this file doesn't have, and ogg_menu_track needs
+  // a disconnected-state call site (cl_view.ts/cl_main.ts, out of this
+  // unit's territory -- see this file's report) that doesn't exist yet.
   Cvar_Get("ogg_enable", "1", CVAR_ARCHIVE);
   Cvar_Get("ogg_volume", "1", CVAR_ARCHIVE);
   Cvar_Get("ogg_shuffle", "0", CVAR_ARCHIVE);
   Cvar_Get("ogg_menu_track", "77", CVAR_ARCHIVE);
-  Cvar_Get("ogg_remap_tracks", "1", CVAR_ARCHIVE);
+  ogg_remap_tracks = Cvar_Get("ogg_remap_tracks", "1", CVAR_ARCHIVE);
+}
+
+// q2repro ogg.c:192-205's remap_track: the xatrix/rogue mission packs'
+// original CD soundtracks (tracks 2-11) aren't part of the remaster's
+// shared baseq2 music set, so the remaster ships their music as extra
+// baseq2 tracks instead -- rogue's CD tracks 2-11 land at baseq2 track12-21
+// (a flat +10 shift), xatrix's land at the non-contiguous subset in the
+// lookup table below (ogg.c:199, copied verbatim). `cl.gamedir` (set from
+// svc_serverdata in CL_ParseServerData, cl_parse.ts:530) mirrors q2repro's
+// own `cl.gamedir` comparison exactly. Gated on ogg_remap_tracks (default
+// "1", matching ogg.c:817's own default) so `ogg_remap_tracks 0` reproduces
+// the un-remapped (wrong-song) behavior for anyone who wants it.
+const XATRIX_TRACK_REMAP: readonly number[] = [9, 13, 14, 7, 16, 2, 15, 3, 4, 18];
+
+function remapTrack(track: number): number {
+  if (!ogg_remap_tracks || !ogg_remap_tracks.value) return track;
+  if (track < 2 || track > 11) return track;
+
+  const gamedir = cl.gamedir.toLowerCase();
+  if (gamedir === "rogue") return track + 10;
+  if (gamedir === "xatrix") return XATRIX_TRACK_REMAP[track - 2]!;
+  return track;
+}
+
+// q2repro ogg.c:630-657's OGG_LoadTrackList builds its track map from EVERY
+// filesystem search path's music/ dir (FS_NextPath, plus base/home dir),
+// not just the active gamedir -- otherwise a mod with no music/ of its own
+// (or an xatrix/rogue install whose remapped baseq2 track lives one level
+// up) gets silence even though the file exists on disk. FS_NextPath's own
+// walk already starts at fs_gamedir and continues through every other
+// registered game directory (files.ts's own doc comment on that function),
+// so this reproduces the same effective search order without this file
+// needing its own copy of the search-path list. Extracted to its own pure
+// function (no FFI) so the search-path/remap logic is directly unit
+// testable without needing a real Vorbis file on disk -- see
+// test/cd_ogg.test.ts.
+function buildTrackCandidates(track: number): string[] {
+  const remapped = remapTrack(track);
+  const pad = remapped < 10 ? `0${remapped}` : `${remapped}`;
+  const candidates: string[] = [];
+  for (let dir = FS_NextPath(null); dir !== null; dir = FS_NextPath(dir)) {
+    candidates.push(`${dir}/music/${pad}.ogg`);
+    candidates.push(`${dir}/music/track${pad}.ogg`);
+  }
+  // FS_Gamedir() fallback kept last in case FS_NextPath ever returns an
+  // empty walk (e.g. filesystem not yet initialized) -- matches this
+  // function's pre-fix-only lookup, so behavior never regresses to fewer
+  // candidates than before.
+  candidates.push(`${FS_Gamedir()}/music/${pad}.ogg`, `${FS_Gamedir()}/music/track${pad}.ogg`);
+  return candidates;
 }
 
 export function CDAudio_Play(track: number, loop: boolean): void {
@@ -131,8 +188,7 @@ export function CDAudio_Play(track: number, loop: boolean): void {
 
   if (track <= 0) return; // track 0/1 = data track / silence, like the CD
 
-  const pad = track < 10 ? `0${track}` : `${track}`;
-  const candidates = [`${FS_Gamedir()}/music/${pad}.ogg`, `${FS_Gamedir()}/music/track${pad}.ogg`];
+  const candidates = buildTrackCandidates(track);
 
   const storage = new Uint8Array(OV_FILE_SIZE);
   let opened = false;
@@ -233,6 +289,17 @@ export function CDAudio_Init(): number {
 // regardless of what any earlier test in the process did.
 export function CDAudio_TestResetRegistration(): void {
   cd_nocd = null;
+}
+
+// TEST SEAMs (not part of the C engine): expose the pure track-remap and
+// candidate-path-building logic directly so test/cd_ogg.test.ts can verify
+// the xatrix/rogue remap table and the cross-searchpath music/ lookup
+// without needing a real Vorbis file on disk or a loaded libvorbisfile.
+export function CDAudio_TestRemapTrack(track: number): number {
+  return remapTrack(track);
+}
+export function CDAudio_TestBuildTrackCandidates(track: number): string[] {
+  return buildTrackCandidates(track);
 }
 
 export function CDAudio_Shutdown(): void {
