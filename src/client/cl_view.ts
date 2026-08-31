@@ -30,7 +30,7 @@ import { crosshair, crosshair_height, crosshair_pic, crosshair_width, scr_vrect,
 import { entitycmpfnc, SCR_AddDirtyPoint, SCR_TouchPics, SCR_UpdateScreen, SCR_DrawPOIs, SCR_DrawDamageDisplays, SCR_GetHelpPathMarkers } from "./cl_scrn";
 import { CL_AddEntities } from "./cl_ents";
 import { CL_RegisterTEntModels } from "./cl_tent";
-import { CL_LoadClientinfo, CL_ParseClientinfo } from "./cl_parse";
+import { CL_LoadClientinfo, CL_ParseClientinfo, CL_RegisterImage } from "./cl_parse";
 import { Sys_SendKeyEvents } from "./cl_input";
 import { Con_ClearNotify } from "./console_impl";
 import { viddef } from "./vid";
@@ -398,7 +398,7 @@ export function CL_PrepRefresh(): void {
   Com_Printf("images\r");
   SCR_UpdateScreen();
   for (let i = 1; i < cls.csr.max_images && cl.configstrings[cls.csr.images + i][0]; i++) {
-    cl.image_precache[i] = re.RegisterPic(cl.configstrings[cls.csr.images + i]);
+    cl.image_precache[i] = CL_RegisterImage(cl.configstrings[cls.csr.images + i]);
     Sys_SendKeyEvents(); // pump message loop
   }
 

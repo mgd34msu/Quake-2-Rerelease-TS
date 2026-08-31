@@ -138,6 +138,28 @@ function buildTga24(pixelsBottomToTop: [number, number, number][], width: number
   return bytes;
 }
 
+// Type 3 (uncompressed, black-and-white/grayscale, 8bpp) -- the format the
+// real retail rerelease's sprites/flare_01.tga through flare_04.tga ship
+// as (see test/cl_precache_flare_retail.test.ts's own header comment for
+// the retail-data survey). One byte per pixel, bottom-to-top row order,
+// same convention as buildTga24 above.
+function buildTga3Gray(pixelsBottomToTop: number[], width: number, height: number): Uint8Array {
+  const header = new Uint8Array(18);
+  header[0] = 0; // id_length
+  header[1] = 0; // colormap_type
+  header[2] = 3; // image_type: uncompressed black-and-white
+  const hv = new DataView(header.buffer);
+  hv.setUint16(12, width, true);
+  hv.setUint16(14, height, true);
+  header[16] = 8; // pixel_size
+  header[17] = 0; // attributes
+
+  const bytes = new Uint8Array(header.length + pixelsBottomToTop.length);
+  bytes.set(header, 0);
+  bytes.set(pixelsBottomToTop, header.length);
+  return bytes;
+}
+
 // Minimal, hand-built, non-copyrighted 8-bit RGBA PNG (colortype 6, no
 // interlacing, filter type 0/None on every scanline) -- the exact IHDR
 // shape qcommon/png.ts's decodePNG targets (see that module's own header
@@ -305,6 +327,34 @@ describe("LoadTGA", () => {
   test("returns a null pic for a missing file", () => {
     const result = LoadTGA("pics/missing.tga");
     expect(result.pic).toBeNull();
+  });
+
+  // Live bug fix (task report): the real retail sprites/flare_01.tga (a
+  // misc_flare glow texture) is a type 3 grayscale TGA. Before this, type 3
+  // hit the "Only type 2 and 10" Sys_Error and dropped the client entirely
+  // the moment cl_parse.ts's CL_RegisterImage correctly resolved the name
+  // instead of mangling it -- see this file's sibling
+  // test/cl_precache_flare_retail.test.ts for the real-bytes round trip.
+  test("decodes a hand-built 8-bit grayscale (type 3) TGA, expanding each byte to R=G=B, A=255", () => {
+    const bottomRow = [10, 200];
+    const topRow = [0, 255];
+    files.set("sprites/test_gray.tga", buildTga3Gray([...bottomRow, ...topRow], 2, 2));
+
+    const result = LoadTGA("sprites/test_gray.tga");
+
+    expect(result.width).toBe(2);
+    expect(result.height).toBe(2);
+    expect(Array.from(result.pic ?? [])).toEqual([
+      0, 0, 0, 255, 255, 255, 255, 255, // output row 0 (top)
+      10, 10, 10, 255, 200, 200, 200, 255, // output row 1 (bottom)
+    ]);
+  });
+
+  test("still rejects an unsupported targa type (e.g. type 1, colormapped) instead of silently misdecoding", () => {
+    const bytes = buildTga3Gray([0], 1, 1);
+    bytes[2] = 1; // image_type: colormapped -- not type 2/3/10
+    files.set("sprites/bad_type.tga", bytes);
+    expect(() => LoadTGA("sprites/bad_type.tga")).toThrow(/Only type 2, 3 and 10/);
   });
 });
 

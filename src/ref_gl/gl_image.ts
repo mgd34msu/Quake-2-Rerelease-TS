@@ -532,11 +532,23 @@ export function LoadTGA(name: string): { pic: Uint8Array | null; width: number; 
   const pixel_size = buffer[p++];
   p += 1; // attributes (unused)
 
-  if (image_type !== 2 && image_type !== 10) {
-    ri.Sys_Error(ERR_DROP, "LoadTGA: Only type 2 and 10 targa RGB images supported\n");
+  // Type 3 (uncompressed, black-and-white/grayscale) added for the
+  // rerelease's own retail data: vanilla 3.21 never shipped a single type-3
+  // .tga (its LoadTGA -- this function's original -- only ever needed type
+  // 2/10 RGB), but the 2023 KEX rerelease does, e.g. baseq2/pak0.pak's
+  // sprites/flare_01.tga through flare_04.tga (128x128, 8bpp grayscale glow
+  // textures for misc_flare -- kexgame/g_misc.ts's SP_misc_flare, RULE-17:
+  // vanilla-derived code never re-read against rerelease-era asset formats).
+  // Before this, resolving any of those names (once cl_parse.ts's
+  // CL_RegisterImage correctly routes them here instead of mangling the
+  // name with an extra "pics/"+".pcx") hit this Sys_Error and dropped the
+  // client. q2repro's own IMG_LoadTGA (src/refresh/images.c:543-547)
+  // explicitly accepts this same TGA_Mono type alongside TGA_RGB/TGA_Colormap.
+  if (image_type !== 2 && image_type !== 3 && image_type !== 10) {
+    ri.Sys_Error(ERR_DROP, "LoadTGA: Only type 2, 3 and 10 targa RGB images supported\n");
   }
-  if (colormap_type !== 0 || (pixel_size !== 32 && pixel_size !== 24)) {
-    ri.Sys_Error(ERR_DROP, "LoadTGA: Only 32 or 24 bit images supported (no colormaps)\n");
+  if (colormap_type !== 0 || (image_type === 3 ? pixel_size !== 8 : pixel_size !== 32 && pixel_size !== 24)) {
+    ri.Sys_Error(ERR_DROP, "LoadTGA: Only 32 or 24 bit images supported (8 bit for type 3, no colormaps)\n");
   }
 
   const columns = width;
@@ -574,6 +586,26 @@ export function LoadTGA(name: string): { pic: Uint8Array | null; width: number; 
           targa_rgba[pixbuf++] = blue;
           targa_rgba[pixbuf++] = alphabyte;
         }
+      }
+    }
+  } else if (image_type === 3) {
+    // Uncompressed, black-and-white (grayscale) images -- new for the
+    // rerelease's own retail data (see this branch's gate comment above).
+    // No reference C to be byte-faithful to (vanilla never had this case);
+    // ported to match q2repro's IMG_LoadTGA's TGA_Mono handling instead
+    // (images.c:653-onward's `pal = NULL` / single-byte-per-pixel path),
+    // same bottom-to-top row order as this file's existing type 2/10
+    // branches (this loader, unlike q2repro's, never reads the
+    // TGA_TOPTOBOTTOM attributes bit either -- consistent with the rest of
+    // this function).
+    for (let row = rows - 1; row >= 0; row--) {
+      let pixbuf = row * columns * 4;
+      for (let column = 0; column < columns; column++) {
+        const gray = buffer[p++];
+        targa_rgba[pixbuf++] = gray;
+        targa_rgba[pixbuf++] = gray;
+        targa_rgba[pixbuf++] = gray;
+        targa_rgba[pixbuf++] = 255;
       }
     }
   } else if (image_type === 10) {

@@ -27,6 +27,7 @@ import {
   BASEDIRNAME,
 } from "../qcommon/qcommon";
 import { cl, cls, ConnstateT, svc_strings, clCvars, cl_entities, type ClientinfoT, num_cl_weaponmodels, cl_weaponmodels, re } from "./client";
+import type { ImageS } from "./ref";
 import type { ProtocolCodec } from "../qcommon/protocol/codec";
 import { VANILLA_CODEC } from "../qcommon/protocol/vanilla";
 import { Q2REPRO_CODEC } from "../qcommon/protocol/q2repro";
@@ -67,7 +68,7 @@ import { Com_Error, Com_Printf, Com_DPrintf, Com_ServerState } from "../qcommon/
 import { Cvar_Set } from "../qcommon/cvar";
 import { Cbuf_AddText, Cbuf_Execute, Cmd_Argc, Cmd_Argv } from "../qcommon/cmd";
 import { FS_LoadFile, FS_Gamedir, FS_CreatePath, FS_FOpenFileWrite, FS_Write, FS_FCloseFile, FS_ReadRawFile, FS_WriteFile, FS_RemoveFile, FS_AddPak, fs_gamedirvar } from "../qcommon/files";
-import { COM_StripExtension, type Vec3, vec3, VectorNormalize } from "../shared/math";
+import { COM_FileExtension, COM_StripExtension, type Vec3, vec3, VectorNormalize } from "../shared/math";
 import { Loc_Localize } from "../qcommon/loc";
 import { CM_InlineModel } from "../qcommon/cmodel";
 import { CL_ClearState, CL_RequestNextDownload, CL_WriteDemoMessage } from "./cl_main";
@@ -233,6 +234,46 @@ function fileExistsUnderAlternateExtension(filename: string): boolean {
   }
 
   return alternates.some((altExt) => FS_LoadFile(`${base}${altExt}`) !== null);
+}
+
+/*
+===============
+CL_RegisterImage
+
+Hack to handle RF_CUSTOMSKIN for remaster, ported from q2repro's
+src/client/precache.c CL_RegisterImage. Under the rerelease's extended
+configstring layout, a CS_IMAGES entry can be a full path WITH its own
+extension instead of the classic bare "pics/<name>.pcx" convention --
+misc_flare's `image` entity key (g_misc.ts's SP_misc_flare) writes straight
+through to gi.imageindex() and can be e.g. "sprites/flare_01.tga". Without
+this dispatch every CS_IMAGES entry (cl_view.ts's CL_PrepRefresh loop, and
+this file's own CL_ParseConfigstring live-update case) went to RegisterPic,
+which (Draw_FindPic) always builds "pics/<name>.pcx" -- for an entry that
+already ends in ".tga" that produces "pics/sprites/flare_01.tga.pcx", a name
+nothing will ever resolve to, locally or over the wire (the
+CL_RequestNextDownload half of this exact bug is fixed the same way in
+cl_main.ts's CS_IMAGES precache-walk phase).
+
+This port has no distinct R_RegisterSprite/R_RegisterImage(IT_SPRITE,
+IF_DEFAULT_FLARE) primitives (ref_gl never grew the rerelease's raw-image
+sprite type) -- R_RegisterSkin's GL_FindImage(name, it_skin) call already
+does the one thing that matters here: load the name exactly as given, no
+"pics/" prefix and no forced ".pcx" extension. Reported deviation: q2repro
+picks between R_RegisterImage/R_RegisterSprite/R_RegisterSkin by subpath,
+but all three bottom out at the same "load this exact name" primitive our
+RegisterSkin already provides, so a present file resolves identically and a
+missing one gracefully returns null either way -- same as the C's own
+sprites/psx_flare and generic sprites/ branches when the asset isn't there.
+The "/some/pic.pcx" escape syntax is unaffected: RegisterPic's own
+Draw_FindPic already strips a leading slash and skips the pics/.pcx wrap.
+===============
+*/
+export function CL_RegisterImage(name: string): ImageS | null {
+  if (!re) return null;
+  if (cls.csr.extended && name[0] !== "/" && name[0] !== "\\" && COM_FileExtension(name) !== "" && name.includes("/")) {
+    return re.RegisterSkin(name);
+  }
+  return re.RegisterPic(name);
 }
 
 /*
@@ -756,7 +797,7 @@ export function CL_ParseConfigString(): void {
   } else if (i >= cls.csr.sounds && i < cls.csr.sounds + cls.csr.max_sounds) {
     if (cl.refresh_prepped) cl.sound_precache[i - cls.csr.sounds] = S_RegisterSound(cl.configstrings[i]);
   } else if (i >= cls.csr.images && i < cls.csr.images + cls.csr.max_images) {
-    if (cl.refresh_prepped) cl.image_precache[i - cls.csr.images] = re?.RegisterPic(cl.configstrings[i]) ?? null;
+    if (cl.refresh_prepped) cl.image_precache[i - cls.csr.images] = CL_RegisterImage(cl.configstrings[i]);
   } else if (i >= cls.csr.playerskins && i < cls.csr.playerskins + MAX_CLIENTS) {
     if (cl.refresh_prepped) CL_ParseClientinfo(i - cls.csr.playerskins);
   } else if (cls.csr.shadowlights !== -1 && i >= cls.csr.shadowlights && i < cls.csr.shadowlights + cls.csr.max_shadowlights) {

@@ -90,6 +90,7 @@ import { SizeBuf, SZ_Init, SZ_Clear, SZ_Print, MSG_WriteByte, MSG_WriteChar, MSG
 import { FS_Gamedir, FS_CreatePath, FS_FOpenFileWrite, FS_Write, FS_FCloseFile, FS_ExecAutoexec, FS_LoadFile } from "../qcommon/files";
 import { CM_LoadMap, CM_NumTexinfo, CM_TexinfoName } from "../qcommon/cmodel";
 import { readMd2SkinNames } from "../qcommon/qfiles";
+import { COM_FileExtension } from "../shared/math";
 import { SV_Shutdown } from "../server/sv_main";
 import { CG_SetActiveCgameKind } from "./cgame/host";
 import { allow_download, allow_download_players, allow_download_models, allow_download_sounds, allow_download_maps } from "../server/sv_main";
@@ -1376,8 +1377,33 @@ export function CL_RequestNextDownload(): void {
   if (precache_check >= cls.csr.images && precache_check < cls.csr.images + cls.csr.max_images) {
     if (precache_check === cls.csr.images) precache_check++; // zero is blank
     while (precache_check < cls.csr.images + cls.csr.max_images && cl.configstrings[precache_check][0]) {
-      const fn = `pics/${cl.configstrings[precache_check]}.pcx`;
+      const name = cl.configstrings[precache_check];
       precache_check++;
+
+      // q2repro's CL_RequestNextDownload (src/client/download.c, CS_IMAGES
+      // phase): a bare CS_IMAGES entry always means "pics/<name>.pcx", but
+      // under the rerelease's extended configstring layout an entry can
+      // instead be a full path the caller already gave an extension --
+      // misc_flare's `image` entity key (kexgame/g_misc.ts's SP_misc_flare)
+      // writes straight through to gi.imageindex() and can be e.g.
+      // "sprites/flare_01.tga". APPENDING ".pcx" to that (the old
+      // unconditional `pics/${name}.pcx` below) built
+      // "pics/sprites/flare_01.tga.pcx" -- a name that can never exist
+      // locally or on any server, spamming a doomed download every time
+      // this phase ran. A leading '/' or '\\' is the existing escape syntax
+      // (name used verbatim, no "pics/" prefix, no forced extension); an
+      // extended-family subdir+extension name is a sprite/skin the renderer
+      // resolves directly (cl_parse.ts's CL_RegisterImage) and is never
+      // downloaded through this convention at all -- skipped entirely,
+      // exactly like q2repro's own `continue` for that case.
+      let fn: string;
+      if (name[0] === "/" || name[0] === "\\") {
+        fn = name.slice(1);
+      } else if (cls.csr.extended && COM_FileExtension(name) !== "" && name.includes("/")) {
+        continue;
+      } else {
+        fn = `pics/${name}.pcx`;
+      }
       if (!CL_CheckOrDownloadFile(fn, "single")) return; // started a download
     }
     precache_check = cls.csr.playerskins;

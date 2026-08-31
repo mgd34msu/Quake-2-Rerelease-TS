@@ -28,7 +28,7 @@ import { MAX_MSGLEN } from "../src/qcommon/qcommon";
 import { FS_InitFilesystem, FS_SetGamedir, FS_WriteFile, FS_LoadFile, FS_AddPak } from "../src/qcommon/files";
 import { BASEDIRNAME } from "../src/qcommon/qcommon";
 import { CM_LoadMap } from "../src/qcommon/cmodel";
-import { CS_REMAP_OLD } from "../src/shared/cs_remap";
+import { CS_REMAP_OLD, CS_REMAP_RERELEASE } from "../src/shared/cs_remap";
 import { SV_Init } from "../src/server/sv_main";
 
 import { cl, cls, ConnstateT } from "../src/client/client";
@@ -552,6 +552,77 @@ describe("cl_main.ts -- CL_RequestNextDownload precache walk", () => {
     cl.configstrings[cls.csr.images + 1] = "genuinely_missing";
     begin();
     expect(cls.downloadname).toBe("pics/genuinely_missing.pcx");
+  });
+
+  // Live bug fix (task report, .orch/followups.md finding 3(a)/8): Mike's
+  // console showed "Downloading pics/sprites/flare_01.tga.pcx / Server does
+  // not have this file" -- misc_flare's `image` spawn key
+  // (kexgame/g_misc.ts's SP_misc_flare) writes a full path WITH its own
+  // extension into a CS_IMAGES configstring via gi.imageindex(), and the
+  // walk used to build "pics/<name>.pcx" unconditionally, producing a
+  // double extension nothing can ever resolve to. Ported from q2repro's own
+  // CL_RequestNextDownload (src/client/download.c:714-729): under the
+  // classic (OLD) family this special case does not exist at all --
+  // q2repro's own check is `cl.csr.extended && ...` -- so a subdir+extension
+  // name still gets the classic "pics/<name>.pcx" treatment there.
+  test("image walk (classic family): a CS_IMAGES entry that already carries a subdir+extension still gets pics/<name>.pcx appended (the skip is extended-family only)", () => {
+    cl.configstrings[cls.csr.images + 1] = "sprites/flare_01.tga";
+    begin();
+    expect(cls.downloadname).toBe("pics/sprites/flare_01.tga.pcx");
+  });
+
+  describe("image walk (rerelease/extended family): CS_IMAGES entries carrying their own extension", () => {
+    // The outer beforeEach above always resets cls.csr to CS_REMAP_OLD and
+    // writes the fixture map's configstrings at the OLD family's indices;
+    // switching families mid-test means re-anchoring those same two
+    // configstrings at the RERELEASE family's (different) indices too, or
+    // the unconditional CM_LoadMap in the walk's ENV_CNT phase reads an
+    // empty map name.
+    function switchToExtendedFamily(): void {
+      cls.csr = CS_REMAP_RERELEASE;
+      cl.configstrings[cls.csr.models + 1] = MAP_NAME;
+      cl.configstrings[cls.csr.mapchecksum] = String(mapChecksum);
+    }
+
+    test("live bug repro: misc_flare's 'sprites/flare_01.tga' is skipped entirely -- no download, no double extension, walk still completes", () => {
+      switchToExtendedFamily();
+      cl.configstrings[cls.csr.images + 1] = "sprites/flare_01.tga";
+      provideEnvAndTextures();
+
+      begin();
+      expect(cls.downloadname).toBe(""); // no download was ever started
+      const text = new TextDecoder().decode(cls.netchan.message.data.subarray(0, cls.netchan.message.cursize));
+      expect(text.includes("begin 1")).toBe(true);
+    });
+
+    test("a subdir+extension name with NO slash is NOT skipped -- q2repro's own check requires strchr(name, '/') too", () => {
+      switchToExtendedFamily();
+      // no "/" anywhere in the name -- fails the "subdir" half of the check
+      cl.configstrings[cls.csr.images + 1] = "flare_01.tga";
+      begin();
+      expect(cls.downloadname).toBe("pics/flare_01.tga.pcx");
+    });
+
+    test("a bare name with no extension is unaffected -- still builds pics/<name>.pcx", () => {
+      switchToExtendedFamily();
+      cl.configstrings[cls.csr.images + 1] = "i_health";
+      begin();
+      expect(cls.downloadname).toBe("pics/i_health.pcx");
+    });
+
+    test("leading '/' escape syntax: name used verbatim, no pics/ prefix and no forced extension", () => {
+      switchToExtendedFamily();
+      cl.configstrings[cls.csr.images + 1] = "/sprites/direct.tga";
+      begin();
+      expect(cls.downloadname).toBe("sprites/direct.tga");
+    });
+
+    test("leading '\\\\' escape syntax behaves the same as '/'", () => {
+      switchToExtendedFamily();
+      cl.configstrings[cls.csr.images + 1] = "\\sprites\\direct.tga";
+      begin();
+      expect(cls.downloadname).toBe("sprites\\direct.tga");
+    });
   });
 
   test("env/sky phase: a missing .pcx is satisfied by an existing .tga sibling for the SAME face -- no download queued", () => {
