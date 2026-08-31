@@ -1,9 +1,10 @@
 // sv_init.c
 
-import { SysError, SvcOpsT, PORT_MASTER, UPDATE_BACKUP } from "../qcommon/qcommon";
+import { SysError, SvcOpsT, PORT_MASTER, UPDATE_BACKUP, PROTOCOL_VERSION_RERELEASE } from "../qcommon/qcommon";
+import { CS_REMAP_RERELEASE } from "../shared/cs_remap";
 import { CM_LoadMap, CM_InlineModel, CM_NumInlineModels, CM_EntityString } from "../qcommon/cmodel";
 import { Cvar_Set, Cvar_FullSet, Cvar_VariableValue, Cvar_GetLatchedVars } from "../qcommon/cvar";
-import { CL_DropHook, SCR_BeginLoadingPlaqueHook, Com_Printf, Com_DPrintf, Com_Error, Com_SetServerState, dedicated } from "../qcommon/common";
+import { CL_DropHook, SCR_BeginLoadingPlaqueHook, Com_Printf, Com_DPrintf, Com_Error, Com_SetServerState, Com_SetServerConnectProtocol, dedicated } from "../qcommon/common";
 import { FS_FOpenFile, FS_FCloseFile } from "../qcommon/files";
 import { NET_Config, NET_StringToAdr } from "../platform/net_udp";
 import { Cbuf_CopyToDefer } from "../qcommon/cmd";
@@ -303,6 +304,13 @@ export function SV_SpawnServer(server: string, spawnpoint: string, serverstate: 
   // all precaches are complete
   sv.state = serverstate;
   Com_SetServerState(sv.state);
+  // Tell the in-process client which protocol this server's family demands
+  // (SVC_DirectConnect: kex accepts only 1038; legacy negotiates per
+  // client, signaled as 0). The localhost connect path skips getchallenge
+  // entirely, so this bridge is its only source of that fact -- see
+  // Com_ServerConnectProtocol's doc comment for the campaign-start connect
+  // loop this fixes.
+  Com_SetServerConnectProtocol(svs.csr === CS_REMAP_RERELEASE ? PROTOCOL_VERSION_RERELEASE : 0);
 
   // create a baseline for more efficient communications
   SV_CreateBaseline();

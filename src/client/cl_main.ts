@@ -65,7 +65,7 @@ import { CDAudio_Shutdown, CDAudio_Init, CDAudio_Update } from "../platform/cd_o
 import { Key_WriteBindings } from "./keys_impl";
 import { Cmd_Argc, Cmd_Argv, Cmd_Args, Cmd_AddCommand, Cmd_TokenizeString, Cbuf_AddText, Cbuf_Execute, setCmdForwardToServerHandler } from "../qcommon/cmd";
 import { Cvar_WriteVariables, Cvar_Get, Cvar_Set, Cvar_SetValue, Cvar_VariableValue, Cvar_VariableString, Cvar_Userinfo, SetUserinfoModified } from "../qcommon/cvar";
-import { Com_Printf, Com_DPrintf, Com_Error, Com_Quit, Com_ServerState, Info_Print, dedicated, COM_BlockSequenceCRCByte } from "../qcommon/common";
+import { Com_Printf, Com_DPrintf, Com_Error, Com_Quit, Com_ServerState, Com_ServerConnectProtocol, Info_Print, dedicated, COM_BlockSequenceCRCByte } from "../qcommon/common";
 import {
   NetadrT,
   NetadrtypeT,
@@ -436,6 +436,14 @@ We have gotten a challenge from the server, so try and
 connect.
 ======================
 */
+// Protocols this client can actually speak, for challenge p= negotiation
+// (see the "challenge" connectionless case): vanilla 34, R1Q2 35, Q2PRO 36,
+// kex/q2repro 1038.
+const SUPPORTED_CONNECT_PROTOCOLS = [PROTOCOL_VERSION, PROTOCOL_VERSION_R1Q2, PROTOCOL_VERSION_Q2PRO, PROTOCOL_VERSION_RERELEASE];
+// The p= list from the most recent challenge reply; cleared when a new
+// server connection begins (CL_Disconnect).
+let challenge_protocols: number[] = [];
+
 export function CL_SendConnectPacket(): void {
   const adr = new NetadrT();
 
@@ -456,7 +464,25 @@ export function CL_SendConnectPacket(): void {
   // connect-string tokens after the standard four fields
   // (q2proto_r1q2_connect_tail / q2proto_q2pro_connect_tail); protocol 34
   // sends none, matching this engine's wire bytes exactly as before.
-  const protocol = clCvars.cl_protocol ? clCvars.cl_protocol.value : PROTOCOL_VERSION;
+  let protocol = clCvars.cl_protocol ? clCvars.cl_protocol.value : PROTOCOL_VERSION;
+  const localProtocol = Com_ServerConnectProtocol();
+  if (cls.servername === "localhost" && Com_ServerState() && localProtocol) {
+    // The integrated local server's family demands one specific protocol
+    // (kex: 1038 only) and the localhost path never runs getchallenge, so
+    // there is no p= list to negotiate from -- take the server's own word
+    // via the Com_ServerConnectProtocol bridge. Without this, a client
+    // defaulting to 34 was version-rejected by its own campaign server in
+    // an endless connect loop.
+    protocol = localProtocol;
+  } else if (challenge_protocols.length > 0 && !challenge_protocols.includes(protocol)) {
+    // Remote (or challenge-driven local) connect: the server advertised
+    // which protocols it accepts and ours isn't among them -- pick the
+    // best mutually-supported one instead of looping on rejection,
+    // mirroring q2proto_parse_challenge's client-side selection. Protocol
+    // numbers rank naturally (34 < 35 < 36 < 1038).
+    const usable = challenge_protocols.filter((p) => SUPPORTED_CONNECT_PROTOCOLS.includes(p));
+    if (usable.length > 0) protocol = Math.max(...usable);
+  }
   // A packet_length token both families send but this port's netchan
   // (qcommon/net_chan.ts) never acts on -- we only ever implement the
   // classic/"old" (unfragmented) netchan framing, so any value a real
@@ -655,6 +681,10 @@ This is also called on Com_Error, so it shouldn't cause any errors
 */
 export function CL_Disconnect(): void {
   if (cls.state === ConnstateT.ca_disconnected) return;
+
+  // A fresh connection negotiates from its own challenge reply -- never
+  // from the previous server's advertised list.
+  challenge_protocols = [];
 
   // q2repro src/client/main.c:731 -- EXEC_TRIGGER(cl_disconnectcmd), gated
   // on cls.state > ca_disconnected (guaranteed by the guard above) and
@@ -941,12 +971,15 @@ export function CL_ConnectionlessPacket(): void {
 
     // phase-8 q2repro interop (matrix cell b): must match whatever netchan
     // framing CL_SendConnectPacket actually requested for this protocol
-    // (net_chan.ts's NETCHAN_NEW doc comment) -- cls.serverProtocol is never
-    // set anywhere in this port (see client.ts's own doc comment on it), so
-    // cl_protocol's cvar value (unchanged since CL_SendConnectPacket read it
-    // to build the connect string) is the only real record of what was
-    // negotiated.
-    const connectProtocol = clCvars.cl_protocol ? clCvars.cl_protocol.value : PROTOCOL_VERSION;
+    // (net_chan.ts's NETCHAN_NEW doc comment). CL_SendConnectPacket records
+    // its ACTUAL choice in cls.serverProtocol -- which, since challenge p=
+    // negotiation and the local-server protocol bridge landed, can differ
+    // from cl_protocol's cvar value (the campaign-start fix: an integrated
+    // kex server forces 1038 regardless of the cvar). Re-deriving from the
+    // cvar here left the netchan in OLD framing while the server spoke NEW,
+    // shifting every payload byte -- the post-connect "unknown command
+    // char" reconnect loop.
+    const connectProtocol = cls.serverProtocol || (clCvars.cl_protocol ? clCvars.cl_protocol.value : PROTOCOL_VERSION);
     const chanType = connectProtocol === PROTOCOL_VERSION_RERELEASE || connectProtocol === PROTOCOL_VERSION_Q2PRO ? NETCHAN_NEW : NETCHAN_OLD;
     // connectProtocol is load-bearing beyond chanType: under NETCHAN_OLD the
     // qport field is a 16-bit short below R1Q2 and a single byte from R1Q2 up
@@ -994,6 +1027,23 @@ export function CL_ConnectionlessPacket(): void {
   // challenge from the server we are connecting to
   if (c === "challenge") {
     cls.challenge = atoi(Cmd_Argv(1));
+    // q2proto_parse_challenge: tokens after the challenge number may carry
+    // "p=<proto>,<proto>,..." -- the server's advertised protocol list (our
+    // own SVC_GetChallenge sends p=1038 for the kex family, p=34,35,36 for
+    // legacy; real q2repro/q2proto servers always send it). Record it so
+    // CL_SendConnectPacket can pick a mutually-supported protocol instead
+    // of blindly requesting cl_protocol's value at a server that rejects
+    // it (the kex family accepts ONLY 1038).
+    challenge_protocols = [];
+    for (let i = 2; i < Cmd_Argc(); i++) {
+      const tok = Cmd_Argv(i);
+      if (tok.startsWith("p=")) {
+        for (const p of tok.slice(2).split(",")) {
+          const n = atoi(p);
+          if (n > 0) challenge_protocols.push(n);
+        }
+      }
+    }
     CL_SendConnectPacket();
     return;
   }

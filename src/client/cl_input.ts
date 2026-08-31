@@ -36,6 +36,7 @@ import { CL_FixUpGender } from "./cl_main";
 import { SCR_FinishCinematic } from "./cl_cin";
 import { ButtonT } from "../kexapi/game";
 import { CG_GetActiveCgameKind } from "./cgame/host";
+import { CLC_Q2PRO_MOVE_NODELTA, CLC_Q2PRO_MOVE_BATCHED } from "../qcommon/protocol/clc_batch_move";
 import { CL_Wheel_Init, CL_Wheel_Open, CL_Wheel_Close, CL_Wheel_ClearInput, CL_Carousel_ClearInput, CL_Carousel_Input, CL_Wheel_WeapNext, CL_Wheel_WeapPrev } from "./cl_wheel";
 
 /*
@@ -464,6 +465,13 @@ function CL_FinishMove(cmd: UsercmdT): void {
 
   // input.c:822-823's own `in_holster` -- Kex stuff.
   if (in_holster.state & 3) cmd.buttons |= ButtonT.BUTTON_HOLSTER;
+  // q2repro input.c:824-827: +moveup/+movedown key states double as the kex
+  // jump/crouch buttons -- the 1038 batched-move format carries NO upmove
+  // field at all (its decoder rejects CM_UP), so vertical intent reaches
+  // the kex game exclusively through these bits. Harmless to legacy games,
+  // which never test bits 3/4, exactly as in q2repro itself.
+  if (in_up.state & 3) cmd.buttons |= ButtonT.BUTTON_JUMP;
+  if (in_down.state & 3) cmd.buttons |= ButtonT.BUTTON_CROUCH;
   in_holster.state &= ~2;
 
   if (anykeydown && cls.key_dest === KeydestT.key_game) cmd.buttons |= BUTTON_ANY;
@@ -621,6 +629,27 @@ export function CL_SendCmd(): void {
   if (cmd.buttons && cl.cinematictime > 0 && !cl.attractloop && cls.realtime - cl.cinematictime > 1000) {
     // skip the rest of the cinematic
     SCR_FinishCinematic();
+  }
+
+  // Batched-move protocols (kex/1038): the server cannot fully consume the
+  // classic clc_move form (its decoder rejects CM_UP outright and the whole
+  // field layout differs), so a codec exposing writeBatchMove gets q2proto's
+  // clc_q2pro_move_batched instead -- one frame, one newest command, dups 0
+  // (q2repro's own client sends cl_packetdup dup frames; loss recovery via
+  // dups is an optimization, not a correctness requirement, since the
+  // server's net_drop backfill handles gaps). Found live: campaign start
+  // connected the in-process client at 1038 and the kex server dropped
+  // every vanilla-format move with "unknown command char".
+  if (cls.codec.writeBatchMove) {
+    const nodelta = (cl_nodelta && cl_nodelta.value) || !cl.frame.valid || cls.demowaiting;
+    MSG_WriteByte(buf, nodelta ? CLC_Q2PRO_MOVE_NODELTA : CLC_Q2PRO_MOVE_BATCHED);
+    const newest = cl.cmds[cls.netchan.outgoing_sequence & (backup - 1)];
+    cls.codec.writeBatchMove(buf, nodelta ? null : cl.frame.serverframe, [{ cmds: [newest] }]);
+
+    Netchan_Transmit(cls.netchan, buf.cursize, buf.data);
+    CL_Carousel_ClearInput();
+    CL_Wheel_ClearInput();
+    return;
   }
 
   // begin a client move command

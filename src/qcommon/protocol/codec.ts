@@ -377,6 +377,13 @@ export interface ProtocolCodec {
   // input -- callers must catch it and drop only the offending client.
   readBatchMove?(msg: SizeBuf, nodelta: boolean, opcodeExtra: number): ClcBatchMoveT;
 
+  // Write half of readBatchMove for this port's OWN client speaking a
+  // batched-move protocol (kex/1038 accepts no other move form its server
+  // can fully use -- q2repro.ts's writeBatchMove doc comment). Caller
+  // writes the opcode byte (CLC_Q2PRO_MOVE_BATCHED, or _NODELTA with
+  // lastframe null) first, mirroring the read dispatch.
+  writeBatchMove?(msg: SizeBuf, lastframe: number | null, frames: ClcBatchMoveFrameT[]): void;
+
   // Reads clc_q2pro_userinfo_delta's body (opcode byte already consumed).
   readUserinfoDelta?(msg: SizeBuf): ClcUserinfoDeltaT;
 

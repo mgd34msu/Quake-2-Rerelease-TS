@@ -296,6 +296,25 @@ export function Com_SetServerState(state: number): void {
   server_state = state;
 }
 
+// Which wire protocol the LOCAL in-process server requires of a connecting
+// client, 0 = no requirement (legacy family, per-client negotiation).
+// Set by sv_init.ts alongside Com_SetServerState; read by the client's
+// CL_SendConnectPacket localhost path, which vanilla runs WITHOUT a
+// getchallenge exchange ("we don't need a challenge on the localhost") and
+// therefore never sees the server's advertised p= protocol list -- the kex
+// family accepts only 1038, so a client defaulting to protocol 34 was
+// version-rejected by its own integrated server in an endless connect loop
+// (found live: starting a rerelease campaign from the menu).
+let server_connect_protocol = 0;
+
+export function Com_ServerConnectProtocol(): number {
+  return server_connect_protocol;
+}
+
+export function Com_SetServerConnectProtocol(protocol: number): void {
+  server_connect_protocol = protocol;
+}
+
 //============================================================================
 
 export function Info_Print(s: string): void {

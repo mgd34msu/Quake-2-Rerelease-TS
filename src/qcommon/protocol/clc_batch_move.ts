@@ -61,7 +61,7 @@
 // byte for wire-alignment only (see q2repro.ts's/q2pro.ts's readBatchMove).
 
 import type { SizeBuf } from "../sizebuf";
-import { MSG_ReadByte } from "../sizebuf";
+import { MSG_ReadByte, MSG_WriteByte } from "../sizebuf";
 import { CM_ANGLE1, CM_ANGLE2, CM_ANGLE3, CM_FORWARD, CM_SIDE, CM_UP, CM_BUTTONS, CM_IMPULSE } from "../qcommon";
 import { UsercmdT } from "../../shared/q_shared";
 
@@ -204,4 +204,67 @@ export function seedFromPrev(prev: UsercmdT | null): UsercmdT {
     cmd.lightlevel = prev.lightlevel;
   }
   return cmd;
+}
+
+// ---------------------------------------------------------------------------
+// Write side (client): LSB-first mirror of BitReader above, porting
+// q2proto_internal_bit_read_write.h's bitwriter_t/bitwriter_write/
+// bitwriter_flush. Added for this port's OWN client speaking 1038 to its
+// integrated kex server (q2proto's client write path,
+// q2proto_proto_q2repro.c's q2repro_client_write_move_delta family) -- the
+// read side above landed first because a real q2repro CLIENT exercised it;
+// the write side became reachable the moment campaign start connected the
+// in-process client at 1038 (found live: the server dropped every
+// vanilla-format move with "unknown command char").
+// ---------------------------------------------------------------------------
+
+// common_clc_cmds, q2proto_internal_protocol.h: batched move opcodes shared
+// by Q2PRO(36)/q2repro(1038).
+export const CLC_Q2PRO_MOVE_NODELTA = 10;
+export const CLC_Q2PRO_MOVE_BATCHED = 11;
+
+export class BitWriter {
+  private buf = 0;
+  private left = 0;
+
+  constructor(private readonly msg: SizeBuf) {}
+
+  writeUnsigned(value: number, bits: number): void {
+    this.buf |= (value & ((1 << bits) - 1)) << this.left;
+    this.left += bits;
+    while (this.left >= 8) {
+      MSG_WriteByte(this.msg, this.buf & 0xff);
+      this.buf >>>= 8;
+      this.left -= 8;
+    }
+  }
+
+  writeSigned(value: number, bits: number): void {
+    this.writeUnsigned(value & ((1 << bits) - 1), bits);
+  }
+
+  // bitwriter_flush: pad the final partial byte with zero bits. The reader's
+  // byte-lazy fill never reads past what the counts direct it to, so zero
+  // padding round-trips exactly.
+  flush(): void {
+    if (this.left > 0) {
+      MSG_WriteByte(this.msg, this.buf & 0xff);
+      this.buf = 0;
+      this.left = 0;
+    }
+  }
+}
+
+// Mirror of readBatchMoveFrames: numDups+1 frames, 5-bit cmd count each,
+// prev-chain threaded continuously across frame boundaries.
+export function writeBatchMoveFrames(bw: BitWriter, frames: ClcBatchMoveFrameT[], encodeCmd: (bw: BitWriter, cmd: UsercmdT, prev: UsercmdT | null) => void): void {
+  let prev: UsercmdT | null = null;
+  for (const frame of frames) {
+    bw.writeUnsigned(frame.cmds.length, 5);
+    for (const cmd of frame.cmds) {
+      encodeCmd(bw, cmd, prev);
+      prev = cmd;
+    }
+  }
+  bw.flush();
 }

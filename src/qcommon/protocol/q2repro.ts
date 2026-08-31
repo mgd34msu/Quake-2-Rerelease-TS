@@ -226,7 +226,7 @@ import { SvcFogDataBitsT, type SvcFogDataT } from "../../kexapi/game";
 import { EntityStateT, PlayerStateT, type UsercmdT, ANGLE2SHORT, SHORT2ANGLE, RF_BEAM } from "../../shared/q_shared";
 import type { ProtocolCodec, ServerDataParamsT, ServerDataReadResultT, FrameWriteParamsT, FrameHeaderT, ClcBatchMoveT, ClcUserinfoDeltaT, ClcClientSettingT } from "./codec";
 import { VANILLA_CODEC } from "./vanilla";
-import { BitReader, readBatchMoveAngleComponent, readBatchMoveFrames, seedFromPrev, ClcBatchMoveError, MAX_CLC_BATCH_MOVE_FRAMES } from "./clc_batch_move";
+import { BitReader, BitWriter, readBatchMoveAngleComponent, readBatchMoveFrames, writeBatchMoveFrames, seedFromPrev, ClcBatchMoveError, MAX_CLC_BATCH_MOVE_FRAMES, type ClcBatchMoveFrameT } from "./clc_batch_move";
 
 // ---------------------------------------------------------------------------
 // Local bit constants: q2proto's U_/PS_/EPS_ layouts that protocol 34 never
@@ -939,6 +939,60 @@ function decodeQ2ReproBatchCmd(br: BitReader, prev: UsercmdT | null): UsercmdT {
   return cmd;
 }
 
+// Client-side encode mirror of decodeQ2ReproBatchCmd above (the write half
+// of q2proto's q2repro move-delta pair). Field choices are the always-valid
+// forms the decoder accepts: hasContents always 1; angles always in their
+// full 16-bit absolute form (delta flag 0 -- pitch/yaw's 8-bit delta form is
+// an optional compression, not a requirement); CM_IMPULSE (the "explicit
+// msec byte follows" reuse) always set so msec never relies on prev
+// inheritance; CM_UP never set (the decoder rejects it per
+// q2proto_proto_q2repro.c:2662-2663 -- vertical intent travels as
+// BUTTON_JUMP/BUTTON_CROUCH in the kex usercmd, matching q2repro's own
+// client input.c:824-827).
+function encodeQ2ReproBatchCmd(bw: BitWriter, cmd: UsercmdT, prev: UsercmdT | null): void {
+  bw.writeUnsigned(1, 1); // hasContents
+
+  let bits = CM_IMPULSE; // msec byte always explicit
+  const p0 = prev ? prev.angles[0] : 0;
+  const p1 = prev ? prev.angles[1] : 0;
+  const p2 = prev ? prev.angles[2] : 0;
+  if (cmd.angles[0] !== p0) bits |= CM_ANGLE1;
+  if (cmd.angles[1] !== p1) bits |= CM_ANGLE2;
+  if (cmd.angles[2] !== p2) bits |= CM_ANGLE3;
+  if (cmd.forwardmove !== (prev ? prev.forwardmove : 0)) bits |= CM_FORWARD;
+  if (cmd.sidemove !== (prev ? prev.sidemove : 0)) bits |= CM_SIDE;
+  if (cmd.buttons !== (prev ? prev.buttons : 0)) bits |= CM_BUTTONS;
+  bw.writeUnsigned(bits, 8);
+
+  if (bits & CM_ANGLE1) {
+    bw.writeUnsigned(0, 1); // full 16-bit form
+    bw.writeSigned(cmd.angles[0], 16);
+  }
+  if (bits & CM_ANGLE2) {
+    bw.writeUnsigned(0, 1);
+    bw.writeSigned(cmd.angles[1], 16);
+  }
+  if (bits & CM_ANGLE3) bw.writeSigned(cmd.angles[2], 16);
+  // signed 10-bit range is +/-511; kex movement speeds (walk 200/run 400,
+  // plus the game's own clamps) stay inside it, but clamp defensively so a
+  // config-forced cl_forwardspeed can never corrupt the bitstream.
+  if (bits & CM_FORWARD) bw.writeSigned(Math.max(-512, Math.min(511, cmd.forwardmove)), 10);
+  if (bits & CM_SIDE) bw.writeSigned(Math.max(-512, Math.min(511, cmd.sidemove)), 10);
+  if (bits & CM_BUTTONS) bw.writeUnsigned(cmd.buttons, 8);
+  bw.writeUnsigned(cmd.msec, 8); // CM_IMPULSE's msec byte
+}
+
+// Write half of readBatchMove below: opcode byte is the CALLER's (nodelta
+// selects CLC_Q2PRO_MOVE_NODELTA and passes lastframe null). numDups =
+// frames.length - 1; lightlevel byte written 0 (the read side discards it).
+function writeBatchMove(msg: SizeBuf, lastframe: number | null, frames: ClcBatchMoveFrameT[]): void {
+  if (lastframe !== null) MSG_WriteLong(msg, lastframe);
+  MSG_WriteByte(msg, frames.length - 1);
+  MSG_WriteByte(msg, 0); // lightlevel
+  const bw = new BitWriter(msg);
+  writeBatchMoveFrames(bw, frames, encodeQ2ReproBatchCmd);
+}
+
 // q2repro_server_read_batch_move, q2proto_proto_q2repro.c:2679-2709.
 function readBatchMove(msg: SizeBuf, nodelta: boolean, _opcodeExtra: number): ClcBatchMoveT {
   const lastframe = nodelta ? -1 : MSG_ReadLong(msg);
@@ -1459,6 +1513,7 @@ export const Q2REPRO_CODEC: ProtocolCodec = {
   readPacketEntitiesBegin,
   readPlayerStateDelta,
   readBatchMove,
+  writeBatchMove,
   readUserinfoDelta,
   readClientSetting,
 };
