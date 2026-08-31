@@ -55,6 +55,7 @@ import { Com_PageInMemory, Com_sprintf, ERR_DROP, MAX_QPATH, PRINT_ALL, PRINT_DE
 import { ri, r_notexture_mip, d_8to24table, TRANSPARENT_COLOR } from "./r_local";
 import { ImageT, ImagetypeT, registration_sequence, SetRegistrationSequence } from "./r_model";
 import { decodePNG } from "../qcommon/png";
+import { decodeJPG } from "../qcommon/jpg";
 
 // r_image.c owns this counter; r_model.c's copy of the same name cannot be
 // written through r_model.ts's export (see file header deviation note).
@@ -216,6 +217,33 @@ export function LoadPNGQuantized(name: string): { pic: Uint8Array | null; width:
   return result;
 }
 
+// JPEG LOADING (truecolor -> palette quantization) -- same rerelease-pak
+// motivation as LoadPNGQuantized above (see file header and qcommon/jpg.ts's
+// own header comment: 198 .jpg files under vault/, none with a .pcx/.png/
+// .tga sibling), reusing the identical QuantizeRGBAToPalette pipeline.
+export function LoadJPGQuantized(name: string): { pic: Uint8Array | null; width: number; height: number } {
+  const result: { pic: Uint8Array | null; width: number; height: number } = { pic: null, width: 0, height: 0 };
+
+  const { data: buffer } = ri.FS_LoadFile(name);
+  if (!buffer) {
+    ri.Con_Printf(PRINT_DEVELOPER, `Bad jpg file ${name}\n`);
+    return result;
+  }
+
+  const decoded = decodeJPG(buffer);
+  ri.FS_FreeFile(buffer);
+
+  if (!decoded.ok) {
+    ri.Con_Printf(PRINT_ALL, `Bad jpg file ${name}: ${decoded.reason}\n`);
+    return result;
+  }
+
+  result.pic = QuantizeRGBAToPalette(decoded.image.pixels, decoded.image.width, decoded.image.height);
+  result.width = decoded.image.width;
+  result.height = decoded.image.height;
+  return result;
+}
+
 //=======================================================
 
 function R_FindFreeImage(): ImageT {
@@ -336,16 +364,24 @@ export function R_FindImage(name: string, type: ImagetypeT): ImageT | null {
       // have the .pcx, byte-for-byte on the vanilla path), then retry as
       // the other supported truecolor extension. Recurses through
       // R_FindImage (not a direct LoadPNGQuantized+GL_LoadPic call) so the
-      // resulting image is cached under its real ".png" name exactly like
-      // the GL side's equivalent fallback.
+      // resulting image is cached under its real ".png"/".jpg" name exactly
+      // like the GL side's equivalent fallback. .jpg added for the retail
+      // vault/ artwork (see LoadJPGQuantized's own header comment) -- this
+      // renderer has no .tga support at all (see file header: LoadTGA is
+      // gl's own copy, ref_soft's ".tga" branch is dead code), so the chain
+      // is .png then .jpg, skipping the .tga rung GL_FindImage's chain has.
       const base = name.slice(0, len - 4);
-      return R_FindImage(`${base}.png`, type);
+      return R_FindImage(`${base}.png`, type) ?? R_FindImage(`${base}.jpg`, type);
     }
     image = GL_LoadPic(name, pic, width, height, type);
   } else if (ext === ".wal") {
     image = R_LoadWal(name);
   } else if (ext === ".png") {
     const { pic, width, height } = LoadPNGQuantized(name);
+    if (!pic) return null;
+    image = GL_LoadPic(name, pic, width, height, type);
+  } else if (ext === ".jpg") {
+    const { pic, width, height } = LoadJPGQuantized(name);
     if (!pic) return null;
     image = GL_LoadPic(name, pic, width, height, type);
   } else if (ext === ".tga") {

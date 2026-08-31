@@ -30,8 +30,9 @@ import { glCvars, SetRefImports, gltextures, ImageT, ImagetypeT, SetNumGltexture
 import type { RefImports } from "../src/client/ref";
 import { CvarT } from "../src/shared/q_shared";
 import { QGLRecording } from "../src/ref_gl/qgl";
-import { SetQGL, GL_Bind, GL_FindImage, GL_Upload8, Scrap_AllocBlock, LoadTGA, LoadPNG, GL_TEXTURE_2D, GL_QUADS, GL_RGBA, GL_UNSIGNED_BYTE } from "../src/ref_gl/gl_image";
+import { SetQGL, GL_Bind, GL_FindImage, GL_Upload8, Scrap_AllocBlock, LoadTGA, LoadPNG, LoadJPG, GL_TEXTURE_2D, GL_QUADS, GL_RGBA, GL_UNSIGNED_BYTE } from "../src/ref_gl/gl_image";
 import { Draw_InitLocal, Draw_Char, Draw_FindPic, Draw_StretchPicRegion } from "../src/ref_gl/gl_draw";
+import { buildBaselineJpeg } from "./support/jpeg_builder";
 
 let files: Map<string, Uint8Array>;
 let qgl: QGLRecording;
@@ -335,6 +336,49 @@ describe("LoadPNG", () => {
   });
 });
 
+describe("LoadJPG", () => {
+  test("decodes a hand-built baseline JPEG exactly (4:4:4, single 8x8 constant-color block)", () => {
+    // See test/support/jpeg_builder.ts's header comment for why a
+    // constant-valued block round-trips through DCT/quant/IDCT exactly,
+    // letting this test assert precise expected bytes instead of a
+    // tolerance.
+    const y = 180,
+      cb = 90,
+      cr = 200;
+    files.set(
+      "vault/preview/test.jpg",
+      buildBaselineJpeg({
+        width: 8,
+        height: 8,
+        components: [
+          { h: 1, v: 1 },
+          { h: 1, v: 1 },
+          { h: 1, v: 1 },
+        ],
+        blocks: [[[y - 128], [cb - 128], [cr - 128]]],
+      }),
+    );
+
+    const result = LoadJPG("vault/preview/test.jpg");
+
+    expect(result.width).toBe(8);
+    expect(result.height).toBe(8);
+    expect(result.pic).not.toBeNull();
+    // Same YCbCr->RGB formula (and 0..255 clamp) jpg.ts's renderOutput uses;
+    // pixel (0,0):
+    const clamp = (v: number): number => (v < 0 ? 0 : v > 255 ? 255 : Math.round(v));
+    const r = clamp(y + 1.402 * (cr - 128));
+    const g = clamp(y - 0.344136 * (cb - 128) - 0.714136 * (cr - 128));
+    const b = clamp(y + 1.772 * (cb - 128));
+    expect(Array.from(result.pic!.slice(0, 4))).toEqual([r, g, b, 255]);
+  });
+
+  test("returns a null pic for a missing file", () => {
+    const result = LoadJPG("vault/missing.jpg");
+    expect(result.pic).toBeNull();
+  });
+});
+
 describe("GL_FindImage", () => {
   test("dispatches .png through LoadPNG (truecolor atlas assets, e.g. kfont textures) with a full-image 0..1 texcoord range", () => {
     files.set("fonts/atlas.png", buildPngRgba(2, 2, () => [10, 20, 30, 255]));
@@ -395,6 +439,53 @@ describe("GL_FindImage", () => {
 
     expect(image).not.toBeNull();
     expect(image?.name).toBe("pics/only.tga");
+  });
+
+  // The retail vault/ artwork (198 promotional .jpg assets, see
+  // qcommon/jpg.ts's own header comment) has no .pcx/.png/.tga sibling
+  // either -- this is the last rung of the fallback chain, matching
+  // q2repro's own "png jpg tga" texture format probe order.
+  test("a missing .pcx with no .png/.tga sibling falls back to a .jpg sibling", () => {
+    files.set(
+      "vault/only.jpg",
+      buildBaselineJpeg({
+        width: 8,
+        height: 8,
+        components: [
+          { h: 1, v: 1 },
+          { h: 1, v: 1 },
+          { h: 1, v: 1 },
+        ],
+        blocks: [[[10], [20], [30]]],
+      }),
+    );
+
+    const image = GL_FindImage("vault/only.pcx", ImagetypeT.it_pic);
+
+    expect(image).not.toBeNull();
+    expect(image?.name).toBe("vault/only.jpg");
+  });
+
+  test("dispatches .jpg through LoadJPG directly", () => {
+    files.set(
+      "vault/direct.jpg",
+      buildBaselineJpeg({
+        width: 8,
+        height: 8,
+        components: [
+          { h: 1, v: 1 },
+          { h: 1, v: 1 },
+          { h: 1, v: 1 },
+        ],
+        blocks: [[[10], [20], [30]]],
+      }),
+    );
+
+    const image = GL_FindImage("vault/direct.jpg", ImagetypeT.it_pic);
+
+    expect(image).not.toBeNull();
+    expect(image?.width).toBe(8);
+    expect(image?.height).toBe(8);
   });
 
   test("an existing .pcx wins over a .png sibling (classic-data path unchanged)", () => {

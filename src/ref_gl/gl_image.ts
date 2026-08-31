@@ -89,6 +89,7 @@ deterministically `return false`; reported deviation since a literal
 
 import { ERR_DROP, ERR_FATAL, PRINT_ALL, PRINT_DEVELOPER, MAX_QPATH, LittleShort, LittleLong, Q_stricmp, Com_sprintf, CVAR_FILES } from "../shared/q_shared";
 import { decodePNG } from "../qcommon/png";
+import { decodeJPG } from "../qcommon/jpg";
 import type { QGL } from "./qgl";
 import {
   ImageT,
@@ -696,6 +697,49 @@ export function LoadPNG(name: string): { pic: Uint8Array | null; width: number; 
 }
 
 /*
+=========================================================
+JPEG LOADING
+
+No classic-engine precedent -- see qcommon/jpg.ts's own header comment for
+why this exists (the rerelease retail pak ships 198 .jpg files, all under
+vault/ and vault/preview/, none with a .png or .tga sibling; q2repro's own
+texture-format probe chain is "png jpg tga", images.c:2258). Same
+{pic, width, height} shape and top-down RGBA8 orientation as LoadPNG's own
+result above, so GL_FindImage's ".jpg" branch below can call
+`GL_LoadPic(name, pic, width, height, type, 32)` identically to its ".png"
+branch. "Recognized but unsupported variant" (progressive/arithmetic/
+12-bit) mirrors LoadPNG's own Sys_Error convention for the same kind of
+failure; "not a JPEG at all"/corrupt data mirrors LoadPCX/LoadTGA/LoadPNG's
+Con_Printf + null-pic convention for a genuinely bad/missing file.
+=========================================================
+*/
+export function LoadJPG(name: string): { pic: Uint8Array | null; width: number; height: number } {
+  const result: { pic: Uint8Array | null; width: number; height: number } = { pic: null, width: 0, height: 0 };
+
+  const { data: buffer } = ri.FS_LoadFile(name);
+  if (!buffer) {
+    ri.Con_Printf(PRINT_DEVELOPER, `Bad jpg file ${name}\n`);
+    return result;
+  }
+
+  const decoded = decodeJPG(buffer);
+  ri.FS_FreeFile(buffer);
+
+  if (!decoded.ok) {
+    if (decoded.reason.startsWith("unsupported")) {
+      ri.Sys_Error(ERR_DROP, `LoadJPG: ${name}: ${decoded.reason}\n`);
+    }
+    ri.Con_Printf(PRINT_ALL, `Bad jpg file ${name}: ${decoded.reason}\n`);
+    return result;
+  }
+
+  result.pic = decoded.image.pixels;
+  result.width = decoded.image.width;
+  result.height = decoded.image.height;
+  return result;
+}
+
+/*
 ====================================================================
 IMAGE FLOOD FILLING
 ====================================================================
@@ -1198,10 +1242,14 @@ export function GL_FindImage(name: string, type: ImagetypeT): ImageT | null {
       // q2repro (documented): it probes overrides BEFORE the requested
       // format, we probe the requested format first -- observably identical
       // on both retail trees (classic data has only the .pcx, rerelease data
-      // has only the .png), and requested-first keeps classic-data lookups
-      // byte-for-byte on the vanilla path.
+      // has only the .png/.jpg), and requested-first keeps classic-data
+      // lookups byte-for-byte on the vanilla path. .jpg added to the chain
+      // for the retail vault/ artwork (see LoadJPG's own header comment) --
+      // none of those 198 assets have a .pcx/.png/.tga sibling either, but
+      // the probe order still matches q2repro's own "png jpg tga" format
+      // chain (images.c:2258).
       const base = name.slice(0, len - 4);
-      return GL_FindImage(`${base}.png`, type) ?? GL_FindImage(`${base}.tga`, type);
+      return GL_FindImage(`${base}.png`, type) ?? GL_FindImage(`${base}.tga`, type) ?? GL_FindImage(`${base}.jpg`, type);
     }
     image = GL_LoadPic(name, pic, width, height, type, 8);
   } else if (ext === ".wal") {
@@ -1212,6 +1260,10 @@ export function GL_FindImage(name: string, type: ImagetypeT): ImageT | null {
     image = GL_LoadPic(name, pic, width, height, type, 32);
   } else if (ext === ".png") {
     const { pic, width, height } = LoadPNG(name);
+    if (!pic) return null;
+    image = GL_LoadPic(name, pic, width, height, type, 32);
+  } else if (ext === ".jpg") {
+    const { pic, width, height } = LoadJPG(name);
     if (!pic) return null;
     image = GL_LoadPic(name, pic, width, height, type, 32);
   } else {
