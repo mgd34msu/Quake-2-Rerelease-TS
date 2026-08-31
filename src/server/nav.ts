@@ -121,7 +121,7 @@ Ported from server/nav.c and server/nav.h (GNU GPL v2 or later).
 //   server's real pacing is" intent regardless of family.
 
 import { type Vec3, vec3, VectorAdd, VectorSubtract, VectorCopy, VectorSet, VectorMA, DotProduct, CrossProduct, VectorScale } from "../shared/math";
-import { MASK_SOLID, MASK_WATER, CONTENTS_SLIME, CONTENTS_LAVA, CONTENTS_PLAYERCLIP, CONTENTS_MONSTERCLIP } from "../shared/q_shared";
+import { type CvarT, MASK_SOLID, MASK_WATER, CONTENTS_SLIME, CONTENTS_LAVA, CONTENTS_PLAYERCLIP, CONTENTS_MONSTERCLIP } from "../shared/q_shared";
 import { Com_Printf, Com_DPrintf } from "../qcommon/common";
 import { Cvar_Get } from "../qcommon/cvar";
 import { FS_LoadFile } from "../qcommon/files";
@@ -1237,6 +1237,69 @@ export function Nav_Frame(): void {
   for (const node of nav_data.conditional_nodes) Nav_UpdateConditionalNode(node);
 }
 
+// ============================================================================
+// A DELIBERATE, DOCUMENTED DEVIATION: `sv_nav_legacy` (not in nav.c at all)
+// ============================================================================
+// q2repro's own init.c:163-166 calls Nav_Load(cmd->server) unconditionally
+// for every ss_game spawn, regardless of which game module is running --
+// there is no family check in the reference engine at all. Under a LEGACY
+// (API v3) game module, that unconditional load is real but functionally
+// inert-and-noisy there: nav.c:1436's `Nav_SetupEntities` binds nav-file
+// edicts by testing `game_e->sv.classname` (server/nav.c:1434-1436, "only
+// map-spawned entities"), and the real engine's own compat shim for old game
+// DLLs (`src/server/game3_proxy/game3_proxy.c`) never populates
+// `edict_t->sv.classname` on the edicts it proxies to the engine -- that
+// substruct is a 2023-kex-only addition old v3 game code has no concept of.
+// So on a real q2repro server running a legacy game DLL, EVERY nav-file
+// edict binding fails and prints "Nav entity appears to be missing" --
+// confirmed by reading game3_proxy.c directly (zero assignments to
+// `sv.classname` anywhere in that file). .orch/followups.md's finding 14
+// already ledgers this exact spam as "upstream-faithful noise" for our own
+// port, which inherited the identical failure for the identical structural
+// reason (see this file's header, "A NEW SEAM": `NavGameEdictView.sv.
+// classname` mirrors kex.c's `sv_entity_t` exactly, and nothing populated it
+// for the legacy family until this cvar's provider was added below).
+//
+// Mike's ruling (2026-08-31, quoted verbatim for the ledger): "add it to the
+// legacy one but default it to off. that way we don't disrupt having bots
+// and things like that." Rather than reproduce the real engine's proxy
+// limitation byte-for-bug (this port has NO DLL/proxy boundary --
+// bindings/legacy.ts holds the legacy game's real edicts directly, classname
+// included, so the resolution failure is not structurally forced here the
+// way it is upstream), this port makes nav loading for the legacy family
+// FAMILY-AWARE and opt-in:
+//   - kex family: unchanged, unconditional (matches init.c:163-166 exactly).
+//   - legacy family: Nav_Load only runs when `sv_nav_legacy` is nonzero (see
+//     sv_init.ts's SV_SpawnServer). Default "0" preserves today's silence on
+//     every legacy campaign/DM boot (no bot nav data is ever meaningfully
+//     used by any legacy game tree -- Nav_GetPathToGoal is a kex-only PF_*
+//     import, see kexapi/game.ts -- so skipping the load changes no
+//     observable legacy gameplay). Setting it to "1" opts back into loading
+//     bots/navigation/<map>.nav AND gets a working resolution, not the
+//     upstream-faithful failure: bindings/legacy.ts registers a real
+//     Nav_SetEdictSource provider over the active legacy tree's own edicts
+//     (classname included), so turning this on does not just reproduce the
+//     noise -- it actually resolves the same nav links a kex boot resolves.
+// This is the FIDELITY RAZOR (rule 17) in the direction rule 16 explicitly
+// allows: a documented, deliberate departure from literal source behavior
+// because the platform difference (no DLL boundary here) removes the reason
+// the original bug existed, and Mike ruled the safer default (off) is the
+// right ship posture regardless.
+let sv_nav_legacy: CvarT | null = null;
+
+/*
+===============
+Nav_LegacyLoadEnabled
+
+Test/consumer seam for the cvar above -- see sv_init.ts's SV_SpawnServer,
+the only call site that needs this decision (whether to call Nav_Load at all
+for a legacy-family spawn; the kex family never consults this).
+===============
+*/
+export function Nav_LegacyLoadEnabled(): boolean {
+  return sv_nav_legacy !== null && sv_nav_legacy.value !== 0;
+}
+
 // nav.c:1468-1474. The debug-draw consumer these cvars gate (`Nav_Debug()`,
 // nav.c:1261-1315) is USE_REF-gated and not ported here at all (see this
 // file's header "SCOPE CUT" -- there is no renderer on this headless port,
@@ -1247,6 +1310,12 @@ export function Nav_Frame(): void {
 export function Nav_Init(): void {
   Cvar_Get("nav_debug", "0", 0); // nav.c:1471
   Cvar_Get("nav_debug_range", "512", 0); // nav.c:1472
+
+  // NOT in nav.c -- see this file's "A DELIBERATE, DOCUMENTED DEVIATION"
+  // comment immediately above. Plain "0" flags (no CVAR_LATCH): the value is
+  // only ever consulted at SV_SpawnServer time, which already only takes
+  // effect on the next map load regardless of latch semantics.
+  sv_nav_legacy = Cvar_Get("sv_nav_legacy", "0", 0);
 }
 
 // nav.c:1476-1479. Note: q2repro itself never calls this from anywhere in
@@ -1314,6 +1383,12 @@ export function Nav_DebugState(): Readonly<{
   num_traversals: number;
   num_edicts: number;
   nodes: readonly NavNodeT[];
+  // `edicts` (nav-file edict records, each carrying the `game_edict` binding
+  // Nav_SetupEntities resolves -- or leaves null when the "appears to be
+  // missing" warning fired) added for the sv_nav_legacy family-gating tests
+  // (test/nav_family_gating_boot.test.ts): lets those tests assert the
+  // resolution actually succeeded instead of only scraping console text.
+  edicts: readonly NavEdictT[];
   registered_edicts: readonly (NavGameEdictView | null)[];
 }> {
   return nav_data;

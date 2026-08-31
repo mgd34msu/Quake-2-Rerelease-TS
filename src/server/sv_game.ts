@@ -396,13 +396,15 @@ export function SV_ShutdownGameProgs(): void {
   // array src/server/nav.ts's Nav_SetupEntities walks (nav.c:1425-1426's
   // `ge->num_edicts`/`EDICT_NUM(n)`). This port reaches that array through
   // nav.ts's Nav_SetEdictSource provider seam instead of a shared `ge`
-  // global (see nav.ts's header, "A NEW SEAM"), and only bindings/kex.ts
-  // registers one -- so without this line a provider closing over a
-  // SHUTDOWN kex game's edicts stays live across a switch to a legacy game
-  // module, and the next level's Nav_SetupEntities resolves nav edicts
-  // against the dead module's stale array rather than the current one.
-  // Nulling it here restores upstream's lifetime exactly: no game module
-  // loaded means no edicts for nav to match against.
+  // global (see nav.ts's header, "A NEW SEAM") -- both bindings/kex.ts
+  // (adaptKexGameExports) and bindings/legacy.ts (LoadLegacyGame, gated at
+  // load time by nav.ts's `sv_nav_legacy` cvar rather than at registration)
+  // register one -- so without this line a provider closing over a
+  // SHUTDOWN game's edicts stays live across a switch to the other family,
+  // and the next level's Nav_SetupEntities resolves nav edicts against the
+  // dead module's stale array rather than the current one. Nulling it here
+  // restores upstream's lifetime exactly: no game module loaded means no
+  // edicts for nav to match against.
   Nav_SetEdictSource(null);
 }
 

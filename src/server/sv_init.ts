@@ -32,7 +32,7 @@ import { geHolder, SV_InitGameProgs, currentGameFamily } from "./sv_game";
 import { SV_ReadLevelFile } from "./sv_ccmds";
 import { SV_ClearWorld } from "./sv_world";
 import { SetPmAirAccelerate } from "../qcommon/pmove";
-import { Nav_Load, Nav_Unload } from "./nav";
+import { Nav_Load, Nav_Unload, Nav_LegacyLoadEnabled } from "./nav";
 import { SV_MvdMapChanged } from "./sv_mvd";
 
 function requireGe(): GameExports {
@@ -279,7 +279,15 @@ export function SV_SpawnServer(server: string, spawnpoint: string, serverstate: 
     // fake-map branch above. Missing bots/navigation/<map>.nav is the
     // common case and is handled gracefully inside Nav_Load itself (see
     // nav.ts's header): it does not throw or block server startup.
-    Nav_Load(server);
+    //
+    // FAMILY GATE (not in init.c -- see nav.ts's "A DELIBERATE, DOCUMENTED
+    // DEVIATION" header comment for the full citation trail and Mike's
+    // ruling): the kex family loads nav unconditionally, matching upstream
+    // exactly; the legacy family only loads it when `sv_nav_legacy` is on,
+    // default off.
+    if (currentGameFamily() === "kex" || Nav_LegacyLoadEnabled()) {
+      Nav_Load(server);
+    }
   }
   sv.configstrings[svs.csr.mapchecksum] = `${checksum}`;
 

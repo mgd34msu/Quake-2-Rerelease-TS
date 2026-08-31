@@ -21,7 +21,14 @@
 
 import type { GameExports, GameImports } from "../../game/game";
 import { GetGameAPI } from "../../game/g_main";
+import { g_edicts as baseGEdicts } from "../../game/g_local";
 import type { GameExports as CtfGameExports } from "../../ctf/game";
+import { g_edicts as ctfGEdicts } from "../../ctf/g_local";
+import { g_edicts as xatrixGEdicts } from "../../xatrix/g_local";
+import { g_edicts as rogueGEdicts } from "../../rogue/g_local";
+import { g_edicts as lmctfGEdicts } from "../../lmctf/g_local";
+import type { Vec3 } from "../../shared/math";
+import { Nav_SetEdictSource, type NavGameEdictView } from "../nav";
 // The C engine picks the game DLL by loading gamex86.dll (or the platform
 // equivalent) out of the mod directory named by the "game" cvar (FS_Gamedir()
 // / Sys_GetGameAPI(), sv_main.c/sys_*.c) -- there is no DLL boundary in this
@@ -152,6 +159,71 @@ export function adaptPackGameExports(ctfGe: CtfGameExports | XatrixGameExports |
   };
 }
 
+/*
+===============
+toNavGameEdictView / legacyNavEdicts
+
+nav.ts's Nav_SetupEntities needs "the currently spawned game's edicts" (see
+nav.ts's header, "A NEW SEAM NOT IN THE C SOURCE") -- bindings/kex.ts
+supplies this for the kex family because KexEdictT already structurally
+satisfies NavGameEdictView's `sv.classname`/`sv.ent_flags` shape directly.
+The legacy (API v3) `Edict`/EdictT shape has neither: `classname` lives flat
+on every legacy tree's own EdictT class (game/ctf/xatrix/rogue/lmctf's
+g_local.ts, all five declared `classname: string | null = null;`), not
+nested under an `sv` substruct, and there is no `ent_flags` bitfield concept
+at all (`SvEntFlagsT`, kexapi/game.ts, is a 2023-kex-only addition).
+
+`LegacyEdictLike` is a local structural type covering exactly what
+NavGameEdictView needs; every one of the five legacy trees' concrete EdictT
+classes satisfies it without this file importing any of their five distinct
+EdictT types by name (the same "structurally typed, not imported" approach
+nav.ts's own header describes for KexEdictT vs NavGameEdictView).
+
+`ent_flags: 0n` is not a fudge: the legacy v3 API has no such bitfield, so
+"never set" is the only correct, behavior-preserving mapping -- it means
+Nav_UpdateConditionalNode's SVFL_TRAP_DANGER/SVFL_IS_LOCKED_DOOR checks
+(nav.c:1153,1193) simply never fire for a legacy-family game, exactly
+matching what a real legacy edict actually is.
+
+See nav.ts's "A DELIBERATE, DOCUMENTED DEVIATION" header comment (the
+`sv_nav_legacy` cvar) for why this provider exists at all -- unlike the real
+engine's game3_proxy compat shim (server/game3_proxy/game3_proxy.c), which
+never populates `sv.classname` and so ALWAYS fails this exact binding step,
+this port has direct access to the legacy game's real edicts and can
+actually resolve nav links against them.
+===============
+*/
+interface LegacyEdictLike {
+  readonly inuse: boolean;
+  readonly svflags: number;
+  readonly solid: number;
+  readonly absmin: Vec3;
+  readonly absmax: Vec3;
+  readonly classname: string | null;
+  readonly s: {
+    readonly modelindex: number;
+    readonly renderfx: number;
+    readonly origin: Vec3;
+    readonly old_origin: Vec3;
+  };
+}
+
+function toNavGameEdictView(e: LegacyEdictLike): NavGameEdictView {
+  return {
+    inuse: e.inuse,
+    svflags: e.svflags,
+    solid: e.solid,
+    absmin: e.absmin,
+    absmax: e.absmax,
+    s: e.s,
+    sv: { classname: e.classname, ent_flags: 0n },
+  };
+}
+
+function legacyNavEdicts(edicts: readonly (LegacyEdictLike | undefined)[]): (NavGameEdictView | null)[] {
+  return edicts.map((e) => (e ? toNavGameEdictView(e) : null));
+}
+
 function DebugGraphNoop(_value: number, _color: number): void {
   // SCR_DebugGraph is only forward-declared in sv_game.c (`void
   // SCR_DebugGraph (float value, int color);`) and never defined by any
@@ -267,13 +339,41 @@ export function LoadLegacyGame(gameName: string): GameExports {
   // CTF_GetGameAPI/LMCTF_GetGameAPI needs no cast. Its GameExports return
   // does NOT assign back structurally (see adaptPackGameExports's comment
   // above) -- bridged through that adapter.
-  return gameName === "lmctf"
-    ? adaptPackGameExports(LMCTF_GetGameAPI(importsObj))
-    : gameName === "ctf"
-      ? adaptPackGameExports(CTF_GetGameAPI(importsObj))
-      : gameName === "xatrix"
-        ? adaptPackGameExports(XATRIX_GetGameAPI(importsObj))
-        : gameName === "rogue"
-          ? adaptPackGameExports(ROGUE_GetGameAPI(importsObj))
-          : GetGameAPI(importsObj);
+  const ge =
+    gameName === "lmctf"
+      ? adaptPackGameExports(LMCTF_GetGameAPI(importsObj))
+      : gameName === "ctf"
+        ? adaptPackGameExports(CTF_GetGameAPI(importsObj))
+        : gameName === "xatrix"
+          ? adaptPackGameExports(XATRIX_GetGameAPI(importsObj))
+          : gameName === "rogue"
+            ? adaptPackGameExports(ROGUE_GetGameAPI(importsObj))
+            : GetGameAPI(importsObj);
+
+  // nav.ts's edict-source seam, mirroring bindings/kex.ts's identical
+  // registration in adaptKexGameExports -- see toNavGameEdictView/
+  // legacyNavEdicts above for why this needs an adapter (unlike kex,
+  // whose KexEdictT already satisfies NavGameEdictView structurally) and
+  // nav.ts's own header for why this provider is only ever consulted when
+  // `sv_nav_legacy` is on (sv_init.ts gates the Nav_Load call itself, not
+  // this registration -- registering unconditionally here, same as kex,
+  // is harmless when nav was never loaded: nav_data.edicts stays empty).
+  // Each tree's own `g_edicts` module singleton is read directly here (not
+  // `ge.edicts`) for the identical live-binding reason legacy_kex.ts's
+  // fixupPickupStringStat already documents for the lmctf-under-kex case.
+  Nav_SetEdictSource(() =>
+    legacyNavEdicts(
+      gameName === "lmctf"
+        ? lmctfGEdicts
+        : gameName === "ctf"
+          ? ctfGEdicts
+          : gameName === "xatrix"
+            ? xatrixGEdicts
+            : gameName === "rogue"
+              ? rogueGEdicts
+              : baseGEdicts,
+    ),
+  );
+
+  return ge;
 }
