@@ -90,6 +90,9 @@ deterministically `return false`; reported deviation since a literal
 import { ERR_DROP, ERR_FATAL, PRINT_ALL, PRINT_DEVELOPER, MAX_QPATH, LittleShort, LittleLong, Q_stricmp, Com_sprintf, CVAR_FILES } from "../shared/q_shared";
 import { decodePNG } from "../qcommon/png";
 import { decodeJPG } from "../qcommon/jpg";
+import { decodeBMP } from "../qcommon/bmp";
+import { decodeGIF } from "../qcommon/gif";
+import { imageExtCandidates, type ImgExtT } from "../qcommon/img_resolve";
 import type { QGL } from "./qgl";
 import {
   ImageT,
@@ -434,6 +437,27 @@ export function Scrap_Upload(): void {
   scrap_dirty = false;
 }
 
+// Test seam (not a port of anything in gl_image.c -- vanilla's own
+// scrap_allocated/scrap_texels are process-lifetime statics with no
+// shutdown-time clear either, and GL_ShutdownImages doesn't touch them).
+// Any test that loads a real image through GL_LoadPic's it_pic-and-
+// under-64px scrap-allocation branch below mutates this module-private
+// state permanently -- with no reset, that allocator offset leaks into
+// whatever OTHER test file's own Scrap_AllocBlock assertions run later in
+// the same bun:test process (gltextures/numgltextures already get an
+// equivalent per-test reset via SetNumGltextures; this is the same idea
+// for the scrap allocator specifically). Test suites that exercise
+// GL_FindImage/GL_LoadPic with small it_pic fixtures must call this in
+// their own beforeEach.
+export function ResetScrapState(): void {
+  for (let texnum = 0; texnum < MAX_SCRAPS; texnum++) {
+    scrap_allocated[texnum].fill(0);
+    scrap_texels[texnum].fill(0);
+  }
+  scrap_dirty = false;
+  scrap_uploads = 0;
+}
+
 /*
 =================================================================
 PCX LOADING
@@ -762,6 +786,85 @@ export function LoadJPG(name: string): { pic: Uint8Array | null; width: number; 
       ri.Sys_Error(ERR_DROP, `LoadJPG: ${name}: ${decoded.reason}\n`);
     }
     ri.Con_Printf(PRINT_ALL, `Bad jpg file ${name}: ${decoded.reason}\n`);
+    return result;
+  }
+
+  result.pic = decoded.image.pixels;
+  result.width = decoded.image.width;
+  result.height = decoded.image.height;
+  return result;
+}
+
+/*
+=========================================================
+BMP LOADING
+
+No classic-engine precedent -- see qcommon/bmp.ts's own header comment
+(Mike's scope-addition ruling 2026-08-31, "support as many image formats
+as possible"; zero .bmp files exist in the real retail data, so this is
+forward-looking format support, not a content-gap fix). Same
+{pic, width, height} shape and top-down RGBA8 orientation as LoadPNG/
+LoadJPG's own result above. "Recognized but unsupported variant"
+(non-BI_RGB compression, exotic header size, 1/4/16-bit depth) mirrors
+LoadPNG/LoadJPG's own Sys_Error convention; "not a BMP at all"/corrupt
+data mirrors their Con_Printf + null-pic convention.
+=========================================================
+*/
+export function LoadBMP(name: string): { pic: Uint8Array | null; width: number; height: number } {
+  const result: { pic: Uint8Array | null; width: number; height: number } = { pic: null, width: 0, height: 0 };
+
+  const { data: buffer } = ri.FS_LoadFile(name);
+  if (!buffer) {
+    ri.Con_Printf(PRINT_DEVELOPER, `Bad bmp file ${name}\n`);
+    return result;
+  }
+
+  const decoded = decodeBMP(buffer);
+  ri.FS_FreeFile(buffer);
+
+  if (!decoded.ok) {
+    if (decoded.reason.startsWith("unsupported")) {
+      ri.Sys_Error(ERR_DROP, `LoadBMP: ${name}: ${decoded.reason}\n`);
+    }
+    ri.Con_Printf(PRINT_ALL, `Bad bmp file ${name}: ${decoded.reason}\n`);
+    return result;
+  }
+
+  result.pic = decoded.image.pixels;
+  result.width = decoded.image.width;
+  result.height = decoded.image.height;
+  return result;
+}
+
+/*
+=========================================================
+GIF LOADING
+
+No classic-engine precedent -- see qcommon/gif.ts's own header comment
+(same Mike ruling as LoadBMP above; zero .gif files exist in the real
+retail data either). Static, first-frame only. Same {pic, width, height}
+shape and top-down RGBA8 orientation as the other truecolor loaders above.
+GIF has no "recognized but unsupported variant" class the way PNG/JPG/BMP
+do (every GIF87a/89a still image this decoder recognizes, it fully
+decodes) -- every failure reason is a "not a GIF at all"/corrupt-data
+case, so this loader never calls Sys_Error, only the Con_Printf +
+null-pic convention.
+=========================================================
+*/
+export function LoadGIF(name: string): { pic: Uint8Array | null; width: number; height: number } {
+  const result: { pic: Uint8Array | null; width: number; height: number } = { pic: null, width: 0, height: 0 };
+
+  const { data: buffer } = ri.FS_LoadFile(name);
+  if (!buffer) {
+    ri.Con_Printf(PRINT_DEVELOPER, `Bad gif file ${name}\n`);
+    return result;
+  }
+
+  const decoded = decodeGIF(buffer);
+  ri.FS_FreeFile(buffer);
+
+  if (!decoded.ok) {
+    ri.Con_Printf(PRINT_ALL, `Bad gif file ${name}: ${decoded.reason}\n`);
     return result;
   }
 
@@ -1242,8 +1345,15 @@ const WAL_OFFSET0_OFFSET = 40;
 function GL_LoadWal(name: string): ImageT | null {
   const { data: mt } = ri.FS_LoadFile(name);
   if (!mt) {
-    ri.Con_Printf(PRINT_ALL, `GL_FindImage: can't load ${name}\n`);
-    return r_notexture;
+    // PRINT_DEVELOPER, matching every other per-extension loader's own
+    // "file doesn't exist" print (LoadPCX/LoadTGA/LoadPNG/LoadJPG above) --
+    // GL_FindImage now retries with the other supported extensions on a
+    // miss (see its own header comment), so a visible PRINT_ALL warning
+    // here would fire on every intermediate candidate a fallback later
+    // resolves, not just a genuine total failure. GL_FindImage itself
+    // prints the user-visible warning once, only if every candidate misses.
+    ri.Con_Printf(PRINT_DEVELOPER, `Bad wal file ${name}\n`);
+    return null;
   }
 
   const view = new DataView(mt.buffer, mt.byteOffset, mt.byteLength);
@@ -1256,6 +1366,84 @@ function GL_LoadWal(name: string): ImageT | null {
   ri.FS_FreeFile(mt);
 
   return image;
+}
+
+// The eight extensions GL_FindImage can decode -- GL is the only renderer
+// with a real TGA decoder (LoadTGA above); ref_soft's R_FindImage has no
+// TGA support at all (see r_image.ts's own header comment) and passes a
+// seven-entry set to imageExtCandidates instead.
+const GL_SUPPORTED_EXTS: readonly ImgExtT[] = ["pcx", "wal", "tga", "png", "jpg", "jpeg", "bmp", "gif"];
+
+// Extension string (no leading dot, e.g. "jpeg" not ".jpeg") -> ImgExtT.
+// A plain lookup rather than a fixed-length suffix slice: ".jpeg" is 5
+// characters, unlike every other recognized extension's 3, so the caller
+// must find the extension by the name's last "." rather than assuming a
+// fixed suffix length (see GL_FindImage below).
+function glExtOf(ext: string): ImgExtT | null {
+  switch (ext) {
+    case "pcx":
+      return "pcx";
+    case "wal":
+      return "wal";
+    case "tga":
+      return "tga";
+    case "png":
+      return "png";
+    case "jpg":
+      return "jpg";
+    case "jpeg":
+      return "jpeg";
+    case "bmp":
+      return "bmp";
+    case "gif":
+      return "gif";
+    default:
+      return null;
+  }
+}
+
+// Loads `name` (already known to end in `.${ext}`) through the loader for
+// that one extension. Always returns null (never a placeholder image) on
+// failure -- GL_FindImage's caller decides what a total miss across every
+// candidate in the fallback chain becomes.
+function GL_LoadByExt(name: string, ext: ImgExtT, type: ImagetypeT): ImageT | null {
+  switch (ext) {
+    case "pcx": {
+      const { pic, width, height } = LoadPCX(name);
+      if (!pic) return null;
+      return GL_LoadPic(name, pic, width, height, type, 8);
+    }
+    case "wal":
+      return GL_LoadWal(name);
+    case "tga": {
+      const { pic, width, height } = LoadTGA(name);
+      if (!pic) return null;
+      return GL_LoadPic(name, pic, width, height, type, 32);
+    }
+    case "png": {
+      const { pic, width, height } = LoadPNG(name);
+      if (!pic) return null;
+      return GL_LoadPic(name, pic, width, height, type, 32);
+    }
+    case "jpg":
+    case "jpeg": {
+      // ".jpeg" is a pure filename-spelling alias -- same decoder, same
+      // bit depth, as ".jpg" (see img_resolve.ts's own header comment).
+      const { pic, width, height } = LoadJPG(name);
+      if (!pic) return null;
+      return GL_LoadPic(name, pic, width, height, type, 32);
+    }
+    case "bmp": {
+      const { pic, width, height } = LoadBMP(name);
+      if (!pic) return null;
+      return GL_LoadPic(name, pic, width, height, type, 32);
+    }
+    case "gif": {
+      const { pic, width, height } = LoadGIF(name);
+      if (!pic) return null;
+      return GL_LoadPic(name, pic, width, height, type, 32);
+    }
+  }
 }
 
 /*
@@ -1280,52 +1468,50 @@ export function GL_FindImage(name: string, type: ImagetypeT): ImageT | null {
   }
 
   //
-  // load the pic from disk
+  // load the pic from disk, retrying with q2repro's other supported
+  // extensions on a miss (q2repro src/refresh/images.c: load_image_data
+  // 1819-1855, try_other_formats 1669-1691 -- see qcommon/img_resolve.ts's
+  // own header comment for the full citation and the one documented
+  // ordering deviation). try_replace_ext REPLACES the extension in place
+  // (images.c:1661-1666), never appends -- the double-extension bug this
+  // port already fixed at ad6fb29 ("pics/sprites/flare_01.tga.pcx").
   //
-  const ext = name.slice(len - 4);
-  let image: ImageT | null;
-  if (ext === ".pcx") {
-    const { pic, width, height } = LoadPCX(name);
-    if (!pic) {
-      // The rerelease pak ships many classic 2D assets ONLY as PNG (e.g.
-      // pics/conchars.png, pics/m_cursor*.png -- no .pcx sibling at all), so
-      // a vanilla-style hard .pcx miss leaves draw_chars null and DrawChar
-      // binds texture 0: solid white glyph quads on real GL. q2repro finds
-      // these via IMG_Find's format-override lookup (Q2PRO lineage,
-      // r_override_textures); this port retries the requested name with the
-      // other supported truecolor extensions instead. Order deviation from
-      // q2repro (documented): it probes overrides BEFORE the requested
-      // format, we probe the requested format first -- observably identical
-      // on both retail trees (classic data has only the .pcx, rerelease data
-      // has only the .png/.jpg), and requested-first keeps classic-data
-      // lookups byte-for-byte on the vanilla path. .jpg added to the chain
-      // for the retail vault/ artwork (see LoadJPG's own header comment) --
-      // none of those 198 assets have a .pcx/.png/.tga sibling either, but
-      // the probe order still matches q2repro's own "png jpg tga" format
-      // chain (images.c:2258).
-      const base = name.slice(0, len - 4);
-      return GL_FindImage(`${base}.png`, type) ?? GL_FindImage(`${base}.tga`, type) ?? GL_FindImage(`${base}.jpg`, type);
-    }
-    image = GL_LoadPic(name, pic, width, height, type, 8);
-  } else if (ext === ".wal") {
-    image = GL_LoadWal(name);
-  } else if (ext === ".tga") {
-    const { pic, width, height } = LoadTGA(name);
-    if (!pic) return null;
-    image = GL_LoadPic(name, pic, width, height, type, 32);
-  } else if (ext === ".png") {
-    const { pic, width, height } = LoadPNG(name);
-    if (!pic) return null;
-    image = GL_LoadPic(name, pic, width, height, type, 32);
-  } else if (ext === ".jpg") {
-    const { pic, width, height } = LoadJPG(name);
-    if (!pic) return null;
-    image = GL_LoadPic(name, pic, width, height, type, 32);
-  } else {
-    return null;
+  // Every image class routes through this one function (skins/pics/sprite
+  // frames call GL_FindImage or R_RegisterSkin -> GL_FindImage directly;
+  // wall textures via gl_model.ts's Mod_LoadTexinfo), so the fallback
+  // chain below covers all of them without any caller-side change.
+  //
+  // Extension found by the LAST "." rather than a fixed suffix length --
+  // ".jpeg" is 5 characters, unlike every other recognized extension's 3
+  // (q2repro itself has no baselen-and-a-fixed-suffix constant either;
+  // find_or_load_image derives baselen from COM_FileExtension the same
+  // way, images.c:1931).
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0) return null; // no extension, or a bare "." with no base name
+  const requestedExt = glExtOf(name.slice(dot + 1));
+  if (requestedExt === null) return null;
+
+  const base = name.slice(0, dot);
+  const isWall = type === ImagetypeT.it_wall;
+  const candidates = imageExtCandidates(requestedExt, isWall, GL_SUPPORTED_EXTS);
+
+  for (const ext of candidates) {
+    const candidateName = ext === requestedExt ? name : `${base}.${ext}`;
+    const image = GL_LoadByExt(candidateName, ext, type);
+    if (image) return image;
   }
 
-  return image;
+  // Every candidate missed. Vanilla GL_FindImage's own ".wal" branch always
+  // fell back to r_notexture directly on a miss (there was no fallback
+  // chain to exhaust yet); preserved here as the terminal case once the
+  // WHOLE chain -- not just the literal ".wal" name -- comes up empty,
+  // matching gl_model.ts's own Mod_LoadTexinfo caller-side r_notexture
+  // convention for every other kind of miss.
+  if (isWall) {
+    ri.Con_Printf(PRINT_ALL, `GL_FindImage: can't load ${name}\n`);
+    return r_notexture;
+  }
+  return null;
 }
 
 /*
@@ -1435,12 +1621,27 @@ export function GL_InitImages(): void {
 
   Draw_GetPalette();
 
-  if (qgl.qglColorTableEXT) { // C: if ( qglColorTableEXT ) -- pointer, not cvar
+  // C: `if ( qglColorTableEXT )` -- pointer, not cvar. Collapsed to also
+  // require gl_ext_palettedtexture per this file's own header comment (the
+  // QGL binding always resolves *_EXT symbols, so the bare pointer check
+  // can never observe "driver doesn't have this extension" the way real
+  // dlsym() could -- NVIDIA/Mesa both export qglColorTableEXT
+  // unconditionally). Without this, any basedir missing pics/16to8.dat
+  // (the rerelease's own pak0.pak -- verified: 16to8.dat ships in the
+  // CLASSIC pak0 only) hit the Sys_Error below on every GL init, dropping
+  // the renderer to ref_soft silently. Downgraded from Sys_Error(ERR_FATAL)
+  // to a console print + leaving d_16to8table null: GL_BuildPalettedTexture
+  // already early-returns on a null table (see its own comment above), so
+  // gl_ext_palettedtexture=1 on rerelease data now degrades gracefully
+  // (falls back to the non-paletted RGBA upload path) instead of killing
+  // the renderer.
+  if (qgl.qglColorTableEXT && glCvars.gl_ext_palettedtexture && glCvars.gl_ext_palettedtexture.value) {
     const { data } = ri.FS_LoadFile("pics/16to8.dat");
     if (!data) {
-      ri.Sys_Error(ERR_FATAL, "Couldn't load pics/16to8.pcx");
+      ri.Con_Printf(PRINT_ALL, "Couldn't load pics/16to8.pcx\n");
+    } else {
+      gl_state.d_16to8table = data;
     }
-    gl_state.d_16to8table = data;
   }
 
   // vid_gamma isn't registered by any function in this unit's SCOPE (gl_rmain.c

@@ -30,7 +30,7 @@ import { glCvars, SetRefImports, gltextures, ImageT, ImagetypeT, SetNumGltexture
 import type { RefImports } from "../src/client/ref";
 import { CvarT } from "../src/shared/q_shared";
 import { QGLRecording } from "../src/ref_gl/qgl";
-import { SetQGL, GL_Bind, GL_FindImage, GL_Upload8, Scrap_AllocBlock, LoadTGA, LoadPNG, LoadJPG, GL_TEXTURE_2D, GL_QUADS, GL_RGBA, GL_UNSIGNED_BYTE } from "../src/ref_gl/gl_image";
+import { SetQGL, GL_Bind, GL_FindImage, GL_Upload8, Scrap_AllocBlock, LoadTGA, LoadPNG, LoadJPG, GL_InitImages, ResetScrapState, GL_TEXTURE_2D, GL_QUADS, GL_RGBA, GL_UNSIGNED_BYTE } from "../src/ref_gl/gl_image";
 import { Draw_InitLocal, Draw_Char, Draw_FindPic, Draw_StretchPicRegion } from "../src/ref_gl/gl_draw";
 import { buildBaselineJpeg } from "./support/jpeg_builder";
 
@@ -234,6 +234,20 @@ beforeEach(() => {
   // (test/glimp.test.ts) may have left enabled in this process. Pin it off:
   // this suite's assertions are written against the RGBA-expansion path.
   if (glCvars.gl_ext_palettedtexture) glCvars.gl_ext_palettedtexture.value = 0;
+  // rule 13: gl_image.ts's scrap allocator (scrap_allocated/scrap_texels)
+  // is module-private with no reset hook of its own -- ANY test in ANY
+  // file that loads a real image through GL_LoadPic's it_pic-and-under-64px
+  // scrap branch (e.g. test/img_resolve_new_formats.test.ts's tiny .bmp/
+  // .jpeg/.pcx fixtures) mutates it permanently. Reset it here so this
+  // suite's own Scrap_AllocBlock assertions (fixed expected {x,y} offsets)
+  // are correct regardless of what ran earlier in the same bun:test
+  // process, not just when this file happens to run first/alone.
+  ResetScrapState();
+  // Same rationale for d_16to8table: the GL_InitImages describe block
+  // below sets it to a real Uint8Array in one of its own tests; reset it
+  // here too so no other test in this file (or a later file, since it's
+  // the same module-level singleton) can observe a stale non-null table.
+  gl_state.d_16to8table = null;
 });
 
 describe("GL_Bind", () => {
@@ -635,5 +649,68 @@ describe("Draw_StretchPicRegion", () => {
   test("returns without drawing when the named pic can't be found", () => {
     Draw_StretchPicRegion(0, 0, 1, 1, "fonts/does-not-exist.png", 0, 0, 1, 1, { r: 255, g: 255, b: 255, a: 255 });
     expect(qgl.calls).toHaveLength(0);
+  });
+});
+
+describe("GL_InitImages -- pics/16to8.dat gating (yellow-items unit finding)", () => {
+  // Draw_GetPalette (called unconditionally, before the 16to8.dat gate)
+  // needs a loadable pics/colormap.pcx or it Sys_Errors -- every test below
+  // provides one so the gate under test is reached at all.
+  beforeEach(() => {
+    files.set("pics/colormap.pcx", buildPcxBytes(2, 2, () => 1));
+  });
+
+  test("gl_ext_palettedtexture off never attempts pics/16to8.dat, even though qglColorTableEXT (QGL always resolves it) is truthy", () => {
+    expect(qgl.qglColorTableEXT).toBeTruthy(); // the real-world NVIDIA/Mesa case this bug hinged on
+    glCvars.gl_ext_palettedtexture = new CvarT();
+    glCvars.gl_ext_palettedtexture.value = 0;
+    gl_state.d_16to8table = null;
+
+    // Wrap FS_LoadFile with a call-logging spy so this test can assert
+    // "pics/16to8.dat" was never even requested, not just that no throw
+    // happened -- the cvar-off path must skip the read entirely, matching
+    // the real engine's cost profile (no doomed file lookup on every GL
+    // init on a rerelease-only basedir).
+    const loadCalls: string[] = [];
+    SetRefImports({
+      ...makeFakeRi(),
+      FS_LoadFile: (name: string) => {
+        loadCalls.push(name);
+        const data = files.get(name);
+        if (!data) return { length: -1, data: null };
+        return { length: data.length, data };
+      },
+    });
+
+    expect(() => GL_InitImages()).not.toThrow();
+
+    expect(loadCalls).not.toContain("pics/16to8.dat");
+    expect(gl_state.d_16to8table).toBeNull();
+  });
+
+  test("gl_ext_palettedtexture on + missing pics/16to8.dat: no throw, console print instead, d_16to8table stays null", () => {
+    glCvars.gl_ext_palettedtexture = new CvarT();
+    glCvars.gl_ext_palettedtexture.value = 1;
+    gl_state.d_16to8table = null;
+    // deliberately no "pics/16to8.dat" entry in `files` -- this is the
+    // rerelease-only-basedir case (16to8.dat ships in the classic pak0
+    // only).
+
+    expect(() => GL_InitImages()).not.toThrow();
+
+    expect(gl_state.d_16to8table).toBeNull();
+  });
+
+  test("gl_ext_palettedtexture on + present pics/16to8.dat: loads it normally (no regression on classic data)", () => {
+    glCvars.gl_ext_palettedtexture = new CvarT();
+    glCvars.gl_ext_palettedtexture.value = 1;
+    gl_state.d_16to8table = null;
+    files.set("pics/16to8.dat", new Uint8Array([1, 2, 3, 4]));
+
+    expect(() => GL_InitImages()).not.toThrow();
+
+    expect(gl_state.d_16to8table).not.toBeNull();
+    const table: Uint8Array = gl_state.d_16to8table ?? new Uint8Array();
+    expect(Array.from(table)).toEqual([1, 2, 3, 4]);
   });
 });

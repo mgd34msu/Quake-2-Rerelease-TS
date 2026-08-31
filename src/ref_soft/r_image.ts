@@ -56,6 +56,9 @@ import { ri, r_notexture_mip, d_8to24table, TRANSPARENT_COLOR } from "./r_local"
 import { ImageT, ImagetypeT, registration_sequence, SetRegistrationSequence } from "./r_model";
 import { decodePNG } from "../qcommon/png";
 import { decodeJPG } from "../qcommon/jpg";
+import { decodeBMP } from "../qcommon/bmp";
+import { decodeGIF } from "../qcommon/gif";
+import { imageExtCandidates, type ImgExtT } from "../qcommon/img_resolve";
 
 // r_image.c owns this counter; r_model.c's copy of the same name cannot be
 // written through r_model.ts's export (see file header deviation note).
@@ -244,6 +247,66 @@ export function LoadJPGQuantized(name: string): { pic: Uint8Array | null; width:
   return result;
 }
 
+// BMP LOADING (truecolor/paletted -> palette quantization) -- Mike's
+// scope-addition ruling 2026-08-31 ("support as many image formats as
+// possible"; no classic-engine precedent, and zero .bmp files exist in the
+// real retail data -- see qcommon/bmp.ts's own header comment), reusing the
+// identical QuantizeRGBAToPalette pipeline LoadPNGQuantized/LoadJPGQuantized
+// above already use.
+export function LoadBMPQuantized(name: string): { pic: Uint8Array | null; width: number; height: number } {
+  const result: { pic: Uint8Array | null; width: number; height: number } = { pic: null, width: 0, height: 0 };
+
+  const { data: buffer } = ri.FS_LoadFile(name);
+  if (!buffer) {
+    ri.Con_Printf(PRINT_DEVELOPER, `Bad bmp file ${name}\n`);
+    return result;
+  }
+
+  const decoded = decodeBMP(buffer);
+  ri.FS_FreeFile(buffer);
+
+  if (!decoded.ok) {
+    ri.Con_Printf(PRINT_ALL, `Bad bmp file ${name}: ${decoded.reason}\n`);
+    return result;
+  }
+
+  result.pic = QuantizeRGBAToPalette(decoded.image.pixels, decoded.image.width, decoded.image.height);
+  result.width = decoded.image.width;
+  result.height = decoded.image.height;
+  return result;
+}
+
+// GIF LOADING (static, first-frame -> palette quantization) -- same Mike
+// ruling as LoadBMPQuantized above (see qcommon/gif.ts's own header
+// comment), reusing the identical QuantizeRGBAToPalette pipeline. A
+// decoded GIF's own color table is already palette-shaped, but its indices
+// are meaningless to this renderer's own d_8to24table -- quantizing the
+// decoded RGBA through the shared pipeline (rather than trying to remap
+// index-to-index) keeps this loader identical in shape to every other
+// truecolor-in/palette-out loader in this file.
+export function LoadGIFQuantized(name: string): { pic: Uint8Array | null; width: number; height: number } {
+  const result: { pic: Uint8Array | null; width: number; height: number } = { pic: null, width: 0, height: 0 };
+
+  const { data: buffer } = ri.FS_LoadFile(name);
+  if (!buffer) {
+    ri.Con_Printf(PRINT_DEVELOPER, `Bad gif file ${name}\n`);
+    return result;
+  }
+
+  const decoded = decodeGIF(buffer);
+  ri.FS_FreeFile(buffer);
+
+  if (!decoded.ok) {
+    ri.Con_Printf(PRINT_ALL, `Bad gif file ${name}: ${decoded.reason}\n`);
+    return result;
+  }
+
+  result.pic = QuantizeRGBAToPalette(decoded.image.pixels, decoded.image.width, decoded.image.height);
+  result.width = decoded.image.width;
+  result.height = decoded.image.height;
+  return result;
+}
+
 //=======================================================
 
 function R_FindFreeImage(): ImageT {
@@ -296,8 +359,16 @@ const WAL_OFFSET0_OFFSET = 40;
 function R_LoadWal(name: string): ImageT | null {
   const { data: mt } = ri.FS_LoadFile(name);
   if (!mt) {
-    ri.Con_Printf(PRINT_ALL, `R_LoadWal: can't load ${name}\n`);
-    return r_notexture_mip;
+    // PRINT_DEVELOPER, matching every other per-extension loader's own
+    // "file doesn't exist" print (LoadPCX/LoadPNGQuantized/LoadJPGQuantized
+    // above) -- R_FindImage now retries with the other supported
+    // extensions on a miss (see its own header comment), so a visible
+    // PRINT_ALL warning here would fire on every intermediate candidate a
+    // fallback later resolves, not just a genuine total failure.
+    // R_FindImage itself prints the user-visible warning once, only if
+    // every candidate misses.
+    ri.Con_Printf(PRINT_DEVELOPER, `Bad wal file ${name}\n`);
+    return null;
   }
 
   const view = new DataView(mt.buffer, mt.byteOffset, mt.byteLength);
@@ -327,6 +398,87 @@ function R_LoadWal(name: string): ImageT | null {
   return image;
 }
 
+// The seven extensions R_FindImage can decode -- this renderer has no TGA
+// decoder at all (LoadTGA is gl_image.ts's own copy; ref_soft's real
+// ".tga" branch is dead code -- `return NULL; // "can't load %s in the
+// software renderer"`, see this file's own header comment), so .tga is
+// left out of the supported set entirely. A requested name that ends in
+// ".tga" therefore never gets tried as-is, but -- per q2repro's own
+// IM_MAX "unrecognized extension" path (images.c:1824-1830) -- still gets
+// the full substitution search run against it (e.g. a wall texture named
+// "x.tga" with a "x.png" sibling on disk still resolves).
+const SOFT_SUPPORTED_EXTS: readonly ImgExtT[] = ["pcx", "wal", "png", "jpg", "jpeg", "bmp", "gif"];
+
+// Extension string (no leading dot, e.g. "jpeg" not ".jpeg") -> ImgExtT --
+// a plain lookup rather than a fixed-length suffix slice, since ".jpeg" is
+// 5 characters unlike every other recognized extension's 3 (see
+// R_FindImage's own dot-index parsing below).
+function softExtOf(ext: string): ImgExtT | null {
+  switch (ext) {
+    case "pcx":
+      return "pcx";
+    case "wal":
+      return "wal";
+    case "png":
+      return "png";
+    case "jpg":
+      return "jpg";
+    case "jpeg":
+      return "jpeg";
+    case "bmp":
+      return "bmp";
+    case "gif":
+      return "gif";
+    default:
+      return null;
+  }
+}
+
+// Loads `name` (already known to end in `.${ext}`) through the loader for
+// that one extension. Always returns null (never a placeholder image) on
+// failure -- R_FindImage's caller decides what a total miss across every
+// candidate in the fallback chain becomes.
+function R_LoadByExt(name: string, ext: ImgExtT, type: ImagetypeT): ImageT | null {
+  switch (ext) {
+    case "pcx": {
+      const { pic, width, height } = LoadPCX(name);
+      if (!pic) return null;
+      return GL_LoadPic(name, pic, width, height, type);
+    }
+    case "wal":
+      return R_LoadWal(name);
+    case "png": {
+      const { pic, width, height } = LoadPNGQuantized(name);
+      if (!pic) return null;
+      return GL_LoadPic(name, pic, width, height, type);
+    }
+    case "jpg":
+    case "jpeg": {
+      // ".jpeg" is a pure filename-spelling alias -- same decoder as
+      // ".jpg" (see img_resolve.ts's own header comment).
+      const { pic, width, height } = LoadJPGQuantized(name);
+      if (!pic) return null;
+      return GL_LoadPic(name, pic, width, height, type);
+    }
+    case "bmp": {
+      const { pic, width, height } = LoadBMPQuantized(name);
+      if (!pic) return null;
+      return GL_LoadPic(name, pic, width, height, type);
+    }
+    case "gif": {
+      const { pic, width, height } = LoadGIFQuantized(name);
+      if (!pic) return null;
+      return GL_LoadPic(name, pic, width, height, type);
+    }
+    case "tga":
+      // Never actually reached: "tga" is absent from SOFT_SUPPORTED_EXTS,
+      // so imageExtCandidates never produces it as a candidate for this
+      // renderer (see that constant's own comment above). Only present so
+      // this switch stays exhaustive over the full ImgExtT union.
+      return null;
+  }
+}
+
 /*
 ===============
 R_FindImage
@@ -348,49 +500,45 @@ export function R_FindImage(name: string, type: ImagetypeT): ImageT | null {
   }
 
   //
-  // load the pic from disk
+  // load the pic from disk, retrying with q2repro's other supported
+  // extensions on a miss (q2repro src/refresh/images.c: load_image_data
+  // 1819-1855, try_other_formats 1669-1691 -- see qcommon/img_resolve.ts's
+  // own header comment for the full citation, the one documented ordering
+  // deviation, and gl_image.ts's GL_FindImage for the parallel GL-side
+  // wiring). try_replace_ext REPLACES the extension in place
+  // (images.c:1661-1666), never appends -- the double-extension bug this
+  // port already fixed at ad6fb29 ("pics/sprites/flare_01.tga.pcx").
   //
-  const ext = name.slice(len - 4);
-  let image: ImageT | null;
-  if (ext === ".pcx") {
-    const { pic, width, height } = LoadPCX(name);
-    if (!pic) {
-      // Rerelease-pak fallback (no classic-engine precedent -- see file
-      // header): several 2D UI assets ship ONLY as truecolor PNG on
-      // rerelease data (verified: pics/conchars.png, all 15
-      // pics/m_cursor*.png -- no .pcx sibling at all). Mirrors
-      // gl_image.ts's GL_FindImage ".pcx"-miss fallback: probe the
-      // requested name first (keeps classic-data lookups, which only ever
-      // have the .pcx, byte-for-byte on the vanilla path), then retry as
-      // the other supported truecolor extension. Recurses through
-      // R_FindImage (not a direct LoadPNGQuantized+GL_LoadPic call) so the
-      // resulting image is cached under its real ".png"/".jpg" name exactly
-      // like the GL side's equivalent fallback. .jpg added for the retail
-      // vault/ artwork (see LoadJPGQuantized's own header comment) -- this
-      // renderer has no .tga support at all (see file header: LoadTGA is
-      // gl's own copy, ref_soft's ".tga" branch is dead code), so the chain
-      // is .png then .jpg, skipping the .tga rung GL_FindImage's chain has.
-      const base = name.slice(0, len - 4);
-      return R_FindImage(`${base}.png`, type) ?? R_FindImage(`${base}.jpg`, type);
-    }
-    image = GL_LoadPic(name, pic, width, height, type);
-  } else if (ext === ".wal") {
-    image = R_LoadWal(name);
-  } else if (ext === ".png") {
-    const { pic, width, height } = LoadPNGQuantized(name);
-    if (!pic) return null;
-    image = GL_LoadPic(name, pic, width, height, type);
-  } else if (ext === ".jpg") {
-    const { pic, width, height } = LoadJPGQuantized(name);
-    if (!pic) return null;
-    image = GL_LoadPic(name, pic, width, height, type);
-  } else if (ext === ".tga") {
-    return null; // ri.Sys_Error (ERR_DROP, "R_FindImage: can't load %s in software renderer", name);
-  } else {
-    return null; // ri.Sys_Error (ERR_DROP, "R_FindImage: bad extension on: %s", name);
+  // All truecolor results are quantized down to this renderer's 8-bit
+  // palette-indexed pixel format through the same QuantizeRGBAToPalette
+  // pipeline LoadPNGQuantized/LoadJPGQuantized already use (see this
+  // file's own header comment) -- R_LoadByExt above never returns a raw
+  // truecolor image_t, so nothing downstream (Draw_*, r_surf.ts) has to
+  // know the fallback chain exists.
+  //
+  // Extension found by the LAST "." rather than a fixed suffix length --
+  // ".jpeg" is 5 characters, unlike every other recognized extension's 3.
+  const dot = name.lastIndexOf(".");
+  const requestedExt = dot > 0 ? softExtOf(name.slice(dot + 1)) : null;
+  const base = dot > 0 ? name.slice(0, dot) : name;
+  const isWall = type === ImagetypeT.it_wall;
+  const candidates = imageExtCandidates(requestedExt, isWall, SOFT_SUPPORTED_EXTS);
+
+  for (const ext of candidates) {
+    const candidateName = ext === requestedExt ? name : `${base}.${ext}`;
+    const image = R_LoadByExt(candidateName, ext, type);
+    if (image) return image;
   }
 
-  return image;
+  // Every candidate missed. Vanilla R_FindImage's own ".wal" branch always
+  // fell back to r_notexture_mip directly on a miss (there was no fallback
+  // chain to exhaust yet); preserved here as the terminal case once the
+  // WHOLE chain -- not just the literal ".wal" name -- comes up empty.
+  if (isWall) {
+    ri.Con_Printf(PRINT_ALL, `R_FindImage: can't load ${name}\n`);
+    return r_notexture_mip;
+  }
+  return null;
 }
 
 /*
