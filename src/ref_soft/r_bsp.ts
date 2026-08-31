@@ -85,6 +85,33 @@ let pbedges: BedgeT[] = [];
 let numbverts = 0;
 let numbedges = 0;
 
+// r_bsp.c declares these two as FILE-SCOPE STATICS (line 47: "static
+// mvertex_t *pfrontenter, *pfrontexit;"), not locals -- their value
+// persists across calls, including across recursive invocations, exactly
+// like entity_rotation below. This matters: R_RecursiveClipBPoly's per-edge
+// loop clips a bmodel polygon against a chain of BSP planes several levels
+// deep, and CotM's higher-precision QBSP-extended bmodel geometry
+// occasionally produces a single recursion level where, due to ordinary
+// floating-point drift across successive plane clips, the edge loop records
+// only one of the two plane-crossings a closed polygon loop should always
+// pair up (an entering transition with no matching exit, or vice versa) --
+// confirmed live on maps/mguhub.bsp with numbverts/numbedges nowhere near
+// MAX_BMODEL_VERTS/MAX_BMODEL_EDGES (13/500, 43/1000), so this is NOT the
+// fixed-pool overflow it first looked like. In vanilla, the unset one of the
+// pair simply keeps whatever real vertex pointer it held from the last time
+// it WAS set (almost always populated by then, since a frame's very first
+// bmodel already primes both) and reuses it, producing an ordinary rendering
+// artifact (a sliver edge connecting the wrong two points) -- never a crash.
+// A local `let`, reset to null every call, throws that stale-but-valid
+// safety net away and turns the same geometry into a hard crash. Per the
+// FIDELITY RAZOR (memory-model-dependent C behavior gets fixed to match the
+// ORIGINAL's observed behavior, not its literal storage class), restoring
+// static-equivalent module scope here reproduces vanilla's actual outcome:
+// keep rendering, never crash. See the null check below for the residual
+// case (no prior value exists yet at all).
+let pfrontenter: MvertexT | null = null;
+let pfrontexit: MvertexT | null = null;
+
 // entity_rotation is r_bsp.c's own file-scope static, used only within this
 // file (r_local.h declares it extern, but grep of the whole C tree shows no
 // other .c file ever reads it).
@@ -155,8 +182,6 @@ Clip a bmodel poly down the world bsp tree
 function R_RecursiveClipBPoly(pedgesIn: BedgeT | null, pnode: MnodeOrLeaf, psurf: MsurfaceT): void {
   const psideedges: [BedgeT | null, BedgeT | null] = [null, null];
   let makeclippededge = false;
-  let pfrontenter: MvertexT | null = null;
-  let pfrontexit: MvertexT | null = null;
 
   if (isMleaf(pnode)) throw new Error("R_RecursiveClipBPoly: expected a decision node");
 
@@ -241,7 +266,15 @@ function R_RecursiveClipBPoly(pedgesIn: BedgeT | null, pnode: MnodeOrLeaf, psurf
       ri.Con_Printf(PRINT_ALL, "Out of edges for bmodel\n");
       return;
     }
-    if (!pfrontexit || !pfrontenter) throw new Error("R_RecursiveClipBPoly: inconsistent clip state");
+    if (!pfrontexit || !pfrontenter) {
+      // Only reachable before ANY bmodel poly has ever been clipped this
+      // process (see pfrontenter/pfrontexit's own module-scope comment
+      // above) -- vanilla's raw pointer reuse has no equivalent failure mode
+      // worth reproducing here, so degrade like the capacity checks above
+      // instead of dereferencing a still-unset vertex.
+      ri.Con_Printf(PRINT_ALL, "R_RecursiveClipBPoly: no prior clip vertex available, dropping poly\n");
+      return;
+    }
 
     let ptedge = pbedges[numbedges];
     ptedge.pnext = psideedges[0];

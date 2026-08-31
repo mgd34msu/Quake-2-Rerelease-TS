@@ -571,8 +571,17 @@ export function R_RenderFace(fa: MsurfaceT, clipflags: number): void {
 
   // translucent surfaces are not drawn by the edge renderer
   if (fa.texinfo.flags & (SURF_TRANS33 | SURF_TRANS66)) {
-    fa.nextalphasurface = r_alpha_surfaces;
-    SetAlphaSurfaces(fa);
+    // See MsurfaceT's own alphaframe comment (r_model.ts): a surface
+    // reachable through more than one path in the same frame (e.g. a
+    // bmodel-flagged entity whose model resolves to the world -- retail
+    // "Call of the Machine" data does this on maps/mgu6m3.bsp) must only be
+    // linked onto r_alpha_surfaces once, or the second push turns the list
+    // into a self-cycle and hangs R_DrawAlphaSurfaces forever.
+    if (fa.alphaframe !== r_framecount) {
+      fa.alphaframe = r_framecount;
+      fa.nextalphasurface = r_alpha_surfaces;
+      SetAlphaSurfaces(fa);
+    }
     return;
   }
 
@@ -723,8 +732,12 @@ export function R_RenderBmodelFace(pedges: BedgeT | null, psurf: MsurfaceT): voi
   if (psurf.flags & SURF_EXTENTS_SKIP) return;
 
   if (psurf.texinfo.flags & (SURF_TRANS33 | SURF_TRANS66)) {
-    psurf.nextalphasurface = r_alpha_surfaces;
-    SetAlphaSurfaces(psurf);
+    // See R_RenderFace's identical guard and MsurfaceT's alphaframe comment.
+    if (psurf.alphaframe !== r_framecount) {
+      psurf.alphaframe = r_framecount;
+      psurf.nextalphasurface = r_alpha_surfaces;
+      SetAlphaSurfaces(psurf);
+    }
     return;
   }
 

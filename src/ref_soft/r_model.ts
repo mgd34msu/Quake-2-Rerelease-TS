@@ -239,6 +239,32 @@ export class MsurfaceT {
 
   nextalphasurface: MsurfaceT | null = null;
 
+  // This port only -- not in vanilla's msurface_t. Vanilla's
+  // R_RenderFace/R_RenderBmodelFace push straight onto the file-scope
+  // r_alpha_surfaces stack (`fa->nextalphasurface = r_alpha_surfaces;
+  // r_alpha_surfaces = fa;`) with no guard against the same surface being
+  // pushed twice in one frame. That's normally impossible in vanilla's own
+  // data (a world surface belongs to exactly one BSP node, visited once;
+  // a bmodel's own surfaces are only walked once per R_DrawBEntitiesOnList
+  // entity) -- but retail's "Call of the Machine" content includes entities
+  // whose modelindex resolves (legitimately, per protocol: CS_MODELS+1 is
+  // always the map itself) to the WORLD model, e.g. maps/mgu6m3.bsp's
+  // entities #82-85 (modelindex 1) and #28 (modelindex 8, likewise
+  // resolving to the world -- see r_rast.ts's R_RenderFace/
+  // R_RenderBmodelFace comment for the full citation). R_DrawBEntitiesOnList
+  // then walks the world's ENTIRE surface list once per such entity, and a
+  // second push of the same still-queued MsurfaceT turns the singly linked
+  // list into a self-cycle (`X.next = X`) on the very next push --
+  // `nextalphasurface = r_alpha_surfaces` executes while r_alpha_surfaces
+  // still points at that same object -- which hangs R_DrawAlphaSurfaces's
+  // `while (s !== null)` forever. Real vanilla C, given the identical
+  // pointer-reuse data, corrupts its list exactly the same way (this is a
+  // property of the linked-list algorithm, not a translation bug), so per
+  // the FIDELITY RAZOR (rule 17: never let UB/aliasing-shaped behavior
+  // diverge from the original's observable, playable outcome) this frame
+  // stamp makes the enqueue idempotent per frame instead of reproducing an
+  // unplayable permanent freeze.
+  alphaframe = -1;
 }
 
 export const CONTENTS_NODE = -1;
