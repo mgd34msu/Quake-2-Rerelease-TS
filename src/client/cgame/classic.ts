@@ -52,5 +52,28 @@ export function GetClassicCgameAPI(imports: CgameImports): CgameExports {
     TouchPics() {
       for (let i = 0; i < 2; i++) for (let j = 0; j < 11; j++) imports.Draw_RegisterPic(sb_nums[i][j]);
     },
+
+    // cgame_classic.c only stubs GetOwnedWeaponWheelWeapons (always 0,
+    // CGC_GetOwnedWeaponWheelWeapons) -- the other three wheel accessors
+    // aren't part of the real classic cgame's export table at all; this
+    // port's CgameExports interface is narrower than KexCgameExports but
+    // still requires every implementer to provide the same members, so
+    // these are harmless stubs. In practice cl_wheel.ts's logic never opens
+    // the kex wheel/carousel while the classic cgame is active (gated by
+    // src/client/cl_input.ts's cl_weapnext/cl_weapprev dispatch on
+    // CG_GetActiveCgameKind() === "kex"), so these are never actually
+    // reached during real play.
+    GetOwnedWeaponWheelWeapons() {
+      return 0;
+    },
+    GetWeaponWheelAmmoCount() {
+      return -1; // -1 == "unlimited/untracked", cl_wheel.ts's own has_ammo convention
+    },
+    GetPowerupWheelCount() {
+      return 0;
+    },
+    GetActiveWeaponWheelWeapon() {
+      return -1;
+    },
   };
 }

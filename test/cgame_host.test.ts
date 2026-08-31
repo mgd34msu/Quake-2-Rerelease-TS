@@ -36,6 +36,10 @@ describe("cgame host", () => {
         called = true;
       },
       TouchPics() {},
+      GetOwnedWeaponWheelWeapons: () => 0,
+      GetWeaponWheelAmmoCount: () => -1,
+      GetPowerupWheelCount: () => 0,
+      GetActiveWeaponWheelWeapon: () => -1,
     };
 
     CG_SetActiveCgame(fake);
@@ -66,6 +70,10 @@ describe("cgame host", () => {
         classic.DrawHUD(playernum, ps, data);
       },
       TouchPics: classic.TouchPics,
+      GetOwnedWeaponWheelWeapons: classic.GetOwnedWeaponWheelWeapons,
+      GetWeaponWheelAmmoCount: classic.GetWeaponWheelAmmoCount,
+      GetPowerupWheelCount: classic.GetPowerupWheelCount,
+      GetActiveWeaponWheelWeapon: classic.GetActiveWeaponWheelWeapon,
     });
 
     expect(() => CG_DrawHUD()).not.toThrow();

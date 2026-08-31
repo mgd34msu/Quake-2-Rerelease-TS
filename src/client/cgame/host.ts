@@ -52,6 +52,7 @@ import { viddef } from "../vid";
 import { GetClassicCgameAPI } from "./classic";
 import { GetCGameAPI as GetKexCgameAPI } from "../../kexgame/cgame/cg_main";
 import { ParseKfont, SCR_KFontLookup, type KfontT } from "./kfont";
+import { CL_Wheel_Precache } from "../cl_wheel";
 
 // ---------------------------------------------------------------------------
 // Fallback text metrics (kfont-less path) -- see the SCR_DrawFontString /
@@ -663,12 +664,25 @@ export interface ClassicHudDataT {
 // concern unrelated to either cgame's own layout/HUD data) stays in
 // SCR_TouchPics itself, matching that file's own note that splitting sb_nums
 // out from under crosshair-only SCOPE would leave no behavioral benefit.
+// GetOwnedWeaponWheelWeapons/GetWeaponWheelAmmoCount/GetPowerupWheelCount/
+// GetActiveWeaponWheelWeapon -- KexCgameExports' own wheel-data accessors
+// (kexapi/game.ts), added to this narrower interface for
+// src/client/cl_wheel.ts (the weapon-wheel/carousel client layer, wired to
+// the active cgame exactly like DrawHUD is). Signatures take this port's
+// classic PlayerStateT (not KexPlayerStateT) for the same reason DrawHUD's
+// own `ps` parameter does: CgameExports is the engine-facing shape, and the
+// kex adapter below (GetKexCgameAsClassicShape) is what runs
+// kexPlayerStateViewFromClassic before forwarding into the real kex cgame.
 export interface CgameExports {
   apiversion: number;
   Init(): void;
   Shutdown(): void;
   DrawHUD(playernum: number, ps: PlayerStateT, data: ClassicHudDataT): void;
   TouchPics(): void;
+  GetOwnedWeaponWheelWeapons(ps: PlayerStateT): number;
+  GetWeaponWheelAmmoCount(ps: PlayerStateT, ammoIndex: number): number;
+  GetPowerupWheelCount(ps: PlayerStateT, powerupIndex: number): number;
+  GetActiveWeaponWheelWeapon(ps: PlayerStateT): number;
 }
 
 // Own versioning for this minimal seam -- not yet KexCgameExports.apiversion
@@ -854,6 +868,10 @@ function GetKexCgameAsClassicShape(imports: CgameImports): CgameExports {
       kex.DrawHUD(0, kexServerDataViewFromClassic(data), hud_vrect, hud_vrect, 1, playernum, kexPlayerStateViewFromClassic(ps));
     },
     TouchPics: kex.TouchPics,
+    GetOwnedWeaponWheelWeapons: (ps) => kex.GetOwnedWeaponWheelWeapons(kexPlayerStateViewFromClassic(ps)),
+    GetWeaponWheelAmmoCount: (ps, ammoIndex) => kex.GetWeaponWheelAmmoCount(kexPlayerStateViewFromClassic(ps), ammoIndex),
+    GetPowerupWheelCount: (ps, powerupIndex) => kex.GetPowerupWheelCount(kexPlayerStateViewFromClassic(ps), powerupIndex),
+    GetActiveWeaponWheelWeapon: (ps) => kex.GetActiveWeaponWheelWeapon(kexPlayerStateViewFromClassic(ps)),
   };
 }
 
@@ -950,6 +968,12 @@ export function CG_TouchPics(): void {
   // rather than needing a true one-shot init hook: this call and every
   // draw/measure call below it are equally safe to trigger the real load).
   ensureKfont();
+  // q2repro's precache.c calls CL_Wheel_Precache() from its own per-level
+  // asset-touch chain, alongside the rest of TouchPics' pic registrations --
+  // this is the closest counterpart this port has to that call site (there
+  // is no separate precache.ts in this port; see cl_wheel.ts's own file
+  // header for why it has no CL_ParseConfigString-time hook either).
+  CL_Wheel_Precache();
 }
 
 // Exposed for test/cgame_activation.test.ts's ps-view/server-data conversion

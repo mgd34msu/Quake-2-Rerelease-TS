@@ -59,6 +59,7 @@ import { V_RenderView } from "./cl_view";
 import { M_Draw } from "./menu";
 import type { EntityT } from "./ref";
 import { CG_DrawHUD, CG_TouchPics } from "./cgame/host";
+import { CL_Carousel_Draw, CL_Wheel_Draw } from "./cl_wheel";
 
 function atof(s: string): number {
   const n = Number.parseFloat(s);
@@ -366,7 +367,9 @@ SCR_Init
 export function SCR_Init(): void {
   setScrViewsize(Cvar_Get("viewsize", "100", CVAR_ARCHIVE));
   scr_conspeed = Cvar_Get("scr_conspeed", "3", 0);
-  scr_showturtle = Cvar_Get("scr_showturtle", "0", 0);
+  // q2repro src/client/screen.c:1487 defaults scr_showturtle to "1"
+  // (cvar-parity fix).
+  scr_showturtle = Cvar_Get("scr_showturtle", "1", 0);
   scr_showpause = Cvar_Get("scr_showpause", "1", 0);
   scr_centertime = Cvar_Get("scr_centertime", "2.5", 0);
   scr_printspeed = Cvar_Get("scr_printspeed", "8", 0);
@@ -377,6 +380,49 @@ export function SCR_Init(): void {
   scr_graphscale = Cvar_Get("graphscale", "1", 0);
   scr_graphshift = Cvar_Get("graphshift", "0", 0);
   scr_drawall = Cvar_Get("scr_drawall", "0", 0);
+
+  // --- cvar-parity audit: remaining src/client/screen.c cvars ---
+  // None of the HUD features these gate (chat-message overlay, per-channel
+  // colored/scalable crosshair, always-on-screen network-lag meter, hit
+  // markers, damage-direction indicators, point-of-interest markers,
+  // stats/pmove debug overlays) exist anywhere in this port's client --
+  // confirmed by grepping src/client/*.ts for their behavior, not just
+  // their cvar names. All registered, consumer unported.
+  Cvar_Get("scr_demobar", "1", 0); // screen.c:1447
+  // scr_font/scr_alpha are also registered in q2repro's src/client/cgame.c
+  // (:69-70, same defaults) for the cgame API's own HUD drawing; this port
+  // registers them once here.
+  Cvar_Get("scr_font", "conchars", 0); // screen.c:1448, cgame.c:70
+  Cvar_Get("scr_scale", "0", CVAR_ARCHIVE); // screen.c:1450
+  Cvar_Get("scr_chathud", "0", CVAR_ARCHIVE); // screen.c:1462
+  Cvar_Get("scr_chathud_lines", "4", CVAR_ARCHIVE); // screen.c:1463
+  Cvar_Get("scr_chathud_time", "0", CVAR_ARCHIVE); // screen.c:1464
+  Cvar_Get("scr_chathud_x", "8", CVAR_ARCHIVE); // screen.c:1467
+  Cvar_Get("scr_chathud_y", "-64", CVAR_ARCHIVE); // screen.c:1468
+  Cvar_Get("ch_health", "0", 0); // screen.c:1470
+  Cvar_Get("ch_red", "1", 0); // screen.c:1472
+  Cvar_Get("ch_green", "1", 0); // screen.c:1474
+  Cvar_Get("ch_blue", "1", 0); // screen.c:1476
+  Cvar_Get("ch_alpha", "1", 0); // screen.c:1478
+  Cvar_Get("ch_scale", "1", 0); // screen.c:1481
+  Cvar_Get("ch_x", "0", 0); // screen.c:1483
+  Cvar_Get("ch_y", "0", 0); // screen.c:1484
+  Cvar_Get("scr_draw2d", "2", 0); // screen.c:1486
+  Cvar_Get("scr_lag_x", "-1", 0); // screen.c:1488
+  Cvar_Get("scr_lag_y", "-1", 0); // screen.c:1489
+  Cvar_Get("scr_lag_draw", "0", 0); // screen.c:1490
+  Cvar_Get("scr_lag_min", "0", 0); // screen.c:1491
+  Cvar_Get("scr_lag_max", "200", 0); // screen.c:1492
+  Cvar_Get("scr_alpha", "1", 0); // screen.c:1493, cgame.c:69
+  Cvar_Get("scr_showstats", "0", 0); // screen.c:1495
+  Cvar_Get("scr_showpmove", "0", 0); // screen.c:1496
+  Cvar_Get("scr_hit_marker_time", "500", 0); // screen.c:1499
+  Cvar_Get("scr_damage_indicators", "1", 0); // screen.c:1501
+  Cvar_Get("scr_damage_indicator_time", "1000", 0); // screen.c:1502
+  Cvar_Get("scr_pois", "1", 0); // screen.c:1504
+  Cvar_Get("scr_poi_edge_frac", "0.15", 0); // screen.c:1505
+  Cvar_Get("scr_poi_max_scale", "1.0", 0); // screen.c:1506
+  Cvar_Get("scr_safe_zone", "0.02", 0); // screen.c:1507
 
   //
   // register our commands
@@ -803,6 +849,13 @@ export function SCR_UpdateScreen(): void {
       // files for the (now real, no longer pass-through) implementation.
       // ARCHITECTURE.md phase 4 ("cgame host, two built-in cgames").
       CG_DrawHUD();
+
+      // q2repro's screen.c:2019-2023 draws the carousel/wheel right after
+      // cgame->DrawHUD, before SCR_DrawNet -- same placement here (see
+      // cl_wheel.ts for the port itself; this is its "cl_scrn draw
+      // hookup").
+      CL_Carousel_Draw();
+      CL_Wheel_Draw();
 
       SCR_DrawNet();
       SCR_CheckDrawCenterString();

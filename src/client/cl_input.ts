@@ -20,7 +20,7 @@
 // platform mapping they live in src/platform/sdl.ts and are re-exported
 // here under the names client.h declares.
 
-import { Cmd_Argv, Cmd_AddCommand } from "../qcommon/cmd";
+import { Cmd_Argv, Cmd_AddCommand, Cbuf_AddText } from "../qcommon/cmd";
 import { Cvar_Get, Cvar_Userinfo, userinfo_modified, SetUserinfoModified } from "../qcommon/cvar";
 import { Com_Printf, COM_BlockSequenceCRCByte } from "../qcommon/common";
 import { Netchan_Transmit } from "../qcommon/net_chan";
@@ -34,6 +34,9 @@ import { cl, cls, ConnstateT, KeydestT, KbuttonT, clCvars, in_klook, in_strafe, 
 import { anykeydown } from "./keys";
 import { CL_FixUpGender } from "./cl_main";
 import { SCR_FinishCinematic } from "./cl_cin";
+import { ButtonT } from "../kexapi/game";
+import { CG_GetActiveCgameKind } from "./cgame/host";
+import { CL_Wheel_Init, CL_Wheel_Open, CL_Wheel_Close, CL_Wheel_ClearInput, CL_Carousel_ClearInput, CL_Carousel_Input, CL_Wheel_WeapNext, CL_Wheel_WeapPrev } from "./cl_wheel";
 
 /*
 ===============================================================================
@@ -79,6 +82,9 @@ export const in_use = new KbuttonT();
 export const in_attack = new KbuttonT();
 export const in_up = new KbuttonT();
 export const in_down = new KbuttonT();
+
+// Kex stuff (input.c:245's own comment) -- q2repro's `in_holster`.
+export const in_holster = new KbuttonT();
 
 let in_impulse = 0;
 
@@ -238,6 +244,61 @@ function IN_Impulse(): void {
   in_impulse = atoi(Cmd_Argv(1));
 }
 
+// ---------------------------------------------------------------------------
+// Kex weapon-wheel input commands (input.c:431-451, 737-744's `c_input[]`
+// table) -- the actual fix for the reported defect (see cl_wheel.ts's own
+// file header for the full citation). Every one of these eight commands
+// used to be unregistered in this client, so scrolling the mouse wheel or
+// pressing the default holster/wheel binds fell through
+// Cmd_ForwardToServer as an unrecognized command and chat-spammed the
+// server. Registered below in CL_InitInput.
+// ---------------------------------------------------------------------------
+
+function IN_HolsterDown(): void {
+  KeyDown(in_holster);
+}
+function IN_HolsterUp(): void {
+  KeyUp(in_holster);
+}
+
+function IN_WheelDown(): void {
+  CL_Wheel_Open(false);
+}
+function IN_WheelUp(): void {
+  CL_Wheel_Close(true);
+}
+function IN_Wheel2Down(): void {
+  CL_Wheel_Open(true);
+}
+function IN_Wheel2Up(): void {
+  CL_Wheel_Close(true);
+}
+
+// IN_WeapNext/IN_WeapPrev (input.c:436-452): q2repro branches on
+// `cl.game_api != Q2PROTO_GAME_RERELEASE` (forward the legacy "weapnext"/
+// "weapprev" text command to the server for non-kex connections, since
+// older/other game modules implement that ClientCommand themselves) vs. the
+// real kex wheel cycle. This port has no `cl.game_api` field, but
+// CG_GetActiveCgameKind() (host.ts) already tracks the exact same
+// classic-vs-kex distinction off the same CL_ParseServerData protocol
+// switch (see cgame_activation.test.ts) -- reused here instead of adding a
+// second, redundant piece of state.
+function IN_WeapNext(): void {
+  if (CG_GetActiveCgameKind() !== "kex") {
+    Cbuf_AddText("weapnext\n");
+    return;
+  }
+  CL_Wheel_WeapNext();
+}
+
+function IN_WeapPrev(): void {
+  if (CG_GetActiveCgameKind() !== "kex") {
+    Cbuf_AddText("weapprev\n");
+    return;
+  }
+  CL_Wheel_WeapPrev();
+}
+
 /*
 ===============
 CL_KeyState
@@ -391,11 +452,19 @@ function CL_FinishMove(cmd: UsercmdT): void {
   //
   // figure button bits
   //
-  if (in_attack.state & 3) cmd.buttons |= BUTTON_ATTACK;
+  // input.c:822-823's own weapon_lock_time gate (set by
+  // CL_Carousel_Input/wheel.c:202 right after a carousel weapon switch, to
+  // briefly suppress +attack so releasing the mouse wheel over the carousel
+  // doesn't also fire the newly-selected weapon).
+  if (in_attack.state & 3 && cl.weapon_lock_time <= cl.time) cmd.buttons |= BUTTON_ATTACK;
   in_attack.state &= ~2;
 
   if (in_use.state & 3) cmd.buttons |= BUTTON_USE;
   in_use.state &= ~2;
+
+  // input.c:822-823's own `in_holster` -- Kex stuff.
+  if (in_holster.state & 3) cmd.buttons |= ButtonT.BUTTON_HOLSTER;
+  in_holster.state &= ~2;
 
   if (anykeydown && cls.key_dest === KeydestT.key_game) cmd.buttons |= BUTTON_ANY;
 
@@ -433,6 +502,11 @@ export function CL_CreateCmd(): UsercmdT {
   IN_Move(cmd);
 
   CL_FinishMove(cmd);
+
+  // input.c's CL_FinalizeCmd: "update wheels before we save it off" --
+  // mutates `cmd.buttons` (BUTTON_HOLSTER) and may dispatch the eventual
+  // `use_index_only` server command (cl_wheel.ts's CL_Carousel_Input).
+  CL_Carousel_Input(cmd);
 
   old_sys_frame_time = sys_frame_time;
 
@@ -483,7 +557,25 @@ export function CL_InitInput(): void {
   Cmd_AddCommand("+klook", IN_KLookDown);
   Cmd_AddCommand("-klook", IN_KLookUp);
 
+  // Kex stuff (input.c:736-744's `c_input[]` table) -- see cl_wheel.ts's
+  // file header for why registering these (rather than leaving them
+  // unrecognized) is the actual bug fix this unit exists for.
+  Cmd_AddCommand("+holster", IN_HolsterDown);
+  Cmd_AddCommand("-holster", IN_HolsterUp);
+  Cmd_AddCommand("+wheel", IN_WheelDown);
+  Cmd_AddCommand("-wheel", IN_WheelUp);
+  Cmd_AddCommand("+wheel2", IN_Wheel2Down);
+  Cmd_AddCommand("-wheel2", IN_Wheel2Up);
+  Cmd_AddCommand("cl_weapnext", IN_WeapNext);
+  Cmd_AddCommand("cl_weapprev", IN_WeapPrev);
+
   cl_nodelta = Cvar_Get("cl_nodelta", "0", 0);
+
+  // wheel.c's own CL_Wheel_Init (wc_*/ww_* cvar registration) -- called from
+  // here rather than a q2repro-style dedicated call site in cl_main.ts's
+  // CL_InitLocal; see cl_wheel.ts's own doc comment on CL_Wheel_Init for why
+  // (cl_main.ts is under concurrent edit by another unit).
+  CL_Wheel_Init();
 }
 
 /*
@@ -534,9 +626,17 @@ export function CL_SendCmd(): void {
   // begin a client move command
   MSG_WriteByte(buf, ClcOpsT.clc_move);
 
-  // save the position for a checksum byte
+  // save the position for a checksum byte. VANILLA ONLY: R1Q2 (35), Q2PRO
+  // (36) and q2repro (1038) all dropped id's leading sequence-checksum byte
+  // from clc_move -- see codec.ts's clcMoveHasChecksum doc comment for the
+  // three q2proto read paths. Writing it unconditionally shifted every later
+  // field by one byte for those protocols, which is exactly how the self-play
+  // interop cells failed: a full handshake, precache and spawn followed by a
+  // single garbage-lastframe move and an immediate
+  // "SV_ReadClientMessage: unknown command char" drop.
+  const hasChecksum = cls.codec.clcMoveHasChecksum === true;
   const checksumIndex = buf.cursize;
-  MSG_WriteByte(buf, 0);
+  if (hasChecksum) MSG_WriteByte(buf, 0);
 
   // let the server know what the last frame we
   // got was, so the next message can be delta compressed
@@ -563,10 +663,18 @@ export function CL_SendCmd(): void {
   cls.codec.writeDeltaUsercmd(buf, oldcmd, cmd);
 
   // calculate a checksum over the move commands
-  buf.data[checksumIndex] = COM_BlockSequenceCRCByte(buf.data.subarray(checksumIndex + 1, buf.cursize), buf.cursize - checksumIndex - 1, cls.netchan.outgoing_sequence);
+  if (hasChecksum) {
+    buf.data[checksumIndex] = COM_BlockSequenceCRCByte(buf.data.subarray(checksumIndex + 1, buf.cursize), buf.cursize - checksumIndex - 1, cls.netchan.outgoing_sequence);
+  }
 
   //
   // deliver the message
   //
   Netchan_Transmit(cls.netchan, buf.cursize, buf.data);
+
+  // input.c:1276-1279: latches the carousel/wheel CLOSING -> CLOSED
+  // transition once the packet carrying the last `use_index_only` has
+  // actually gone out, not merely once a frame has been built.
+  CL_Carousel_ClearInput();
+  CL_Wheel_ClearInput();
 }

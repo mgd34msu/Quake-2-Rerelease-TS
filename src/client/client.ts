@@ -127,6 +127,161 @@ export function setNumClWeaponmodels(v: number): void {
 
 export const CMD_BACKUP = 64; // allow a lot of command backups for very fast systems
 
+// ---------------------------------------------------------------------------
+// Weapon-wheel/carousel state -- q2repro's src/client/client.h:157-207,
+// 404-447 (cl_wheel_icon_t, cl_wheel_weapon_t, cl_wheel_ammo_t,
+// cl_wheel_powerup_t, cl_wheel_state_t, cl_wheel_slot_t, and the client_
+// state_t.wheel_data/carousel/wheel members). Real logic lives in
+// src/client/cl_wheel.ts (wheel.c's port); these are just the plain-data
+// shapes + the `cl.wheel_data`/`cl.carousel`/`cl.wheel` fields themselves,
+// placed here (not in cl_wheel.ts) so `ClStateT.clear()` below can reset
+// them the same field-by-field way it resets every other `cl.*` member --
+// matching client.h's "the client_state_t structure is wiped completely at
+// every server map change" comment on the struct itself. Plain interfaces
+// (not classes) throughout: no runtime hoisting concerns, and every field
+// is a number/string/boolean/array -- no nested class identity to preserve.
+// ---------------------------------------------------------------------------
+
+// cl_wheel_icon_t (client.h:157-161). `wheel`/`selected` are DRAW-TIME PIC
+// PATHS in this port, not qhandle_t handles: RefExports draws pics by name
+// (ref.ts's DrawPic/DrawStretchPic/DrawColorPic all take a `name: string`,
+// there is no "resolve to a handle up front" step for 2D pics anywhere else
+// in this port -- see host.ts's kfont/SCR_DrawBind code for the identical
+// convention). `main` (the plain non-wheel icon, used as CL_LoadWheelIcons'
+// own fallback-of-last-resort) is just the raw CS_IMAGES configstring text
+// for the icon, no "wheel/" prefix -- see cl_wheel.ts's loadWheelIcon.
+export interface WheelIconT {
+  main: string;
+  wheel: string;
+  selected: string;
+}
+
+// cl_wheel_weapon_t (client.h:163-172).
+export interface WheelWeaponT {
+  item_index: number;
+  icons: WheelIconT;
+  ammo_index: number; // -1 == no ammo requirement
+  min_ammo: number;
+  sort_id: number;
+  quantity_warn: number;
+  is_powerup: boolean;
+  can_drop: boolean;
+}
+
+// cl_wheel_ammo_t (client.h:174-177).
+export interface WheelAmmoT {
+  item_index: number;
+  icons: WheelIconT;
+}
+
+// cl_wheel_powerup_t (client.h:179-186).
+export interface WheelPowerupT {
+  item_index: number;
+  icons: WheelIconT;
+  sort_id: number;
+  ammo_index: number;
+  is_toggle: boolean;
+  can_drop: boolean;
+}
+
+// client_state_t.wheel_data (client.h:404-414): the static per-item tables
+// parsed from the CS_WHEEL_WEAPONS/CS_WHEEL_AMMO/CS_WHEEL_POWERUPS
+// configstring blocks (cs_remap.ts's csr.wheelweapons/wheelammo/
+// wheelpowerups). cl_wheel.ts's own file header documents where the parse
+// happens (lazily, from cl.configstrings -- see that file for why there is
+// no CL_ParseConfigString-time hook in this port).
+export interface WheelDataT {
+  weapons: WheelWeaponT[];
+  num_weapons: number;
+  ammo: WheelAmmoT[];
+  num_ammo: number;
+  powerups: WheelPowerupT[];
+  num_powerups: number;
+}
+
+export function newWheelDataT(): WheelDataT {
+  return { weapons: [], num_weapons: 0, ammo: [], num_ammo: 0, powerups: [], num_powerups: 0 };
+}
+
+// cl_wheel_state_t (client.h:188-192).
+export enum WheelStateT {
+  WHEEL_CLOSED = 0, // release holster
+  WHEEL_CLOSING = 1, // do not draw or process, but keep holster held
+  WHEEL_OPEN = 2, // draw & process + holster
+}
+
+// client_state_t.carousel's anonymous slot struct (client.h:422-426).
+export interface CarouselSlotT {
+  has_ammo: boolean;
+  data_id: number;
+  item_index: number;
+}
+
+// client_state_t.carousel (client.h:417-428).
+export interface CarouselT {
+  state: WheelStateT;
+  close_time: number; // cls.realtime-scale timestamp (com_localTime3 in the C source)
+  selected: number; // item_index of the selected slot, -1 == none
+  slots: CarouselSlotT[];
+  num_slots: number;
+}
+
+export function newCarouselT(): CarouselT {
+  return { state: WheelStateT.WHEEL_CLOSED, close_time: 0, selected: -1, slots: [], num_slots: 0 };
+}
+
+// cl_wheel_slot_t (client.h:194-207). `dir` is a plain 2-tuple (this port's
+// Vec2-shaped state elsewhere uses plain number[] too -- no shared Vec2
+// class exists the way shared/math.ts's Vec3 does).
+export interface WheelSlotT {
+  has_item: boolean;
+  is_powerup: boolean;
+  has_ammo: boolean;
+  data_id: number;
+  item_index: number;
+  sort_id: number;
+  icons: WheelIconT | null;
+  // cached per-frame data (wheel.c's CL_Wheel_Update)
+  angle: number;
+  dir: [number, number];
+  dot: number;
+}
+
+// client_state_t.wheel (client.h:430-447).
+export interface WheelT {
+  state: WheelStateT;
+  position: [number, number];
+  distance: number;
+  dir: [number, number];
+  is_powerup_wheel: boolean;
+  timer: number;
+  timescale: number;
+  selected: number; // slot INDEX (not item_index -- matches wheel.c's own convention), -1 == none
+  deselect_time: number;
+  slots: WheelSlotT[];
+  num_slots: number;
+  slice_deg: number;
+  slice_sin: number;
+}
+
+export function newWheelT(): WheelT {
+  return {
+    state: WheelStateT.WHEEL_CLOSED,
+    position: [0, 0],
+    distance: 0,
+    dir: [0, 0],
+    is_powerup_wheel: false,
+    timer: 0,
+    timescale: 1,
+    selected: -1,
+    deselect_time: 0,
+    slots: [],
+    num_slots: 0,
+    slice_deg: 0,
+    slice_sin: 0,
+  };
+}
+
 //
 // the client_state_t structure is wiped completely at every server map
 // change -- ported as ClStateT (see naming ruling above)
@@ -227,6 +382,19 @@ export class ClStateT {
   // carry over an undersized array).
   shadowdefs: ShadowLightDefT[] = Array.from({ length: MAX_SHADOW_LIGHTS_WIDE }, () => new ShadowLightDefT());
 
+  // client_state_t.wheel_data/carousel/wheel (client.h:404-447) -- see the
+  // WheelDataT/CarouselT/WheelT doc comments above this class.
+  wheel_data: WheelDataT = newWheelDataT();
+  carousel: CarouselT = newCarouselT();
+  wheel: WheelT = newWheelT();
+
+  // client_state_t.weapon_lock_time (client.h, set by CL_Carousel_Input --
+  // wheel.c:202) -- briefly suppresses +attack right after a carousel weapon
+  // switch. `cl.time`-scale (paused-game-aware), NOT cls.realtime-scale like
+  // carousel.close_time/wheel timers above -- matches wheel.c's own use of
+  // `cl.time` (not com_localTime3) for this one field.
+  weapon_lock_time = 0;
+
   // mirrors `memset(&cl, 0, sizeof(client_state_t))` (CL_ClearState)
   clear(): void {
     this.timeoutcount = 0;
@@ -274,6 +442,10 @@ export class ClStateT {
     this.shadowdefs = Array.from({ length: MAX_SHADOW_LIGHTS_WIDE }, () => new ShadowLightDefT());
     this.clientinfo = Array.from({ length: MAX_CLIENTS }, () => new ClientinfoT());
     this.baseclientinfo = new ClientinfoT();
+    this.wheel_data = newWheelDataT();
+    this.carousel = newCarouselT();
+    this.wheel = newWheelT();
+    this.weapon_lock_time = 0;
   }
 }
 
