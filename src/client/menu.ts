@@ -1575,6 +1575,11 @@ const s_content_list = new MenulistS();
 const s_content_ruleset_list = new MenulistS();
 const s_content_start_list = new MenulistS();
 const s_content_skill_list = new MenulistS();
+// Owner request (2026-08-31): a coop on/off toggle on the New Game screen
+// (QoL -- reaching coop otherwise means the multiplayer start-server
+// screen or console cvars). Default off; "begin" always forces
+// deathmatch 0 either way (PerformLaunch).
+const s_content_coop_list = new MenulistS();
 const s_content_begin_action = new MenuactionS();
 
 // Index-aligned with the currently displayed spincontrol itemnames --
@@ -1655,7 +1660,7 @@ export function BeginContentFunc(): void {
   const bsp = content_units[s_content_start_list.curvalue]?.bsp ?? plan.map;
   const skill = def.needsSkillSelect ? s_content_skill_list.curvalue : null;
 
-  PerformLaunch(plan, bsp, skill);
+  PerformLaunch(plan, bsp, skill, s_content_coop_list.curvalue === 1);
   M_ForceMenuOff();
 }
 
@@ -1689,10 +1694,16 @@ function Content_MenuInit(): void {
   s_content_skill_list.generic.name = "skill";
   s_content_skill_list.itemnames = ["easy", "medium", "hard"];
 
+  s_content_coop_list.generic.type = MTYPE_SPINCONTROL;
+  s_content_coop_list.generic.x = 0;
+  s_content_coop_list.generic.y = 80;
+  s_content_coop_list.generic.name = "coop";
+  s_content_coop_list.itemnames = ["no", "yes"];
+
   s_content_begin_action.generic.type = MTYPE_ACTION;
   s_content_begin_action.generic.flags = QMF_LEFT_JUSTIFY;
   s_content_begin_action.generic.x = 24;
-  s_content_begin_action.generic.y = 80;
+  s_content_begin_action.generic.y = 100;
   s_content_begin_action.generic.name = "begin";
   s_content_begin_action.generic.callback = BeginContentFunc;
 
@@ -1700,6 +1711,7 @@ function Content_MenuInit(): void {
   Menu_AddItem(s_content_menu, s_content_ruleset_list);
   Menu_AddItem(s_content_menu, s_content_start_list);
   Menu_AddItem(s_content_menu, s_content_skill_list);
+  Menu_AddItem(s_content_menu, s_content_coop_list);
   Menu_AddItem(s_content_menu, s_content_begin_action);
 
   Menu_Center(s_content_menu);

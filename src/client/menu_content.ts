@@ -87,7 +87,7 @@
 // episode instead of always starting at unit 1 -- but the guaranteed
 // default (this table) never depends on that data being present.
 
-import { Cvar_Set, Cvar_ForceSet } from "../qcommon/cvar";
+import { Cvar_Set, Cvar_ForceSet, Cvar_VariableValue } from "../qcommon/cvar";
 import { Cbuf_AddText } from "../qcommon/cmd";
 import { MapDB_UnitsForEpisode, type MapdbUnitEntry } from "../qcommon/mapdb";
 
@@ -242,9 +242,16 @@ start point, when the caller offers one); pass plan.map to start at the
 default first unit.
 ===============
 */
-export function PerformLaunch(plan: LaunchPlan, bsp: string, skill: number | null): void {
+export function PerformLaunch(plan: LaunchPlan, bsp: string, skill: number | null, coop = false): void {
+  // New Game NEVER starts deathmatch, coop or not. `coop` is the New Game
+  // screen's QoL toggle (owner request 2026-08-31); when enabled and
+  // maxclients is still the SP default of 1, widen it so the listen
+  // server can actually accept a second player -- same guard vanilla's
+  // start-server screen applies (m_menu.c StartServerActionFunc: coop
+  // with maxclients <= 1 gets 4).
   Cvar_Set("deathmatch", "0");
-  Cvar_Set("coop", "0");
+  Cvar_Set("coop", coop ? "1" : "0");
+  if (coop && Cvar_VariableValue("maxclients") <= 1) Cvar_Set("maxclients", "4");
   Cvar_Set("gamerules", "0");
   Cvar_Set("game", plan.game);
 

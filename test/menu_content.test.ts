@@ -51,7 +51,7 @@ import { Cvar_ForceSet, Cvar_VariableString } from "../src/qcommon/cvar";
 import { Com_SetServerState } from "../src/qcommon/common";
 import { FS_InitFilesystem } from "../src/qcommon/files";
 import { MapDB_Init, MapDB_Get, MapDB_Shutdown, MapDB_ResolveBsp, MapDB_UnitsForEpisode } from "../src/qcommon/mapdb";
-import { CONTENT_LIST, RULESETS, AvailableRulesetsFor, ResolveLaunch } from "../src/client/menu_content";
+import { CONTENT_LIST, RULESETS, AvailableRulesetsFor, ResolveLaunch, PerformLaunch, type LaunchPlan } from "../src/client/menu_content";
 import { M_Menu_Game_f, M_Menu_Content_f, BeginContentFunc } from "../src/client/menu";
 import { cls, KeydestT } from "../src/client/client";
 
@@ -273,5 +273,38 @@ describe("menu.ts -- Content & Rules screen wired into the Game menu", () => {
     // baseq2 needsSkillSelect: true, skill spincontrol curvalue 0 -> "easy"
     expect(Cvar_VariableString("skill")).toBe("0");
     expect(Cvar_VariableString("g_start_items")).toBe("");
+  });
+});
+
+describe("PerformLaunch -- game-mode cvars (New Game never starts deathmatch)", () => {
+  // Regression for Mike's 2026-08-31 report: a New Game menu start must
+  // force deathmatch off no matter what a previous session left behind,
+  // and the coop QoL toggle must start coop (widening maxclients from the
+  // SP default of 1, vanilla m_menu.c StartServerActionFunc precedent)
+  // without ever enabling deathmatch.
+  const plan: LaunchPlan = { game: "", map: "base1", startItems: "" };
+
+  test("coop=false forces deathmatch 0 and coop 0 over stale values", () => {
+    Cvar_ForceSet("deathmatch", "1");
+    Cvar_ForceSet("coop", "1");
+    PerformLaunch(plan, "base1", 1, false);
+    expect(Cvar_VariableString("deathmatch")).toBe("0");
+    expect(Cvar_VariableString("coop")).toBe("0");
+  });
+
+  test("coop=true starts coop, not deathmatch, and widens maxclients from 1", () => {
+    Cvar_ForceSet("deathmatch", "1");
+    Cvar_ForceSet("coop", "0");
+    Cvar_ForceSet("maxclients", "1");
+    PerformLaunch(plan, "base1", 1, true);
+    expect(Cvar_VariableString("deathmatch")).toBe("0");
+    expect(Cvar_VariableString("coop")).toBe("1");
+    expect(Cvar_VariableString("maxclients")).toBe("4");
+  });
+
+  test("coop=true respects an already-widened maxclients", () => {
+    Cvar_ForceSet("maxclients", "8");
+    PerformLaunch(plan, "base1", null, true);
+    expect(Cvar_VariableString("maxclients")).toBe("8");
   });
 });
