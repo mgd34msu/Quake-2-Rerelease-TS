@@ -87,6 +87,16 @@ export const in_down = new KbuttonT();
 // Kex stuff (input.c:245's own comment) -- q2repro's `in_holster`.
 export const in_holster = new KbuttonT();
 
+// KEX voice-chat key (rerelease default.cfg's `bind v +pushtotalk`) --
+// state-tracked, no consumer; see the registration comment.
+export const in_pushtotalk = new KbuttonT();
+function IN_PushToTalkDown(): void {
+  KeyDown(in_pushtotalk);
+}
+function IN_PushToTalkUp(): void {
+  KeyUp(in_pushtotalk);
+}
+
 let in_impulse = 0;
 
 function atoi(s: string): number {
@@ -570,6 +580,16 @@ export function CL_InitInput(): void {
   // unrecognized) is the actual bug fix this unit exists for.
   Cmd_AddCommand("+holster", IN_HolsterDown);
   Cmd_AddCommand("-holster", IN_HolsterUp);
+  // The rerelease's own default.cfg ships `bind v +pushtotalk` (baseq2
+  // pak0.pak) -- the KEX engine's voice-chat key. The voice system itself is
+  // KEX-proprietary engine code with platform voice services behind it; no
+  // open engine (q2repro included) implements it, and q2repro prints
+  // "Unknown command" for this exact default binding. Registered as a real
+  // tracked kbutton so the shipped config binds cleanly and the pressed
+  // state exists for a future voice unit; consumer absent, ledgered for
+  // Mike's ruling.
+  Cmd_AddCommand("+pushtotalk", IN_PushToTalkDown);
+  Cmd_AddCommand("-pushtotalk", IN_PushToTalkUp);
   Cmd_AddCommand("+wheel", IN_WheelDown);
   Cmd_AddCommand("-wheel", IN_WheelUp);
   Cmd_AddCommand("+wheel2", IN_Wheel2Down);
