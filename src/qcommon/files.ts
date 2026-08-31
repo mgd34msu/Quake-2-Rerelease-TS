@@ -935,6 +935,32 @@ export function FS_ListFiles(findname: string): string[] | null {
   return list.length ? list : null;
 }
 
+// Lists every pack/zip ENTRY (relative name) across the whole search path
+// matching a glob pattern -- '*' crosses '/' (globToRegExp turns it into
+// '.*'), so "players/*" yields every nested entry under players/. No
+// vanilla counterpart (Sys_FindFirst walked the real filesystem only);
+// added because the rerelease ships the classic players/ model layout
+// INSIDE its pak, where FS_ListFiles's readdir walk cannot see it -- the
+// Player Setup menu was empty (and, before the FS_NextPath identity fix
+// above, frozen) on rerelease data.
+export function FS_ListPakFiles(findname: string): string[] {
+  const matcher = globToRegExp(findname);
+  const seen = new Set<string>();
+  for (let s = fs_searchpaths; s; s = s.next) {
+    if (s.kind === "pack") {
+      const pak = s.pack;
+      for (let i = 0; i < pak.numfiles; i++) {
+        if (matcher.test(pak.files[i].name)) seen.add(pak.files[i].name);
+      }
+    } else if (s.kind === "zip") {
+      for (const entry of s.zip.archive.entries) {
+        if (matcher.test(entry.name)) seen.add(entry.name);
+      }
+    }
+  }
+  return [...seen];
+}
+
 /*
 ** FS_Dir_f
 */
@@ -999,16 +1025,27 @@ distinct directory string).
 ================
 */
 export function FS_NextPath(prevpath: string | null): string | null {
-  if (prevpath === null) return fs_gamedir;
-
-  let prev = fs_gamedir;
+  // The C compares prevpath against fs_gamedir/s->filename by POINTER
+  // identity, so two paths with identical text are still distinct steps of
+  // the walk. A literal `===` on TS strings compares CONTENT -- and
+  // fs_gamedir's text always equals the game-dir searchpath's filename, so
+  // the walk returned the same entry forever and every do/while caller
+  // (PlayerConfig_ScanDirectories first) spun infinitely the moment its
+  // pattern matched nothing (found live: Player Setup froze the app on
+  // rerelease data, which has no loose players/ dirs). Rebuilding the walk
+  // as a DEDUPED ordered list makes each position unambiguous and the walk
+  // finite, preserving the C's observable sequence (rule 17: pointer
+  // identity is exactly the UB-class platform difference the razor covers).
+  const dirs: string[] = [fs_gamedir];
   for (let s = fs_searchpaths; s; s = s.next) {
     if (s.kind === "pack" || s.kind === "zip") continue;
-    if (prevpath === prev) return s.filename;
-    prev = s.filename;
+    if (!dirs.includes(s.filename)) dirs.push(s.filename);
   }
 
-  return null;
+  if (prevpath === null) return dirs[0];
+  const idx = dirs.indexOf(prevpath);
+  if (idx === -1 || idx + 1 >= dirs.length) return null;
+  return dirs[idx + 1];
 }
 
 /*

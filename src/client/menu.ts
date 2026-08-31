@@ -117,7 +117,7 @@ import {
   DF_NO_SPHERES,
 } from "../shared/q_shared";
 import { COM_Parse, type ComParseState } from "../shared/math";
-import { FS_Gamedir, FS_LoadFile, FS_FreeFile, FS_ListFiles, FS_NextPath, FS_ReadRawFile, Developer_searchpath } from "../qcommon/files";
+import { FS_Gamedir, FS_LoadFile, FS_FreeFile, FS_ListFiles, FS_ListPakFiles, FS_NextPath, FS_ReadRawFile, Developer_searchpath } from "../qcommon/files";
 import {
   MenuframeworkS,
   MenuactionS,
@@ -2758,9 +2758,30 @@ function ModelCallback(): void {
 // PlayerConfig_ScanDirectories: see file header for the deviation this
 // takes from Sys_FindFirst/SFF_SUBDIR-filtered FS_ListFiles, neither of
 // which this port's files.ts exposes.
+// Shared skin-pairing rule for both scan phases: a skin counts only when
+// its matching "_i" icon exists in the same list (the C's IconOfSkinExists
+// gate), and the returned names are extension-less basenames.
+function skinNamesFromPcxList(pcxnames: string[]): string[] {
+  const skinnames: string[] = [];
+  for (const pcx of pcxnames) {
+    if (pcx.endsWith("_i.pcx")) continue;
+
+    const dot = pcx.lastIndexOf(".");
+    const iconPath = (dot === -1 ? pcx : pcx.slice(0, dot)) + "_i.pcx";
+    if (!pcxnames.includes(iconPath)) continue;
+
+    const slash = pcx.lastIndexOf("/");
+    const base = slash === -1 ? pcx : pcx.slice(slash + 1);
+    const baseDot = base.lastIndexOf(".");
+    skinnames.push(baseDot === -1 ? base : base.slice(0, baseDot));
+  }
+  return skinnames;
+}
+
 function PlayerConfig_ScanDirectories(): boolean {
   s_pmi = [];
 
+  // Phase 1: loose directories on disk, the C's own walk.
   let dirnames: string[] | null = null;
   let path: string | null = null;
   do {
@@ -2768,32 +2789,47 @@ function PlayerConfig_ScanDirectories(): boolean {
     dirnames = FS_ListFiles(`${path}/players/*`);
   } while (!dirnames && path);
 
-  if (!dirnames) return false;
-
-  for (const dirpath of dirnames) {
+  for (const dirpath of dirnames ?? []) {
     if (!FS_LoadFile(`${dirpath}/tris.md2`)) continue;
 
     const pcxnames = FS_ListFiles(`${dirpath}/*.pcx`);
     if (!pcxnames) continue;
 
-    const skinnames: string[] = [];
-    for (const pcx of pcxnames) {
-      if (pcx.endsWith("_i.pcx")) continue;
-
-      const dot = pcx.lastIndexOf(".");
-      const iconPath = (dot === -1 ? pcx : pcx.slice(0, dot)) + "_i.pcx";
-      if (!pcxnames.includes(iconPath)) continue;
-
-      const slash = pcx.lastIndexOf("/");
-      const base = slash === -1 ? pcx : pcx.slice(slash + 1);
-      const baseDot = base.lastIndexOf(".");
-      skinnames.push(baseDot === -1 ? base : base.slice(0, baseDot));
-    }
-
+    const skinnames = skinNamesFromPcxList(pcxnames);
     if (skinnames.length === 0) continue;
 
     const slash = dirpath.lastIndexOf("/");
     const dirBase = slash === -1 ? dirpath : dirpath.slice(slash + 1);
+
+    s_pmi.push({
+      nskins: skinnames.length,
+      skindisplaynames: skinnames,
+      displayname: dirBase.slice(0, MAX_DISPLAYNAME - 1),
+      directory: dirBase,
+    });
+  }
+
+  // Phase 2 (no vanilla counterpart -- see FS_ListPakFiles's own comment):
+  // the rerelease ships the identical classic players/ layout (tris.md2 +
+  // .pcx skins + _i.pcx icons) INSIDE its pak, invisible to the readdir
+  // walk above, so Player Setup came up empty on retail rerelease data.
+  // Loose disk models of the same directory name win (classic override
+  // semantics).
+  const pakEntries = FS_ListPakFiles("players/*");
+  const byDir = new Map<string, string[]>();
+  for (const name of pakEntries) {
+    const parts = name.split("/");
+    if (parts.length < 3) continue;
+    const list = byDir.get(parts[1]);
+    if (list) list.push(name);
+    else byDir.set(parts[1], [name]);
+  }
+  for (const [dirBase, names] of byDir) {
+    if (s_pmi.some((p) => p.directory === dirBase)) continue;
+    if (!names.some((n) => n.toLowerCase() === `players/${dirBase}/tris.md2`.toLowerCase())) continue;
+
+    const skinnames = skinNamesFromPcxList(names.filter((n) => n.toLowerCase().endsWith(".pcx")));
+    if (skinnames.length === 0) continue;
 
     s_pmi.push({
       nskins: skinnames.length,

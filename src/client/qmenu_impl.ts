@@ -506,11 +506,21 @@ function Slider_Draw(s: MenusliderS): void {
   if (s.range < 0) s.range = 0;
   if (s.range > 1) s.range = 1;
 
-  DrawChar(s.generic.x + parent.x + RCOLUMN_OFFSET, s.generic.y + parent.y, 128);
-
-  let i = 0;
-  for (i = 0; i < SLIDER_RANGE; i++) DrawChar(RCOLUMN_OFFSET + s.generic.x + i * 8 + parent.x + 8, s.generic.y + parent.y, 129);
-  DrawChar(RCOLUMN_OFFSET + s.generic.x + i * 8 + parent.x + 8, s.generic.y + parent.y, 130);
+  // DEVIATION from the C's char-based track (chars 128/129/130 = left cap/
+  // body/right cap): the rerelease charset (pics/conchars.png in the retail
+  // pak) ships those three cells completely EMPTY -- the KEX UI never used
+  // character sliders -- so on rerelease data the track was invisible and
+  // only the thumb (char 131, present in both charsets) floated in space
+  // (found live on Mike's RC pass; q2repro sidesteps this by shipping its
+  // own charset assets). The track is now a filled groove spanning the same
+  // extent the chars covered, uniform across both data sets; the thumb
+  // stays char 131 for the classic look.
+  const trackX = s.generic.x + parent.x + RCOLUMN_OFFSET;
+  const trackY = s.generic.y + parent.y;
+  const trackW = (SLIDER_RANGE + 2) * 8;
+  re.DrawFill(trackX + 2, trackY + 3, trackW - 4, 2, 4); // groove (dark gray)
+  re.DrawFill(trackX + 2, trackY + 2, 1, 4, 4); // left end cap
+  re.DrawFill(trackX + trackW - 3, trackY + 2, 1, 4, 4); // right end cap
   DrawChar(8 + RCOLUMN_OFFSET + parent.x + s.generic.x + (SLIDER_RANGE - 1) * 8 * s.range, s.generic.y + parent.y, 131);
 }
 
