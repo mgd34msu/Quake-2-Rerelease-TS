@@ -100,10 +100,25 @@ Ported from server/nav.c and server/nav.h (GNU GPL v2 or later).
 // - `node_link_bitmap`, `Nav_Debug`, and friends: dropped entirely (see
 //   "SCOPE CUT" above).
 // - `sv_fps->integer` (nav.c:1456, `Nav_Frame`'s "wait one server-frame's
-//   worth of frames before the first entity-setup pass" gate): this engine's
-//   equivalent tick-rate cvar is `sv_tick_rate` (src/server/server.ts,
-//   sv_main.ts's `SV_Init`), substituted directly (`Math.trunc(value)` for
-//   C's `int`).
+//   worth of [real] time before the first entity-setup pass" gate): q2repro's
+//   `sv_fps` is the cvar that ACTUALLY governs its frame pacing, so
+//   `nav_frame > sv_fps` there really does mean "wait ~1 real second". This
+//   port's own `sv_fps` (sv_main.ts's `SV_Init`, `Cvar_Get("sv_fps", "40",
+//   CVAR_LATCH)`) is registered but never consumed anywhere else -- the
+//   value that actually governs this port's per-tick pacing is `sv.framerate`
+//   (server.ts), computed per spawn by SV_ComputeFramerate's family dispatch
+//   (sv_init.ts: legacy families pin 10Hz regardless of any cvar; only the
+//   kex family honors `sv_tick_rate`, clamped to 10..60). An EARLIER version
+//   of this file compared against the raw `sv_tick_rate` cvar directly
+//   instead -- which is wrong in exactly the cases that matter: on a legacy-
+//   family server sv_tick_rate still reads its own default/configured value
+//   (e.g. 40) while sv.framerate is pinned to 10, so the gate waited 4x
+//   longer in real time than intended (40 frames at the real 100ms/frame
+//   pacing = 4s, not the intended ~1s); on kex, whenever sv_tick_rate is
+//   raised above its default the two values only coincidentally agreed.
+//   Fixed to read `sv.framerate` (server.ts's `sv` singleton) directly,
+//   matching q2repro's actual "wait 1 second of frames, whatever this
+//   server's real pacing is" intent regardless of family.
 
 import { type Vec3, vec3, VectorAdd, VectorSubtract, VectorCopy, VectorSet, VectorMA, DotProduct, CrossProduct, VectorScale } from "../shared/math";
 import { MASK_SOLID, MASK_WATER, CONTENTS_SLIME, CONTENTS_LAVA, CONTENTS_PLAYERCLIP, CONTENTS_MONSTERCLIP } from "../shared/q_shared";
@@ -111,7 +126,7 @@ import { Com_Printf, Com_DPrintf } from "../qcommon/common";
 import { Cvar_Get } from "../qcommon/cvar";
 import { FS_LoadFile } from "../qcommon/files";
 import { SV_Trace, SV_PointContents } from "./sv_world";
-import { sv_tick_rate } from "./server";
+import { sv } from "./server";
 import { PathFlags, PathReturnCode, PathLinkType, type PathRequest, type PathInfo } from "../kexapi/game";
 
 // small local helper matching the C `BIT(n)` macro used throughout nav.h's
@@ -1214,7 +1229,7 @@ function Nav_SetupEntities(): void {
 export function Nav_Frame(): void {
   nav_data.nav_frame++;
 
-  const tickRate = sv_tick_rate ? Math.trunc(sv_tick_rate.value) : 10;
+  const tickRate = Math.trunc(sv.framerate);
   if (nav_data.nav_frame > tickRate) {
     if (!nav_data.setup_entities) Nav_SetupEntities();
   }

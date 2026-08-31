@@ -33,27 +33,40 @@
 // the inhibition filter cannot be the thing deleting them or shifting
 // their survival. The hypothesis is REFUTED for this entity set.
 //
-// CONFIRMED ACTUAL ROOT CAUSE (parsed directly from the real retail
-// bots/navigation/base1.nav, NAV3 v6, per nav.ts's own documented binary
-// layout): the file has exactly 4 edict records -- {model: 22}, {model:
-// 14}, {model: 32}, {model: 22} -- the literal RAW BSP SUBMODEL NUMBERS
-// (matching "four warnings ... model 14/22/32", 22 appearing twice), NOT
-// sequential precache-order indices. src/server/nav.ts's Nav_SetupEntities
-// (line ~1195) compares this raw baked number directly against
-// `game_e.s.modelindex`, but src/server/sv_init.ts's SV_ModelIndex (via
-// SV_FindIndex) and src/server/sv_game.ts's PF_setmodel assign inline
-// "*N" bmodel indices by sequential first-use precache order (no special
-// case for the "*" prefix), same as every other model name -- so
-// `s.modelindex` for these entities is never anywhere near the raw
-// submodel number (empirically ~53/~76/~95 for *14/*22/*32 on a real
-// SpawnEntities("base1", ...) run through this exact fixture, see the
-// second test's console output below, even AFTER fixing the unrelated
-// sm_meat/soundindex bug this same task turned up). This is a numbering-
-// scheme mismatch in src/server/sv_init.ts / src/server/sv_game.ts (an
-// inline model's modelindex needs to be derived directly from its "*N"
-// suffix, not looked up through the generic sequential configstring
-// allocator), NOT a spawn-inhibition bug -- outside src/kexgame/g_spawn.ts's
-// territory, reported rather than fixed here.
+// CORRECTED FINDING (a prior unit's "root cause" below this paragraph was
+// WRONG -- see task report for the full derivation, and the second test's
+// own updated comment for the live-boot evidence). bots/navigation/base1.nav
+// (NAV3 v6, per nav.ts's own documented binary layout) does have exactly 4
+// edict records -- {model: 22}, {model: 14}, {model: 32}, {model: 22} --
+// matching "four warnings ... model 14/22/32" (22 appearing twice). But
+// those baked values are NOT raw BSP submodel suffix numbers as originally
+// assumed here -- they are already the correct, final runtime
+// `s.modelindex` values. src/server/sv_init.ts's SV_SpawnServer
+// pre-registers every compiled inline submodel's configstring slot (hence
+// its later-assigned `s.modelindex`) BEFORE SpawnEntities ever runs
+// (sv_init.ts:282-286, byte-identical to q2repro init.c:174-179's
+// world-reserves-slot-1, submodel-N-gets-slot-N+1 scheme) -- so by the time
+// an entity's own spawn function calls gi.setmodel("*N"), that index is
+// already fixed and deterministic, not first-use/spawn-order dependent. A
+// live boot with spatial and classname/target cross-referencing confirms
+// this map's three referenced entities really do land at modelindex 14, 22,
+// and 32 respectively, matching base1.nav exactly. src/server/nav.ts's
+// Nav_SetupEntities direct, untransformed `game_e.s.modelindex === e.model`
+// compare (nav.c:1432, unmodified) is correct as written; there is no
+// numbering-scheme bug in src/server/sv_init.ts, src/server/sv_game.ts, or
+// src/server/nav.ts to fix. The actual root cause of the "Nav entity
+// appears to be missing" warnings was a timing bug: src/server/nav.ts's
+// Nav_Frame compared its "wait ~1 real second before the first
+// entity-setup pass" gate (nav.c:1456's `sv_fps->integer`) against the raw
+// `sv_tick_rate` cvar instead of `sv.framerate` (the value that actually
+// governs this port's frame pacing), so on any server not running the kex
+// family's exact default tick rate the gate fired 4x later (or earlier)
+// than the intended ~1 second -- see nav.ts's own header comment and the
+// task report for the measured timings. This test file's earlier
+// "~53/~76/~95" empirical numbers were an artifact of this file's OWN test
+// fixture (below) never pre-registering the world/inline-submodel
+// configstrings the way SV_SpawnServer really does -- not of the port under
+// test -- and have been corrected along with the fixture.
 //
 // No retail content is read into this repository or committed anywhere:
 // pak0.pak is read directly from the user's local retail install path at
@@ -217,11 +230,41 @@ function makeFakeGameImports(): KexGameImports {
   }
 
   // Mirrors src/server/sv_init.ts's real SV_FindIndex algorithm exactly:
-  // sequential first-use assignment, no special-casing of "*"-prefixed
-  // inline-model names -- this IS the production numbering scheme (see
-  // task report), reproduced here rather than faked differently, so this
-  // fixture's modelindex() answers "what would our real engine assign".
-  const modelNamesById: string[] = [""];
+  // linear search over already-registered names, append-on-first-miss, no
+  // special-casing of "*"-prefixed inline-model names beyond what the
+  // search itself finds -- this IS the production numbering scheme.
+  //
+  // CORRECTED (see task report): a prior version of this fixture started
+  // `modelNamesById` empty and let SpawnEntities' own gi.setmodel calls be
+  // the ONLY source of entries, in first-use spawn order. That is NOT what
+  // the real engine does. src/server/sv_init.ts's SV_SpawnServer
+  // pre-registers configstrings[csr.models+1] = "maps/<name>.bsp" (world,
+  // modelindex 1) and then configstrings[csr.models+1+i] = "*i" for every
+  // compiled inline submodel i, in submodel-number order, BEFORE
+  // SpawnEntities ever runs (sv_init.ts:282-286, verified line-for-line
+  // against q2repro init.c:174-179's `for (i=1,j=2; i<nummodels; i++,j++)
+  // sprintf(configstrings[csr.models+j], "*%d", i)`). So by the time any
+  // entity's own spawn function calls gi.setmodel("*N"), that name is
+  // already present in the table at index N+1 -- SV_FindIndex's linear
+  // search finds it immediately and returns N+1, it never falls through to
+  // "append a new one in call order". This fixture's own `modelindexCalls`
+  // recorder confirms the real gi.modelindex/gi.setmodel call sequence
+  // still happens (interleaved with every other precache call the DLL
+  // makes) -- it's the OUTCOME of those calls (do they land on N+1 or on
+  // whatever a naive sequential-first-use counter would produce) that this
+  // fixture was getting wrong.
+  //
+  // This test file only has base1's ENTITY lump (extracted from pak0.pak's
+  // IBSP LUMP_ENTITIES), not its MODELS lump, so the true compiled
+  // submodel count isn't available here -- but every submodel any spawned
+  // entity could possibly reference by name is bounded by the highest
+  // "*N" that appears anywhere in the entity text, so pre-registering up
+  // through that bound reproduces the real engine's indexing outcome
+  // exactly for every entity this file inspects.
+  const maxSubmodel =
+    realEntityString === null ? 0 : Math.max(0, ...[...realEntityString.matchAll(/"model"\s*"\*(\d+)"/g)].map((m) => Number(m[1])));
+  const modelNamesById: string[] = ["", "maps/base1.bsp"];
+  for (let i = 1; i <= maxSubmodel; i++) modelNamesById.push(`*${i}`);
   function modelindex(name: string): number {
     rec.modelindexCalls.push(name);
     let idx = modelNamesById.indexOf(name);
@@ -555,29 +598,46 @@ describe("SpawnEntities inhibition vs. the real g_spawn.cpp:1070-1086 rule, over
       expect(trig77!.s.modelindex).toBeGreaterThan(0);
       expect(trig42!.s.modelindex).toBeGreaterThan(0);
 
-      // CONFIRMED FINDING, asserted here rather than merely logged: parsing
-      // the REAL bots/navigation/base1.nav (NAV3 v6, per nav.ts's own
-      // documented binary layout) directly gives its 4 edict records' raw
-      // baked `model` values -- 22, 14, 32, 22 -- the literal submodel
-      // numbers, matching "four warnings ... model 14/22/32" exactly (22
-      // appears twice). This port's real modelindex() (mirroring
-      // src/server/sv_init.ts's SV_FindIndex -- sequential first-use, no
-      // "*"-prefix special case) does NOT reproduce those raw numbers: it
-      // assigns whatever index each name's first `gi.setmodel`/
-      // `gi.modelindex` call happens to land on in spawn order instead.
-      // This is the actual root cause of the "Nav entity appears to be
-      // missing" warnings -- a numbering-scheme mismatch between
-      // src/server/nav.ts's Nav_SetupEntities and src/server/sv_init.ts's
-      // SV_ModelIndex, NOT a spawn-inhibition bug (see this file's own
-      // header, and the task report, for the full derivation). Fixing it
-      // needs an inline-model special case in src/server/sv_init.ts /
-      // src/server/sv_game.ts (outside src/kexgame/g_spawn.ts's territory),
-      // not a change here -- this assertion exists so a FUTURE fix to that
-      // numbering scheme flips these `not.toBe` checks to `toBe`, which is
-      // the intended signal that the real bug has been fixed.
-      expect(trig77!.s.modelindex).not.toBe(14);
-      expect(trig42!.s.modelindex).not.toBe(22);
-      expect(door!.s.modelindex).not.toBe(32);
+      // CORRECTED FINDING (see task report for the full derivation; this
+      // replaces a prior version of this assertion block that had it
+      // backwards). A prior unit assumed base1.nav's baked `model` values --
+      // 22, 14, 32, 22, matching "four warnings ... model 14/22/32" (22
+      // appears twice) -- were literal compiled-BSP submodel suffix numbers
+      // (i.e. that baked value 14 meant "the entity whose map-authored
+      // 'model' key is literally *14'"), and on that assumption asserted the
+      // entities' real modelindex would NOT equal their own baked value.
+      // That assumption was never checked against a real SV_SpawnServer run
+      // and was wrong: the baked values are already the correct, final
+      // s.modelindex numbers, not raw submodel suffixes.
+      //
+      // The catch for THIS test specifically: base1.nav ships with the KEX
+      // rerelease build of base1.bsp, but this file parses the CLASSIC
+      // RETAIL base1.bsp (pak0.pak, baseq2) -- a live boot against the real
+      // rerelease install (basedir pointed at the actual kex tree, spatial
+      // absmin/absmax plus classname/target cross-referencing) shows the
+      // rerelease bsp's compile numbers these same three entities one
+      // submodel EARLIER than the retail bsp does (trig77/*13 there vs.
+      // *14 here, etc.) -- evidently the rerelease build added one extra
+      // inline-model brush somewhere earlier in compile order. So the
+      // numbers below are RETAIL-bsp-specific (submodel N -> configstring
+      // slot/modelindex N+1, world reserves slot 1 -- sv_init.ts:282-286,
+      // byte-identical to q2repro init.c:174-179), matching what m14/m22/m32
+      // above already established for retail: trig77 is retail submodel
+      // *14 -> modelindex 15; trig42 is retail submodel *22 -> modelindex
+      // 23; door is retail submodel *32 -> modelindex 33. There is no
+      // numbering-scheme bug in src/server/sv_init.ts or
+      // src/server/sv_game.ts to fix, and src/server/nav.ts's direct,
+      // untransformed `game_e.s.modelindex === e.model` compare (nav.c:1432,
+      // unmodified, and correctly run against the matching KEX bsp+nav pair
+      // at actual runtime) is already correct. This fixture's own
+      // modelindex() was the actual bug here: it never pre-registered the
+      // world model / inline submodels the way SV_SpawnServer really does
+      // (see this function's own updated comment above), so it produced
+      // sequential-first-use numbers with no relationship to production.
+      // With that fixed, these now assert the real (retail-bsp) numbers.
+      expect(trig77!.s.modelindex).toBe(15);
+      expect(trig42!.s.modelindex).toBe(23);
+      expect(door!.s.modelindex).toBe(33);
     },
   );
 });
