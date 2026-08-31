@@ -128,12 +128,21 @@
 //     shape, renamed per q_shared.ts's own documented convention) and
 //     damage_blend (both sides, same name) likewise.
 //   - pmove: kex's `KexPmoveStateT` uses FLOAT origin/velocity/delta_angles
-//     and a wider `KexPmTypeT` (adds PM_GRAPPLE, PM_NOCLIP); the engine's
-//     `PmoveStateT` (q_shared.ts) is still the vanilla 12.3-fixed-point
-//     int16 shape -- NOT widened by the "wide core" phase (only the top-
-//     level entity/player state was). origin/velocity are scaled *8 and
-//     rounded/clamped to int16 (the same convention qcommon/pmove.ts's own
-//     `pm.s.origin[i] = pml.origin[i] * 8` already uses); delta_angles go
+//     and a wider `KexPmTypeT` (adds PM_GRAPPLE, PM_NOCLIP). The engine's
+//     `PmoveStateT` (q_shared.ts) carries origin/velocity TWICE now (FLOAT
+//     PMOVE STATE END TO END, .orch/followups.md): the legacy
+//     `origin`/`velocity` Int16Array fields stay the vanilla 12.3
+//     fixed-point shape (scaled *8, rounded/clamped to int16, same as
+//     always -- still populated below, since sv_ents.ts's PVS origin calc is
+//     a family-generic consumer that reads it), and the new
+//     `originF`/`velocityF` Float32Array fields carry the kex value straight
+//     through with NO narrowing at all -- these are what protocol/
+//     q2repro.ts's 1038 codec and the client's prediction seed
+//     (client/cgame/host.ts) actually use now, closing the quantize-
+//     requantize round trip that used to destroy PM_StepSlideMove's
+//     DIST_EPSILON floor clearance during client-side replay. delta_angles
+//     stays short-encoded on the wire either way (matches q2repro.c's own
+//     PS_M_DELTA_ANGLES: `MSG_WriteShort`, not float) and goes
 //     through q_shared.ts's existing `ANGLE2SHORT`. `pm_type` is mapped by
 //     `toEnginePmType`, 1:1 in both directions: PM_GRAPPLE and PM_NOCLIP are
 //     real members of the engine's own PmTypeT now (q_shared.ts appends them
@@ -587,6 +596,18 @@ function syncPlayerStateKexToEngine(src: KexPlayerStateT, dst: PlayerStateT): vo
     dst.pmove.velocity[i] = clampInt16(Math.round(src.pmove.velocity[i] * 8));
     dst.pmove.delta_angles[i] = ANGLE2SHORT(src.pmove.delta_angles[i]);
   }
+  // FLOAT PMOVE STATE END TO END (.orch/followups.md): the kex game's
+  // pmove.origin/velocity are already genuine floats (rerelease game.h's
+  // real pmove_state_t: `vec3_t origin; vec3_t velocity;`, no fixed-point
+  // narrowing at all) -- copied straight through, no *8/round/clamp. This is
+  // the authoritative value protocol/q2repro.ts's 1038 codec now reads/writes
+  // for the wire and client/cgame/host.ts seeds prediction replay from; the
+  // 12.3-fixed shadow above stays populated (unchanged formula) purely for
+  // the family-generic engine-side consumers that still read it (sv_ents.ts's
+  // PVS origin calc; nothing else server-side under kex reads
+  // PlayerStateT.pmove -- grepped).
+  VectorCopy(src.pmove.origin, dst.pmove.originF);
+  VectorCopy(src.pmove.velocity, dst.pmove.velocityF);
   dst.pmove.pm_flags = src.pmove.pm_flags;
   dst.pmove.pm_time = src.pmove.pm_time;
   dst.pmove.gravity = src.pmove.gravity;

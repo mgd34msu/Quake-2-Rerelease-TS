@@ -203,12 +203,14 @@ describe("kex prediction bridge -- usercmd conversion", () => {
 });
 
 describe("kex prediction bridge -- pmove state seeding", () => {
-  test("12.3 fixed point becomes world units, and pm_time passes through unscaled", () => {
+  // FLOAT PMOVE STATE END TO END (.orch/followups.md): the seed is read
+  // straight from PmoveStateT's float mirror (originF/velocityF,
+  // q_shared.ts) now, not widened from the legacy 12.3 Int16 shadow -- see
+  // host.ts's kexPmoveStateViewFromClassic and q2repro.ts's file header.
+  test("originF/velocityF pass through unscaled, and pm_time passes through unscaled", () => {
     const src = cl.frame.playerstate.pmove;
-    src.origin[0] = 800; // 100 units
-    src.origin[1] = -8; // -1 unit
-    src.origin[2] = 3;  // 0.375 units
-    src.velocity[0] = 2400; // 300 u/s
+    src.originF.set([100, -1, 0.375]);
+    src.velocityF.set([300, 0, 0]);
     src.pm_time = 800; // kex pm_time is MILLISECONDS, not vanilla's 8ms units
     src.gravity = 800;
     src.viewheight = 22;
@@ -228,12 +230,29 @@ describe("kex prediction bridge -- pmove state seeding", () => {
     expect(seed.pm_type).toBe(KexPmTypeT.PM_NORMAL);
   });
 
+  // The actual residual this fix eliminates: a mid-precision, non-1/8-grid
+  // value must reach the seed exactly (float32 exactly, not rounded to the
+  // nearest 0.125) instead of being requantized on the way in.
+  test("a sub-1/8-unit-grid origin reaches the seed at float precision, not snapped to 0.125", () => {
+    const src = cl.frame.playerstate.pmove;
+    src.originF.set([15.7301, -42.0625, 7.11]);
+    src.velocityF.set([3.14159, -0.001, 99.99]);
+
+    const seed = kexPmoveStateViewFromClassic(src);
+
+    expect(seed.origin[0]).toBeCloseTo(15.7301, 4);
+    expect(seed.origin[0]).not.toBe(15.75); // the old requantized (round(x*8)/8) value
+    expect(seed.origin[1]).toBeCloseTo(-42.0625, 4); // already an exact 1/8-grid point
+    expect(seed.origin[2]).toBeCloseTo(7.11, 4);
+    expect(seed.velocity[0]).toBeCloseTo(3.14159, 4);
+  });
+
   test("the seed is a copy -- writing through it cannot reach the snapshot", () => {
     const src = cl.frame.playerstate.pmove;
-    src.origin[0] = 800;
+    src.originF.set([100, 0, 0]);
     const seed = kexPmoveStateViewFromClassic(src);
     seed.origin[0] = 12345;
-    expect(src.origin[0]).toBe(800);
+    expect(src.originF[0]).toBe(100);
   });
 });
 
@@ -309,8 +328,11 @@ function buildCommands(count: number): UsercmdT[] {
 
 /** Drives the whole client path: seeds cl.frame.playerstate, parks the
  *  commands in cl.cmds where the replay loop reads them, and runs the real
- *  CL_PredictMovement. Returns cl.predicted_origin. */
-function runClientPrediction(kind: "classic" | "kex", seed: SeedT, cmds: UsercmdT[]): [number, number, number] {
+ *  CL_PredictMovement. Returns cl.predicted_origin. `originFOverride`, when
+ *  given, replaces the exact-1/8-grid originF this helper derives from
+ *  `seed.origin` by default -- used by the sub-grid-precision test below,
+ *  which needs a seed value SeedT's own short-domain shape cannot express. */
+function runClientPrediction(kind: "classic" | "kex", seed: SeedT, cmds: UsercmdT[], originFOverride?: [number, number, number]): [number, number, number] {
   CG_SetActiveCgameKind(kind);
 
   cls.state = ConnstateT.ca_active;
@@ -329,6 +351,15 @@ function runClientPrediction(kind: "classic" | "kex", seed: SeedT, cmds: Usercmd
   ps.pmove.pm_type = PmTypeT.PM_NORMAL;
   ps.pmove.origin.set(seed.origin);
   ps.pmove.velocity.set(seed.velocity);
+  // FLOAT PMOVE STATE END TO END: under kex, host.ts's
+  // kexPmoveStateViewFromClassic now seeds prediction from originF/velocityF
+  // directly (not by widening the legacy Int16 shadow above) -- populate
+  // both so this helper drives the real production seam for both `kind`s.
+  // SeedT's own values are already exact 1/8-unit-grid points, so this
+  // widening is exact and changes nothing about the outcomes below; a
+  // dedicated sub-grid-precision test exists separately.
+  ps.pmove.originF.set(originFOverride ?? [seed.origin[0] * 0.125, seed.origin[1] * 0.125, seed.origin[2] * 0.125]);
+  ps.pmove.velocityF.set([seed.velocity[0] * 0.125, seed.velocity[1] * 0.125, seed.velocity[2] * 0.125]);
   ps.pmove.pm_flags = seed.pm_flags;
   ps.pmove.pm_time = seed.pm_time;
   ps.pmove.gravity = seed.gravity;
@@ -440,6 +471,26 @@ describe("kex prediction -- deterministic replay against the server game's own P
     expect(Math.abs(got[1])).toBeGreaterThan(1);
     expect(got[2]).not.toBe(DEFAULT_SEED.origin[2] * 0.125);
     expect(got).toEqual(runServerPmove(DEFAULT_SEED, cmds));
+  });
+
+  // FLOAT PMOVE STATE END TO END (.orch/followups.md): the residual this
+  // fix targets is specifically at the SEED (before this fix,
+  // kexPmoveStateViewFromClassic widened an already-12.3-quantized Int16
+  // origin, so no seed could ever start off-grid). Zero velocity and a
+  // command with no forward/side/button input mean nothing accelerates the
+  // player horizontally during the one replayed frame, so the X axis has to
+  // land back exactly where it started -- isolating "did the seed itself
+  // survive" from "does float noise accumulate during movement" (already
+  // covered by the test above, which uses DEFAULT_SEED's non-zero velocity).
+  test("a mid-precision seed origin (x=15.7301) survives a predict frame without 0.125-grid snapping", () => {
+    const motionlessSeed: SeedT = { ...DEFAULT_SEED, velocity: [0, 0, 0] };
+    const stillCmd = new UsercmdT();
+    stillCmd.msec = 25; // a real frame, not a zero-duration no-op
+    // no forward/side/buttons: nothing pushes the player off the seed origin
+    const got = runClientPrediction("kex", motionlessSeed, [stillCmd], [15.7301, 0, -24]);
+    expect(got[0]).toBeCloseTo(15.7301, 3);
+    // the pre-fix pipeline would have snapped this to round(15.7301*8)/8 = 15.75
+    expect(got[0]).not.toBeCloseTo(15.75, 3);
   });
 
   test("still matches with a jump held, a ducked seed and a live pm_time", () => {

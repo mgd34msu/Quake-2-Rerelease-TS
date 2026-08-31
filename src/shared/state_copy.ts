@@ -49,6 +49,13 @@ export function clonePlayerState(ps: PlayerStateT): PlayerStateT {
   c.pmove.pm_type = ps.pmove.pm_type;
   c.pmove.origin.set(ps.pmove.origin);
   c.pmove.velocity.set(ps.pmove.velocity);
+  // FLOAT PMOVE STATE END TO END (.orch/followups.md): this clone becomes
+  // the per-client "from" baseline sv_ents.ts's frame history compares the
+  // NEXT frame's "to" against (protocol/q2repro.ts's encodePlayerStateDelta)
+  // -- dropping originF/velocityF here would zero the baseline every frame
+  // and force PS_M_ORIGIN/PS_M_VELOCITY to look changed on every delta.
+  c.pmove.originF.set(ps.pmove.originF);
+  c.pmove.velocityF.set(ps.pmove.velocityF);
   c.pmove.pm_flags = ps.pmove.pm_flags;
   c.pmove.pm_time = ps.pmove.pm_time;
   c.pmove.gravity = ps.pmove.gravity;

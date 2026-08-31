@@ -920,26 +920,30 @@ function kexPmTypeFromEngine(t: PmTypeT): KexPmTypeT {
   }
 }
 
-// origin/velocity: kex.ts's forward direction is
-// `clampInt16(Math.round(kexFloat * 8))` (float units -> 12.3 fixed-point
-// int16); the inverse is qcommon/pmove.ts's own established "int16 fixed ->
-// float" idiom, `fixed * 0.125` (see pmove.ts's pml.origin/pml.velocity
-// assignments) -- not reintroducing a new `/ 8` convention.
-function unfixed3(src: Int16Array): Vec3 {
-  return new Float32Array([src[0] * 0.125, src[1] * 0.125, src[2] * 0.125]);
-}
-
 // delta_angles: kex.ts's forward direction is `ANGLE2SHORT(kexFloatDegrees)`;
 // SHORT2ANGLE (q_shared.ts) is that function's own documented inverse.
 function shortAngles3(src: Int16Array): Vec3 {
   return new Float32Array([SHORT2ANGLE(src[0]), SHORT2ANGLE(src[1]), SHORT2ANGLE(src[2])]);
 }
 
+// FLOAT PMOVE STATE END TO END (.orch/followups.md): origin/velocity are
+// read straight from PmoveStateT's own float mirror (`originF`/`velocityF`,
+// q_shared.ts) -- populated with NO narrowing by protocol/q2repro.ts's 1038
+// codec (server -> wire -> client, all genuine IEEE-754 float, matching
+// q2repro.c's own encoding) -- instead of widening the legacy 12.3
+// fixed-point `origin`/`velocity` Int16Array shadow (`short * 0.125`, this
+// function's own former approach). This is the seed CL_PredictMovementKev
+// replays from; feeding it the genuine value instead of a re-widened,
+// already-quantized one is what eliminates the round trip that was
+// destroying PM_StepSlideMove's DIST_EPSILON floor clearance. Seed is only
+// this precise once per replay (CL_PredictMovementKex, cl_pred.ts) --
+// exactly matching the design note there ("the pmove state stays FLOAT for
+// the whole replay").
 function kexPmoveStateViewFromClassic(src: PmoveStateT): KexPmoveStateT {
   return {
     pm_type: kexPmTypeFromEngine(src.pm_type),
-    origin: unfixed3(src.origin),
-    velocity: unfixed3(src.velocity),
+    origin: new Float32Array(src.originF),
+    velocity: new Float32Array(src.velocityF),
     pm_flags: src.pm_flags,
     pm_time: src.pm_time,
     gravity: src.gravity,

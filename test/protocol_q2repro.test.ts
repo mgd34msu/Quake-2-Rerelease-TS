@@ -247,19 +247,55 @@ describe("Q2REPRO_CODEC.writePlayerStateDelta -- golden bytes", () => {
   });
 
   // pm_origin change: XY share one flag bit (PS_M_ORIGIN), Z has its own
-  // extraflags bit (EPS_M_ORIGIN2) -- q2repro.c:2017-2020. This engine's
-  // PmoveStateT.pmove.origin is still the classic Int16 12.3-fixed
-  // representation (short/8 = world units); wire values are the widened
-  // floats (q2repro.ts's "DOCUMENTED NARROWING"). short=[800,-1600,2400] ->
-  // float [100,-200,300].
+  // extraflags bit (EPS_M_ORIGIN2) -- q2repro.c:2017-2020. FLOAT PMOVE STATE
+  // END TO END: this codec now sources pm_origin/pm_velocity from
+  // PmoveStateT's float mirror (originF), matching q2repro.c's own encoding
+  // exactly (full IEEE-754 float, no fixed-point stage) -- see q2repro.ts's
+  // file header.
   //   flags = PS_M_ORIGIN(BIT(1)=2); extraflags = EPS_M_ORIGIN2(BIT(3)=8)
   //   float32(100)=[0,0,200,66]; float32(-200)=[0,0,72,195]; float32(300)=[0,0,150,67]
   test("pm_origin change: PS_M_ORIGIN (xy) + EPS_M_ORIGIN2 (z) split", () => {
     const from = new PlayerStateT();
     const to = new PlayerStateT();
-    to.pmove.origin.set([800, -1600, 2400]); // = [100, -200, 300] world units
+    to.pmove.originF.set([100, -200, 300]);
     const bytes = bufOf((msg) => Q2REPRO_CODEC.writePlayerStateDelta(msg, from, to));
     expect(bytes).toEqual([17, 2, 0, 8, 0, 0, 200, 66, 0, 0, 72, 195, 0, 0, 150, 67]);
+  });
+
+  // FLOAT PMOVE STATE END TO END (.orch/followups.md): a genuinely
+  // sub-1/8-unit-grid origin (x=15.7301, not a multiple of 0.125) must
+  // survive an encode/decode round trip WITHOUT snapping to the nearest
+  // 0.125 -- the exact residual the old short-domain round trip introduced
+  // (round(15.7301*8)/8 = round(125.8408)/8 = 126/8 = 15.75, a visible
+  // ~0.02-unit loss that, compounded across a client prediction replay,
+  // destroyed PM_StepSlideMove's DIST_EPSILON floor clearance). float32
+  // itself is NOT exact for 15.7301 (no binary fraction is), so the
+  // assertion is "close to the requested value, not snapped to a 1/8-unit
+  // grid point" -- toBeCloseTo at 4 decimal places is well inside float32
+  // precision at this magnitude and would fail if the value had been
+  // silently rounded to 15.75.
+  test("pm_origin: sub-1/8-unit-grid value round-trips at float precision, not snapped to 0.125", () => {
+    const from = new PlayerStateT();
+    const to = new PlayerStateT();
+    to.pmove.originF.set([15.7301, -42.0625, 7.11]);
+    to.pmove.velocityF.set([3.14159, -0.001, 99.99]);
+
+    const msg = new SizeBuf();
+    SZ_Init(msg, new Uint8Array(64), 64);
+    Q2REPRO_CODEC.writePlayerStateDelta(msg, from, to);
+    MSG_BeginReading(msg);
+    msg.readcount = 1;
+
+    const out = new PlayerStateT();
+    Q2REPRO_CODEC.readPlayerStateDelta(msg, from, out);
+
+    expect(out.pmove.originF[0]).toBeCloseTo(15.7301, 4);
+    expect(out.pmove.originF[1]).toBeCloseTo(-42.0625, 4);
+    expect(out.pmove.originF[2]).toBeCloseTo(7.11, 4);
+    expect(out.pmove.originF[0]).not.toBe(15.75); // the old requantized value
+    expect(out.pmove.velocityF[0]).toBeCloseTo(3.14159, 4);
+    expect(out.pmove.velocityF[1]).toBeCloseTo(-0.001, 4);
+    expect(out.pmove.velocityF[2]).toBeCloseTo(99.99, 4);
   });
 
   // gunindex + gunskin packed into one u16: gunindex | (gunskin << 13)
@@ -589,8 +625,14 @@ describe("Q2REPRO_CODEC read-side round trips", () => {
     const from = new PlayerStateT();
     const to = new PlayerStateT();
     to.pmove.pm_type = 1;
-    to.pmove.origin.set([800, -400, 240]); // -> float [100,-50,30]
-    to.pmove.velocity.set([80, -80, 40]); // -> float [10,-10,5]
+    // FLOAT PMOVE STATE END TO END: the wire (and this codec's encode/decode)
+    // now sources pm_origin/pm_velocity from PmoveStateT's float mirror
+    // (originF/velocityF), not the legacy 12.3 Int16 shadow -- see
+    // q2repro.ts's own file header. [100,-50,30]/[10,-10,5] are the same
+    // world-unit values the old short=[800,-400,240]/[80,-80,40] encoding
+    // used to represent.
+    to.pmove.originF.set([100, -50, 30]);
+    to.pmove.velocityF.set([10, -10, 5]);
     to.pmove.pm_time = 50;
     to.pmove.pm_flags = 2;
     to.pmove.gravity = 800;
@@ -615,6 +657,10 @@ describe("Q2REPRO_CODEC read-side round trips", () => {
     Q2REPRO_CODEC.readPlayerStateDelta(msg, from, out);
 
     expect(out.pmove.pm_type).toBe(1);
+    expect(Array.from(out.pmove.originF)).toEqual([100, -50, 30]);
+    expect(Array.from(out.pmove.velocityF)).toEqual([10, -10, 5]);
+    // legacy 12.3 shadow stays in sync too (family-generic consumers, see
+    // q2repro.ts's file header).
     expect(Array.from(out.pmove.origin)).toEqual([800, -400, 240]);
     expect(Array.from(out.pmove.velocity)).toEqual([80, -80, 40]);
     expect(out.pmove.pm_time).toBe(50);

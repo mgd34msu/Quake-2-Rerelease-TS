@@ -345,8 +345,13 @@ describe("Q2REPRO_CODEC frame envelope round trip", () => {
     const psFrom = new PlayerStateT();
     const psTo = new PlayerStateT();
     psTo.pmove.pm_type = 1;
-    psTo.pmove.origin.set([800, -400, 240]); // -> float [100,-50,30], exact (protocol_q2repro.test.ts's own fixture)
-    psTo.pmove.velocity.set([80, -80, 40]);
+    // FLOAT PMOVE STATE END TO END (.orch/followups.md): the wire now
+    // sources pm_origin/pm_velocity from originF/velocityF (q_shared.ts),
+    // not the legacy 12.3 Int16 shadow -- see q2repro.ts's file header.
+    // [100,-50,30]/[10,-10,5] are the same world-unit values the old
+    // short=[800,-400,240]/[80,-80,40] fixture used to represent.
+    psTo.pmove.originF.set([100, -50, 30]);
+    psTo.pmove.velocityF.set([10, -10, 5]);
     psTo.gunindex = 5;
     psTo.gunskin = 3;
 
@@ -385,6 +390,10 @@ describe("Q2REPRO_CODEC frame envelope round trip", () => {
     const psOut = new PlayerStateT();
     Q2REPRO_CODEC.readFramePlayerstate(psFrom, psOut);
     expect(psOut.pmove.pm_type).toBe(1);
+    expect(Array.from(psOut.pmove.originF)).toEqual([100, -50, 30]);
+    expect(Array.from(psOut.pmove.velocityF)).toEqual([10, -10, 5]);
+    // legacy 12.3 shadow stays in sync too (family-generic consumers, see
+    // q2repro.ts's file header).
     expect(Array.from(psOut.pmove.origin)).toEqual([800, -400, 240]);
     expect(Array.from(psOut.pmove.velocity)).toEqual([80, -80, 40]);
     expect(psOut.gunindex).toBe(5);
@@ -461,7 +470,10 @@ describe("SV_WriteFrameToClient E2E with a fabricated client (svs.codec = Q2REPR
       sv.framenum = 1;
       const frame1 = client.frames[sv.framenum & UPDATE_MASK];
       frame1.ps = new PlayerStateT();
-      frame1.ps.pmove.origin.set([160, 0, 0]);
+      // FLOAT PMOVE STATE END TO END: the 1038 wire sources pm_origin from
+      // originF now (q2repro.ts's file header); [20,0,0] is the same
+      // world-unit value the old short=[160,0,0] fixture represented.
+      frame1.ps.pmove.originF.set([20, 0, 0]);
       frame1.areabytes = 0;
       frame1.num_entities = 1;
       frame1.first_entity = 0;
@@ -481,7 +493,7 @@ describe("SV_WriteFrameToClient E2E with a fabricated client (svs.codec = Q2REPR
       expect(header1.deltaframe).toBe(-1); // client.lastframe was 0 -> nodelta
       const ps1Out = new PlayerStateT();
       Q2REPRO_CODEC.readFramePlayerstate(new PlayerStateT(), ps1Out);
-      expect(Array.from(ps1Out.pmove.origin)).toEqual([160, 0, 0]);
+      expect(Array.from(ps1Out.pmove.originF)).toEqual([20, 0, 0]);
       Q2REPRO_CODEC.readPacketEntitiesBegin();
       const e1 = Q2REPRO_CODEC.readEntityBits();
       expect(e1.number).toBe(3);
@@ -495,7 +507,7 @@ describe("SV_WriteFrameToClient E2E with a fabricated client (svs.codec = Q2REPR
       sv.framenum = 2;
       const frame2 = client.frames[sv.framenum & UPDATE_MASK];
       frame2.ps = new PlayerStateT();
-      frame2.ps.pmove.origin.set([320, 0, 0]); // changed from frame1
+      frame2.ps.pmove.originF.set([40, 0, 0]); // changed from frame1, world units
       frame2.areabytes = 0;
       frame2.num_entities = 2;
       frame2.first_entity = 1; // distinct slots -- frame1's snapshot at index 0 must survive untouched
@@ -519,7 +531,7 @@ describe("SV_WriteFrameToClient E2E with a fabricated client (svs.codec = Q2REPR
       expect(header2.deltaframe).toBe(1); // real delta this time
       const ps2Out = new PlayerStateT();
       Q2REPRO_CODEC.readFramePlayerstate(new PlayerStateT(), ps2Out);
-      expect(Array.from(ps2Out.pmove.origin)).toEqual([320, 0, 0]);
+      expect(Array.from(ps2Out.pmove.originF)).toEqual([40, 0, 0]);
       Q2REPRO_CODEC.readPacketEntitiesBegin();
 
       // entity 3 (delta from its prior frame1 state) then entity 7 (new, from baseline)

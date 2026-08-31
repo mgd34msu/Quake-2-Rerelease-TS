@@ -320,6 +320,38 @@ export class PmoveStateT {
   // entities.c:1601-1610). Stays 0 for every vanilla-family game, whose
   // viewoffset already carries the eye height, so no classic path changes.
   viewheight = 0; // int8_t
+
+  // ---------------------------------------------------------------------
+  // KEX-FAMILY FLOAT MIRROR (rerelease game.h:400-412's real pmove_state_t:
+  // `vec3_t origin; vec3_t velocity;` -- genuine float, no fixed-point at
+  // all; q2repro.c's 1038 wire format matches, transmitting full IEEE-754
+  // floats for pm_origin/pm_velocity, q2proto_proto_q2repro.c:2081-2099).
+  // `origin`/`velocity` above stay the vanilla/legacy family's 12.3
+  // fixed-point Int16Array, untouched, for the classic wire (protocol 34)
+  // and qcommon/pmove.ts's own bit-exact PM_SnapPosition-style quantization
+  // (that algorithm's short-domain sign/nudge logic is load-bearing, not
+  // just a storage width).
+  //
+  // `originF`/`velocityF` are the kex family's own authoritative carrier:
+  // server/bindings/kex.ts's syncPlayerStateKexToEngine writes the kex
+  // game's float pmove state here directly (no *8/round/clamp narrowing),
+  // protocol/q2repro.ts's 1038 codec reads/writes these directly for the
+  // wire (no more short-widen-then-narrow round trip), and
+  // client/cgame/host.ts's kexPmoveStateViewFromClassic seeds the client's
+  // predicted replay from these instead of widening the (deliberately
+  // still-populated, for other family-generic consumers -- sv_ents.ts's PVS
+  // origin calc, cl_ents.ts's interpolation teleport check and
+  // non-predicting render path, CL_CheckPredictionError's debug compare)
+  // Int16 shadow above. This is what eliminates the 12.3
+  // quantize-requantize round trip that was destroying PM_StepSlideMove's
+  // DIST_EPSILON floor clearance during client-side replay (.orch/
+  // followups.md's "FLOAT PMOVE STATE END TO END" item). Float32Array
+  // (not plain number[]) so assignment truncates to IEEE-754 single
+  // precision exactly like the C `vec3_t`, matching q2proto's own encoding
+  // bit-for-bit. Always zero for every vanilla-family game (nothing writes
+  // them), matching viewheight's convention above.
+  originF: Vec3 = new Float32Array(3);
+  velocityF: Vec3 = new Float32Array(3);
 }
 
 //

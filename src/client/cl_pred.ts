@@ -271,13 +271,15 @@ function CL_KexPointContents(point: Vec3): number {
 }
 
 /** predict.c:270-294. The pmove state stays FLOAT for the whole replay: it is
- *  seeded once from the snapshot (which is all the precision the 1038 codec
- *  transmits -- qcommon/protocol/q2repro.ts narrows pm origin/velocity to the
- *  12.3 fixed-point Int16Array on both write and read) and then carried
- *  forward across every replayed command without being re-quantized, exactly
- *  as the server carries its own float pmove state forward across frames.
- *  Quantizing per replayed frame instead would inject a fresh rounding error
- *  on every one of them.
+ *  seeded once from the snapshot -- host.ts's kexPmoveStateViewFromClassic
+ *  reads PmoveStateT's own float mirror (`originF`/`velocityF`,
+ *  q_shared.ts), which the 1038 codec (qcommon/protocol/q2repro.ts)
+ *  populates with the genuine, un-narrowed wire value (FLOAT PMOVE STATE END
+ *  TO END, .orch/followups.md) -- and then carried forward across every
+ *  replayed command without being re-quantized, exactly as the server
+ *  carries its own float pmove state forward across frames. Quantizing per
+ *  replayed frame instead would inject a fresh rounding error on every one
+ *  of them.
  *
  *  pm_time needs no conversion in either direction: kexgame/p_move.ts compares
  *  it directly against cmd.msec in MILLISECONDS (p_move.ts:1447-1452) and

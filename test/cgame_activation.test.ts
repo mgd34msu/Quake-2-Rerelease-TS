@@ -146,10 +146,14 @@ describe("cgame activation -- kind selection off CL_ParseServerData's protocol f
 // ---------------------------------------------------------------------------
 
 describe("kexPlayerStateViewFromClassic -- field spot checks (inverse of kex.ts's syncPlayerStateKexToEngine)", () => {
-  test("pmove.origin/velocity: int16 12.3 fixed-point -> float, the inverse of the forward `* 8` scale", () => {
+  // FLOAT PMOVE STATE END TO END (.orch/followups.md): the view now reads
+  // PmoveStateT's own float mirror (originF/velocityF) directly, with no
+  // int16-domain widening step at all -- see host.ts's
+  // kexPmoveStateViewFromClassic and q2repro.ts's file header.
+  test("pmove.origin/velocity: read straight from the float mirror, no int16 widening step", () => {
     const ps = new PlayerStateT();
-    ps.pmove.origin.set([80, -160, 8]); // 10, -20, 1 world units
-    ps.pmove.velocity.set([800, 0, -8]); // 100, 0, -1 world units
+    ps.pmove.originF.set([10, -20, 1]);
+    ps.pmove.velocityF.set([100, 0, -1]);
 
     const view = kexPlayerStateViewFromClassic(ps);
 

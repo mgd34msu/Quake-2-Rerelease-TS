@@ -152,19 +152,28 @@
 // matters for the byte-exactness assertions.
 //
 // ---------------------------------------------------------------------------
-// DOCUMENTED NARROWING: pmove origin/velocity precision
+// FLOAT PMOVE STATE END TO END (.orch/followups.md)
 // ---------------------------------------------------------------------------
 // 1038's wire format transmits pm_origin/pm_velocity as full IEEE-754
-// floats (q2repro.c:2081-2099, matching KEX's native float pmove_state_t).
-// This port's PmoveStateT (shared/q_shared.ts, phase 2) keeps the classic
-// protocol-34 fixed-point representation (Int16Array, 12.3 fixed: divide by
-// 8 for world units) -- the same existing, documented narrowing
-// src/server/bindings/kex.ts's syncPlayerStateKexToEngine already performs
-// on ingest from the KEX game (`clampInt16(Math.round(src.pmove.origin[i] *
-// 8))`). This codec widens back to float the same way for the wire
-// (`short / 8`) and narrows on read the same way KEX ingest does
-// (`clampInt16(Math.round(f * 8))`) -- consistent with the rest of this
-// port's pmove precision budget, not a new precision loss introduced here.
+// floats (q2repro.c:2081-2099, matching KEX's native float pmove_state_t --
+// rerelease game.h:400-412's real `pmove_state_t` is `vec3_t origin; vec3_t
+// velocity;`, no fixed-point at all). This port's PmoveStateT
+// (shared/q_shared.ts) now carries a matching float mirror
+// (`originF`/`velocityF`), which server/bindings/kex.ts's
+// syncPlayerStateKexToEngine populates directly from the kex game's own
+// float pmove state (no narrowing) and this codec reads/writes directly for
+// the wire below -- no short-domain round trip. The classic
+// `origin`/`velocity` Int16Array fields (12.3 fixed) are a SEPARATE shadow,
+// still kept in sync (same `pmFloatToShort` formula this codec always used)
+// purely for family-generic consumers that still read them (sv_ents.ts's
+// PVS origin calc; client/cl_ents.ts's interpolation teleport check and
+// non-predicting render path; CL_CheckPredictionError's debug compare) --
+// none of those need the extra precision, and it keeps them byte-for-byte
+// unchanged by this fix. This closes the quantize-requantize round trip that
+// used to destroy PM_StepSlideMove's DIST_EPSILON floor clearance during
+// client-side prediction replay (client/cgame/host.ts's
+// kexPmoveStateViewFromClassic now seeds from `originF`/`velocityF`
+// directly instead of widening the Int16 shadow).
 
 import type { SizeBuf } from "../sizebuf";
 import { MSG_WriteByte, MSG_WriteChar, MSG_WriteShort, MSG_WriteLong, MSG_WriteLong64, MSG_WriteFloat, MSG_WriteString, MSG_WriteDeltaUsercmd, SZ_Write } from "../sizebuf";
@@ -389,11 +398,11 @@ function widthOf(value: number, uint16Safe: boolean): 0 | 1 | 2 {
   return 0;
 }
 
-// src/server/bindings/kex.ts's syncPlayerStateKexToEngine narrowing,
-// reversed for the wire (see file header's "DOCUMENTED NARROWING").
-function pmShortToFloat(short: number): number {
-  return short * 0.125;
-}
+// Still used to keep the legacy 12.3 fixed-point `origin`/`velocity` shadow
+// (q_shared.ts's PmoveStateT, see its own doc comment) in sync for the
+// family-generic consumers that read it -- the wire itself now reads/writes
+// `originF`/`velocityF` directly (see file header's "FLOAT PMOVE STATE END
+// TO END" section).
 export function pmFloatToShort(f: number): number {
   return clampInt16(Math.round(f * 8));
 }
@@ -664,26 +673,19 @@ function encodePlayerStateDelta(from: PlayerStateT, to: PlayerStateT): PlayerSta
   let flags = 0;
   let extraflags = 0;
 
-  const toOriginF: [number, number, number] = [
-    pmShortToFloat(to.pmove.origin[0]),
-    pmShortToFloat(to.pmove.origin[1]),
-    pmShortToFloat(to.pmove.origin[2]),
-  ];
-  const fromOriginF: [number, number, number] = [
-    pmShortToFloat(from.pmove.origin[0]),
-    pmShortToFloat(from.pmove.origin[1]),
-    pmShortToFloat(from.pmove.origin[2]),
-  ];
-  const toVelF: [number, number, number] = [
-    pmShortToFloat(to.pmove.velocity[0]),
-    pmShortToFloat(to.pmove.velocity[1]),
-    pmShortToFloat(to.pmove.velocity[2]),
-  ];
-  const fromVelF: [number, number, number] = [
-    pmShortToFloat(from.pmove.velocity[0]),
-    pmShortToFloat(from.pmove.velocity[1]),
-    pmShortToFloat(from.pmove.velocity[2]),
-  ];
+  // FLOAT PMOVE STATE END TO END (.orch/followups.md): sourced from
+  // `originF`/`velocityF` (q_shared.ts) -- the genuine, un-narrowed float
+  // value server/bindings/kex.ts's syncPlayerStateKexToEngine copies
+  // straight from the kex game's own float pmove state -- not from the
+  // legacy 12.3 fixed-point `origin`/`velocity` shadow. This is what
+  // eliminates the quantize-requantize round trip: the value written to the
+  // wire below is exactly what the kex game module holds, matching
+  // q2repro.c's own encoding (q2proto_proto_q2repro.c:2081-2099, full
+  // IEEE-754 float, no fixed-point stage at all).
+  const toOriginF: [number, number, number] = [to.pmove.originF[0], to.pmove.originF[1], to.pmove.originF[2]];
+  const fromOriginF: [number, number, number] = [from.pmove.originF[0], from.pmove.originF[1], from.pmove.originF[2]];
+  const toVelF: [number, number, number] = [to.pmove.velocityF[0], to.pmove.velocityF[1], to.pmove.velocityF[2]];
+  const fromVelF: [number, number, number] = [from.pmove.velocityF[0], from.pmove.velocityF[1], from.pmove.velocityF[2]];
 
   if (to.pmove.pm_type !== from.pmove.pm_type) flags |= PS_M_TYPE;
 
@@ -1192,6 +1194,8 @@ function readPlayerStateFields(msg: SizeBuf, from: PlayerStateT, to: PlayerState
   to.pmove.pm_type = from.pmove.pm_type;
   to.pmove.origin.set(from.pmove.origin);
   to.pmove.velocity.set(from.pmove.velocity);
+  to.pmove.originF.set(from.pmove.originF);
+  to.pmove.velocityF.set(from.pmove.velocityF);
   to.pmove.pm_flags = from.pmove.pm_flags;
   to.pmove.pm_time = from.pmove.pm_time;
   to.pmove.gravity = from.pmove.gravity;
@@ -1214,29 +1218,45 @@ function readPlayerStateFields(msg: SizeBuf, from: PlayerStateT, to: PlayerState
 
   if (flags & PS_M_TYPE) to.pmove.pm_type = MSG_ReadByte(msg);
 
-  let originX = pmShortToFloat(to.pmove.origin[0]);
-  let originY = pmShortToFloat(to.pmove.origin[1]);
-  let originZ = pmShortToFloat(to.pmove.origin[2]);
+  // FLOAT PMOVE STATE END TO END (.orch/followups.md): q2repro.c's own
+  // svc_playerstate reads pm_origin/pm_velocity as full IEEE-754 floats
+  // (q2proto_proto_q2repro.c:636-653) -- `originF`/`velocityF` below carry
+  // that value through with NO narrowing, matching the wire exactly. The
+  // legacy `origin`/`velocity` Int16Array fields are ALSO kept in sync (12.3
+  // fixed, same `pmFloatToShort` formula as before this fix) purely for the
+  // family-generic client consumers that still read them (cl_ents.ts's
+  // interpolation teleport check and non-predicting render path,
+  // CL_CheckPredictionError's debug compare) -- neither of those needs the
+  // extra precision, and this keeps them byte-for-byte unchanged.
+  let originX = to.pmove.originF[0];
+  let originY = to.pmove.originF[1];
+  let originZ = to.pmove.originF[2];
   if (flags & PS_M_ORIGIN) {
     originX = MSG_ReadFloat(msg);
     originY = MSG_ReadFloat(msg);
   }
   if (extraflags & EPS_M_ORIGIN2) originZ = MSG_ReadFloat(msg);
   if (flags & PS_M_ORIGIN || extraflags & EPS_M_ORIGIN2) {
+    to.pmove.originF[0] = originX;
+    to.pmove.originF[1] = originY;
+    to.pmove.originF[2] = originZ;
     to.pmove.origin[0] = pmFloatToShort(originX);
     to.pmove.origin[1] = pmFloatToShort(originY);
     to.pmove.origin[2] = pmFloatToShort(originZ);
   }
 
-  let velX = pmShortToFloat(to.pmove.velocity[0]);
-  let velY = pmShortToFloat(to.pmove.velocity[1]);
-  let velZ = pmShortToFloat(to.pmove.velocity[2]);
+  let velX = to.pmove.velocityF[0];
+  let velY = to.pmove.velocityF[1];
+  let velZ = to.pmove.velocityF[2];
   if (flags & PS_M_VELOCITY) {
     velX = MSG_ReadFloat(msg);
     velY = MSG_ReadFloat(msg);
   }
   if (extraflags & EPS_M_VELOCITY2) velZ = MSG_ReadFloat(msg);
   if (flags & PS_M_VELOCITY || extraflags & EPS_M_VELOCITY2) {
+    to.pmove.velocityF[0] = velX;
+    to.pmove.velocityF[1] = velY;
+    to.pmove.velocityF[2] = velZ;
     to.pmove.velocity[0] = pmFloatToShort(velX);
     to.pmove.velocity[1] = pmFloatToShort(velY);
     to.pmove.velocity[2] = pmFloatToShort(velZ);

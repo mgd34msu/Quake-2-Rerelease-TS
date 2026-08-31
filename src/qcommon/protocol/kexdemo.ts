@@ -483,6 +483,8 @@ function readKexPlayerStateFields(from: PlayerStateT, to: PlayerStateT, flags: n
   to.pmove.pm_type = from.pmove.pm_type;
   to.pmove.origin.set(from.pmove.origin);
   to.pmove.velocity.set(from.pmove.velocity);
+  to.pmove.originF.set(from.pmove.originF);
+  to.pmove.velocityF.set(from.pmove.velocityF);
   to.pmove.pm_flags = from.pmove.pm_flags;
   to.pmove.pm_time = from.pmove.pm_time;
   to.pmove.gravity = from.pmove.gravity;
@@ -508,13 +510,20 @@ function readKexPlayerStateFields(from: PlayerStateT, to: PlayerStateT, flags: n
 
   // kex.c:648-655: pm_origin/pm_velocity are always full float triples
   // (read_var_coords_float), all-or-nothing per field -- no q2repro-style
-  // xy/z split. Converted to this port's packed-short PmoveStateT
-  // representation via q2repro.ts's own pmFloatToShort (the same 1/8-unit
-  // scale src/server/bindings/kex.ts already uses at the sync boundary).
+  // xy/z split. `originF`/`velocityF` (q_shared.ts, FLOAT PMOVE STATE END TO
+  // END, .orch/followups.md) carry the value through with no narrowing at
+  // all, matching live 1038 playback; the legacy `origin`/`velocity`
+  // Int16Array fields are also kept in sync (q2repro.ts's own
+  // pmFloatToShort, the same 1/8-unit scale src/server/bindings/kex.ts uses
+  // at the sync boundary) for the family-generic client consumers that still
+  // read them.
   if (flags & PS_M_ORIGIN) {
     const x = MSG_ReadFloat(net_message);
     const y = MSG_ReadFloat(net_message);
     const z = MSG_ReadFloat(net_message);
+    to.pmove.originF[0] = x;
+    to.pmove.originF[1] = y;
+    to.pmove.originF[2] = z;
     to.pmove.origin[0] = pmFloatToShort(x);
     to.pmove.origin[1] = pmFloatToShort(y);
     to.pmove.origin[2] = pmFloatToShort(z);
@@ -523,6 +532,9 @@ function readKexPlayerStateFields(from: PlayerStateT, to: PlayerStateT, flags: n
     const x = MSG_ReadFloat(net_message);
     const y = MSG_ReadFloat(net_message);
     const z = MSG_ReadFloat(net_message);
+    to.pmove.velocityF[0] = x;
+    to.pmove.velocityF[1] = y;
+    to.pmove.velocityF[2] = z;
     to.pmove.velocity[0] = pmFloatToShort(x);
     to.pmove.velocity[1] = pmFloatToShort(y);
     to.pmove.velocity[2] = pmFloatToShort(z);
