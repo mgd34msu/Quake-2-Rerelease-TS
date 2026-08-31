@@ -43,8 +43,7 @@ already resolves this module to make the R_InitSkyBox call.
 
 import { type Vec3, vec3, DotProduct, VectorSubtract, VectorCopy } from "../shared/math";
 import { fixedLength } from "../shared/fixed";
-import { CplaneT, ERR_DROP, SURF_SKY, SURF_TRANS33, SURF_TRANS66 } from "../shared/q_shared";
-import { MAX_MAP_EDGES, MAX_MAP_FACES, MAX_MAP_VERTS } from "../qcommon/qfiles";
+import { CplaneT, SURF_SKY, SURF_TRANS33, SURF_TRANS66 } from "../shared/q_shared";
 import {
   type BedgeT,
   type ClipplaneT,
@@ -84,7 +83,6 @@ import {
   ycenter,
   xscaleinv,
   yscaleinv,
-  ri,
 } from "./r_local";
 import { MedgeT, MsurfaceT, MtexinfoT, type MplaneT, MvertexT, SURF_DRAWSKYBOX, SURF_EXTENTS_SKIP } from "./r_model";
 import type * as ModelModule from "./r_model";
@@ -212,9 +210,37 @@ export function R_InitSkyBox(): void {
   for (let i = 0; i < 24; i++) loadmodel.surfedges.push(0);
   loadmodel.numsurfedges += 24;
 
-  if (loadmodel.numsurfaces > MAX_MAP_FACES || loadmodel.numvertexes > MAX_MAP_VERTS || loadmodel.numedges > MAX_MAP_EDGES) {
-    ri.Sys_Error(ERR_DROP, "InitSkyBox: map overflow");
-  }
+  // Vanilla's R_InitSkyBox (ref_soft/r_rast.c:117-129) appends its 6
+  // faces/8 verts/12 edges/24 surfedges via POINTER ARITHMETIC into slack
+  // space at the tail of loadmodel->{surfaces,vertexes,edges,surfedges} --
+  // Hunk-allocated up front at a fixed MAX_MAP_FACES/VERTS/EDGES/SURFEDGES
+  // size regardless of how many the BSP lumps actually used, with the
+  // Sys_Error below as a genuine bounds check against overrunning that
+  // fixed allocation on a real classic (16-bit-index, <=65536-vert) map
+  // already sized right up to those constants.
+  //
+  // This port's loadmodel.{surfaces,vertexes,edges,surfedges} are plain
+  // growable arrays (`.push()` above, r_model.ts's Mod_Load* throughout) --
+  // there is no fixed-size allocation for this check to guard, so it can
+  // never fire for a real overrun; it only reproduces vanilla's *numeric*
+  // threshold, which retail's QBSP-extended-format "Call of the Machine"
+  // maps are specifically allowed to exceed elsewhere in this same loader
+  // (see qcommon/qfiles.ts's header comment: MAX_MAP_VERTS/FACES/EDGES are
+  // "no longer enforced as a load-rejection cap" anywhere else in this
+  // codebase, replaced by cross-reference bounds checks the way q2repro's
+  // BSP_Load does -- cmodel.ts/gl_model.ts/r_model.ts already dropped the
+  // equivalent whole-map rejection). Verified real: maps/mgu4m2.bsp
+  // (78458 verts / 72903 faces / 152341 edges) and maps/mguhub.bsp (79538 /
+  // 72159 / 153281) both legitimately exceed MAX_MAP_VERTS=65536 /
+  // MAX_MAP_FACES=65536 / MAX_MAP_EDGES=128000 and already load everywhere
+  // else in this same r_model.ts pipeline; only this now-vestigial count
+  // check (a leftover of a buffer that doesn't exist in this port) rejected
+  // them, as a whole-map ERR_DROP no less -- the same failure mode the
+  // Mod_LoadBrushModel graceful-refusal blocks above (SURF_EXTENTS_SKIP,
+  // the DECOUPLED_LM fullbright fallback) were written to eliminate. Dropped
+  // rather than "grown" to a new numeric bound: every possible replacement
+  // constant would be exactly as arbitrary as this one, since nothing
+  // downstream depends on one.
 
   for (let i = 0; i < 6; i++) {
     const face = r_skyfaces[i];

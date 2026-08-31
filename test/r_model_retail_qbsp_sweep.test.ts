@@ -7,15 +7,20 @@ identical rationale for why this, not a bare repeated Mod_ForName). Confirms
 the QBSP dual-format software-renderer loader (Mod_LoadFacesExt/
 Mod_LoadNodesExt/etc., the ident dispatch, the format-aware
 PrescanClassicSurfaceExtents/BSPX numfaces computation) handles every real
-retail map -- reports the exact pass/fail matrix, since this renderer's own
-surface-cache/blocklights buffers carry a real classic-hardware-derived
-capacity limit the classic-repo reference unit found 2/28 maps blocked on
-(a skybox buffer).
+retail map.
 
-No copyrighted map data is committed anywhere -- pak0.pak is read directly
-from the user's local retail install via FS_LoadFile served through this
-port's own fake RefImports, matching every other retail-gated test's "skip
-if the install isn't present" convention.
+Previously reported 26/28, with maps/mgu4m2.bsp and maps/mguhub.bsp blocked
+on "InitSkyBox: map overflow" -- r_rast.ts's R_InitSkyBox carried a vestigial
+whole-map rejection copied verbatim from vanilla's MAX_MAP_FACES/VERTS/EDGES
+check (see R_InitSkyBox's own comment for the full citation: that check
+guarded a fixed Hunk-allocated buffer in vanilla C that this port's growable
+loadmodel.{surfaces,vertexes,edges} arrays never had). Both maps' real lump
+counts (mgu4m2.bsp: 78458 verts/72903 faces/152341 edges; mguhub.bsp: 79538/
+72159/153281) legitimately exceed the classic 65536/65536/128000 constants --
+exactly the QBSP-extended-format headroom qcommon/qfiles.ts's header comment
+describes -- and already loaded through every other stage of this same
+loader. Fixed by dropping the check (not growing it to a new numeric bound);
+now 28/28.
 */
 
 import { describe, test, expect } from "bun:test";
@@ -111,7 +116,15 @@ describe("r_model.ts -- QBSP dual-format sweep over all 28 real retail mgu*.bsp 
         console.log(failing.map((f) => `  ${f.name}: ${f.reason ?? "no surfaces"}`).join("\n"));
       }
       expect(results.length).toBe(28);
+      // every failure must be a real, attributable error message, never a
+      // silent "returned null with no reason" -- checked before the hard
+      // 28/28 assertion below so a future regression's failing map(s) are
+      // named in the console output even though the pass-count assertion
+      // also fails.
       for (const f of failing) expect(f.reason).toBeDefined();
+      // all 28 real retail mgu*.bsp maps load cleanly (see this file's
+      // header comment for the two that used to fail and why they're fixed).
+      expect(passing.length).toBe(28);
     },
     180000,
   );

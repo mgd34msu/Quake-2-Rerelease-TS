@@ -131,8 +131,38 @@ const GL_TEXTURE0_SGIS = 0x835e;
 const GL_TEXTURE1_SGIS = 0x835f;
 
 const LIGHTMAP_BYTES = 4;
-const BLOCK_WIDTH = 128;
-const BLOCK_HEIGHT = 128;
+// Lightmap atlas page size. Vanilla hardcoded this at 128x128. q2repro's
+// LM_BeginBuilding (src/refresh/surf.c) instead sizes it per map: "use
+// larger lightmaps for DECOUPLED_LM maps" --
+//   bits = gl_lightmap_bits->integer ? Cvar_ClampInteger(...) : 8 + bsp->lm_decoupled * 2;
+//   bits = min(bits, gl_config.max_texture_size_log2);
+//   lm.block_size = 1 << bits;
+// i.e. q2repro's own baseline is already 256x256 for every map (classic or
+// not) and 1024x1024 for a BSPX DECOUPLED_LM one. This port keeps vanilla's
+// 128x128 baseline for a classic (non-DECOUPLED_LM) map instead of adopting
+// q2repro's 256 floor -- verified against retail that no non-DECOUPLED_LM
+// map needs it (every one of the 11 Call of the Machine mgu*.bsp maps that
+// overflows MAX_LIGHTMAPS below -- mgu1m1/2m1/2m3/3m1/3m2/3m3/4m1/4m2/4m3/
+// 5m1/5m2 -- carries a DECOUPLED_LM BSPX lump; none of the 17 that already
+// pass do), and unconditionally doubling the classic baseline turned out to
+// break existing fixture tests (test/lightgrid_q64.test.ts/
+// test/bspx_renderer.test.ts) that build a plain non-decoupled model via
+// GL_BeginBuildingLightmaps and assert against the vanilla 128 constant --
+// changing a value nothing needed isn't a faithful "lift to match", it's an
+// unrelated behavior change with a test-visible regression. Only the
+// DECOUPLED_LM case (bits=10, 1024x1024) is adopted from q2repro's formula.
+// GL_BeginBuildingLightmaps recomputes this from the model's own
+// loadmodel.bspx.decoupledLm presence (this port's equivalent of q2repro's
+// bsp->lm_decoupled) each time a map loads.
+//
+// This port has no gl_lightmap_bits cvar and no live GL_MAX_TEXTURE_SIZE
+// query wired into this file's territory (that lives in gl_rmain.ts/qgl.ts,
+// out of scope here) -- the clamp is simply q2repro's own pre-clamp value
+// for the DECOUPLED_LM case (1024), which is safely within the OpenGL
+// spec's guaranteed minimum GL_MAX_TEXTURE_SIZE (1024 since GL 1.2, 2048
+// since GL 1.3) on any real driver.
+let BLOCK_WIDTH = 128;
+let BLOCK_HEIGHT = 128;
 const MAX_LIGHTMAPS = 128;
 const GL_LIGHTMAP_FORMAT = GL_RGBA;
 
@@ -369,7 +399,7 @@ export function R_BlendLightmaps(): void {
         for (; drawsurf && drawsurf !== surf; drawsurf = drawsurf.lightmapchain) {
           if (drawsurf.polys) {
             if (usingShader && drawsurf.plane) qgl.qglNormal3f(drawsurf.plane.normal[0], drawsurf.plane.normal[1], drawsurf.plane.normal[2]);
-            DrawGLPolyChain(drawsurf.polys, (drawsurf.light_s - drawsurf.dlight_s) * (1.0 / 128.0), (drawsurf.light_t - drawsurf.dlight_t) * (1.0 / 128.0));
+            DrawGLPolyChain(drawsurf.polys, (drawsurf.light_s - drawsurf.dlight_s) * (1.0 / BLOCK_WIDTH), (drawsurf.light_t - drawsurf.dlight_t) * (1.0 / BLOCK_HEIGHT));
           }
         }
 
@@ -397,7 +427,7 @@ export function R_BlendLightmaps(): void {
     for (let surf = newdrawsurf; surf; surf = surf.lightmapchain) {
       if (surf.polys) {
         if (usingShader && surf.plane) qgl.qglNormal3f(surf.plane.normal[0], surf.plane.normal[1], surf.plane.normal[2]);
-        DrawGLPolyChain(surf.polys, (surf.light_s - surf.dlight_s) * (1.0 / 128.0), (surf.light_t - surf.dlight_t) * (1.0 / 128.0));
+        DrawGLPolyChain(surf.polys, (surf.light_s - surf.dlight_s) * (1.0 / BLOCK_WIDTH), (surf.light_t - surf.dlight_t) * (1.0 / BLOCK_HEIGHT));
       }
     }
   }
@@ -1226,7 +1256,15 @@ GL_BeginBuildingLightmaps
 const beginBuildingLightstyles: LightstyleT[] = Array.from({ length: MAX_LIGHTSTYLES }, () => new LightstyleT());
 
 export function GL_BeginBuildingLightmaps(m: ModelT): void {
-  gl_lms.allocated.fill(0);
+  // q2repro's LM_BeginBuilding sizing (see BLOCK_WIDTH/BLOCK_HEIGHT's own
+  // comment above) -- recomputed per map load since different maps carry
+  // different lm_decoupled state.
+  const decoupled = Boolean(m.bspx?.decoupledLm);
+  const bits = decoupled ? 10 : 7;
+  BLOCK_WIDTH = 1 << bits;
+  BLOCK_HEIGHT = 1 << bits;
+  gl_lms.allocated = new Array(BLOCK_WIDTH).fill(0);
+  gl_lms.lightmap_buffer = new Uint8Array(LIGHTMAP_BYTES * BLOCK_WIDTH * BLOCK_HEIGHT);
 
   SetFrameCount(1); // no dlightcache
 
@@ -1261,7 +1299,7 @@ export function GL_BeginBuildingLightmaps(m: ModelT): void {
   GL_Bind(gl_state.lightmap_textures + 0);
   qgl.qglTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
   qgl.qglTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-  qgl.qglTexImage2D(GL_TEXTURE_2D, 0, gl_lms.internal_format, BLOCK_WIDTH, BLOCK_HEIGHT, 0, GL_LIGHTMAP_FORMAT, GL_UNSIGNED_BYTE, new Uint32Array(128 * 128));
+  qgl.qglTexImage2D(GL_TEXTURE_2D, 0, gl_lms.internal_format, BLOCK_WIDTH, BLOCK_HEIGHT, 0, GL_LIGHTMAP_FORMAT, GL_UNSIGNED_BYTE, new Uint32Array(BLOCK_WIDTH * BLOCK_HEIGHT));
 }
 
 /*

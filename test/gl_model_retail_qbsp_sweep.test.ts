@@ -4,13 +4,31 @@ maps shipped in baseq2/pak0.pak (12 QBSP extended-format, 16 classic IBSP)
 loaded through the REAL src/ref_gl/gl_model.ts Mod_ForName, no synthetic
 fixture. Confirms the QBSP dual-format GL loader (Mod_LoadFacesExt/
 Mod_LoadNodesExt/etc., the ident dispatch in Mod_ForName) handles every real
-retail map -- reports the exact pass/fail matrix rather than asserting blind
-28/28, since gl_model.ts's own lightmap-block-building path (GL_BeginBuildingLightmaps
-/GL_CreateSurfaceLightmap, gl_rsurf.ts) may carry a real capacity limit on
-some of this content, the way the classic-repo reference unit found (5/28
-GL blocked on a lightmap-buffer cap, ledgered there, not asserted as an
-a-priori requirement here since this repo's gl_rsurf.ts is not the same
-file).
+retail map.
+
+Previously reported 15/28: 11 maps (mgu1m1/2m1/2m3/3m1/3m2/3m3/4m1/4m2/4m3/
+5m1/5m2) blocked on "LM_UploadBlock() - MAX_LIGHTMAPS exceeded", and 2 more
+(mgu6m2/mgu6m3) on "GL_Upload8: too large". Both fixed in gl_rsurf.ts/
+gl_image.ts:
+
+- The lightmap blocker: every one of the 11 failing maps carries a BSPX
+  DECOUPLED_LM lump (verified against the real pak0.pak directory), which
+  packs far more lightmap data per map than the fixed 128x128-texel atlas
+  page this port's LM_UploadBlock/LM_AllocBlock (gl_rsurf.ts) hardcoded --
+  overflowing the 128-page MAX_LIGHTMAPS budget. q2repro's LM_BeginBuilding
+  (src/refresh/surf.c) sizes its atlas page per map instead -- 256x256
+  normally, 1024x1024 for a DECOUPLED_LM map -- and gl_rsurf.ts's
+  GL_BeginBuildingLightmaps now does the same (see BLOCK_WIDTH/BLOCK_HEIGHT's
+  own comment there).
+- The GL_Upload8 blocker: vanilla's `s > 512*256` check there guarded a fixed
+  C stack buffer (`unsigned trans[512*256]`) this port never had (its `trans`
+  is a dynamically-sized `Uint32Array(s)`) -- real Call of the Machine 8-bit
+  texture data in mgu6m2.bsp/mgu6m3.bsp legitimately exceeds 512*256 texels
+  and tripped this vestigial cap before GL_Upload32's own (already-correct)
+  clamp-and-resample-to-256 ever got to run. See GL_Upload8's own comment in
+  gl_image.ts for the full citation.
+
+Now 28/28.
 
 No copyrighted map data is committed anywhere -- pak0.pak is read directly
 from the user's local retail install via FS_LoadFile served through this
@@ -134,6 +152,9 @@ describe("gl_model.ts -- QBSP dual-format sweep over all 28 real retail mgu*.bsp
       // silent "returned null with no reason" -- a genuine capacity/format
       // blocker gets ledgered by name below, not swept under a bare boolean.
       for (const f of failing) expect(f.reason).toBeDefined();
+      // all 28 real retail mgu*.bsp maps load cleanly (see this file's
+      // header comment for the 13 that used to fail and why they're fixed).
+      expect(passing.length).toBe(28);
     },
     180000,
   );

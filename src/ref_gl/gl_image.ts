@@ -1057,7 +1057,30 @@ Returns has_alpha
 */
 export function GL_Upload8(data: Uint8Array, width: number, height: number, mipmap: boolean, is_sky: boolean): boolean {
   const s = width * height;
-  if (s > 512 * 256) {
+  // Vanilla's check here (`s > 512*256`) guarded a fixed-size C stack array
+  // (`unsigned trans[512*256]`, ref_gl/gl_image.c:1167) -- a stack-frame
+  // budget accident, not a real GL limit: vanilla's own game content never
+  // shipped an 8-bit texture/sky face anywhere near that size, so the cap
+  // was never exercised. This port's `trans` (below) is a `new Uint32Array(s)`
+  // allocated to the real input size, not a fixed buffer, so that vanilla
+  // constraint doesn't apply here at all. Real "Call of the Machine" rerelease
+  // content (mgu6m2.bsp/mgu6m3.bsp) legitimately ships an 8-bit texture
+  // bigger than 512*256=131072 texels and tripped this vestigial cap.
+  // q2repro has no equivalent GL_Upload8 at all -- it unpacks 8-bit source
+  // images through IMG_Unpack8 (src/refresh/images.c) with no size check of
+  // its own, then lets the normal upload path clamp/resample to the actual
+  // GPU limit (GL_ClampTextureSize against gl_config.max_texture_size,
+  // src/refresh/texture.c:446). This port's GL_Upload32 below already does
+  // the equivalent unconditional clamp-and-resample down to <=256x256
+  // (`scaled_width`/`scaled_height`, further down in this file) regardless
+  // of input size, so removing this check doesn't skip any real bound --
+  // it just stops rejecting valid input before GL_Upload32 gets to run its
+  // own (already-correct) downscale. What's kept is a sanity ceiling against
+  // corrupted/malicious dimensions, sized to q2repro's own general image
+  // sanity bound (images.h: `#define MAX_TEXTURE_SIZE 8192`, used the same
+  // way by every one of its image loaders).
+  const MAX_TEXTURE_SIZE = 8192;
+  if (width > MAX_TEXTURE_SIZE || height > MAX_TEXTURE_SIZE) {
     ri.Sys_Error(ERR_DROP, "GL_Upload8: too large");
   }
 

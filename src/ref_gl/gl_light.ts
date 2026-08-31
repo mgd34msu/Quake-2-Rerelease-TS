@@ -464,10 +464,12 @@ export function R_LightPoint(p: Vec3, color: Vec3): void {
 // Vanilla sized this 34*34*3 (headroom over the classic 256-unit extents
 // cap, max smax/tmax ~17). Bumped to 128*128*3 to cover DECOUPLED_LM faces,
 // whose lm_width/lm_height come straight from the BSPX lump instead of the
-// 256-unit-extents-derived grid (real rerelease data: up to 32x36, still
-// well inside the atlas's own BLOCK_WIDTH/BLOCK_HEIGHT=128 cap -- see
-// gl_rsurf.ts's GL_CreateSurfaceLightmap, which allocates this same face
-// into the shared lightmap atlas via surfaceLightmapDims).
+// 256-unit-extents-derived grid (real rerelease data: up to 32x36 -- a
+// single FACE's own lightmap dimensions, unrelated to and much smaller than
+// gl_rsurf.ts's BLOCK_WIDTH/BLOCK_HEIGHT, the shared ATLAS page a face's
+// lightmap gets packed into via GL_CreateSurfaceLightmap/surfaceLightmapDims;
+// this buffer's cap tracks the former, not the latter, and doesn't need to
+// grow when the atlas page size does).
 const s_blocklights = new Float32Array(128 * 128 * 3);
 
 /*
