@@ -37,6 +37,7 @@ import {
   SZ_Write,
 } from "../qcommon/sizebuf";
 import { Cvar_VariableString } from "../qcommon/cvar";
+import { Nav_SetEdictSource } from "./nav";
 import { CM_InlineModel, CM_PointLeafnum, CM_LeafArea, CM_LeafCluster, CM_ClusterPVS, CM_ClusterPHS, CM_AreasConnected } from "../qcommon/cmodel";
 import type { GameExports, Edict } from "../game/game";
 import { GAME_API_VERSION } from "../game/game";
@@ -391,6 +392,18 @@ export function SV_ShutdownGameProgs(): void {
   // Sys_UnloadGame() -- omitted: no DLL boundary in this port (see this
   // file's header comment and SV_InitGameProgs below).
   geHolder.ge = null;
+  // game.c:1068-1071 nulls the single `ge` global here, which is also the
+  // array src/server/nav.ts's Nav_SetupEntities walks (nav.c:1425-1426's
+  // `ge->num_edicts`/`EDICT_NUM(n)`). This port reaches that array through
+  // nav.ts's Nav_SetEdictSource provider seam instead of a shared `ge`
+  // global (see nav.ts's header, "A NEW SEAM"), and only bindings/kex.ts
+  // registers one -- so without this line a provider closing over a
+  // SHUTDOWN kex game's edicts stays live across a switch to a legacy game
+  // module, and the next level's Nav_SetupEntities resolves nav edicts
+  // against the dead module's stale array rather than the current one.
+  // Nulling it here restores upstream's lifetime exactly: no game module
+  // loaded means no edicts for nav to match against.
+  Nav_SetEdictSource(null);
 }
 
 /*
