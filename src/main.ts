@@ -70,6 +70,7 @@ import { CL_Drop, CL_Frame, CL_Init, CL_Shutdown, Cmd_ForwardToServer } from "./
 import { SCR_BeginLoadingPlaque } from "./client/cl_scrn";
 import { Key_Init } from "./client/keys_impl";
 import { SCR_EndLoadingPlaque } from "./client/cl_scrn";
+import { HAPTICS_SetBackendEnabled, Haptics_Init } from "./platform/haptics";
 import { SDL_SetBackendEnabled } from "./platform/sdl";
 
 // common.c's Com_Error_f lives beside Com_Error there; common.ts omitted the
@@ -178,7 +179,13 @@ export function Qcommon_Init(argv: string[]): void {
     Cvar_Get("sys_history", "128", 0); // common.c:965 -- STRINGIFY(HISTORY_SIZE); q2repro's inc/common/common.h defines HISTORY_SIZE as 128
 
     // arm the windowing/input/audio backend before CL_Init reaches VID_Init
-    if (dedicated && !dedicated.value) SDL_SetBackendEnabled(true);
+    if (dedicated && !dedicated.value) {
+      SDL_SetBackendEnabled(true);
+      // Controller haptics ride the same non-dedicated gate; everything
+      // no-ops without a rumble-capable controller (haptics.ts header).
+      HAPTICS_SetBackendEnabled(true);
+      Haptics_Init();
+    }
 
     const s = Com_sprintf("%4.2f %s %s", VERSION, CPUSTRING, BUILDSTRING);
     // q2repro src/common/common.c:945 flags "version" CVAR_ROM, not

@@ -60,6 +60,7 @@
 //   registrations but omits these); hosted as module-private state here
 //   instead of adding fields to client.ts (out of SCOPE).
 
+import { Haptics_Frame } from "../platform/haptics";
 import { IN_Shutdown } from "../platform/sdl";
 import { CDAudio_Shutdown, CDAudio_Init, CDAudio_Update } from "../platform/cd_ogg";
 import { Key_WriteBindings } from "./keys_impl";
@@ -1950,6 +1951,7 @@ export function CL_Frame(msec: number): void {
 
   // update audio
   S_Update(cl.refdef.vieworg, cl.v_forward, cl.v_right, cl.v_up);
+  Haptics_Frame(cls.realtime); // advance the rumble pattern scheduler
 
   CDAudio_Update();
 

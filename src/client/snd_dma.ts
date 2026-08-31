@@ -21,6 +21,7 @@ import { Cvar_Get } from "../qcommon/cvar";
 import { FS_FCloseFile, FS_FOpenFile } from "../qcommon/files";
 import { type Vec3, vec3, DotProduct, VectorCopy, VectorNormalize, VectorSubtract } from "../shared/math";
 import { ATTN_STATIC, CVAR_ARCHIVE, CVAR_SOUND, Com_PageInMemory, Com_sprintf, ERR_DROP, ERR_FATAL, RDF_UNDERWATER, type EntityStateT } from "../shared/q_shared";
+import { Haptics_TriggerSound } from "../platform/haptics";
 import { cl, cl_entities, cl_parse_entities, clCvars, cls, ConnstateT, MAX_PARSE_ENTITIES } from "./client";
 import { CL_GetEntitySoundOrigin } from "./cl_ents";
 import {
@@ -612,6 +613,12 @@ export function S_StartSound(
     sfx = S_RegisterSexedSound(cl_entities[entnum].current, sfx.name);
   }
   if (!sfx) return;
+
+  // Retail tactile/ haptic cues mirror sound/ paths 1:1 (all 53 .bnvib
+  // names verified) -- the trigger IS the sound start, gated to the local
+  // player inside Haptics_TriggerSound. See platform/haptics.ts's header
+  // for the evidence and downmix design.
+  Haptics_TriggerSound(sfx.name, entnum);
 
   // make sure the sound is loaded
   const sc = S_LoadSound(sfx);
