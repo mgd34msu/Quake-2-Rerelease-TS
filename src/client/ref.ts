@@ -146,6 +146,25 @@ export interface RefExports {
   RegisterModel(name: string): ModelS | null;
   RegisterSkin(name: string): ImageS | null;
   RegisterPic(name: string): ImageS | null;
+  // Registers an already-in-memory RGBA8 pixel buffer under an exact name,
+  // with no disk access and no filename-extension probing -- for callers
+  // that already have rasterized pixels in hand (RegisterPic's whole
+  // "resolve a filename to pixels" job doesn't apply). Added for
+  // client/cgame/host.ts's TTF-backed kfont path (qcommon/ttf.ts's
+  // buildFontAtlas rasterizes a font atlas straight into RGBA8 memory, no
+  // file on disk to register a name against). GL: gl_image.ts's own
+  // GL_LoadPic already accepts RGBA8 pixels + a bit depth directly.
+  // Software: this renderer's whole pixel pipeline (r_draw.ts, r_surf.ts,
+  // vid.colormap/d_8to24table) is palette-indexed 8-bit, so the
+  // implementation quantizes via the SAME QuantizeRGBAToPalette path
+  // r_image.ts's own LoadPNGQuantized/LoadJPGQuantized already use for the
+  // rerelease's truecolor PNG/JPG UI assets, then feeds the same
+  // module-private GL_LoadPic every other r_image.ts loader funnels
+  // through. Returns null if `width`/`height` are non-positive (mirrors
+  // RegisterPic's own "not found" null convention -- see gl_draw.ts's
+  // Draw_FindPic/r_draw.ts's Draw_FindPic just below RegisterPic's own
+  // wiring in both GetRefAPIs).
+  RegisterRawPic(name: string, pixels: Uint8Array, width: number, height: number): ImageS | null;
   SetSky(name: string, rotate: number, axis: Vec3): void;
   EndRegistration(): void;
 

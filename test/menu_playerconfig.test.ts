@@ -112,6 +112,7 @@ function fakeRe(calls: string[], renderedRefdefs: Parameters<RefExports["RenderF
       return { markerSkin: name };
     },
     RegisterPic: () => null,
+    RegisterRawPic: () => null,
     SetSky: () => {},
     EndRegistration: () => {},
     RenderFrame: (fd) => {

@@ -85,21 +85,22 @@ import { CL_Wheel_Precache } from "../cl_wheel";
 // doc comment -- this file's ensureActiveKfont() below is that contract's
 // prescribed caller, implemented for real).
 import { parseFont, buildFontAtlas, latin1Codepoints } from "../../qcommon/ttf";
-// GL_LoadPic: the INTEGRATION CONTRACT's step 4 registration primitive
-// ("gl_image.ts's already-public GL_LoadPic ... ALREADY exported"). Reached
-// directly from client code rather than through RefExports (ref.ts) --
-// there is no "register raw RGBA pixels under an exact name" member on
-// that interface, and adding one would mean extending ref.ts/gl_draw.ts/
-// r_draw.ts too, outside this unit's host.ts-only scope for this item (see
-// this file's own task report). ONLY the GL renderer is reachable this way:
-// ref_soft/r_image.ts's own GL_LoadPic-equivalent is a private
-// (non-exported) function, so a "ttf:" source registers nothing under the
-// software renderer -- ensureActiveKfont() below falls back to the
-// classic conchars path exactly as it would for any other load failure,
-// so this is a silently-degraded (not silently-wrong) result, and it is
-// reported here plainly rather than swept under.
-import { GL_LoadPic } from "../../ref_gl/gl_image";
-import { ImagetypeT } from "../../ref_gl/gl_local";
+// re.RegisterRawPic: the INTEGRATION CONTRACT's step 4 registration
+// primitive, reached through RefExports (ref.ts) so it works under EITHER
+// renderer -- see that interface member's own doc comment for the full
+// GL-vs-software writeup. Previously this called gl_image.ts's GL_LoadPic
+// directly, which only reaches the GL renderer (ref_soft/r_image.ts's own
+// GL_LoadPic-equivalent was a private, non-exported function, so a "ttf:"
+// source silently registered nothing at all under the software renderer --
+// ensureActiveKfont() below would fall back to the classic conchars path
+// exactly as it would for any other load failure). Closed by adding
+// RegisterRawPic to RefExports (implemented in both gl_rmain.ts, which
+// forwards straight to GL_LoadPic, and r_main.ts, which forwards to
+// r_image.ts's new R_RegisterRawPic -- RGBA8-to-palette quantization via
+// the same QuantizeRGBAToPalette pipeline that renderer's own
+// LoadPNGQuantized/LoadJPGQuantized already use for the rerelease's other
+// truecolor UI assets), so a "ttf:" source now registers correctly under
+// both renderers.
 
 // ---------------------------------------------------------------------------
 // Fallback text metrics (kfont-less path) -- see the SCR_DrawFontString /
@@ -209,13 +210,15 @@ function ensureKfontCvars(): void {
 // real: FS_LoadFile the raw font bytes (.ttf, falling back to .otf --
 // covers the 3 CFF-flavored files in the real retail font set), parseFont,
 // buildFontAtlas over latin1Codepoints() at the requested pixel size,
-// register the atlas under a caller-assigned name via GL_LoadPic (see this
-// file's own import-site doc comment on GL_LoadPic for the cross-layer
-// reasoning and the ref_soft gap), then Kfont_FromTTF to relabel the atlas
-// into this file's own lookup shape. Any failure at any step (file missing,
-// unrecognized sfnt signature, etc.) returns null -- matches SCR_LoadKFont's
-// own "just return" bail-on-failure convention (loadKfontAsset's own doc
-// comment above cites the same precedent) rather than throwing.
+// register the atlas under a caller-assigned name via re.RegisterRawPic
+// (see this file's own import-site doc comment above on RefExports.
+// RegisterRawPic for the cross-layer reasoning -- reaches both renderers,
+// closing the former GL-only ref_soft gap), then Kfont_FromTTF to relabel
+// the atlas into this file's own lookup shape. Any failure at any step
+// (file missing, unrecognized sfnt signature, registration failure, etc.)
+// returns null -- matches SCR_LoadKFont's own "just return" bail-on-failure
+// convention (loadKfontAsset's own doc comment above cites the same
+// precedent) rather than throwing.
 function loadTtfKfontAsset(name: string, pxSize: number): ActiveKfontT | null {
   if (!re) return null;
   const raw = FS_LoadFile(`fonts/${name}.ttf`) ?? FS_LoadFile(`fonts/${name}.otf`);
@@ -224,7 +227,7 @@ function loadTtfKfontAsset(name: string, pxSize: number): ActiveKfontT | null {
   if (!parsed.ok) return null;
   const atlas = buildFontAtlas(parsed.font, latin1Codepoints(), pxSize);
   const pic = `/ttf:${name}:${pxSize}`;
-  GL_LoadPic(pic, atlas.pixels, atlas.width, atlas.height, ImagetypeT.it_pic, 32);
+  if (!re.RegisterRawPic(pic, atlas.pixels, atlas.width, atlas.height)) return null;
   return wrapTtfKfont(Kfont_FromTTF(atlas, pic));
 }
 

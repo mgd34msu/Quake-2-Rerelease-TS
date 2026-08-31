@@ -143,6 +143,7 @@ function makeFakeRe(): RefExports & {
       fake.registerPicCalls.push(name);
       return fake.registerPicResult;
     },
+    RegisterRawPic: (): ImageS | null => null,
     SetSky: () => undefined,
     EndRegistration: () => undefined,
     RenderFrame: () => undefined,
@@ -201,6 +202,17 @@ describe("host.ts -- kfont-aware SCR_MeasureFontString/SCR_FontLineHeight/SCR_Dr
 
   beforeEach(() => {
     setRe(null);
+    // cl_kfont_source is a process-global cvar singleton -- force it back to
+    // its documented default before every test rather than assuming no
+    // other file's tests left it on a non-default value (rule 13:
+    // self-sufficient, never relies on another file having run first/last).
+    // Concretely needed because test/cgame_host_kfont_source.test.ts's own
+    // last test leaves this cvar force-set to "ttf:DoesNotExist", which
+    // would otherwise make every test below dispatch through
+    // loadTtfKfontAsset (always failing, since that font genuinely doesn't
+    // exist) instead of the classic kfont path these tests are named for,
+    // when both files run in the same `bun test` process.
+    Cvar_ForceSet("cl_kfont_source", "kfont");
   });
 
   test("without a mounted fonts/qconfont.kfont, SCR_MeasureFontString/SCR_FontLineHeight use the original conchars math", () => {
@@ -240,6 +252,17 @@ describe("host.ts -- kfont-aware SCR_MeasureFontString/SCR_FontLineHeight/SCR_Dr
 
   beforeEach(() => {
     setRe(null);
+    // cl_kfont_source is a process-global cvar singleton -- force it back to
+    // its documented default before every test rather than assuming no
+    // other file's tests left it on a non-default value (rule 13:
+    // self-sufficient, never relies on another file having run first/last).
+    // Concretely needed because test/cgame_host_kfont_source.test.ts's own
+    // last test leaves this cvar force-set to "ttf:DoesNotExist", which
+    // would otherwise make every test below dispatch through
+    // loadTtfKfontAsset (always failing, since that font genuinely doesn't
+    // exist) instead of the classic kfont path these tests are named for,
+    // when both files run in the same `bun test` process.
+    Cvar_ForceSet("cl_kfont_source", "kfont");
   });
 
   test("the font loads: with fonts/qconfont.kfont mounted, SCR_DrawFontString registers and draws through DrawStretchPicRegion (the atlas path), not DrawChar", () => {

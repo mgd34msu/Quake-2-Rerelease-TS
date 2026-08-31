@@ -154,6 +154,7 @@ describe("ref.ts / vid.ts / screen.ts default structs", () => {
       RegisterModel: () => null,
       RegisterSkin: () => null,
       RegisterPic: () => null,
+      RegisterRawPic: () => null,
       SetSky: () => undefined,
       EndRegistration: () => undefined,
       RenderFrame: () => undefined,

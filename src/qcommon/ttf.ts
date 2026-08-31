@@ -45,31 +45,30 @@
 //     retail font set, e.g. the 'o with diaeresis' loc_english.txt needs,
 //     uses plain XY offsets). Falls back to a (0,0) offset if encountered,
 //     documented, not silently wrong-shaped -- see parseCompositeGlyph.
-//   - COLR/CPAL color glyphs -- NOT implemented, and this is a real,
-//     load-bearing gap for 7 of the 29 shipped fonts: every
+//   - COLR v0 + CPAL color glyphs -- IMPLEMENTED (closer unit, follow-up to
+//     the finding below): parseCOLR/parseCPAL decode the layer-record and
+//     palette tables, ParsedFontT.colorLayers()/paletteColor() expose them,
+//     and rasterizeColorGlyph() composites each layer's outline (rasterized
+//     via the SAME rasterizeContours() every other glyph in this module
+//     uses) tinted by its CPAL color, alpha-blended in COLR's own
+//     bottom-to-top layer order. Verified against the real bytes: every
 //     KexControllerIcons*.ttf file (DS4/DSense/Generic/Mouse/SwitchJoy/
-//     SwitchPro/Xbox) is a COLR v0 + CPAL color font (verified: each one's
-//     sfnt table directory carries COLR/CPAL/GDEF tables). Their
-//     cmap-reachable glyphs are, BY DESIGN, empty base outlines -- the
-//     actual multi-color button-icon artwork lives in separate,
-//     higher-numbered "layer" glyphs a COLR table would composite with
-//     per-layer palette colors from CPAL (verified against the real bytes:
-//     e.g. KexControllerIconsDS4.ttf's cmap-mapped gids are all
-//     zero-contour, but plenty of its NOT-cmap-reachable higher gids have
-//     real outline geometry that rasterizes correctly -- this module's
-//     glyf/loca decoder itself is not the gap, see test/ttf_retail.test.ts).
-//     COLR compositing is deliberately NOT implemented here: it is a
-//     genuinely different rendering shape than everything else in this
-//     module (multiple colored layers per "character" instead of one
-//     grayscale-coverage-to-alpha glyph), fundamentally incompatible with
-//     the kfont draw model this seam plugs into (DrawStretchPicRegion draws
-//     ONE atlas rect tinted by ONE DrawColorT per character -- see
-//     client/cgame/kfont.ts) without inventing a second render path, which
-//     the brief explicitly rules out. If controller-icon glyphs are ever
-//     needed through this seam, that requires either a COLR-aware
-//     multi-layer draw path (out of scope for a kfont-shaped seam) or
-//     sourcing icon art from a different asset entirely -- reported here
-//     rather than silently producing blank icons.
+//     SwitchPro/Xbox) is a COLR v0 + CPAL color font (each one's sfnt table
+//     directory carries COLR/CPAL/GDEF tables) -- their cmap-reachable
+//     glyphs are, BY DESIGN, empty base outlines; the actual multi-color
+//     button-icon artwork lives in separate, higher-numbered "layer" glyphs
+//     a COLR table composites with per-layer palette colors from CPAL (see
+//     test/ttf_colr_retail.test.ts). COLRv1 (the gradient/paint-graph
+//     extension) is NOT implemented -- parseCOLR only accepts version 0,
+//     see its own doc comment; no font in the shipped retail set uses v1.
+//     rasterizeColorGlyph() produces a standalone RGBA8 bitmap, NOT an
+//     atlas rect wired into buildFontAtlas()/kfont's single-tint draw model
+//     (DrawStretchPicRegion draws ONE atlas rect tinted by ONE DrawColorT
+//     per character -- see client/cgame/kfont.ts) -- mapping the 7
+//     controller-icon fonts' color glyphs onto an actual HUD draw path
+//     (repeated DrawColorPic-tinted rects per layer, or a small compositor
+//     at atlas-build time, per .orch/followups.md's "V1.0.0 QUEUE" note)
+//     remains a separate, not-yet-scheduled integration unit.
 //   - CFF (Type 2 charstrings): the 3 .otf files (AtkinsonHyperLegible-
 //     Regular, NotoSansJP-Regular, NotoSansKR-Regular) all carry 'CFF '
 //     outlines, not 'glyf'. AtkinsonHyperLegible is a plain (non-CID) CFF
@@ -1088,6 +1087,118 @@ function parseKernFormat0(view: DataView, offset: number, length: number): Map<n
 }
 
 // -----------------------------------------------------------------------
+// COLR v0 + CPAL (color glyphs)
+//
+// OpenType spec references: "COLR — Color Table"
+// (https://learn.microsoft.com/en-us/typography/opentype/spec/colr) and
+// "CPAL — Color Palette Table"
+// (https://learn.microsoft.com/en-us/typography/opentype/spec/cpal). Only
+// COLR version 0 is implemented (the "COLRv1" gradient/paint-graph
+// extension -- version 1 header + the whole PaintXxx/ClipList machinery --
+// is NOT implemented; version-1 tables report `null` from colorLayers, the
+// same "not a color glyph as far as this module is concerned" result as no
+// COLR table at all). Verified against the 7 real KexControllerIcons*.ttf
+// files shipped in the retail rerelease KPF (Q2Game.kpf, fonts/) -- see
+// test/ttf_colr_retail.test.ts: each carries a v0 COLR table, single-palette
+// CPAL, and every cmap-mapped icon codepoint resolves to a multi-layer base
+// glyph record (3 to 16 layers observed).
+// -----------------------------------------------------------------------
+
+// COLR table, "Color table header" + BaseGlyphRecord + LayerRecord (COLR
+// spec, version 0): uint16 version; uint16 numBaseGlyphRecords;
+// Offset32 baseGlyphRecordsOffset; Offset32 layerRecordsOffset;
+// uint16 numLayerRecords. BaseGlyphRecord (6 bytes, sorted by gID):
+// uint16 gID; uint16 firstLayerIndex; uint16 numLayers. LayerRecord
+// (4 bytes): uint16 gID; uint16 paletteIndex (0xFFFF is the spec's "use the
+// applied text foreground color instead of a CPAL entry" sentinel --
+// preserved as-is in ColorLayerT.paletteIndex; see rasterizeColorGlyph's
+// own handling).
+interface ColrTable {
+  base: Map<number, { firstLayerIndex: number; numLayers: number }>;
+  layers: { gid: number; paletteIndex: number }[];
+}
+
+function parseCOLR(view: DataView, offset: number, length: number): ColrTable | null {
+  if (length < 14) return null;
+  const version = view.getUint16(offset, false);
+  if (version !== 0) return null; // COLRv1 (gradient paint graph) -- documented cut, see file header above
+  const numBaseGlyphRecords = view.getUint16(offset + 2, false);
+  const baseGlyphRecordsOffset = view.getUint32(offset + 4, false);
+  const layerRecordsOffset = view.getUint32(offset + 8, false);
+  const numLayerRecords = view.getUint16(offset + 12, false);
+
+  const base = new Map<number, { firstLayerIndex: number; numLayers: number }>();
+  let bp = offset + baseGlyphRecordsOffset;
+  for (let i = 0; i < numBaseGlyphRecords; i++) {
+    const gID = view.getUint16(bp, false);
+    const firstLayerIndex = view.getUint16(bp + 2, false);
+    const numLayers = view.getUint16(bp + 4, false);
+    base.set(gID, { firstLayerIndex, numLayers });
+    bp += 6;
+  }
+
+  const layers: { gid: number; paletteIndex: number }[] = new Array(numLayerRecords);
+  let lp = offset + layerRecordsOffset;
+  for (let i = 0; i < numLayerRecords; i++) {
+    const gID = view.getUint16(lp, false);
+    const paletteIndex = view.getUint16(lp + 2, false);
+    layers[i] = { gid: gID, paletteIndex };
+    lp += 4;
+  }
+
+  return { base, layers };
+}
+
+// CPAL table (CPAL spec): uint16 version; uint16 numPaletteEntries;
+// uint16 numPalettes; uint16 numColorRecords; Offset32
+// colorRecordsArrayOffset; uint16 colorRecordIndices[numPalettes] (each is
+// the index, into the shared colorRecords array, of that palette's FIRST
+// entry -- a palette's `numPaletteEntries` colors are contiguous from
+// there). ColorRecord (4 bytes) is BGRA byte order, NOT RGBA: uint8 blue;
+// uint8 green; uint8 red; uint8 alpha. Version-1-only fields (palette
+// flags/label-offset arrays, appended after colorRecordIndices) are never
+// read -- this module has no use for palette names/dark-mode flags, only
+// the color data every version carries at the same fixed offset.
+interface CpalTable {
+  numPaletteEntries: number;
+  numPalettes: number;
+  colorRecordIndices: Uint16Array;
+  colorRecords: { r: number; g: number; b: number; a: number }[];
+}
+
+function parseCPAL(view: DataView, offset: number, length: number): CpalTable | null {
+  if (length < 12) return null;
+  const numPaletteEntries = view.getUint16(offset + 2, false);
+  const numPalettes = view.getUint16(offset + 4, false);
+  const numColorRecords = view.getUint16(offset + 6, false);
+  const colorRecordsArrayOffset = view.getUint32(offset + 8, false);
+
+  const colorRecordIndices = new Uint16Array(numPalettes);
+  const idxBase = offset + 12;
+  for (let i = 0; i < numPalettes; i++) colorRecordIndices[i] = view.getUint16(idxBase + i * 2, false);
+
+  const recBase = offset + colorRecordsArrayOffset;
+  const colorRecords: { r: number; g: number; b: number; a: number }[] = new Array(numColorRecords);
+  for (let i = 0; i < numColorRecords; i++) {
+    const p = recBase + i * 4;
+    const blue = view.getUint8(p);
+    const green = view.getUint8(p + 1);
+    const red = view.getUint8(p + 2);
+    const alpha = view.getUint8(p + 3);
+    colorRecords[i] = { r: red, g: green, b: blue, a: alpha };
+  }
+
+  return { numPaletteEntries, numPalettes, colorRecordIndices, colorRecords };
+}
+
+// One COLR layer record, relabeled onto this module's own naming (gid, not
+// "gID" -- matches every other gid-shaped field in this file).
+export interface ColorLayerT {
+  gid: number;
+  paletteIndex: number; // 0xFFFF = use the caller's foreground color (COLR spec sentinel), not a CPAL index
+}
+
+// -----------------------------------------------------------------------
 // Top-level parse: ParsedFontT
 // -----------------------------------------------------------------------
 
@@ -1102,6 +1213,14 @@ export interface ParsedFontT {
   advanceWidth(gid: number): number; // font units
   contours(gid: number): FlattenedContourT[]; // font units, fully resolved (composites flattened)
   kerning(leftGid: number, rightGid: number): number; // font units, 0 if no 'kern' data
+  // null if `gid` has no COLR v0 base-glyph record at all (not a color
+  // glyph, or a COLRv1-only record -- see parseCOLR's own version check) --
+  // matches kerning's "0 if no data" and contours' "[] if none" convention
+  // of a plain not-present result rather than an error.
+  colorLayers(gid: number): ColorLayerT[] | null;
+  // null if there is no CPAL table, `paletteId` is out of range, or
+  // `paletteIndex` is out of range for that palette's entry count.
+  paletteColor(paletteIndex: number, paletteId?: number): { r: number; g: number; b: number; a: number } | null;
 }
 
 export type ParseFontResultT = { ok: true; font: ParsedFontT } | { ok: false; reason: string };
@@ -1202,6 +1321,11 @@ export function parseFont(buf: Uint8Array): ParseFontResultT {
   const kernT = tables.get("kern");
   const kernPairs = kernT !== undefined ? parseKernFormat0(view, kernT.offset, kernT.length) : null;
 
+  const colrT = tables.get("COLR");
+  const colrTable = colrT !== undefined ? parseCOLR(view, colrT.offset, colrT.length) : null;
+  const cpalT = tables.get("CPAL");
+  const cpalTable = cpalT !== undefined ? parseCPAL(view, cpalT.offset, cpalT.length) : null;
+
   const font: ParsedFontT = {
     unitsPerEm,
     numGlyphs,
@@ -1213,6 +1337,26 @@ export function parseFont(buf: Uint8Array): ParseFontResultT {
     advanceWidth: (gid: number) => (gid >= 0 && gid < numGlyphs ? advanceWidths[gid] : 0),
     contours: contoursFn,
     kerning: (l: number, r: number) => (kernPairs === null ? 0 : (kernPairs.get(l * 65536 + r) ?? 0)),
+    colorLayers: (gid: number) => {
+      if (colrTable === null) return null;
+      const rec = colrTable.base.get(gid);
+      if (rec === undefined) return null;
+      const out: ColorLayerT[] = [];
+      for (let i = 0; i < rec.numLayers; i++) {
+        const layer = colrTable.layers[rec.firstLayerIndex + i];
+        if (layer === undefined) continue;
+        out.push({ gid: layer.gid, paletteIndex: layer.paletteIndex });
+      }
+      return out;
+    },
+    paletteColor: (paletteIndex: number, paletteId = 0) => {
+      if (cpalTable === null) return null;
+      if (paletteId < 0 || paletteId >= cpalTable.numPalettes) return null;
+      if (paletteIndex < 0 || paletteIndex >= cpalTable.numPaletteEntries) return null;
+      const first = cpalTable.colorRecordIndices[paletteId];
+      const rec = cpalTable.colorRecords[first + paletteIndex];
+      return rec === undefined ? null : rec;
+    },
   };
   return { ok: true, font };
 }
@@ -1334,6 +1478,102 @@ export function rasterizeGlyph(font: ParsedFontT, gid: number, px: number): Rast
 
   const pxContours: FlattenedContourT[] = contours.map((c) => c.map((p) => ({ x: p.x * scale, y: (font.ascent - p.y) * scale })));
   return rasterizeContours(pxContours, width, height);
+}
+
+// -----------------------------------------------------------------------
+// COLR v0 compositing: rasterize a color glyph as a stack of tinted
+// grayscale-coverage layers, alpha-blended in COLR's own bottom-to-top
+// layer order (COLR spec, "Baseline table format": "the first layer
+// specified for a base glyph is the bottom-most layer, and it will get
+// painted first"). Reuses rasterizeContours -- each layer glyph's outline
+// is a perfectly ordinary glyph outline in its own right, so its coverage
+// buffer is computed identically, then tinted by that layer's CPAL color
+// and composited with standard non-premultiplied "over" alpha blending
+// instead of being written straight into an RGBA8 atlas as flat white.
+// -----------------------------------------------------------------------
+
+export interface RasterizedColorGlyphT {
+  width: number;
+  height: number;
+  pixels: Uint8Array; // RGBA8 straight (non-premultiplied) alpha, width*height*4
+}
+
+const COLR_FOREGROUND_SENTINEL = 0xffff;
+
+// Standard non-premultiplied "source over destination" compositing (Porter-
+// Duff "over"): outA = srcA + dstA*(1-srcA); outRGB = (srcRGB*srcA +
+// dstRGB*dstA*(1-srcA)) / outA. `srcCoverage` is the layer's rasterized
+// alpha (0-255) at this pixel, further modulated by the layer color's own
+// alpha (CPAL/COLR spec: a color record's alpha applies exactly like any
+// other paint alpha).
+function compositeOver(pixels: Uint8Array, i: number, srcCoverage: number, color: { r: number; g: number; b: number; a: number }): void {
+  const srcA = (srcCoverage / 255) * (color.a / 255);
+  if (srcA <= 0) return;
+  const o = i * 4;
+  const dstA = pixels[o + 3] / 255;
+  const outA = srcA + dstA * (1 - srcA);
+  if (outA <= 0) return;
+  const dstFactor = dstA * (1 - srcA);
+  pixels[o] = Math.round((color.r * srcA + pixels[o] * dstFactor) / outA);
+  pixels[o + 1] = Math.round((color.g * srcA + pixels[o + 1] * dstFactor) / outA);
+  pixels[o + 2] = Math.round((color.b * srcA + pixels[o + 2] * dstFactor) / outA);
+  pixels[o + 3] = Math.round(outA * 255);
+}
+
+// Rasterizes COLR base glyph `baseGid` (a gid with a `font.colorLayers()`
+// entry -- see that method's own doc comment) at `px` pixels-per-em,
+// compositing every layer's outline tinted by its CPAL palette color (or
+// `foregroundColor` for a layer using the 0xFFFF "text foreground" sentinel)
+// into one RGBA8 bitmap. Returns null if `baseGid` has no COLR entry at
+// all (not a color glyph -- callers that don't already know this should
+// check via `font.colorLayers(baseGid) !== null` first, exactly like
+// rasterizeGlyph's callers already check contours()/cmapLookup() first).
+//
+// Cell sizing deliberately mirrors rasterizeGlyph's own convention (advance
+// width for the width, ascent-to-lowest-point for the height) but computes
+// yMin over the UNION of every layer's contours, not the base glyph's own
+// (empty, by COLR v0 design -- see this file's header FINDING) contours,
+// so every layer shares one consistent pixel-space transform and lands in
+// its correct relative position instead of each layer picking its own
+// (wrongly offset) bounding box.
+export function rasterizeColorGlyph(
+  font: ParsedFontT,
+  baseGid: number,
+  px: number,
+  paletteId = 0,
+  foregroundColor: { r: number; g: number; b: number; a: number } = { r: 255, g: 255, b: 255, a: 255 },
+): RasterizedColorGlyphT | null {
+  const layers = font.colorLayers(baseGid);
+  if (layers === null) return null;
+
+  const scale = px / font.unitsPerEm;
+  const width = Math.max(1, Math.round(font.advanceWidth(baseGid) * scale));
+
+  const resolved: { contours: FlattenedContourT[]; color: { r: number; g: number; b: number; a: number } }[] = [];
+  let yMin = 0;
+  for (const layer of layers) {
+    const color = layer.paletteIndex === COLR_FOREGROUND_SENTINEL ? foregroundColor : font.paletteColor(layer.paletteIndex, paletteId);
+    if (color === null) continue; // malformed/out-of-range palette index -- skip the layer rather than fail the whole glyph
+    const contours = font.contours(layer.gid);
+    for (const c of contours) for (const p of c) if (p.y < yMin) yMin = p.y;
+    resolved.push({ contours, color });
+  }
+
+  const bottom = Math.min(0, yMin);
+  const height = Math.max(1, Math.round((font.ascent - bottom) * scale));
+  const pixels = new Uint8Array(width * height * 4);
+
+  for (const { contours, color } of resolved) {
+    if (contours.length === 0) continue;
+    const pxContours: FlattenedContourT[] = contours.map((c) => c.map((p) => ({ x: p.x * scale, y: (font.ascent - p.y) * scale })));
+    const raster = rasterizeContours(pxContours, width, height);
+    for (let i = 0; i < raster.coverage.length; i++) {
+      if (raster.coverage[i] === 0) continue;
+      compositeOver(pixels, i, raster.coverage[i], color);
+    }
+  }
+
+  return { width, height, pixels };
 }
 
 // -----------------------------------------------------------------------

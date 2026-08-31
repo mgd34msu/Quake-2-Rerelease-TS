@@ -42,6 +42,7 @@ function makeFakeRe(): RefExports {
     RegisterModel: () => null,
     RegisterSkin: () => null,
     RegisterPic: (): ImageS | null => ({}) as ImageS, // always "succeeds" -- the PNG itself is never touched by loadKfontAsset
+    RegisterRawPic: (): ImageS | null => ({}) as ImageS, // always "succeeds" -- unexercised by this file's tests (see header comment), same convention as RegisterPic above
     SetSky: () => undefined,
     EndRegistration: () => undefined,
     RenderFrame: () => undefined,

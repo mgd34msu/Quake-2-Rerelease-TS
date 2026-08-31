@@ -73,6 +73,7 @@ function makeSpyRe(log: DrawCall[]): RefExports {
     RegisterModel: () => null,
     RegisterSkin: () => null,
     RegisterPic: (_name: string): ImageS | null => null,
+    RegisterRawPic: (): ImageS | null => null,
     SetSky: () => undefined,
     EndRegistration: () => undefined,
     RenderFrame: () => undefined,

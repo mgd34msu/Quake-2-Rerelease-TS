@@ -47,6 +47,7 @@ function makeFakeRe(): RefExports & {
     RegisterPic(_name: string): ImageS | null {
       return fake.registerPicResult;
     },
+    RegisterRawPic: (): ImageS | null => null,
     SetSky: () => undefined,
     EndRegistration: () => undefined,
     RenderFrame: () => undefined,

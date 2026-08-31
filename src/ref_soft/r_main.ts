@@ -160,7 +160,7 @@ import {
 } from "./r_model";
 import { r_worldmodel, R_DrawSolidClippedSubmodelPolygons, R_DrawSubmodelPolygons, R_RenderWorld, R_RotateBmodel } from "./r_bsp";
 import { Draw_Char, Draw_ColorPic, Draw_FadeScreen, Draw_Fill, Draw_FindPic, Draw_GetPicSize, Draw_InitLocal, Draw_Pic, Draw_StretchPic, Draw_StretchPicRegion, Draw_StretchRaw, Draw_TileClear } from "./r_draw";
-import { LoadPCX, R_FindImage, R_ImageList_f, R_InitImages, R_RegisterSkin, R_ShutdownImages } from "./r_image";
+import { LoadPCX, R_FindImage, R_ImageList_f, R_InitImages, R_RegisterSkin, R_RegisterRawPic, R_ShutdownImages } from "./r_image";
 import { R_BeginEdgeFrame, R_ScanEdges, R_SurfacePatch } from "./r_edge";
 import { r_skytexinfo } from "./r_rast";
 import { D_FlushCaches, R_InitCaches } from "./r_surf";
@@ -1113,6 +1113,7 @@ export function GetRefAPI(imp: RefImports): RefExports {
     RegisterModel: (name: string) => R_RegisterModel(name),
     RegisterSkin: (name: string) => R_RegisterSkin(name),
     RegisterPic: (name: string) => Draw_FindPic(name),
+    RegisterRawPic: (name: string, pixels: Uint8Array, width: number, height: number) => R_RegisterRawPic(name, pixels, width, height),
     SetSky: (name: string, rotate: number, axis: Vec3) => R_SetSky(name, rotate, axis),
     EndRegistration: () => R_EndRegistration(),
 

@@ -243,6 +243,7 @@ describe("M_Draw's backdrop is drawn before the menu's own content", () => {
       RegisterModel: () => null,
       RegisterSkin: () => null,
       RegisterPic: () => null,
+      RegisterRawPic: () => null,
       SetSky: () => {},
       EndRegistration: () => {},
       RenderFrame: () => {},

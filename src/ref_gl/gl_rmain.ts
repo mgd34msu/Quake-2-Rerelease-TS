@@ -123,6 +123,7 @@ import {
   GL_RENDERER_3DLABS,
   REF_VERSION,
   r_particletexture,
+  ImagetypeT,
 } from "./gl_local";
 import { R_BeginRegistration, R_EndRegistration, R_RegisterModel, Mod_PointInLeaf, Mod_Init, Mod_FreeAll, Mod_Modellist_f, ModtypeT, ModelT, ParsedSp2T } from "./gl_model";
 import { GL_InitShaderPath, GL_ShutdownShaderPath, GL_UsingShaderPath } from "./gl_shader";
@@ -145,6 +146,7 @@ import {
   GL_TextureAlphaMode,
   GL_TextureSolidMode,
   GL_SetTexturePalette,
+  GL_LoadPic,
 } from "./gl_image";
 import { loadQGLFromSystem, QGL_Shutdown, type GLGetProcAddressFn } from "./qgl";
 import { Draw_Char, Draw_ColorPic, Draw_Fill, Draw_FadeScreen, Draw_FindPic, Draw_GetPicSize, Draw_InitLocal, Draw_Pic, Draw_StretchPic, Draw_StretchPicRegion, Draw_StretchRaw, Draw_TileClear, SetRawPalette } from "./gl_draw";
@@ -1619,6 +1621,7 @@ export function GetRefAPI(imp: RefImports): RefExports {
     RegisterModel: (name: string) => R_RegisterModel(name),
     RegisterSkin: (name: string) => R_RegisterSkin(name),
     RegisterPic: (name: string) => Draw_FindPic(name),
+    RegisterRawPic: (name: string, pixels: Uint8Array, width: number, height: number) => (width <= 0 || height <= 0 ? null : GL_LoadPic(name, pixels, width, height, ImagetypeT.it_pic, 32)),
     SetSky: (name: string, rotate: number, axis: Vec3) => R_SetSky(name, rotate, axis),
     EndRegistration: () => R_EndRegistration(),
 

@@ -55,6 +55,7 @@ function makeFakeRe(): RefExports & { drawColorPicCalls: DrawColorPicCall[]; pic
     RegisterModel: () => null,
     RegisterSkin: () => null,
     RegisterPic: (_name: string): ImageS | null => ({}) as ImageS,
+    RegisterRawPic: (): ImageS | null => ({}) as ImageS,
     SetSky: () => undefined,
     EndRegistration: () => undefined,
     RenderFrame: () => undefined,

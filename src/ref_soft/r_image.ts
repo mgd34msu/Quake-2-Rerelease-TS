@@ -402,6 +402,27 @@ export function R_RegisterSkin(name: string): ImageT | null {
   return R_FindImage(name, ImagetypeT.it_skin);
 }
 
+// RefExports.RegisterRawPic's software-renderer implementation (see that
+// interface member's own doc comment in client/ref.ts for why this exists:
+// client/cgame/host.ts's TTF-backed kfont path has a rasterized RGBA8 font
+// atlas already in memory, not a filename to resolve through R_FindImage).
+// No classic-engine precedent -- added alongside LoadPNGQuantized/
+// LoadJPGQuantized above for the identical reason those exist (this
+// renderer's whole pixel pipeline is palette-indexed 8-bit, unlike ref_gl's
+// RGBA8 textures), reusing the SAME QuantizeRGBAToPalette pipeline those two
+// loaders already use, then registering through the same module-private
+// GL_LoadPic every other loader in this file funnels through -- so a raw
+// pic registered this way is cached under `name` exactly like any
+// disk-loaded one, and a later R_FindImage(name, ...) call (e.g. from
+// Draw_Pic) finds it by the name-match loop at the top of that function
+// without ever touching disk. Mirrors GL_LoadPic's own MAX_QPATH-length
+// Sys_Error via that same private function.
+export function R_RegisterRawPic(name: string, pixels: Uint8Array, width: number, height: number): ImageT | null {
+  if (width <= 0 || height <= 0) return null;
+  const quantized = QuantizeRGBAToPalette(pixels, width, height);
+  return GL_LoadPic(name, quantized, width, height, ImagetypeT.it_pic);
+}
+
 // memset(image, 0, sizeof(*image)) equivalent: r_model.ts's ImageT has no
 // clear() method (out of this unit's SCOPE to add one), so this resets an
 // existing ImageT's fields in place rather than replacing the r_images[]

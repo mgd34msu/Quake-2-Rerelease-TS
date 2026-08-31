@@ -47,6 +47,7 @@ function makeFakeRe(): RefExports & { drawCharCalls: number[] } {
     RegisterModel: () => null,
     RegisterSkin: () => null,
     RegisterPic: (): ImageS | null => null,
+    RegisterRawPic: (): ImageS | null => null,
     SetSky: () => undefined,
     EndRegistration: () => undefined,
     RenderFrame: () => undefined,
