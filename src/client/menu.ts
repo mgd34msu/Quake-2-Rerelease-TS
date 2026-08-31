@@ -124,7 +124,7 @@ import {
 import { COM_Parse, type ComParseState, VectorCopy } from "../shared/math";
 import { CalcFov } from "./cl_view";
 import { RefdefT, EntityT } from "./ref";
-import { FS_Gamedir, FS_LoadFile, FS_FreeFile, FS_ListFiles, FS_ListPakFiles, FS_NextPath, FS_ReadRawFile, Developer_searchpath } from "../qcommon/files";
+import { FS_Gamedir, FS_LoadFile, FS_FreeFile, FS_ListFiles, FS_ListPakFiles, FS_NextPath, FS_ReadRawFile, Developer_searchpath, fs_basedir, fs_homedir } from "../qcommon/files";
 import {
   MenuframeworkS,
   MenuactionS,
@@ -149,11 +149,18 @@ import { MapDB_Init, type MapdbUnitEntry } from "../qcommon/mapdb";
 import {
   CONTENT_LIST,
   RULESETS,
-  AvailableRulesetsFor,
-  ResolveLaunch,
+  AvailableRulesetsForGame,
+  NeedsSkillSelectForGame,
   UnitsForContent,
   PerformLaunch,
-  type ContentDef,
+  DiscoverGameDirs,
+  BuildGameList,
+  GameListDisplayName,
+  FsFallbackGamedirName,
+  StartPointsForSelection,
+  ResolveLaunchForGame,
+  type SelectableGame,
+  type GameFsSeam,
   type RulesetId,
 } from "./menu_content";
 
@@ -1587,22 +1594,51 @@ const s_content_begin_action = new MenuactionS();
 // pattern as StartServer_MenuInit's own `mapnames` array above.
 let content_rulesets: RulesetId[] = [];
 let content_units: MapdbUnitEntry[] = [];
+// The full selectable-game list (curated CONTENT_LIST rows, famous ones
+// first, then any discovered gamedirs) rebuilt every time this screen
+// opens -- see Content_MenuInit's DiscoverGameDirs call, same "reload on
+// open" idiom MapDB_Init()/StartServer_MenuInit's maps.lst read use.
+let game_list: SelectableGame[] = [];
 
-function currentContentDef(): ContentDef {
-  return CONTENT_LIST[s_content_list.curvalue] ?? CONTENT_LIST[0];
+// The real, non-test seam: files.ts's FS_ListFiles/FS_ReadRawFile already
+// operate on literal filesystem paths with no dependency on the currently
+// mounted gamedir (see each function's own header comment) -- exactly
+// what menu_content.ts's pure discovery/enumeration functions need to
+// browse a candidate gamedir that isn't the active one.
+const gameFsSeam: GameFsSeam = {
+  listFiles: FS_ListFiles,
+  readTextFile: (path) => {
+    const raw = FS_ReadRawFile(path);
+    return raw ? new TextDecoder().decode(raw) : null;
+  },
+};
+
+// basedir, then homedir when set -- same root set files.ts's own
+// FS_InitFilesystem mounts baseq2 from (content_root is deliberately
+// excluded: it always resolves to the rerelease's own "baseq2", which is
+// never a sibling gamedir to scan for THIS purpose).
+function gamedirScanRoots(): string[] {
+  const roots: string[] = [fs_basedir ? fs_basedir.string : "."];
+  const home = fs_homedir ? fs_homedir.string : "";
+  if (home.length) roots.push(home);
+  return roots;
+}
+
+function currentSelectableGame(): SelectableGame {
+  return game_list[s_content_list.curvalue] ?? game_list[0] ?? { kind: "curated", content: CONTENT_LIST[0] };
 }
 
 function currentRuleset(): RulesetId | null {
   return content_rulesets[s_content_ruleset_list.curvalue] ?? null;
 }
 
-// Rebuilds the ruleset spincontrol for whichever content is now selected,
+// Rebuilds the ruleset spincontrol for whichever game is now selected,
 // then cascades into RebuildStartPoints (the unit browser depends on both
-// content AND ruleset -- a classic-ruleset selection never has mapdb
-// units to browse, only the rerelease side does).
+// game AND ruleset -- a classic-ruleset selection never has mapdb units to
+// browse, only the rerelease side does).
 function RebuildRulesets(): void {
-  const def = currentContentDef();
-  content_rulesets = AvailableRulesetsFor(def.id);
+  const game = currentSelectableGame();
+  content_rulesets = AvailableRulesetsForGame(game);
   s_content_ruleset_list.itemnames = content_rulesets.map((id) => RULESETS.find((r) => r.id === id)?.name ?? id);
   if (s_content_ruleset_list.curvalue >= content_rulesets.length) s_content_ruleset_list.curvalue = 0;
 
@@ -1620,7 +1656,7 @@ function RebuildRulesets(): void {
   // SpinControl_Draw ignores QMF_GRAYED too, it's an MTYPE_ACTION-only
   // flag) -- kept anyway as a harmless, honest "this row doesn't apply"
   // marker, matching the pre-existing intent without the side effect.
-  s_content_skill_list.generic.flags = def.needsSkillSelect ? 0 : QMF_GRAYED;
+  s_content_skill_list.generic.flags = NeedsSkillSelectForGame(game) ? 0 : QMF_GRAYED;
 
   RebuildStartPoints();
 }
@@ -1631,11 +1667,38 @@ function RebuildRulesets(): void {
 // StartServer_MenuInit uses for maps.lst, so a content_root cvar set
 // after the client was already running still takes effect next time this
 // menu is opened.
+//
+// Priority order (Mike's design + 2026-08-31 addendum, "at least have them
+// selectable in that order"): (a) mapdb episode unit order, under EITHER
+// ruleset, whenever the selected content has a mapdb episode AND mapdb.json
+// loaded something for it -- the campaign map sequences are identical
+// across rulesets and mapdb.json is reachable regardless of basedir (see
+// menu_content.ts's FsFallbackGamedirName doc comment for why tier
+// (b)/(c) below is never used for the "kex" ruleset instead); (b) the
+// game's maplist.txt, in file order; (c) maps/*.bsp scan, alphabetical,
+// last resort. Falls back to the single default "Start" entry (plan.map)
+// when none of the three has anything, same as before this task.
 function RebuildStartPoints(): void {
-  const def = currentContentDef();
+  const game = currentSelectableGame();
   const ruleset = currentRuleset();
 
-  content_units = ruleset === "rerelease" ? UnitsForContent(def.id) : [];
+  if (!ruleset) {
+    content_units = [];
+    s_content_start_list.itemnames = ["Start"];
+    s_content_start_list.curvalue = 0;
+    return;
+  }
+
+  // Merge in the currently-mounted gamedir's own pak-internal maps/*.bsp
+  // entries when the candidate IS the active gamedir -- FS_ListPakFiles
+  // only ever sees whatever's presently mounted (see its own header
+  // comment), so this is only reachable for the one gamedir the engine
+  // already has open, never a browsed-but-inactive candidate (0d94408's
+  // FS_ListPakFiles precedent).
+  const dirname = FsFallbackGamedirName(game, ruleset);
+  const extraPak = dirname && FS_Gamedir() === dirname ? FS_ListPakFiles("maps/*.bsp") : [];
+
+  content_units = StartPointsForSelection(game, ruleset, UnitsForContent, gameFsSeam, gamedirScanRoots(), extraPak);
 
   s_content_start_list.itemnames = content_units.length ? content_units.map((u) => u.title) : ["Start"];
   if (s_content_start_list.curvalue >= s_content_start_list.itemnames.length) s_content_start_list.curvalue = 0;
@@ -1650,15 +1713,16 @@ function ContentRulesetChangeFunc(): void {
 }
 
 export function BeginContentFunc(): void {
-  const def = currentContentDef();
+  const game = currentSelectableGame();
   const ruleset = currentRuleset();
   if (!ruleset) return;
 
-  const plan = ResolveLaunch(def.id, ruleset);
+  const firstMap = content_units[0]?.bsp ?? "";
+  const plan = ResolveLaunchForGame(game, ruleset, firstMap);
   if (!plan) return;
 
   const bsp = content_units[s_content_start_list.curvalue]?.bsp ?? plan.map;
-  const skill = def.needsSkillSelect ? s_content_skill_list.curvalue : null;
+  const skill = NeedsSkillSelectForGame(game) ? s_content_skill_list.curvalue : null;
 
   PerformLaunch(plan, bsp, skill, s_content_coop_list.curvalue === 1);
   M_ForceMenuOff();
@@ -1667,6 +1731,14 @@ export function BeginContentFunc(): void {
 function Content_MenuInit(): void {
   MapDB_Init();
 
+  // Bullet 1 (game discovery, reload-on-open idiom): scan for gamedirs
+  // sibling to baseq2 the curated table below doesn't already name, and
+  // append them so any installed mod/content shows up (Mike's ruling,
+  // 2026-08-31: "the maps should come from whatever is available as a
+  // game").
+  const discovered = DiscoverGameDirs(gameFsSeam, gamedirScanRoots());
+  game_list = BuildGameList(discovered);
+
   s_content_menu.x = viddef.width * 0.5;
   s_content_menu.nitems = 0;
 
@@ -1674,7 +1746,7 @@ function Content_MenuInit(): void {
   s_content_list.generic.x = 0;
   s_content_list.generic.y = 0;
   s_content_list.generic.name = "content";
-  s_content_list.itemnames = CONTENT_LIST.map((c) => c.name);
+  s_content_list.itemnames = game_list.map(GameListDisplayName);
   s_content_list.generic.callback = ContentChangeFunc;
 
   s_content_ruleset_list.generic.type = MTYPE_SPINCONTROL;
@@ -1749,7 +1821,11 @@ function Content_MenuDraw(): void {
   Menu_Draw(s_content_menu);
 }
 
-function Content_MenuKey(key: number): string | null {
+// Exported test seam (matches this file's own s_content_menu/BeginContentFunc
+// export pattern): lets a test drive the "content" spincontrol's selection
+// the same way a real K_RIGHTARROW keypress would, without needing to reach
+// into this module's private widget state directly.
+export function Content_MenuKey(key: number): string | null {
   return Default_MenuKey(s_content_menu, key);
 }
 

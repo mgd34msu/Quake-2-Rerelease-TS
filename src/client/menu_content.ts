@@ -90,6 +90,7 @@
 import { Cvar_Set, Cvar_ForceSet, Cvar_VariableValue } from "../qcommon/cvar";
 import { Cbuf_AddText } from "../qcommon/cmd";
 import { MapDB_UnitsForEpisode, type MapdbUnitEntry } from "../qcommon/mapdb";
+import { BASEDIRNAME } from "../qcommon/qcommon";
 
 export type RulesetId = "classic" | "rerelease";
 
@@ -283,3 +284,287 @@ export function PerformLaunch(plan: LaunchPlan, bsp: string, skill: number | nul
 // tests) don't need a second import line into qcommon/mapdb.ts just for
 // the browser entry shape.
 export type { MapdbUnitEntry };
+
+/*
+=============================================================================
+GAME DISCOVERY (Mike's ruling, 2026-08-31, quoted for the ledger: "we need
+to be able to select the game as well, because otherwise how will we know
+which maps to use ... the maps should come from whatever is available as a
+game") -- the New Game screen's game list is no longer limited to the
+curated CONTENT_LIST above: at menu open, menu.ts scans the basedir (and
+homedir, when set) for gamedirs sibling to baseq2 the curated table doesn't
+already name, and appends them so any installed mod/content shows up.
+
+Addendum (Mike, 2026-08-31): the ordered "start at" list for the famous SP
+campaigns now uses mapdb.json's own unit order under EITHER ruleset,
+whenever mapdb.json is loadable -- the four id-original tracks' map
+sequences are identical in both trees, and mapdb.json is reachable via
+content_root regardless of which basedir is active (see files.ts's own
+content_root comment) -- lifting the old rerelease-only gate menu.ts's
+RebuildStartPoints used to apply.
+
+DEVIATION (documented per .orch/preferences.md rule 3): the design brief's
+"ruleset choices = classic only unless the dir is the rerelease's own
+baseq2 content" carve-out is not implemented. The only rerelease-content
+dirname the engine's binding layer (src/server/bindings/legacy_kex.ts)
+actually recognizes is "kex" itself, which is already excluded from
+discovery below by CuratedGameDirnames() (it's already a curated table
+entry) -- so no directory can ever reach discovery AND legitimately be
+rerelease content without bindings-layer changes this task's territory
+(menu_content.ts + menu.ts only) doesn't authorize. Every discovered
+gamedir here runs the classic legacy binding (game cvar = its directory
+name), matching the lmctf launch plan's own shape above.
+=============================================================================
+*/
+
+// The pure discovery/enumeration functions below take this seam instead of
+// importing qcommon/files.ts directly, for two reasons: (1) menu_content.ts
+// stays a plain, boot-free model module per its own header (no vid/menu/FS
+// runtime needed to test it); (2) files.ts's FS_ListFiles/FS_ReadRawFile
+// already operate on LITERAL filesystem paths with no dependency on which
+// gamedir happens to be currently mounted (see each of their own header
+// comments) -- exactly what's needed here to browse a candidate gamedir
+// that isn't the active one, and exactly what lets a test point this at a
+// mkdtemp() fixture tree by passing those real functions in unmodified.
+export interface GameFsSeam {
+  // Mirrors files.ts's FS_ListFiles: glob-matched "dir/name" entries, or
+  // null if the directory doesn't exist.
+  listFiles(findname: string): string[] | null;
+  // Mirrors files.ts's FS_ReadRawFile plus a text decode: whole-file text,
+  // or null if the file doesn't exist.
+  readTextFile(path: string): string | null;
+}
+
+function basenameOf(path: string): string {
+  const slash = path.lastIndexOf("/");
+  return slash >= 0 ? path.slice(slash + 1) : path;
+}
+
+// Every `game` cvar value the curated table already dispatches on ("" is
+// omitted -- it's BASEDIRNAME itself, excluded by name in DiscoverGameDirs
+// below, not by this set). A discovered sibling directory with one of
+// these names is already represented by a curated CONTENT_LIST row and
+// must not be listed twice.
+function CuratedGameDirnames(): Set<string> {
+  const set = new Set<string>();
+  for (const content of CONTENT_LIST) {
+    for (const ruleset of RULESETS) {
+      const plan = LAUNCH_TABLE[content.id][ruleset.id];
+      if (plan && plan.game.length) set.add(plan.game);
+    }
+  }
+  return set;
+}
+
+// Bullet 1's qualification rule: at least one .pak, a maps/ subdir
+// (existence, not non-emptiness -- listing the PARENT catches an empty
+// maps/ dir that globbing straight into it would miss, since FS_ListFiles
+// returns null for both "doesn't exist" and "matched nothing"), or a
+// maplist.txt.
+function GameDirQualifies(seam: GameFsSeam, gamedirPath: string): boolean {
+  if ((seam.listFiles(`${gamedirPath}/*.pak`) ?? []).length > 0) return true;
+  if ((seam.listFiles(`${gamedirPath}/*`) ?? []).some((p) => basenameOf(p) === "maps")) return true;
+  if (seam.readTextFile(`${gamedirPath}/maplist.txt`) !== null) return true;
+  return false;
+}
+
+/*
+===============
+DiscoverGameDirs
+
+Scans each root (a basedir or homedir path) for gamedirs sibling to baseq2
+that qualify and aren't already named in the curated table, in root order
+(so a homedir copy is found the same way a basedir one is), deduped by
+name, returned sorted for a stable menu across boots.
+===============
+*/
+export function DiscoverGameDirs(seam: GameFsSeam, roots: readonly string[]): string[] {
+  const excluded = CuratedGameDirnames();
+  const found: string[] = [];
+  for (const root of roots) {
+    if (!root.length) continue;
+    const entries = seam.listFiles(`${root}/*`) ?? [];
+    for (const path of entries) {
+      const dirname = basenameOf(path);
+      if (dirname === BASEDIRNAME || excluded.has(dirname) || found.includes(dirname)) continue;
+      if (GameDirQualifies(seam, path)) found.push(dirname);
+    }
+  }
+  return found.sort();
+}
+
+// A game the New Game screen can select: either a curated CONTENT_LIST row
+// (full ruleset choice, mapdb wiring, curated display name) or a
+// discovered gamedir (classic-only, displayed by directory name -- see
+// this section's header DEVIATION note).
+export type SelectableGame = { readonly kind: "curated"; readonly content: ContentDef } | { readonly kind: "discovered"; readonly dirname: string };
+
+/*
+===============
+BuildGameList
+
+Famous CONTENT_LIST entries first (owner design: "the famous CONTENT_LIST
+entries stay first"), discovered gamedirs appended after, in
+DiscoverGameDirs' order.
+===============
+*/
+export function BuildGameList(discoveredDirnames: readonly string[]): SelectableGame[] {
+  const curated = CONTENT_LIST.map((content): SelectableGame => ({ kind: "curated", content }));
+  const discovered = discoveredDirnames.map((dirname): SelectableGame => ({ kind: "discovered", dirname }));
+  return [...curated, ...discovered];
+}
+
+export function GameListDisplayName(game: SelectableGame): string {
+  return game.kind === "curated" ? game.content.name : game.dirname;
+}
+
+export function AvailableRulesetsForGame(game: SelectableGame): RulesetId[] {
+  return game.kind === "curated" ? AvailableRulesetsFor(game.content.id) : ["classic"];
+}
+
+export function NeedsSkillSelectForGame(game: SelectableGame): boolean {
+  return game.kind === "curated" ? game.content.needsSkillSelect : false;
+}
+
+/*
+===============
+FsFallbackGamedirName
+
+Which on-disk gamedir name backs bullet 2's (b)/(c) maplist.txt/maps/*.bsp
+fallback for a (game, ruleset) selection, or null when there is none to
+scan. The "kex" ruleset's tree is one monolithic pak shared by every
+rerelease content id (base1, xswamp, rmine1, mguhub, q64/rtest, q2ctf1 all
+live in the same gamedir) -- scanning it would list every rerelease map
+for every content id alike, so it is never used as an FS fallback source;
+mapdb (tier (a), applied in menu.ts's RebuildStartPoints before this
+function is ever consulted) is the only rerelease-side source, same as the
+pre-existing single-default fallback for whichever content mapdb has
+nothing for.
+===============
+*/
+export function FsFallbackGamedirName(game: SelectableGame, ruleset: RulesetId): string | null {
+  if (game.kind === "discovered") return game.dirname;
+  if (ruleset !== "classic") return null;
+  const plan = ResolveLaunch(game.content.id, "classic");
+  if (!plan) return null;
+  return plan.game.length ? plan.game : BASEDIRNAME;
+}
+
+/*
+===============
+ParseMaplistTxt
+
+lmctf precedent (~/q2ts/lmctf/maplist.txt): one bsp basename per line, FILE
+order preserved (never sorted) -- the first line is the game's own default
+start.
+===============
+*/
+export function ParseMaplistTxt(text: string): MapdbUnitEntry[] {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((bsp) => ({ title: bsp, bsp }));
+}
+
+function bspBasenamesFrom(paths: readonly string[]): string[] {
+  const names = new Set<string>();
+  for (const p of paths) {
+    const base = basenameOf(p);
+    const dot = base.lastIndexOf(".");
+    names.add(dot === -1 ? base : base.slice(0, dot));
+  }
+  return [...names].sort();
+}
+
+/*
+===============
+StartPointsForGamedir
+
+Bullet 2's (b)/(c) tiers for one on-disk gamedir: maplist.txt in file order
+when present and non-empty, else every maps/*.bsp basename (alphabetical --
+explicitly the last resort, per Mike's addendum) across the loose maps/
+dir and, when the caller already has them (its gamedir is the one
+currently mounted -- see menu.ts's FS_ListPakFiles call site), any
+pak-internal maps/*.bsp entries passed in `extraBspPaths`. Empty when
+neither source has anything; the caller (menu.ts's RebuildStartPoints)
+falls back to the single default "Start" entry in that case, same as
+before this task.
+===============
+*/
+export function StartPointsForGamedir(seam: GameFsSeam, gamedirPath: string, extraBspPaths: readonly string[] = []): MapdbUnitEntry[] {
+  const maplistText = seam.readTextFile(`${gamedirPath}/maplist.txt`);
+  if (maplistText !== null) {
+    const entries = ParseMaplistTxt(maplistText);
+    if (entries.length) return entries;
+  }
+
+  const loose = seam.listFiles(`${gamedirPath}/maps/*.bsp`) ?? [];
+  const names = bspBasenamesFrom([...loose, ...extraBspPaths]);
+  return names.map((bsp) => ({ title: bsp, bsp }));
+}
+
+/*
+===============
+StartPointsForSelection
+
+The full "start at" priority chain for one (game, ruleset) selection --
+menu.ts's RebuildStartPoints is a thin wrapper around this. Mike's
+addendum (2026-08-31, "at least have them selectable in that order"):
+(a) mapdb episode unit order wins under EITHER ruleset whenever the
+selected content has a mapdb episode AND `mapdbUnitsForContent` returns
+something for it -- no ruleset gate anymore (the four id-original
+campaigns' map sequences are identical in both trees, and mapdb.json is
+reachable via content_root regardless of basedir); (b)/(c) FsFallbackGamedirName
++ StartPointsForGamedir's own maplist.txt/maps/*.bsp tiers, tried against
+each root in order (so a homedir copy of a gamedir is found the same way a
+basedir one is); empty when nothing anywhere has a map, in which case the
+caller falls back to the single default "Start" entry, same as before this
+task.
+
+`mapdbUnitsForContent` is injected (rather than this function importing
+qcommon/mapdb.ts's UnitsForContent itself) purely so tests can supply a
+synthetic mapdb answer without standing up FS_InitFilesystem/mapdb.json at
+all -- production always passes the real UnitsForContent.
+===============
+*/
+export function StartPointsForSelection(
+  game: SelectableGame,
+  ruleset: RulesetId,
+  mapdbUnitsForContent: (content: ContentId) => MapdbUnitEntry[],
+  seam: GameFsSeam,
+  gamedirRoots: readonly string[],
+  extraBspPaths: readonly string[] = [],
+): MapdbUnitEntry[] {
+  const mapdbUnits = game.kind === "curated" && game.content.mapdbEpisodeId ? mapdbUnitsForContent(game.content.id) : [];
+  if (mapdbUnits.length) return mapdbUnits;
+
+  const dirname = FsFallbackGamedirName(game, ruleset);
+  if (!dirname) return [];
+
+  for (const root of gamedirRoots) {
+    const candidate = StartPointsForGamedir(seam, `${root}/${dirname}`, extraBspPaths);
+    if (candidate.length) return candidate;
+  }
+  return [];
+}
+
+/*
+===============
+LaunchPlanForDiscovered
+
+Bullet 3's shape for a discovered gamedir: classic legacy binding (game
+cvar = the directory name), no g_start_items override, ctf left undefined
+(the kex module's ZOID cvar block that field exists for -- see LaunchPlan's
+own doc comment -- has no equivalent in a discovered classic gamedir).
+===============
+*/
+export function LaunchPlanForDiscovered(dirname: string, firstMap: string): LaunchPlan {
+  return { game: dirname, map: firstMap, startItems: "" };
+}
+
+// One-call launch-plan resolution for either branch of a SelectableGame --
+// menu.ts's BeginContentFunc no longer needs its own kind-branch.
+export function ResolveLaunchForGame(game: SelectableGame, ruleset: RulesetId, firstMap: string): LaunchPlan | null {
+  return game.kind === "curated" ? ResolveLaunch(game.content.id, ruleset) : LaunchPlanForDiscovered(game.dirname, firstMap);
+}
