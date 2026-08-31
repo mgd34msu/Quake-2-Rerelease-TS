@@ -210,3 +210,76 @@ export function Com_ConfigstringSize(csr: CsRemapT, cs: number): number {
 
   return csr.configstring_size;
 }
+
+// Field order for remapLegacyConfigstringIndex below, ascending by starting
+// index within CS_REMAP_OLD. Every field a legacy (v3 GameImports) game
+// module can ever address: shadowlights/wheelweapons/wheelammo/
+// wheelpowerups/cdloopcount/gamestyle are all -1 (absent) in CS_REMAP_OLD
+// (see that table's own header comment), so no legacy-family raw index can
+// ever fall into one of those blocks -- they're intentionally excluded here.
+const CS_LEGACY_FIELD_ORDER: readonly (keyof CsRemapT)[] = [
+  "airaccel",
+  "maxclients",
+  "mapchecksum",
+  "models",
+  "sounds",
+  "images",
+  "lights",
+  "items",
+  "playerskins",
+  "general",
+];
+
+/*
+===================
+remapLegacyConfigstringIndex
+
+Translates a RAW configstring index a legacy (v3 GameImports/GameExports)
+game module computed against its own frozen, hardcoded CS_* / MAX_* constants
+(shared/q_shared.ts -- numerically identical to CS_REMAP_OLD's fields, see
+that table's own header comment) into the equivalent index under a
+DIFFERENT CsRemapT layout -- e.g. CS_REMAP_RERELEASE, when a legacy game
+module is hosted under the kex family's wide configstring layout (protocol
+1038; see src/server/bindings/legacy_kex.ts, "the legacy-wrap path with the
+wide-entity/64-stat[/configstring-index] remaps").
+
+Legacy game modules never see a CsRemapT (it is an engine-only concept --
+the frozen GameImports/GameExports contract has no awareness of it, per
+ARCHITECTURE.md's "legacy modules are frozen exhibits ... the game trees
+themselves do not change"), so this translation can only happen at the
+engine/binding boundary, on every raw index the game module hands to
+`gi.configstring()` (or, in the one documented exception a legacy tree's
+own game code embeds a configstring index as plain data rather than an
+argument to gi.configstring() -- STAT_PICKUP_STRING, see
+legacy_kex.ts's own header -- wherever that data is next read as an index).
+
+The two families agree on the CS_NAME..CS_STATUSBAR range (every index
+strictly below `from.airaccel`; q2repro's shared.h keeps both cs_remap
+tables' low, fixed indices identical -- confirmed field-by-field against
+CS_REMAP_OLD/CS_REMAP_RERELEASE above), so those pass through unchanged.
+Everything from `from.airaccel` onward lives in one of the named,
+variable-length blocks in CS_LEGACY_FIELD_ORDER; the index's offset within
+its own block is preserved, only the block's START shifts between families
+(each family's MAX_MODELS/MAX_SOUNDS/MAX_IMAGES/etc. differ, so the running
+totals differ -- see both tables' own header comments).
+===================
+*/
+export function remapLegacyConfigstringIndex(index: number, from: CsRemapT, to: CsRemapT): number {
+  if (index < from.airaccel) return index;
+
+  for (let i = 0; i < CS_LEGACY_FIELD_ORDER.length; i++) {
+    const field = CS_LEGACY_FIELD_ORDER[i];
+    const start = from[field] as number;
+    const nextField = CS_LEGACY_FIELD_ORDER[i + 1];
+    const boundary = nextField ? (from[nextField] as number) : from.end;
+    if (index >= start && index < boundary) {
+      const targetStart = to[field] as number;
+      if (targetStart < 0) {
+        throw new Error(`remapLegacyConfigstringIndex: target family has no '${field}' block (index ${index})`);
+      }
+      return targetStart + (index - start);
+    }
+  }
+
+  throw new Error(`remapLegacyConfigstringIndex: index ${index} is out of range for the source family (end=${from.end})`);
+}

@@ -109,7 +109,12 @@ import {
 // the bridge current. One adapter serves all three pack tracks; the union
 // parameter works because the three interfaces are structurally identical
 // in every member the adapter touches.
-function adaptPackGameExports(ctfGe: CtfGameExports | XatrixGameExports | RogueGameExports | LmctfGameExports): GameExports {
+// Exported (not just used internally by LoadLegacyGame below) so
+// src/server/bindings/legacy_kex.ts can reuse the identical Edict-shaped
+// GameExports bridge for LMCTF hosted under the kex family's protocol --
+// see that file's header. Purely additive: no existing caller's behavior
+// changes.
+export function adaptPackGameExports(ctfGe: CtfGameExports | XatrixGameExports | RogueGameExports | LmctfGameExports): GameExports {
   return {
     apiversion: ctfGe.apiversion,
     Init: () => ctfGe.Init(),

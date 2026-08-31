@@ -57,6 +57,7 @@ import { SV_LinkEdict } from "./sv_world";
 import { SV_MvdUnicast } from "./sv_mvd";
 import { LoadLegacyGame } from "./bindings/legacy";
 import { LoadKexGame } from "./bindings/kex";
+import { LoadLmctfKexGame } from "./bindings/legacy_kex";
 import { CS_REMAP_OLD, CS_REMAP_RERELEASE } from "../shared/cs_remap";
 import { VANILLA_CODEC } from "../qcommon/protocol/vanilla";
 import { Q2REPRO_CODEC } from "../qcommon/protocol/q2repro";
@@ -446,7 +447,19 @@ export function SV_InitGameProgs(): void {
   // cs_remap_rerelease for the kex module, done here.
   const gameName = Cvar_VariableString("game");
   const family = currentGameFamily();
-  svs.csr = family === "kex" ? CS_REMAP_RERELEASE : CS_REMAP_OLD;
+  // "lmctf-kex" (bindings/legacy_kex.ts, .orch/followups.md's "kex-family
+  // LMCTF adaptation" task #26) is a THIRD, narrower selection: LMCTF's own
+  // frozen legacy-API v3 content, hosted under the kex family's wire
+  // protocol/configstring layout. It is deliberately NOT folded into
+  // `family`/`currentGameFamily()` -- see legacy_kex.ts's own header ("two
+  // independent axes") for why: `family` still governs tick rate (LMCTF has
+  // no tick_rate import and is hardcoded to 10Hz), savegame container choice
+  // (LMCTF has no WriteGameJson/ReadGameJson/CanSave), and MVD codec choice,
+  // all of which must stay on LMCTF's native legacy behavior regardless of
+  // which wire protocol is active. Only svs.csr/svs.codec (below) and which
+  // GetGameAPI gets called (further below) key off this narrower check.
+  const lmctfKex = gameName === "lmctf-kex";
+  svs.csr = family === "kex" || lmctfKex ? CS_REMAP_RERELEASE : CS_REMAP_OLD;
   // ARCHITECTURE.md "Protocol layer" / .orch/phase5-design.md phase 5: mirror
   // q2repro's own server, which ONLY accepts the rerelease protocol (1038) --
   // offer Q2REPRO_CODEC for kex games, keep legacy games on VANILLA_CODEC
@@ -454,8 +467,8 @@ export function SV_InitGameProgs(): void {
   // simplification server.ts's `codec` field doc comment already calls out;
   // full multi-protocol negotiation (a legacy-34 client and a kex-1038
   // client connected to the same server simultaneously) is future work.
-  svs.codec = family === "kex" ? Q2REPRO_CODEC : VANILLA_CODEC;
-  const ge = family === "kex" ? LoadKexGame() : LoadLegacyGame(gameName);
+  svs.codec = family === "kex" || lmctfKex ? Q2REPRO_CODEC : VANILLA_CODEC;
+  const ge = lmctfKex ? LoadLmctfKexGame() : family === "kex" ? LoadKexGame() : LoadLegacyGame(gameName);
 
   if (ge.apiversion !== GAME_API_VERSION) {
     Com_Error(ERR_DROP, "game is version %i, not %i", ge.apiversion, GAME_API_VERSION);
