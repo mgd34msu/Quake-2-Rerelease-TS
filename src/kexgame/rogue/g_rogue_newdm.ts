@@ -31,24 +31,28 @@
 // - g_spawn.ts also carries `PrecacheForRandomRespawn` as a local throwing
 //   stub (g_spawn.ts:1420), cited to this file. Same story: reported, not
 //   edited. `PrecacheForRandomRespawn` is exported below, real.
-// - g_main.ts's `InitGameRules` (g_main.cpp:557's `if (cvarTrue(gamerules))
-//   InitGameRules();` call site) is ALSO a local throwing stub
-//   (g_main.ts:566-571), cited generically to "ROGUE mission pack, no
-//   src/kexgame/ home" -- now that this file IS that home, the stub could
-//   be swapped for a real import. However: g_main.ts is off-limits to this
-//   unit, AND swapping it is a genuine ARCHITECTURAL decision the
-//   coordinator should rule on, not something this unit should silently
-//   opt into -- g_combat.ts, g_spawn.ts, and p_client.ts each independently
-//   established a deliberate "`DMGame` stays a local, all-null `DmGameRt`,
-//   because `gamerules` sits at its registered default of 0 everywhere"
-//   precedent (see each file's own "DMGame -- concrete faithful value, not
-//   a stub" header note). Wiring g_main.ts's `InitGameRules` to this file's
-//   real one would make `gamerules` nonzero actually populate a real
-//   `DMGame` for the first time in this port line -- a behavior change
-//   those three files' authors evidently chose NOT to make. This file
-//   exports a real, working `InitGameRules` (below) so that swap is
-//   possible whenever the coordinator decides it's wanted, but does not
-//   perform it.
+//
+// ============================================================================
+// SWAPPED (2026-08-30, InitGameRules/DMGame wiring unit)
+// ============================================================================
+// g_main.ts's `InitGameRules` (g_main.cpp:557's `if (cvarTrue(gamerules))
+// InitGameRules();` call site) used to be a local throwing stub, cited
+// generically to "ROGUE mission pack, no src/kexgame/ home" -- false once
+// this file landed, and the real blocker (recorded at length in
+// .orch/followups.md) was that g_combat.ts/g_main.ts each carried their OWN
+// local, all-null `DmGameRt` object instead of reading this file's real one:
+// wiring g_main.ts's `InitGameRules` straight to this file's real function
+// without also fixing that would have populated a `DMGame` struct nothing
+// else ever read. Fixed: `DMGame` above is now `export`ed (this file is
+// already the C++ definition site, g_rogue_newdm.cpp:10's non-`extern`
+// `dm_game_rt DMGame;`) and g_combat.ts's `T_Damage` / g_main.ts's
+// `CheckDMRules` both import this exact binding instead of keeping their own
+// copies -- see g_combat.ts's own updated "CTFMatchSetup / DMGame" note.
+// g_main.ts's `InitGame` now calls this file's real `InitGameRules` at its
+// real `gamerules->integer` guard (g_main.cpp:373-375), and g_main.ts's
+// `CheckDMRules` now checks `DMGame.CheckDMRules` at its real guard
+// (g_main.cpp:676-681) -- both previously no-op'd behind a "DMGame is always
+// null" comment.
 //
 // ============================================================================
 // STUBS THIS FILE USED TO OWN
@@ -447,9 +451,17 @@ export function fire_doppleganger(ent: EdictT, start: Vec3, aimdir: Vec3): void 
 const RDM_TAG = 2;
 const RDM_DEATHBALL = 3;
 
-/** g_local.h:3275 `extern dm_game_rt DMGame;` -- see file header's
- *  "NOT SWAPPED" note on why this is not wired into g_main.ts by this unit. */
-const DMGame: DmGameRt = {
+/**
+ * g_local.h:3275 `extern dm_game_rt DMGame;` -- this file is the real C++
+ * DEFINITION site too (rogue/g_rogue_newdm.cpp:10, `dm_game_rt DMGame;`, no
+ * `extern`), so this is the canonical, single, exported `DMGame` object for
+ * this whole port line. g_combat.ts's `T_Damage` imports this exact binding
+ * (not a copy) to read `ChangeDamage`/`ChangeKnockback`; g_main.ts's
+ * `CheckDMRules` imports it to read `CheckDMRules`, matching C's `extern`
+ * fan-out exactly (2026-08-30 InitGameRules/DMGame wiring unit -- see this
+ * unit's own updated "NOT SWAPPED" note below, now "SWAPPED").
+ */
+export const DMGame: DmGameRt = {
   GameInit: null,
   PostInitSetup: null,
   ClientBegin: null,
@@ -465,11 +477,11 @@ const DMGame: DmGameRt = {
 };
 
 /**
- * rogue/g_rogue_newdm.cpp:322-359: `void InitGameRules()`. Populates
- * `DMGame` per the `gamerules` cvar's value and calls `DMGame.GameInit()`.
- * Exported so the coordinator can wire it in at g_main.ts's own
- * `InitGameRules` call site (see file header's "NOT SWAPPED" note) --
- * NOT called from anywhere in this port line by this unit.
+ * rogue/g_rogue_newdm.cpp:322-359: `void InitGameRules()`. Populates the
+ * real, exported `DMGame` above per the `gamerules` cvar's value and calls
+ * `DMGame.GameInit()`. Called from g_main.ts's `InitGame`, at the same
+ * `if (gamerules->integer) InitGameRules();` guard as the real C++
+ * (g_main.cpp:373-375) -- see file header's "SWAPPED" note.
  */
 export function InitGameRules(): void {
   DMGame.GameInit = null;

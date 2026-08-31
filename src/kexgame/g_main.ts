@@ -119,11 +119,25 @@
 // landed module already does. `CTFInit()` (ctf/g_ctf.cpp) itself is not
 // ported (it only registers CTF-specific cvars/commands, all irrelevant
 // while `ctf` stays at its registered default); `CTFCheckRules`/
-// `CTFInMatch`/`CheckEndTDMLevel`/`CTFNextMap`/`DMGame.CheckDMRules`/
-// `InitGameRules` are each cited at their real call site, reached only
-// behind a real, concretely-false-by-default guard (`ctf->integer`,
-// `teamplay->integer`, `gamerules->integer`) -- unreachable today, not
-// silently skipped.
+// `CTFInMatch`/`CheckEndTDMLevel`/`CTFNextMap` are each cited at their real
+// call site, reached only behind a real, concretely-false-by-default guard
+// (`ctf->integer`, `teamplay->integer`) -- unreachable today, not silently
+// skipped.
+//
+// `gamerules`/`DMGame`/`InitGameRules` are DIFFERENT: as of the 2026-08-30
+// InitGameRules/DMGame wiring unit these are real, not just "unreachable but
+// honest" -- `InitGameRules` below is a real, direct call to
+// rogue/g_rogue_newdm.ts's real, exported `InitGameRules` (which populates
+// that same file's real, exported `DMGame`, the identical object
+// g_combat.ts's `T_Damage` and this file's own `CheckDMRules` both import
+// and read), and `CheckDMRules` below checks `DMGame.CheckDMRules` for real.
+// With `gamerules` at its registered default of 0 this is still a no-op --
+// exactly the stock server's real behavior -- but a nonzero `gamerules` now
+// genuinely engages the rogue ruleset, matching g_main.cpp exactly instead
+// of silently no-op'ing behind a "DMGame is always null" comment. See
+// `InitGameRules`'s and `CheckDMRules`'s own updated comments below, and
+// g_combat.ts's/rogue/g_rogue_newdm.ts's own "DMGame" notes for the full
+// unification history.
 //
 // ============================================================================
 // Cvar_WasModified -- CvarT has no `modified_count` (documented type gap)
@@ -260,6 +274,7 @@ import { ClientEndServerFrame } from "./p_view";
 import { BeginIntermission, G_ReportMatchDetails } from "./p_hud";
 import { Bot_SetWeapon, Bot_TriggerEdict, Bot_UseItem, Bot_GetItemID, Edict_ForceLookAtPoint, Bot_PickedUpItem } from "./bots/bot_exports";
 import { Bot_UpdateDebug } from "./bots/bot_debug";
+import { InitGameRules, DMGame } from "./rogue/g_rogue_newdm";
 import {
   ClientBegin,
   ClientUserinfoChanged,
@@ -590,6 +605,12 @@ export function InitGame(): void {
 
   //======
   // ROGUE
+  // g_main.cpp:373-375: `if (gamerules->integer) InitGameRules();` -- real
+  // call to rogue/g_rogue_newdm.ts's real, exported `InitGameRules` (2026-
+  // 08-30 InitGameRules/DMGame wiring unit; see this file's header's
+  // "gamerules(DMGame)" note for the full unification history). With
+  // `gamerules` at its registered default of 0 this is a no-op, exactly
+  // like the real C++.
   if (cvarTrue(gamerules)) InitGameRules(); // if there are game rules to set up, do so now.
   // ROGUE
   //======
@@ -597,34 +618,6 @@ export function InitGame(): void {
   // how far back we should support lag origins for
   game.max_lag_origins = Math.trunc(20 * (0.1 / gi.frame_time_s));
   game.lag_origins = Array.from({ length: game.maxclients * game.max_lag_origins }, () => vec3());
-}
-
-/**
- * ROGUE `InitGameRules()` (rogue/g_rogue_newdm.cpp:322-359). Reached only
- * when `gamerules` is nonzero, a real, concretely-false-by-default guard
- * (see file header).
- *
- * CORRECTION (2026-08-30 stale-comment sweep): this used to say "no
- * src/kexgame/ home" -- that is no longer true. rogue/g_rogue_newdm.ts has
- * since landed a real, exported `InitGameRules`, with its own doc comment
- * explicitly noting "Exported so the coordinator can wire it in at
- * g_main.ts's own InitGameRules call site... NOT called from anywhere in
- * this port line by this unit." NOT wired in here either, deliberately:
- * that file's real `InitGameRules` populates ITS OWN local module-scope
- * `DMGame` object, which is a SEPARATE binding from g_combat.ts's own
- * local, all-null `DMGame` constant that `T_Damage` actually reads for
- * `ChangeDamage`/`ChangeKnockback` (g_combat.ts's own header, "CTFMatchSetup
- * / DMGame" note). Simply calling the real `InitGameRules` here would
- * populate a `DMGame` object nothing else ever reads -- `T_Damage` would
- * still see all-null and silently no-op, exactly like g_target.ts's
- * pre-fix `xyspeed` bug (see .orch/followups.md). Wiring this correctly
- * needs g_combat.ts's `DMGame` unified with rogue/g_rogue_newdm.ts's real
- * one (an exported setter/getter, matching p_view.ts's `SetXyspeed`
- * precedent) before this stub can safely become a real call -- flagged
- * precisely in .orch/followups.md rather than half-wired here.
- */
-function InitGameRules(): void {
-  throw new Error("InitGameRules: not yet wired (rogue/g_rogue_newdm.ts has a real implementation, but its DMGame binding needs unifying with g_combat.ts's own local DMGame first -- see this function's own doc comment); reached only when gamerules is nonzero (default 0)");
 }
 
 // ---------------------------------------------------------------------------
@@ -1064,9 +1057,17 @@ export function CheckDMRules(): void {
   // ctf defaults 0, so both are unreachable here (see file header).
 
   //=======
-  // ROGUE: gamerules->integer && DMGame.CheckDMRules -- DMGame is always
-  // null in this port line (g_combat.ts's own precedent); gamerules
-  // defaults 0 either way.
+  // ROGUE
+  // g_main.cpp:676-681: `if (gamerules->integer && DMGame.CheckDMRules) {
+  // if (DMGame.CheckDMRules()) return; }` -- real check against the same
+  // `DMGame` object rogue/g_rogue_newdm.ts's `InitGameRules` populates (see
+  // file header's "gamerules(DMGame)" note; 2026-08-30 InitGameRules/DMGame
+  // wiring unit). With `gamerules` at its registered default of 0, or under
+  // a ruleset that never sets `CheckDMRules` (e.g. RDM_TAG), this stays a
+  // no-op exactly like the real C++.
+  if (cvarTrue(gamerules) && DMGame.CheckDMRules !== null) {
+    if (DMGame.CheckDMRules()) return;
+  }
   // ROGUE
   //=======
 

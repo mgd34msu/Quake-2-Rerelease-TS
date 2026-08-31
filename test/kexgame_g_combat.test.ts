@@ -34,6 +34,13 @@ every documented deviation/stub this suite's design routes around):
     stub; it now asserts the real FoundTarget/HuntTarget side effects
     instead: `.enemy` set, the attacker's `sight_entity` woken up, and
     `monsterinfo.run` invoked).
+  - T_Damage: DMGame gamerules hook (2026-08-30 InitGameRules/DMGame wiring
+    unit) -- gamerules=0 default behavior unchanged; an identity test
+    proving g_combat.ts's `T_Damage` reads the SAME `DMGame` object
+    rogue/g_rogue_newdm.ts exports (not a copy) by mutating it directly from
+    the test and observing the effect; and an end-to-end test calling the
+    real `InitGameRules()` with `gamerules=3` (RDM_DEATHBALL) and checking
+    `T_Damage` actually applies the real `DBall_ChangeDamage` halving.
 */
 
 import { describe, test, expect } from "bun:test";
@@ -59,6 +66,7 @@ import { defaultEdict, gi, globals, game, level, g_edicts, SetGameImports, SetGa
 import { Gtime_from_ms } from "../src/kexgame/gtime";
 import { CanDamage, Killed, CheckArmor, CheckPowerArmor, CheckTeamDamage, OnSameTeam, T_Damage, T_RadiusDamage } from "../src/kexgame/g_combat";
 import { PlayerStatT } from "../src/kexgame/p_hud";
+import { InitGameRules, DMGame } from "../src/kexgame/rogue/g_rogue_newdm";
 
 // ---------------------------------------------------------------------------
 // fake KexGameImports / KexGameExports fixture (mirrors
@@ -1253,5 +1261,80 @@ describe("CanDamage", () => {
     const inflictor = makeBreakableEdict(edicts, 2);
 
     expect(CanDamage(targ, inflictor)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T_Damage: DMGame gamerules hook (g_combat.cpp:588-593, `if
+// (deathmatch->integer && gamerules->integer) { ... DMGame.ChangeDamage
+// ... }`) -- 2026-08-30 InitGameRules/DMGame wiring unit. See g_combat.ts's
+// own "CTFMatchSetup / DMGame" file-header note and
+// src/kexgame/rogue/g_rogue_newdm.ts's own "DMGame" doc comment for the full
+// unification history: this file used to carry its OWN local, all-null
+// `DMGame` object, a SEPARATE binding from the one rogue/g_rogue_newdm.ts's
+// real `InitGameRules()` populates -- wiring `InitGameRules` in without also
+// fixing this would have silently no-op'd every ChangeDamage/ChangeKnockback
+// hook even with `gamerules` set. g_combat.ts now imports the same object
+// rogue/g_rogue_newdm.ts exports, so these tests import it too, directly
+// from its real home.
+// ---------------------------------------------------------------------------
+
+describe("T_Damage: DMGame gamerules hook (rogue/g_rogue_newdm.ts unification)", () => {
+  test("gamerules=0 (default): DMGame is never consulted, T_Damage behaves like a stock server", () => {
+    const { edicts } = setupWorld(0, 8, 8);
+    const targ = makeBreakableEdict(edicts, 1);
+    const attacker = makeBreakableEdict(edicts, 2);
+    // deathmatch/gamerules both default to "0" via the fake gi.cvar() -- the
+    // exact same guard T_Damage used before this unit's change.
+
+    T_Damage(targ, attacker, attacker, vec3(1, 0, 0), ORIGIN, NORMAL, 30, 0, DamageflagsT.DAMAGE_NONE, MOD_UNKNOWN);
+
+    expect(targ.health).toBe(20); // 50 - 30, unaffected -- byte-identical to the pre-unit default path
+  });
+
+  test("identity: mutating the imported DMGame object directly is observed by T_Damage -- proves it is the SAME binding, not a per-file copy (the exact bug class this unit fixes)", () => {
+    const { edicts, rec } = setupWorld(0, 8, 8);
+    const targ = makeBreakableEdict(edicts, 1);
+    const attacker = makeBreakableEdict(edicts, 2);
+    rec.cvars.set("deathmatch", Object.assign(new CvarT(), { name: "deathmatch", string: "1", value: 1 }));
+    rec.cvars.set("gamerules", Object.assign(new CvarT(), { name: "gamerules", string: "1", value: 1 }));
+
+    const prevChangeDamage = DMGame.ChangeDamage;
+    // Set a field DIRECTLY on the object this test file imported from
+    // rogue/g_rogue_newdm.ts -- NOT through any g_combat.ts export (it has
+    // none). If g_combat.ts's T_Damage read a different, unfixed local
+    // object (the pre-unit bug), this assignment would have zero effect and
+    // the assertion below would see plain, un-hooked damage (20) instead.
+    DMGame.ChangeDamage = (_targ, _attacker, damage) => damage - 7;
+    try {
+      T_Damage(targ, attacker, attacker, vec3(1, 0, 0), ORIGIN, NORMAL, 30, 0, DamageflagsT.DAMAGE_NONE, MOD_UNKNOWN);
+      expect(targ.health).toBe(27); // 50 - (30 - 7), proves T_Damage called THIS exact function reference
+    } finally {
+      DMGame.ChangeDamage = prevChangeDamage;
+    }
+  });
+
+  test("gamerules=3 (RDM_DEATHBALL): the real InitGameRules() populates DMGame, and T_Damage applies the real DBall_ChangeDamage halving end to end", () => {
+    const { edicts, rec } = setupWorld(0, 8, 8);
+    const targ = makeBreakableEdict(edicts, 1);
+    const attacker = makeBreakableEdict(edicts, 2);
+    rec.cvars.set("deathmatch", Object.assign(new CvarT(), { name: "deathmatch", string: "1", value: 1 }));
+    rec.cvars.set("gamerules", Object.assign(new CvarT(), { name: "gamerules", string: "3", value: 3 }));
+
+    InitGameRules(); // real rogue/g_rogue_newdm.ts function -- g_main.cpp:373-375's real call site
+    try {
+      expect(DMGame.ChangeDamage).not.toBeNull(); // RDM_DEATHBALL wires DBall_ChangeDamage
+
+      // rogue_dm_ball.cpp DBall_ChangeDamage: targ !== ball && attacker !==
+      // ball (both true here, no ball spawned) -> halves player damage.
+      T_Damage(targ, attacker, attacker, vec3(1, 0, 0), ORIGIN, NORMAL, 30, 0, DamageflagsT.DAMAGE_NONE, MOD_UNKNOWN);
+      expect(targ.health).toBe(35); // 50 - trunc(30/2)
+    } finally {
+      // Reset DMGame back to all-null, matching a real server turning
+      // gamerules back off (InitGameRules's own unconditional reset at its
+      // top, rogue/g_rogue_newdm.cpp:324's `memset(&DMGame, 0, ...)`).
+      rec.cvars.set("gamerules", Object.assign(new CvarT(), { name: "gamerules", string: "0", value: 0 }));
+      InitGameRules();
+    }
   });
 });

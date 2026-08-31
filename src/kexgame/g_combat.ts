@@ -119,13 +119,13 @@
 // referenced inside this function body, never at module-eval time).
 //
 // ============================================================================
-// CTFMatchSetup / DMGame -- concrete faithful values, not stubs (see their
-// own comments)
+// CTFMatchSetup / DMGame -- real, live bindings (see their own comments)
 // ============================================================================
 // Both are read UNCONDITIONALLY inside T_Damage. `ctfgame` (CTFMatchSetup's
-// backing global) and a rogue-ruleset-populated `DMGame` are both out of
-// scope; see each's own comment below for why a concrete default is the
-// faithful choice rather than a throwing stub.
+// backing global, ctf/g_ctf.ts) and `DMGame` (rogue/g_rogue_newdm.ts, the
+// same object rogue/g_rogue_newdm.cpp's real `InitGameRules()` populates)
+// are both real imports now, not local stand-ins -- see each's own comment
+// below for the unification history.
 //
 // ============================================================================
 // mod_t is a BY-VALUE parameter in C (`mod_t mod`, not `const mod_t&`)
@@ -156,7 +156,6 @@ import {
   COOP_DAMAGE_RESPAWN_TIME,
   type DamageIndicatorT,
   DamageflagsT,
-  type DmGameRt,
   type EdictT,
   EntFlagsT,
   type GitemArmorT,
@@ -180,6 +179,7 @@ import { brandom } from "./q_std";
 import { visible, FoundTarget } from "./g_ai";
 import { cleanupHealTarget } from "./m_medic";
 import { MarkTeslaArea, TargetTesla } from "./rogue/g_rogue_newai";
+import { DMGame } from "./rogue/g_rogue_newdm";
 import { CTFApplyResistance, CTFApplyStrength, CTFCheckHurtCarrier, CTFMatchSetup } from "./ctf/g_ctf";
 import { PlayerStatT } from "./p_hud";
 
@@ -718,40 +718,36 @@ export function CheckTeamDamage(targ: EdictT, attacker: EdictT): boolean {
 // ---------------------------------------------------------------------------
 
 
-/**
- * g_local.h:3275 `extern dm_game_rt DMGame;` -- real assignment lives in
- * rogue/g_rogue_newdm.cpp:322-359's `InitGameRules()`. Modeled as a local,
- * all-null default: T_Damage's own `if (deathmatch->integer &&
- * gamerules->integer)` guard keeps every DMGame.* read unreachable as long
- * as `gamerules` sits at its registered default of 0 (g_main.cpp:282) --
- * exactly a stock (non-rogue-ruleset) server's real behavior.
- *
- * NOT "out of scope" anymore (2026-08-30 stale-comment sweep):
- * rogue/g_rogue_newdm.ts has since landed a real, exported `InitGameRules`
- * that populates ITS OWN local `DMGame` object -- a SEPARATE binding from
- * this one. g_main.ts's own `InitGameRules` call site still uses a local
- * throwing stub rather than that real function specifically BECAUSE wiring
- * it in would populate a `DMGame` object this file never reads, silently
- * no-op'ing every ChangeDamage/ChangeKnockback hook even with `gamerules`
- * set -- see g_main.ts's own `InitGameRules` doc comment for the full
- * finding. Unifying the two bindings (an exported setter here, matching
- * p_view.ts's `SetXyspeed` precedent) is real, focused follow-up work,
- * flagged in .orch/followups.md.
- */
-const DMGame: DmGameRt = {
-  GameInit: null,
-  PostInitSetup: null,
-  ClientBegin: null,
-  SelectSpawnPoint: null,
-  PlayerDeath: null,
-  Score: null,
-  PlayerEffects: null,
-  DogTag: null,
-  PlayerDisconnect: null,
-  ChangeDamage: null,
-  ChangeKnockback: null,
-  CheckDMRules: null,
-};
+// g_local.h:3275 `extern dm_game_rt DMGame;` -- in the real C++ this is ONE
+// global struct, DEFINED (not just declared) in rogue/g_rogue_newdm.cpp:10
+// (`dm_game_rt DMGame;`, no `extern`) and read/written by every other
+// translation unit (including this one, g_combat.cpp) via that single
+// `extern` declaration -- there is no per-file copy on the C++ side.
+//
+// UNIFIED (2026-08-30, InitGameRules/DMGame wiring unit): this file used to
+// carry its OWN local, all-null `DMGame` object -- a separate binding from
+// rogue/g_rogue_newdm.ts's real one, which its own `InitGameRules()`
+// (rogue/g_rogue_newdm.cpp:322-359) actually populates. Wiring g_main.ts's
+// `InitGameRules` call site straight to that function without also fixing
+// this would have populated a `DMGame` object this file never read --
+// exactly g_target.ts's pre-fix `xyspeed` bug (.orch/followups.md), just for
+// a struct instead of a scalar. Fixed by importing the single real object
+// from rogue/g_rogue_newdm.ts (the file that owns it in C++ too) instead of
+// keeping a local copy here, matching the C++ `extern` relationship exactly:
+// this file only ever READS `DMGame.*` fields (see T_Damage below), it never
+// reassigns the `DMGame` binding itself, so a plain object import (a live
+// ES-module binding to the same object rogue/g_rogue_newdm.ts mutates in
+// place) is the direct equivalent of C's `extern` -- no setter function is
+// needed the way p_view.ts's `SetXyspeed` was for a primitive `let`, because
+// only object PROPERTIES are being written across the module boundary, not
+// the binding itself. This creates a real import cycle (g_combat.ts <->
+// rogue/g_rogue_newdm.ts, which already imports `T_RadiusDamage` from this
+// file) -- a sanctioned pattern this file already uses elsewhere (see the
+// CTFMatchSetup/DMGame file-header note on g_combat.ts <-> p_client.ts <->
+// ctf/g_ctf.ts); safe here for the same reason: `DMGame` is read only inside
+// T_Damage's function body, never at module-evaluation time. The real
+// import lives at this file's top-level import block
+// (`import { DMGame } from "./rogue/g_rogue_newdm";`).
 
 // ---------------------------------------------------------------------------
 // T_Damage

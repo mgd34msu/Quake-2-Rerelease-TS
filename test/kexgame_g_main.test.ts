@@ -53,6 +53,8 @@ import { GTIME_ZERO, Gtime_from_ms } from "../src/kexgame/gtime";
 import { GetGameAPI, PreInitGame, InitGame, CheckDMRules, EndDMLevel } from "../src/kexgame/g_main";
 import { turret_breach_think } from "../src/kexgame/g_turret";
 import { defaultGClient } from "../src/kexgame/p_client";
+import { InitGameRules, DMGame } from "../src/kexgame/rogue/g_rogue_newdm";
+import { DBall_GameInit, DBall_ChangeDamage, DBall_ChangeKnockback, DBall_CheckDMRules } from "../src/kexgame/rogue/rogue_dm_ball";
 
 // ---------------------------------------------------------------------------
 // fake KexGameImports fixture, with a cvar-registration spy
@@ -475,6 +477,58 @@ describe("InitGame", () => {
     expect(exportsTable.max_edicts).toBe(game.maxentities);
     expect(exportsTable.edicts).toBe(g_edicts);
   });
+
+  // -------------------------------------------------------------------------
+  // InitGameRules/DMGame wiring (g_main.cpp:373-375, 2026-08-30 unit)
+  // -------------------------------------------------------------------------
+  // g_main.ts used to carry a local throwing-stub `InitGameRules`, cited to
+  // rogue/g_rogue_newdm.ts's real one being unwireable until g_combat.ts's
+  // own separate local `DMGame` was unified with it. Both file's own updated
+  // headers document the fix: g_main.ts now imports and calls the real
+  // `InitGameRules`/reads the real, shared `DMGame` directly.
+
+  test("gamerules unset (default 0): InitGameRules is never reached, DMGame stays all-null (g_main.cpp:373-375's guard)", () => {
+    resetWorld();
+    GetGameAPI(makeFakeGameImports());
+    PreInitGame();
+    InitGame();
+
+    expect(DMGame.GameInit).toBeNull();
+    expect(DMGame.ChangeDamage).toBeNull();
+    expect(DMGame.ChangeKnockback).toBeNull();
+    expect(DMGame.CheckDMRules).toBeNull();
+  });
+
+  test("gamerules=3 (RDM_DEATHBALL): InitGame calls the REAL rogue/g_rogue_newdm.ts InitGameRules, populating the SAME DMGame object with the real DBall_* functions by reference (identity, not just shape -- the exact bug class this unit fixes)", () => {
+    resetWorld();
+    GetGameAPI(makeFakeGameImports());
+    // Pre-register gamerules=3 before InitGame's own `mustCvar` call reads
+    // it -- matching this file's existing "ctf" test precedent above (real
+    // Cvar_Get semantics: a second registration call never changes an
+    // already-registered cvar's value).
+    gi.cvar("gamerules", "3", CvarFlagsT.CVAR_LATCH);
+    PreInitGame();
+    InitGame();
+
+    try {
+      // Strict reference identity, not merely "a function got assigned":
+      // proves g_main.ts's InitGame call reached the SAME DMGame object
+      // rogue/g_rogue_newdm.ts's InitGameRules mutates, and that object is
+      // the SAME one g_combat.ts's T_Damage reads (see
+      // test/kexgame_g_combat.test.ts's own identity test for that half).
+      expect(DMGame.GameInit).toBe(DBall_GameInit);
+      expect(DMGame.ChangeDamage).toBe(DBall_ChangeDamage);
+      expect(DMGame.ChangeKnockback).toBe(DBall_ChangeKnockback);
+      expect(DMGame.CheckDMRules).toBe(DBall_CheckDMRules);
+    } finally {
+      // Reset the shared DMGame singleton back to all-null for the rest of
+      // this test file's run (rogue/g_rogue_newdm.cpp:324's own
+      // `memset(&DMGame, 0, ...)` at the top of every real InitGameRules
+      // call -- a real server turning gamerules back off does exactly this).
+      gi.cvar_set("gamerules", "0");
+      InitGameRules();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -535,6 +589,74 @@ describe("CheckDMRules", () => {
 
     CheckDMRules();
     expect(broadcastPrints.length).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // DMGame.CheckDMRules hook (g_main.cpp:676-681, 2026-08-30
+  // InitGameRules/DMGame wiring unit) -- a rules-path call observing the
+  // real, shared DMGame binding, the g_main.ts side of the same unification
+  // test/kexgame_g_combat.test.ts covers for the damage path.
+  // -------------------------------------------------------------------------
+
+  test("gamerules engaged and DMGame.CheckDMRules truthy: short-circuits before fraglimit is ever checked", () => {
+    setupDeathmatch();
+    gi.cvar_set("gamerules", "1"); // the guard only checks truthiness, any nonzero value engages it
+    gi.cvar_set("fraglimit", "10");
+    game.clients[0]!.resp.score = 10; // would trip fraglimit if the DMGame guard didn't return first
+    level.mapname = "q2dm1";
+
+    const prevCheckDMRules = DMGame.CheckDMRules;
+    let called = false;
+    DMGame.CheckDMRules = () => {
+      called = true;
+      return 1;
+    };
+    try {
+      CheckDMRules();
+      expect(called).toBe(true); // proves CheckDMRules() read the SAME DMGame object, not a copy
+      expect(broadcastPrints.some((m) => /[Ff]raglimit/.test(m))).toBe(false);
+    } finally {
+      DMGame.CheckDMRules = prevCheckDMRules;
+    }
+  });
+
+  test("gamerules engaged but DMGame.CheckDMRules returns falsy: falls through to the normal fraglimit check", () => {
+    setupDeathmatch();
+    gi.cvar_set("gamerules", "1");
+    gi.cvar_set("fraglimit", "10");
+    game.clients[0]!.resp.score = 10;
+    level.mapname = "q2dm1";
+
+    const prevCheckDMRules = DMGame.CheckDMRules;
+    DMGame.CheckDMRules = () => 0;
+    try {
+      CheckDMRules();
+      expect(broadcastPrints.some((m) => /[Ff]raglimit/.test(m))).toBe(true);
+    } finally {
+      DMGame.CheckDMRules = prevCheckDMRules;
+    }
+  });
+
+  test("gamerules unset (default 0): DMGame.CheckDMRules is never consulted even if populated -- guard checks gamerules first", () => {
+    setupDeathmatch();
+    gi.cvar_set("fraglimit", "10");
+    game.clients[0]!.resp.score = 10;
+    level.mapname = "q2dm1";
+    // gamerules stays at its registered default of "0" here.
+
+    const prevCheckDMRules = DMGame.CheckDMRules;
+    let called = false;
+    DMGame.CheckDMRules = () => {
+      called = true;
+      return 1;
+    };
+    try {
+      CheckDMRules();
+      expect(called).toBe(false);
+      expect(broadcastPrints.some((m) => /[Ff]raglimit/.test(m))).toBe(true); // normal fraglimit path still runs
+    } finally {
+      DMGame.CheckDMRules = prevCheckDMRules;
+    }
   });
 });
 
