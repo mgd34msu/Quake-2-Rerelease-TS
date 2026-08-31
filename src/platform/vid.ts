@@ -104,25 +104,26 @@ const vid_modes: VidmodeT[] = [
   new VidmodeT("Mode 7: 1152x864", 1152, 864, 7),
   new VidmodeT("Mode 8: 1280x960", 1280, 960, 8),
   new VidmodeT("Mode 9: 1600x1200", 1600, 1200, 9),
-  // Extension beyond the C table (vid_menu.c stopped at 1600x1200 in the
-  // 4:3 CRT era): a 16:9 mode so `vid_mode 10` gives native 1080p.
-  new VidmodeT("Mode 10: 1920x1080", 1920, 1080, 10),
-  // v1.0.0 RC modern-display set (task: "more video modes"). q2repro carries
-  // no numeric mode table at all to supersede -- its vid_modelist is a
-  // string spec parsed by VID_GetFullscreen, not an indexable array (see
-  // this unit's report) -- so these are appended past the existing 0-10
-  // table (never renumbered: existing configs pinning sw_mode/gl_mode to a
-  // low index must keep resolving to the same resolution) rather than
-  // matched against any upstream table.
-  new VidmodeT("Mode 11: 1280x720", 1280, 720, 11),
-  new VidmodeT("Mode 12: 1366x768", 1366, 768, 12),
-  new VidmodeT("Mode 13: 1440x900", 1440, 900, 13),
-  new VidmodeT("Mode 14: 1600x900", 1600, 900, 14),
+  // Modern-display extension past the genuine vanilla 0-9 set (vid_dll.c's
+  // table continued only to mode 10 = 2048x1536, restored below in its
+  // ascending-order slot). Indices 0-9 are the ones decades of configs pin
+  // via sw_mode/gl_mode and stay untouched; everything at 10+ is this
+  // port's own table, kept in plain ascending width/height order so the
+  // menu spinner reads naturally (1080p sits between 1600x900 and
+  // 1920x1200 where a human looks for it). q2repro carries no numeric mode
+  // table at all to supersede -- its vid_modelist is a string spec parsed
+  // by VID_GetFullscreen, not an indexable array.
+  new VidmodeT("Mode 10: 1280x720", 1280, 720, 10),
+  new VidmodeT("Mode 11: 1366x768", 1366, 768, 11),
+  new VidmodeT("Mode 12: 1440x900", 1440, 900, 12),
+  new VidmodeT("Mode 13: 1600x900", 1600, 900, 13),
+  new VidmodeT("Mode 14: 1920x1080", 1920, 1080, 14),
   new VidmodeT("Mode 15: 1920x1200", 1920, 1200, 15),
-  new VidmodeT("Mode 16: 2560x1080", 2560, 1080, 16),
-  new VidmodeT("Mode 17: 2560x1440", 2560, 1440, 17),
-  new VidmodeT("Mode 18: 3440x1440", 3440, 1440, 18),
-  new VidmodeT("Mode 19: 3840x2160", 3840, 2160, 19),
+  new VidmodeT("Mode 16: 2048x1536", 2048, 1536, 16),
+  new VidmodeT("Mode 17: 2560x1080", 2560, 1080, 17),
+  new VidmodeT("Mode 18: 2560x1440", 2560, 1440, 18),
+  new VidmodeT("Mode 19: 3440x1440", 3440, 1440, 19),
+  new VidmodeT("Mode 20: 3840x2160", 3840, 2160, 20),
 ];
 
 let r_customwidth: CvarT | null = null;
@@ -156,7 +157,7 @@ export function VID_GetModeInfo(mode: number): { width: number; height: number }
 
 // vid_scale: fraction of the chosen mode's resolution actually rendered
 // internally, then presented scaled (aspect-preserving letterbox) to fill
-// that mode's window/display -- e.g. vid_mode 10 (1920x1080) + vid_scale
+// that mode's window/display -- e.g. vid_mode 14 (1920x1080) + vid_scale
 // 0.667 renders at ~1280x720 and displays fullscreen at 1080p. No q2repro
 // precedent (checked: no r_scale/vid_scale/downscale-to-present feature
 // anywhere in its refresh or GL backend -- see this unit's report), so
