@@ -667,4 +667,8 @@ export const VANILLA_CODEC: ProtocolCodec = {
   readFrameHeader,
   readFramePlayerstate,
   readPacketEntitiesBegin,
+  // vanilla_server_read_move (q2proto_proto_vanilla.c:1168-1176) opens with
+  // id's sequence-checksum byte; every later protocol dropped the field. See
+  // codec.ts's clcMoveHasChecksum doc comment.
+  clcMoveHasChecksum: true,
 };

@@ -385,4 +385,25 @@ export interface ProtocolCodec {
   // implements it (q2proto_common_server_read_setting-shaped -- q2repro.c/
   // q2pro.c both just read two shorts, no protocol-specific branching).
   readClientSetting?(msg: SizeBuf): ClcClientSettingT;
+
+  // Whether this protocol's non-batched clc_move carries id's leading
+  // sequence-checksum byte before `lastframe`. Vanilla (34) does --
+  // vanilla_server_read_move (q2proto_proto_vanilla.c:1168-1176) opens with
+  // `q2protoio_read_u8(io_arg), "skip checksum byte"`. R1Q2 (35) and Q2PRO
+  // (36) DROPPED the field: r1q2_server_read_move
+  // (q2proto_proto_r1q2.c:1528-1535) and q2pro_server_read_move
+  // (q2proto_proto_q2pro.c:2387-2393) both start straight at the i32
+  // lastframe. Reading the byte anyway shifts every following field by one
+  // and desynchronizes the whole packet -- confirmed live against a real
+  // q2repro client at protocol 35, which spawned and then produced an
+  // unbroken run of "Failed command checksum" lines followed by
+  // "SV_ReadClientMessage: badread".
+  //
+  // Spelled as a flag rather than a codec-owned readMove() because the
+  // surrounding clc_move case in sv_user.ts also needs the checksum's byte
+  // OFFSET inside net_message to run COM_BlockSequenceCRCByte over the
+  // right span, which a value-returning reader would have to hand back
+  // anyway. Optional, and absent means "no checksum byte", so only vanilla
+  // (and the demo codecs that share its wire shape) sets it.
+  clcMoveHasChecksum?: boolean;
 }
