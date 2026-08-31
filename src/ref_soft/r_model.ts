@@ -238,6 +238,7 @@ export class MsurfaceT {
   samples: Uint8Array | null = null; // [numstyles*surfsize]
 
   nextalphasurface: MsurfaceT | null = null;
+
 }
 
 export const CONTENTS_NODE = -1;
@@ -567,6 +568,22 @@ export function Mod_ForName(name: string, crash: boolean): ModelT | null {
     default:
       ri.Sys_Error(ERR_DROP, `Mod_NumForName: unknown fileid for ${mod.name}`);
   }
+
+  // NOT PORTED HERE: q2repro src/refresh/models.c:1632-1636 (`#if USE_MD5`)
+  // calls MOD_LoadMD5(model) at exactly this point when model->type ==
+  // MOD_ALIAS. src/ref_gl/gl_model.ts's Mod_ForName does the same (its own
+  // Mod_LoadMD5, wired to a real ModelT.skeleton field and a skinned CPU
+  // draw path in gl_mesh.ts). This software renderer intentionally has no
+  // equivalent: q2repro's MD5 code (md5_model_t/model_t.skeleton, defined
+  // in src/refresh/gl.h:439-470, a GL-refresh-PRIVATE header) and its
+  // runtime skinning (src/refresh/mesh.c:739-908) live entirely inside
+  // q2repro's single GL-only refresh module -- q2repro ships no software
+  // renderer at all, so there is no C source anywhere to port a soft-MD5
+  // loading or rendering path FROM. Per this unit's brief ("if genuinely
+  // out of q2repro's scope, document that with the C citation rather than
+  // silently skipping"): this is that documentation. ModelT below
+  // deliberately carries no `skeleton` field -- adding one with nothing to
+  // populate or render it would be dead weight, not fidelity.
 
   loadmodel.extradatasize = buf.length; // stands in for Hunk_End()'s byte count -- see report
 

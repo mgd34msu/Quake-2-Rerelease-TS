@@ -111,10 +111,12 @@ import {
   r_oldviewcluster2,
   SetViewClusters,
   MAX_LBM_HEIGHT,
+  glCvars,
 } from "./gl_local";
 import { GL_FindImage, GL_FreeUnusedImages } from "./gl_image";
 import { GL_SubdivideSurface } from "./gl_warp";
 import { GL_BuildPolygonFromSurface, GL_CreateSurfaceLightmap, GL_BeginBuildingLightmaps, GL_EndBuildingLightmaps } from "./gl_rsurf";
+import { loadMd5Model, md5PathsFor, md5SkinPathFor, Md5ParseError, Md5ModelT } from "../qcommon/md5_model";
 
 // mplane_t is byte-for-byte the same struct as q_shared.ts's CplaneT
 // (cplane_t) -- see r_model.ts's identical MplaneT alias and comment.
@@ -370,6 +372,11 @@ export class ModelT {
   extradatasize = 0;
   extradata: unknown = null; // opaque cache blob owned by this file's alias/sprite/brush loaders
 
+  // model_t.skeleton (gl.h:470, `#if USE_MD5`) -- present only for a
+  // MOD_ALIAS model that has a real, sibling "md5/*.md5mesh"+".md5anim"
+  // pair (see Mod_LoadMD5 below); null means "MD2-only", the normal case.
+  skeleton: Md5ModelT | null = null;
+
   // BSPX extension data (see qcommon/bspx.ts). null for every classic BSP
   // (no BSPX directory at all) and for any BSPX directory that doesn't
   // carry DECOUPLED_LM/LIGHTGRID_OCTREE. PARSED ONLY -- neither lump is
@@ -615,6 +622,14 @@ export function Mod_ForName(name: string, crash: boolean): ModelT | null {
 
     default:
       ri.Sys_Error(ERR_DROP, `Mod_NumForName: unknown fileid for ${mod.name}`);
+  }
+
+  // q2repro src/refresh/models.c:1632-1636 (`#if USE_MD5`): "check for an
+  // MD5; this requires the MD2/MD3 to have loaded first, since we need it
+  // for skin names" -- runs after the switch above, gated on both the MD2
+  // having loaded successfully and gl_md5_load.
+  if (mod.type === ModtypeT.mod_alias && (!glCvars.gl_md5_load || glCvars.gl_md5_load.value)) {
+    Mod_LoadMD5(mod);
   }
 
   loadmodel.extradatasize = buf.length; // stands in for Hunk_End()'s byte count -- see file header
@@ -1721,6 +1736,75 @@ function Mod_LoadAliasModel(mod: ModelT, buffer: Uint8Array): void {
   mod.maxs[0] = 32;
   mod.maxs[1] = 32;
   mod.maxs[2] = 32;
+}
+
+/*
+===============
+Mod_LoadMD5
+
+q2repro src/refresh/models.c:1415-1445 (MOD_LoadMD5), called from
+Mod_ForName right after this switch's MD2 case -- "this requires the
+MD2/MD3 to have loaded first, since we need it for skin names". See
+qcommon/md5_model.ts's own file header for the "md5/" subdirectory
+file-discovery correction (NOT a bare sibling of tris.md2) and the
+FS_FileExists substitution this port makes (attempt FS_LoadFile on both
+files and bail if either is missing, since RefImports has no true
+existence probe).
+
+Any parse failure (Md5ParseError) is swallowed here exactly like the C
+original's `fail:` label: a warning is printed, mod.skeleton stays null,
+and the model renders as plain MD2 -- MD5 is a pure rendering upgrade, never
+a hard requirement.
+===============
+*/
+function Mod_LoadMD5(mod: ModelT): void {
+  const paliashdr = mod.extradata;
+  if (!(paliashdr instanceof ParsedMd2T)) return;
+
+  const { meshPath, animPath, scalePath } = md5PathsFor(mod.name);
+
+  const meshFile = ri.FS_LoadFile(meshPath);
+  if (!meshFile.data) return; // FS_FileExists substitute -- see md5_model.ts header comment
+  const animFile = ri.FS_LoadFile(animPath);
+  if (!animFile.data) {
+    ri.FS_FreeFile(meshFile.data);
+    return;
+  }
+
+  const scaleFile = ri.FS_LoadFile(scalePath);
+  const scaleSource = scaleFile.data ? { text: new TextDecoder().decode(scaleFile.data), path: scalePath } : null;
+
+  const warn = (msg: string): void => ri.Con_Printf(PRINT_ALL, `${msg}\n`);
+
+  try {
+    const meshText = new TextDecoder().decode(meshFile.data);
+    const animText = new TextDecoder().decode(animFile.data);
+    const md5model = loadMd5Model(meshText, meshPath, animText, animPath, scaleSource, warn);
+
+    // models.c:1249-1251 -- warn on mismatched frame counts (not fatal)
+    if (md5model.numFrames < paliashdr.num_frames) {
+      warn(`${animPath} has less frames than ${mod.name} (${md5model.numFrames} < ${paliashdr.num_frames})`);
+    }
+
+    // MD5_LoadSkins (models.c:1370-1403) -- re-resolve the MD2's own skin
+    // names under this model's "md5/" subdirectory.
+    for (let i = 0; i < paliashdr.num_skins; i++) {
+      mod.skins[i] = safeFindImage(md5SkinPathFor(paliashdr.skinnames[i]), ImagetypeT.it_skin) ?? mod.skins[i];
+    }
+
+    mod.skeleton = md5model;
+  } catch (err) {
+    if (err instanceof Md5ParseError) {
+      warn(`Couldn't load ${err.message}`);
+      mod.skeleton = null;
+    } else {
+      throw err;
+    }
+  } finally {
+    ri.FS_FreeFile(meshFile.data);
+    ri.FS_FreeFile(animFile.data);
+    if (scaleFile.data) ri.FS_FreeFile(scaleFile.data);
+  }
 }
 
 /*

@@ -71,7 +71,7 @@ reinterpretation via a shared `Int32Array`/`Float32Array` view over one
 for GL return values.
 */
 
-import { type Vec3, vec3, DotProduct, VectorAdd, VectorSubtract, VectorCopy, VectorClear, VectorNormalize, AngleVectors } from "../shared/math";
+import { type Vec3, vec3, DotProduct, VectorAdd, VectorSubtract, VectorCopy, VectorClear, VectorNormalize, VectorLength, AngleVectors } from "../shared/math";
 import {
   RF_SHELL_RED,
   RF_SHELL_GREEN,
@@ -97,10 +97,12 @@ import { qgl, GL_Bind, GL_TexEnv, GL_TEXTURE_2D, GL_REPLACE, GL_BLEND } from "./
 import { R_RotateForEntity, MYgluPerspective } from "./gl_rmain";
 import { lightspot, R_LightPoint } from "./gl_light";
 import { fixedLength } from "../shared/fixed";
+import { type Md5ModelT, calcSkelVert, getSkeletonFrame } from "../qcommon/md5_model";
 
 // standard OpenGL 1.1 enum values (`<GL/gl.h>`) this file calls qgl* with
 // directly; no shared GL-enum module exists yet across gl_*.ts, see
 // gl_light.ts/gl_rsurf.ts/gl_warp.ts/gl_rmain.ts's identical note.
+const GL_TRIANGLES = 0x0004;
 const GL_TRIANGLE_FAN = 0x0006;
 const GL_TRIANGLE_STRIP = 0x0005;
 const GL_FLOAT = 0x1406;
@@ -440,6 +442,73 @@ export function GL_DrawAliasFrameLerp(paliashdr: ParsedMd2T, backlerp: number): 
   }
 
   // PMM - added double damage shell
+  if (isShell) qgl.qglEnable(GL_TEXTURE_2D);
+}
+
+/*
+=============
+GL_DrawAliasSkeleton
+
+q2repro src/refresh/mesh.c:747-908 (`#if USE_MD5`) -- CPU skinning
+(calc_skel_vert/tess_plain_skel/tess_shell_skel) plus frame selection
+(draw_alias_skeleton/lerp_alias_skeleton, ported into md5_model.ts's
+getSkeletonFrame), adapted to this port's own immediate-mode glBegin/glEnd
+draw style. The `gl_vertex_arrays` branch GL_DrawAliasFrameLerp above
+supports for MD2 is not ported for MD5 -- immediate mode only, a documented
+scope simplification (this renderer's alias-model lerping was already
+always CPU-side, see gl_gpulerp's own "registered only" comment in
+gl_rmain.ts; only the *array-upload* optimization is skipped here, not any
+actual skinning behavior).
+
+Shading uses q2repro's own shadedot() formula (mesh.c:84-92: `d =
+Dot(normal, shadedir); if (d<0) d*=0.3; return d+1`), but applied against
+this port's own per-entity `shadevector` (vanilla's mechanism, already
+computed above by R_DrawAliasModel and used by every other alias-shading
+path in this file) rather than q2repro's independent fixed `shadedir`
+global -- this renderer has no equivalent fixed-light-direction concept,
+and shadevector is the faithful vanilla per-entity substitute already wired
+in everywhere else.
+=============
+*/
+function GL_DrawAliasSkeleton(model: Md5ModelT, oldframe: number, newframe: number, backlerp: number): void {
+  if (!currententity) return;
+
+  const frontlerp = 1.0 - backlerp;
+  const skeleton = getSkeletonFrame(model, oldframe, newframe, backlerp, frontlerp);
+  const isShell = isShellFlags(currententity.flags);
+  const alpha = currententity.flags & RF_TRANSLUCENT ? currententity.alpha : 1.0;
+  const shellOrColored = isShell || currententity.flags & (RF_SHELL_RED | RF_SHELL_GREEN | RF_SHELL_BLUE);
+
+  if (isShell) qgl.qglDisable(GL_TEXTURE_2D);
+
+  for (const mesh of model.meshes) {
+    const positions: Vec3[] = new Array(mesh.numVerts);
+    const normals: Vec3[] = new Array(mesh.numVerts);
+    for (let i = 0; i < mesh.numVerts; i++) {
+      positions[i] = vec3();
+      normals[i] = vec3();
+      calcSkelVert(mesh.vertices[i], mesh, skeleton, positions[i], normals[i]);
+    }
+
+    qgl.qglBegin(GL_TRIANGLES);
+    for (let i = 0; i < mesh.numIndices; i++) {
+      const vi = mesh.indices[i];
+
+      if (shellOrColored) {
+        qgl.qglColor4f(shadelight[0], shadelight[1], shadelight[2], alpha);
+      } else {
+        let d = DotProduct(normals[vi], shadevector);
+        if (d < 0) d *= 0.3;
+        d += 1;
+        qgl.qglTexCoord2f(mesh.tcoords[vi].s, mesh.tcoords[vi].t);
+        qgl.qglColor4f(d * shadelight[0], d * shadelight[1], d * shadelight[2], alpha);
+      }
+
+      qgl.qglVertex3fv(positions[vi]);
+    }
+    qgl.qglEnd();
+  }
+
   if (isShell) qgl.qglEnable(GL_TEXTURE_2D);
 }
 
@@ -792,7 +861,28 @@ export function R_DrawAliasModel(e: EntityT): void {
   }
 
   if (!(glCvars.r_lerpmodels && glCvars.r_lerpmodels.value)) currententity.backlerp = 0;
-  GL_DrawAliasFrameLerp(paliashdr, currententity.backlerp);
+
+  // q2repro src/refresh/mesh.c:1092-1095 (`#if USE_MD5`) -- prefer the
+  // skinned MD5 mesh over the MD2 lerp path when one loaded and gl_md5_use
+  // allows it. The original also OR's in `ent->flags & RF_NO_LOD`; this
+  // port's EntityT carries no RF_NO_LOD (a rerelease-only flag, absent from
+  // shared/q_shared.ts's vanilla RF_* set), so only the distance gate is
+  // ported -- no entity in this codebase can currently request it anyway.
+  let usedSkeleton = false;
+  if (currentmodel.skeleton && (!glCvars.gl_md5_use || glCvars.gl_md5_use.value)) {
+    const maxDist = glCvars.gl_md5_distance ? glCvars.gl_md5_distance.value : 0;
+    let withinDistance = maxDist <= 0;
+    if (!withinDistance) {
+      const delta = vec3();
+      VectorSubtract(currententity.origin, r_newrefdef.vieworg, delta);
+      withinDistance = VectorLength(delta) <= maxDist;
+    }
+    if (withinDistance) {
+      GL_DrawAliasSkeleton(currentmodel.skeleton, currententity.oldframe, currententity.frame, currententity.backlerp);
+      usedSkeleton = true;
+    }
+  }
+  if (!usedSkeleton) GL_DrawAliasFrameLerp(paliashdr, currententity.backlerp);
 
   GL_TexEnv(GL_REPLACE);
   qgl.qglShadeModel(GL_FLAT);

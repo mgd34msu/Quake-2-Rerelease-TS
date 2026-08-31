@@ -288,6 +288,14 @@ export const glCvars: {
   gl_cull_nodes: CvarT | null;
   gl_cull_models: CvarT | null;
   gl_novis: CvarT | null;
+
+  // q2repro src/refresh/main.c:1121-1123 (`#if USE_MD5`): MD5 skeletal-model
+  // loading/use/LOD-distance cvars -- now real consumers, see gl_model.ts's
+  // Mod_LoadMD5 (gl_md5_load) and gl_mesh.ts's R_DrawAliasModel
+  // (gl_md5_use/gl_md5_distance).
+  gl_md5_load: CvarT | null;
+  gl_md5_use: CvarT | null;
+  gl_md5_distance: CvarT | null;
 } = {
   r_norefresh: null,
   r_lefthand: null,
@@ -367,6 +375,10 @@ export const glCvars: {
   gl_cull_nodes: null,
   gl_cull_models: null,
   gl_novis: null,
+
+  gl_md5_load: null,
+  gl_md5_use: null,
+  gl_md5_distance: null,
 };
 
 export let gl_lightmap_format = 0;

@@ -1121,11 +1121,11 @@ export function R_Register(): void {
   ri.Cvar_Get("gl_flarespeed", "8", 0);
   ri.Cvar_Get("gl_fontshadow", "0", 0);
   // q2repro src/refresh/main.c:1121-1123 (`#if USE_MD5`): MD5 skeletal-model
-  // loading/LOD-distance cvars; this renderer only loads MD2 (gl_model.ts's
-  // ParsedMd2T), no MD5 loader exists -- registered only.
-  ri.Cvar_Get("gl_md5_load", "1", CVAR_FILES);
-  ri.Cvar_Get("gl_md5_use", "1", 0);
-  ri.Cvar_Get("gl_md5_distance", "2048", 0);
+  // loading/use/LOD-distance cvars. gl_model.ts's Mod_LoadMD5 reads
+  // gl_md5_load; gl_mesh.ts's R_DrawAliasModel reads gl_md5_use/gl_md5_distance.
+  glCvars.gl_md5_load = ri.Cvar_Get("gl_md5_load", "1", CVAR_FILES);
+  glCvars.gl_md5_use = ri.Cvar_Get("gl_md5_use", "1", 0);
+  glCvars.gl_md5_distance = ri.Cvar_Get("gl_md5_distance", "2048", 0);
   // q2repro src/refresh/main.c:1125 (also :1168, same Cvar_Get call, cited
   // once here): damage-blend screen-overlay fraction; this renderer has no
   // damage-blend overlay pass -- registered only.
