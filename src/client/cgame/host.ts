@@ -41,18 +41,65 @@ import { Loc_Localize } from "../../qcommon/loc";
 import { ERR_DROP } from "../../qcommon/qcommon";
 import { Cvar_Get, Cvar_Set, Cvar_ForceSet } from "../../qcommon/cvar";
 import { FS_LoadFile } from "../../qcommon/files";
-import type { KexCgameImports, Vec2T, KexPlayerStateT, KexPmoveStateT, CgServerDataT, VrectT } from "../../kexapi/game";
-import { TextAlignT, KexPmTypeT, MAX_STATS as KEX_MAX_STATS, rgba_white } from "../../kexapi/game";
-import type { PlayerStateT, PmoveStateT } from "../../shared/q_shared";
-import { PmTypeT, SHORT2ANGLE } from "../../shared/q_shared";
-import type { Vec3 } from "../../shared/math";
+import type {
+  KexCgameImports,
+  Vec2T,
+  KexPlayerStateT,
+  KexPmoveStateT,
+  CgServerDataT,
+  VrectT,
+  KexCgameExports,
+  KexPmoveT,
+  KexUsercmdT,
+  KexTraceT,
+  KexCsurfaceT,
+  KexEdictT,
+} from "../../kexapi/game";
+import {
+  TextAlignT,
+  KexPmTypeT,
+  MAX_STATS as KEX_MAX_STATS,
+  rgba_white,
+  ContentsT,
+  SolidT,
+  SvflagsT,
+  KexEntityEventT,
+  WaterLevelT,
+  MAX_ITEMS,
+  Max_Armor_Types,
+} from "../../kexapi/game";
+import type { PlayerStateT, PmoveStateT, TraceT, CsurfaceT, UsercmdT, CvarT } from "../../shared/q_shared";
+import { PmTypeT, SHORT2ANGLE, CplaneT } from "../../shared/q_shared";
+import { vec3, type Vec3 } from "../../shared/math";
 import type { DrawColorT } from "../ref";
 import { Key_GetBinding } from "../keys_impl";
 import { viddef } from "../vid";
 import { GetClassicCgameAPI } from "./classic";
 import { GetCGameAPI as GetKexCgameAPI } from "../../kexgame/cgame/cg_main";
-import { ParseKfont, SCR_KFontLookup, type KfontT } from "./kfont";
+import { ParseKfont, SCR_KFontLookup, Kfont_FromTTF, TtfKfont_Lookup, type KfontT, type KfontCharT, type TtfKfontT } from "./kfont";
 import { CL_Wheel_Precache } from "../cl_wheel";
+// [item 5] cl_kfont_source's "ttf:<name>" path -- qcommon/ttf.ts's pure
+// TTF/OTF parser+rasterizer (no engine/renderer dependency of its own) and
+// kfont.ts's own Kfont_FromTTF seam (see that file's "Kfont_FromTTF --
+// TTF/OTF-backed kfont seam" section, especially its INTEGRATION CONTRACT
+// doc comment -- this file's ensureActiveKfont() below is that contract's
+// prescribed caller, implemented for real).
+import { parseFont, buildFontAtlas, latin1Codepoints } from "../../qcommon/ttf";
+// GL_LoadPic: the INTEGRATION CONTRACT's step 4 registration primitive
+// ("gl_image.ts's already-public GL_LoadPic ... ALREADY exported"). Reached
+// directly from client code rather than through RefExports (ref.ts) --
+// there is no "register raw RGBA pixels under an exact name" member on
+// that interface, and adding one would mean extending ref.ts/gl_draw.ts/
+// r_draw.ts too, outside this unit's host.ts-only scope for this item (see
+// this file's own task report). ONLY the GL renderer is reachable this way:
+// ref_soft/r_image.ts's own GL_LoadPic-equivalent is a private
+// (non-exported) function, so a "ttf:" source registers nothing under the
+// software renderer -- ensureActiveKfont() below falls back to the
+// classic conchars path exactly as it would for any other load failure,
+// so this is a silently-degraded (not silently-wrong) result, and it is
+// reported here plainly rather than swept under.
+import { GL_LoadPic } from "../../ref_gl/gl_image";
+import { ImagetypeT } from "../../ref_gl/gl_local";
 
 // ---------------------------------------------------------------------------
 // Fallback text metrics (kfont-less path) -- see the SCR_DrawFontString /
@@ -96,11 +143,12 @@ function drawConchar(x: number, y: number, num: number): void {
 // this section is the real load path q2repro's own SCR_Init
 // (`SCR_LoadKFont(&scr.kfont, "fonts/qconfont.kfont")`) exercises.
 //
-// Memoized by `re` IDENTITY, not a one-shot flag: `re` is swapped out
-// exactly once in a real process (client.ts's setRe, right after the
-// renderer constructs) and stays stable for the rest of that process's
-// life, so in real play this reduces to "load once, right after the
-// renderer exists" -- the same timing q2repro's SCR_Init achieves by
+// Memoized by `re` IDENTITY (plus, since item 5 below, the resolved source
+// cvar state -- see ensureActiveKfont()), not a one-shot flag: `re` is
+// swapped out exactly once in a real process (client.ts's setRe, right
+// after the renderer constructs) and stays stable for the rest of that
+// process's life, so in real play this reduces to "load once, right after
+// the renderer exists" -- the same timing q2repro's SCR_Init achieves by
 // running once at startup. The identity-keyed cache (rather than a plain
 // "attempted yet?" boolean) exists so this module's shared state stays
 // correct across test files that call `setRe` repeatedly with different
@@ -109,6 +157,76 @@ function drawConchar(x: number, y: number, num: number): void {
 // value produced for the rest of the suite.
 let kfontCacheFor: unknown = undefined;
 let kfontCache: KfontT | null = null;
+
+// ---------------------------------------------------------------------------
+// [item 5] cl_kfont_source -- kfont.ts's own "Kfont_FromTTF" doc comment
+// (see that file) already spelled out the proposed cvar exactly: a plain
+// string cvar, default "kfont" (byte-identical to the load-with-conchars-
+// fallback behavior above), also accepting "classic" (force-disable, conchars
+// only) and "ttf:<name>" (rasterize fonts/<name>.ttf or .otf via qcommon/
+// ttf.ts's parseFont/buildFontAtlas at cl_kfont_ttf_size pixels, ASCII+
+// Latin-1 codepoint set per latin1Codepoints()). ActiveKfontT is this file's
+// own dispatch shape: both KfontT (the classic .kfont path, fixed 95-entry
+// array + SCR_KFontLookup) and TtfKfontT (kfont.ts's Map-based generalization
+// + TtfKfont_Lookup) get wrapped behind the SAME {pic, line_height,
+// lookup(codepoint)} shape, so every draw/measure function below this point
+// only needs to change ITS OWN parameter type from `KfontT | null` to
+// `ActiveKfontT | null` and replace `SCR_KFontLookup(font, cp)` with
+// `font.lookup(cp)` -- no other body changes, and every preserved-quirk
+// doc comment on those functions (unscaled kfont line-height/width,
+// CONCHAR_HEIGHT-not-line_height newline advance, etc.) still applies
+// unchanged to both wrapped sources.
+// ---------------------------------------------------------------------------
+
+interface ActiveKfontT {
+  pic: string;
+  line_height: number;
+  lookup(codepoint: number): KfontCharT | null;
+}
+
+function wrapClassicKfont(font: KfontT): ActiveKfontT {
+  return { pic: font.pic, line_height: font.line_height, lookup: (cp) => SCR_KFontLookup(font, cp) };
+}
+
+function wrapTtfKfont(font: TtfKfontT): ActiveKfontT {
+  return { pic: font.pic, line_height: font.line_height, lookup: (cp) => TtfKfont_Lookup(font, cp) };
+}
+
+let cl_kfont_source: CvarT | null = null;
+let cl_kfont_ttf_size: CvarT | null = null;
+
+function ensureKfontCvars(): void {
+  // Cvar_Get is idempotent (this codebase's established convention --
+  // multiple files already independently register the same cvar name, e.g.
+  // cl_scrn.ts's own SCR_Init comment on scr_font/scr_alpha), so calling
+  // this on every ensureActiveKfont() is cheap and correct even if it runs
+  // before or after any other registrar.
+  if (!cl_kfont_source) cl_kfont_source = Cvar_Get("cl_kfont_source", "kfont", 0);
+  if (!cl_kfont_ttf_size) cl_kfont_ttf_size = Cvar_Get("cl_kfont_ttf_size", "16", 0);
+}
+
+// kfont.ts's Kfont_FromTTF INTEGRATION CONTRACT, steps 1-5, implemented for
+// real: FS_LoadFile the raw font bytes (.ttf, falling back to .otf --
+// covers the 3 CFF-flavored files in the real retail font set), parseFont,
+// buildFontAtlas over latin1Codepoints() at the requested pixel size,
+// register the atlas under a caller-assigned name via GL_LoadPic (see this
+// file's own import-site doc comment on GL_LoadPic for the cross-layer
+// reasoning and the ref_soft gap), then Kfont_FromTTF to relabel the atlas
+// into this file's own lookup shape. Any failure at any step (file missing,
+// unrecognized sfnt signature, etc.) returns null -- matches SCR_LoadKFont's
+// own "just return" bail-on-failure convention (loadKfontAsset's own doc
+// comment above cites the same precedent) rather than throwing.
+function loadTtfKfontAsset(name: string, pxSize: number): ActiveKfontT | null {
+  if (!re) return null;
+  const raw = FS_LoadFile(`fonts/${name}.ttf`) ?? FS_LoadFile(`fonts/${name}.otf`);
+  if (!raw) return null;
+  const parsed = parseFont(raw);
+  if (!parsed.ok) return null;
+  const atlas = buildFontAtlas(parsed.font, latin1Codepoints(), pxSize);
+  const pic = `/ttf:${name}:${pxSize}`;
+  GL_LoadPic(pic, atlas.pixels, atlas.width, atlas.height, ImagetypeT.it_pic, 32);
+  return wrapTtfKfont(Kfont_FromTTF(atlas, pic));
+}
 
 // SCR_LoadKFont (src/refresh/draw.c), engine-side half: ./kfont.ts's
 // ParseKfont does the pure text-format parsing (unit-tested directly,
@@ -132,12 +250,48 @@ function loadKfontAsset(filename: string): KfontT | null {
   return { pic, chars: parsed.chars, line_height: parsed.line_height };
 }
 
-function ensureKfont(): KfontT | null {
-  if (re !== kfontCacheFor) {
-    kfontCacheFor = re;
-    kfontCache = loadKfontAsset("fonts/qconfont.kfont");
+// The real entry point every draw/measure function below calls (superseding
+// the old "always today's classic .kfont" ensureKfont) -- resolves
+// cl_kfont_source, then dispatches to whichever loader that source names.
+// Cache key is `re` identity PLUS the resolved source/size string, so a
+// runtime `cl_kfont_source`/`cl_kfont_ttf_size` change takes effect on the
+// next call instead of sticking to whatever loaded first (unlike the plain
+// `re`-only memoization the classic-only path used to get away with, since
+// that path had no cvar to react to).
+let activeKfontCacheKey: string | null = null;
+let activeKfontCacheFor: unknown = undefined;
+let activeKfontCache: ActiveKfontT | null = null;
+
+function ensureActiveKfont(): ActiveKfontT | null {
+  ensureKfontCvars();
+  const source = cl_kfont_source!.string;
+  const pxSize = Math.trunc(cl_kfont_ttf_size!.value) || 16;
+  const key = `${source}|${pxSize}`;
+
+  if (re === activeKfontCacheFor && key === activeKfontCacheKey) return activeKfontCache;
+  activeKfontCacheFor = re;
+  activeKfontCacheKey = key;
+
+  if (source === "classic") {
+    // Force-disable: every draw/measure function's own `!font` branch is
+    // the plain conchars fallback, exactly as if no kfont asset existed at
+    // all.
+    activeKfontCache = null;
+  } else if (source.startsWith("ttf:")) {
+    activeKfontCache = loadTtfKfontAsset(source.slice(4), pxSize);
+  } else {
+    // "kfont" (the documented default) and any unrecognized value both
+    // fall back to today's pre-item-5 behavior: load the classic
+    // fonts/qconfont.kfont asset, or the conchars fallback if that fails --
+    // matches cl_kfont_source's own documented default disposition
+    // ("kfont (today's default)", kfont.ts's Kfont_FromTTF header comment).
+    if (re !== kfontCacheFor) {
+      kfontCacheFor = re;
+      kfontCache = loadKfontAsset("fonts/qconfont.kfont");
+    }
+    activeKfontCache = kfontCache ? wrapClassicKfont(kfontCache) : null;
   }
-  return kfontCache;
+  return activeKfontCache;
 }
 
 // CG_SCR_FontLineHeight (src/client/cgame.c): NOTE `scale` is read in the
@@ -149,7 +303,7 @@ function ensureKfont(): KfontT | null {
 // character -- see drawKfontChar below -- but an UNSCALED line pitch and
 // UNSCALED measured width; see measureFontStringDispatch's own doc comment
 // for the matching quirk on the measure side).
-function fontLineHeightForScale(font: KfontT | null, scale: number): number {
+function fontLineHeightForScale(font: ActiveKfontT | null, scale: number): number {
   if (!font) return CONCHAR_HEIGHT * scale;
   return font.line_height;
 }
@@ -159,10 +313,10 @@ function fontLineHeightForScale(font: KfontT | null, scale: number): number {
 // or a zero-width atlas entry -- e.g. the real qconfont.kfont has no entry
 // at all for ` or ~) contribute nothing, matching `if (ch) x += ch->w;`
 // exactly (silently skipped, not substituted with a fallback width).
-function measureKfontLineWidth(font: KfontT, line: string): number {
+function measureKfontLineWidth(font: ActiveKfontT, line: string): number {
   let width = 0;
   for (let i = 0; i < line.length; i++) {
-    const ch = SCR_KFontLookup(font, line.charCodeAt(i));
+    const ch = font.lookup(line.charCodeAt(i));
     if (ch) width += ch.w;
   }
   return width;
@@ -177,7 +331,7 @@ function measureKfontLineWidth(font: KfontT, line: string): number {
 // (fontLineHeightForScale) are BOTH unscaled by `scale`, unlike the
 // fallback branch, which scales both -- this is q2repro's own real
 // behavior with kfont data, not something to "fix" here.
-function measureFontStringDispatch(font: KfontT | null, str: string, scale: number): Vec2T {
+function measureFontStringDispatch(font: ActiveKfontT | null, str: string, scale: number): Vec2T {
   const lines = str.split("\n");
   let maxWidth = 0;
   for (const line of lines) {
@@ -202,9 +356,9 @@ function measureFontStringDispatch(font: KfontT | null, str: string, scale: numb
 // measureFontStringDispatch's doc comment for why this differs from the
 // UNSCALED width the measure path sums; both sides are faithful to
 // q2repro's own respective functions.
-function drawKfontChar(font: KfontT, x: number, y: number, scale: number, codepoint: number, color: DrawColorT, shadow: boolean): number {
+function drawKfontChar(font: ActiveKfontT, x: number, y: number, scale: number, codepoint: number, color: DrawColorT, shadow: boolean): number {
   if (!re) return 0;
-  const ch = SCR_KFontLookup(font, codepoint);
+  const ch = font.lookup(codepoint);
   if (!ch) return 0;
 
   const w = ch.w * scale;
@@ -225,7 +379,7 @@ function drawKfontChar(font: KfontT, x: number, y: number, scale: number, codepo
 // below), returning the cursor's final x (used by q2repro's own caller to
 // place the blink cursor; unused here, but kept for shape parity/future
 // callers).
-function drawKStringStretch(font: KfontT, x: number, y: number, scale: number, maxlen: number, s: string, color: DrawColorT, shadow: boolean): number {
+function drawKStringStretch(font: ActiveKfontT, x: number, y: number, scale: number, maxlen: number, s: string, color: DrawColorT, shadow: boolean): number {
   let cx = x;
   for (let i = 0; i < maxlen && i < s.length; i++) {
     cx += drawKfontChar(font, cx, y, scale, s.charCodeAt(i), color, shadow);
@@ -243,7 +397,7 @@ function drawKStringStretch(font: KfontT, x: number, y: number, scale: number, m
 // the whole string's measured width -- see drawFontStringDispatch below),
 // matching q2repro's own `x = sx;` per-line reset rather than re-aligning
 // each line independently.
-function drawKStringMultiStretch(font: KfontT, x: number, y: number, scale: number, maxlen: number, s: string, color: DrawColorT, shadow: boolean): void {
+function drawKStringMultiStretch(font: ActiveKfontT, x: number, y: number, scale: number, maxlen: number, s: string, color: DrawColorT, shadow: boolean): void {
   let remaining = maxlen;
   let pos = 0;
   let cy = y;
@@ -294,7 +448,7 @@ function drawConcharLines(str: string, x: number, y: number, scale: number): voi
 // SCR_DrawKStringMultiStretch, both of which reset to that same `x` after
 // every newline -- see drawKStringMultiStretch's own doc comment above).
 function drawFontStringDispatch(str: string, x: number, y: number, scale: number, color: DrawColorT, shadow: boolean, align: TextAlignT): void {
-  const font = ensureKfont();
+  const font = ensureActiveKfont();
 
   let drawX = x;
   if (align !== TextAlignT.LEFT) {
@@ -571,12 +725,12 @@ export function buildCgameImports(): CgameImports {
     // original conchars-only math (`maxlen * CONCHAR_WIDTH * scale`) as its
     // documented fallback.
     SCR_MeasureFontString(str, scale) {
-      return measureFontStringDispatch(ensureKfont(), str, scale);
+      return measureFontStringDispatch(ensureActiveKfont(), str, scale);
     },
     // fontLineHeightForScale (top of file) -- kfont-aware, with the original
     // `CONCHAR_HEIGHT * scale` as its documented fallback.
     SCR_FontLineHeight(scale) {
-      return fontLineHeightForScale(ensureKfont(), scale);
+      return fontLineHeightForScale(ensureActiveKfont(), scale);
     },
 
     // Matches q2repro's own CG_CL_GetTextInput, which is a `// FIXME: Hook
@@ -673,6 +827,21 @@ export interface ClassicHudDataT {
 // own `ps` parameter does: CgameExports is the engine-facing shape, and the
 // kex adapter below (GetKexCgameAsClassicShape) is what runs
 // kexPlayerStateViewFromClassic before forwarding into the real kex cgame.
+// ParseCenterPrint/NotifyMessage (items 5/6, this unit): the two
+// KexCgameExports members (kexapi/game.ts:2296/2305) that never had an
+// engine-facing home in CgameExports. OPTIONAL, not required-and-stubbed
+// like every other CgameExports member above (see GetClassicCgameAPI's own
+// "this port's CgameExports interface is narrower... but still requires
+// every implementer to provide the same members, so these are harmless
+// stubs" comment for that established convention) -- deliberately NOT
+// following it here: the task brief scoping this wiring explicitly
+// restricts it to "host.ts ONLY", and giving classic.ts (untouched by this
+// unit) a harmless-stub implementer of these two would mean editing that
+// file too. Optional members let classic.ts's existing object literal
+// keep satisfying CgameExports unchanged; every call site below already
+// treats their absence as "this cgame doesn't have one" (cl_scrn.ts's
+// SCR_CenterPrint: falls through to its own local implementation when
+// undefined).
 export interface CgameExports {
   apiversion: number;
   Init(): void;
@@ -683,6 +852,8 @@ export interface CgameExports {
   GetWeaponWheelAmmoCount(ps: PlayerStateT, ammoIndex: number): number;
   GetPowerupWheelCount(ps: PlayerStateT, powerupIndex: number): number;
   GetActiveWeaponWheelWeapon(ps: PlayerStateT): number;
+  ParseCenterPrint?(str: string, isplit: number, instant: boolean): void;
+  NotifyMessage?(isplit: number, msg: string, is_chat: boolean): void;
 }
 
 // Own versioning for this minimal seam -- not yet KexCgameExports.apiversion
@@ -718,16 +889,15 @@ export const CGAME_API_VERSION = 1;
 // side.
 //
 // ---------------------------------------------------------------------------
-// kexPmTypeFromEngine: the exact inverse of kex.ts's toEnginePmType, which
-// collapses two kex-only pm_types (PM_GRAPPLE, PM_NOCLIP) onto legacy
-// PM_NORMAL/PM_SPECTATOR because the classic PmTypeT has no equivalent.
-// Reversing that collapse is inherently lossy the other way too: legacy
-// PM_SPECTATOR could have come from either kex PM_NOCLIP or kex
-// PM_SPECTATOR -- this picks PM_SPECTATOR, the direct name match, as the
-// "closest faithful thing" (preferences.md rule 3); PM_NOCLIP is simply
-// never reconstructed from a classic ps. Every other member is a 1:1 name
-// match on both enums and round-trips exactly.
-// ---------------------------------------------------------------------------
+// kexPmTypeFromEngine: the exact inverse of server/bindings/kex.ts's
+// toEnginePmType, and a total bijection -- every member is a 1:1 name match on
+// both enums. PM_GRAPPLE and PM_NOCLIP used to have no engine-side equivalent
+// and collapsed onto PM_NORMAL/PM_SPECTATOR, which made this direction lossy
+// (a legacy PM_SPECTATOR could have been either kex value, and PM_NOCLIP was
+// simply never reconstructable). q_shared.ts's PmTypeT carries both for real
+// now, so nothing is lost either way. That matters for prediction: the client
+// replays through the kex cgame's own Pmove, and a grappled player predicted
+// as PM_NORMAL gets gravity and friction the kex server never applies.
 function kexPmTypeFromEngine(t: PmTypeT): KexPmTypeT {
   switch (t) {
     case PmTypeT.PM_NORMAL:
@@ -740,6 +910,10 @@ function kexPmTypeFromEngine(t: PmTypeT): KexPmTypeT {
       return KexPmTypeT.PM_GIB;
     case PmTypeT.PM_FREEZE:
       return KexPmTypeT.PM_FREEZE;
+    case PmTypeT.PM_GRAPPLE:
+      return KexPmTypeT.PM_GRAPPLE;
+    case PmTypeT.PM_NOCLIP:
+      return KexPmTypeT.PM_NOCLIP;
   }
 }
 
@@ -834,6 +1008,190 @@ function kexServerDataViewFromClassic(data: ClassicHudDataT): CgServerDataT {
   return { layout: data.layout, inventory: new Int16Array(data.inventory) };
 }
 
+// ---------------------------------------------------------------------------
+// Movement-prediction bridge (q2repro src/client/predict.c:230-243, 270-294)
+// ---------------------------------------------------------------------------
+// predict.c builds a pmove_t, hands it the client's own trace/clip/
+// pointcontents callbacks plus the snapshot's pmove state and viewoffset, and
+// dispatches every backed-up usercmd through `cgame->Pmove` -- the SAME
+// movement code the server's game module runs. That is the whole point:
+// prediction is only correct when both sides execute identical physics.
+//
+// The kex movement code (kexgame/p_move.ts, reached through the kex cgame's
+// own Pmove export, kexgame/cgame/cg_main.ts:169) speaks KexPmoveT: float
+// origin/velocity, float usercmd angles, KexTraceT results, KexEdictT trace
+// targets. Everything the client actually holds is the classic shape -- the
+// 1038 codec (qcommon/protocol/q2repro.ts) deposits pmove origin/velocity
+// into PmoveStateT's 12.3 fixed-point Int16Array, exactly the same narrowing
+// server/bindings/kex.ts's syncPlayerStateKexToEngine performs on the way in.
+// The functions below are the conversions cl_pred.ts needs to cross that gap;
+// cl_pred.ts owns the collision callbacks and the replay loop itself.
+// ---------------------------------------------------------------------------
+
+/** A cgame's own movement code. */
+export type CgamePmoveFn = (pm: KexPmoveT) => void;
+
+// q2repro's CL_Trace assigns `tr->ent = (struct edict_s *)cl_entities` -- the
+// client's own entity slot, standing in for a server edict the client does
+// not have. The kex movement code stores whatever a trace returns in
+// pm.groundentity, tests it for truthiness in a dozen places, and compares it
+// for identity against earlier touch entries (p_move.ts:344) -- but never
+// reads a single field off it. So what the client needs is a stable IDENTITY
+// TOKEN per entity number, not a mirror of the entity: `s.number` is set so
+// the object is self-describing, everything else stays at the zero value
+// defaultEdict() (kexgame/g_main_globals.ts) would give it.
+//
+// Identity must be stable for the whole session, not per frame: "am I still
+// standing on the same thing I was standing on last frame" is an identity
+// comparison across replayed frames. The array is keyed by entity number for
+// exactly that reason, and is the client-side counterpart of the parallel
+// edict array server/bindings/kex.ts maintains (its `engineEdicts`).
+const kexTraceEntities: KexEdictT[] = [];
+
+function makeKexTraceEntity(number: number): KexEdictT {
+  return {
+    s: {
+      number,
+      origin: vec3(),
+      angles: vec3(),
+      old_origin: vec3(),
+      modelindex: 0,
+      modelindex2: 0,
+      modelindex3: 0,
+      modelindex4: 0,
+      frame: 0,
+      skinnum: 0,
+      effects: 0n,
+      renderfx: 0,
+      solid: 0,
+      sound: 0,
+      event: KexEntityEventT.EV_NONE,
+      alpha: 0,
+      scale: 0,
+      instance_bits: 0,
+      loop_volume: 0,
+      loop_attenuation: 0,
+      owner: 0,
+      old_frame: 0,
+    },
+    client: null,
+    sv: {
+      init: false,
+      ent_flags: 0n,
+      buttons: 0,
+      spawnflags: 0,
+      item_id: 0,
+      armor_type: 0,
+      armor_value: 0,
+      health: 0,
+      max_health: 0,
+      starting_health: 0,
+      weapon: 0,
+      team: 0,
+      lobby_usernum: 0,
+      respawntime: 0,
+      viewheight: 0,
+      last_attackertime: 0,
+      waterlevel: WaterLevelT.WATER_NONE,
+      viewangles: vec3(),
+      viewforward: vec3(),
+      velocity: vec3(),
+      start_origin: vec3(),
+      end_origin: vec3(),
+      enemy: null,
+      ground_entity: null,
+      classname: null,
+      targetname: null,
+      netname: "",
+      inventory: new Int32Array(MAX_ITEMS),
+      armor_info: Array.from({ length: Max_Armor_Types }, () => ({ item_id: 0, max_count: 0 })),
+    },
+    inuse: false,
+    linked: false,
+    linkcount: 0,
+    areanum: 0,
+    areanum2: 0,
+    svflags: SvflagsT.SVF_NONE,
+    mins: vec3(),
+    maxs: vec3(),
+    absmin: vec3(),
+    absmax: vec3(),
+    size: vec3(),
+    solid: SolidT.SOLID_NOT,
+    clipmask: ContentsT.CONTENTS_NONE,
+    owner: null,
+  };
+}
+
+/** The identity token for entity `number`, allocated on first use and stable
+ *  for the rest of the session. Number 0 is the world, matching the server's
+ *  own edict-0-is-the-world convention (sv_world.ts's worldEdict()). */
+export function CL_KexTraceEntity(number: number): KexEdictT {
+  const existing = kexTraceEntities[number];
+  if (existing) return existing;
+  const created = makeKexTraceEntity(number);
+  kexTraceEntities[number] = created;
+  return created;
+}
+
+function kexCsurfaceFromEngine(s: CsurfaceT | null): KexCsurfaceT | null {
+  if (!s) return null;
+  // id/material are texinfo metadata the collision model does not carry here;
+  // server/bindings/kex.ts's toKexTrace fills them the same way for the same
+  // reason, so both sides of a trace see identical surface data.
+  return { name: s.name, flags: s.flags, value: s.value, id: 0, material: "" };
+}
+
+/** The client-side twin of server/bindings/kex.ts's toKexTrace. */
+export function kexTraceFromEngine(t: TraceT, ent: KexEdictT | null): KexTraceT {
+  return {
+    allsolid: t.allsolid,
+    startsolid: t.startsolid,
+    fraction: t.fraction,
+    endpos: t.endpos,
+    plane: t.plane,
+    surface: kexCsurfaceFromEngine(t.surface),
+    contents: t.contents,
+    ent,
+    plane2: t.plane2 ?? new CplaneT(),
+    surface2: kexCsurfaceFromEngine(t.surface2 ?? null),
+  };
+}
+
+/** In-place copy, for the "this entity's trace beat the running result" merge
+ *  in cl_pred.ts (the client's counterpart of sv_world.ts's
+ *  SV_ClipMoveToEntities, which assigns the whole struct by value). */
+export function copyKexTrace(dst: KexTraceT, src: KexTraceT): void {
+  dst.allsolid = src.allsolid;
+  dst.startsolid = src.startsolid;
+  dst.fraction = src.fraction;
+  dst.endpos = src.endpos;
+  dst.plane = src.plane;
+  dst.surface = src.surface;
+  dst.contents = src.contents;
+  dst.ent = src.ent;
+  dst.plane2 = src.plane2;
+  dst.surface2 = src.surface2;
+}
+
+/** The client-side twin of server/bindings/kex.ts's toKexUsercmd. `upmove`,
+ *  `impulse` and `lightlevel` have no field on KexUsercmdT and are dropped
+ *  here exactly as the server drops them: the kex movement code takes
+ *  vertical intent from BUTTON_JUMP/BUTTON_CROUCH instead, which cl_input.ts
+ *  (:483-484) already sets from the same +moveup/+movedown key states.
+ *  `server_frame` is only read by the server's own lag compensation
+ *  (p_view.ts:1562); Pmove never looks at it. */
+export function kexUsercmdFromClassic(cmd: UsercmdT, server_frame: number): KexUsercmdT {
+  return {
+    msec: cmd.msec,
+    buttons: cmd.buttons,
+    angles: vec3(SHORT2ANGLE(cmd.angles[0]), SHORT2ANGLE(cmd.angles[1]), SHORT2ANGLE(cmd.angles[2])),
+    forwardmove: cmd.forwardmove,
+    sidemove: cmd.sidemove,
+    server_frame,
+  };
+}
+
 // hud_vrect/hud_safe/scale/isplit: the real kex client (q2repro's
 // cgame.c-equivalent caller) computes these once per frame from the video
 // mode and a splitscreen layout; no such caller-side computation exists yet
@@ -852,8 +1210,7 @@ function kexHudVrect(): VrectT {
   return { x: 0, y: 0, width: viddef.width, height: viddef.height };
 }
 
-function GetKexCgameAsClassicShape(imports: CgameImports): CgameExports {
-  const kex = GetKexCgameAPI(imports);
+function GetKexCgameAsClassicShape(kex: KexCgameExports): CgameExports {
   return {
     // This seam's own minimal-shape versioning (see CGAME_API_VERSION's own
     // doc comment below), NOT kex's real apiversion (KexCgameExports.apiversion
@@ -872,6 +1229,17 @@ function GetKexCgameAsClassicShape(imports: CgameImports): CgameExports {
     GetWeaponWheelAmmoCount: (ps, ammoIndex) => kex.GetWeaponWheelAmmoCount(kexPlayerStateViewFromClassic(ps), ammoIndex),
     GetPowerupWheelCount: (ps, powerupIndex) => kex.GetPowerupWheelCount(kexPlayerStateViewFromClassic(ps), powerupIndex),
     GetActiveWeaponWheelWeapon: (ps) => kex.GetActiveWeaponWheelWeapon(kexPlayerStateViewFromClassic(ps)),
+    // [items 5/6] ParseCenterPrint/NotifyMessage: straight pass-throughs --
+    // both members have IDENTICAL signatures on KexCgameExports and this
+    // narrower CgameExports (kexapi/game.ts:2296/2305), unlike DrawHUD/the
+    // wheel accessors above (which all need a playerstate-shape conversion
+    // via kexPlayerStateViewFromClassic). kex.ParseCenterPrint is
+    // src/kexgame/cgame/cg_screen.ts's real CG_ParseCenterPrint (the
+    // %bind:cmd:purpose% stripping + queue/typewriter machinery, cg_main.ts's
+    // `ParseCenterPrint: CG_ParseCenterPrint` export) -- see cl_scrn.ts's
+    // SCR_CenterPrint for the delegation call site this makes real.
+    ParseCenterPrint: kex.ParseCenterPrint,
+    NotifyMessage: kex.NotifyMessage,
   };
 }
 
@@ -885,13 +1253,32 @@ function GetKexCgameAsClassicShape(imports: CgameImports): CgameExports {
  *  current behavior. */
 export type CgameKind = "classic" | "kex";
 
-const cgameFactories: Record<CgameKind, (imports: CgameImports) => CgameExports> = {
-  classic: GetClassicCgameAPI,
-  kex: GetKexCgameAsClassicShape,
+// What a built cgame hands back to the host. `Pmove` is the member q2repro's
+// cgame_export_t carries and its predict.c calls for every replayed usercmd.
+//
+// It is null for classic, and that is not a gap: v3.19 had no cgame at all --
+// Pmove lived in the engine (qcommon/pmove.ts here, exactly as in the
+// original) and cl_pred.ts calls it directly, which is the byte-for-byte
+// vanilla path this port must not disturb. The kex cgame really does own its
+// movement code (kexgame/cgame/cg_main.ts:169 forwards to kexgame/p_move.ts,
+// the same function kexgame/p_client.ts's ClientThink runs server-side), so
+// for kex sessions this is the one and only movement implementation on both
+// sides of the wire.
+interface BuiltCgame {
+  exports: CgameExports;
+  Pmove: CgamePmoveFn | null;
+}
+
+const cgameFactories: Record<CgameKind, (imports: CgameImports) => BuiltCgame> = {
+  classic: (imports) => ({ exports: GetClassicCgameAPI(imports), Pmove: null }),
+  kex: (imports) => {
+    const kex = GetKexCgameAPI(imports);
+    return { exports: GetKexCgameAsClassicShape(kex), Pmove: (pm: KexPmoveT) => kex.Pmove(pm) };
+  },
 };
 
 let activeCgameKind: CgameKind = "classic";
-let activeCgame: CgameExports | null = null;
+let activeCgame: BuiltCgame | null = null;
 
 // Lazy singleton rather than an eager module-scope construction: host.ts,
 // classic.ts and cl_scrn.ts form an import cycle (host builds classic,
@@ -901,10 +1288,10 @@ let activeCgame: CgameExports | null = null;
 // the cycle is safe under ESM live bindings -- but building the classic
 // cgame this way (on first actual use) sidesteps having to reason about
 // module-initialization order at all.
-function ensureActiveCgame(): CgameExports {
+function ensureActiveCgame(): BuiltCgame {
   if (!activeCgame) {
     activeCgame = cgameFactories[activeCgameKind](buildCgameImports());
-    activeCgame.Init();
+    activeCgame.exports.Init();
   }
   return activeCgame;
 }
@@ -913,11 +1300,20 @@ function ensureActiveCgame(): CgameExports {
 // server -> kex cgame, classic/legacy server -> classic cgame; see
 // q2repro's CG_Load for the precedent this will follow).
 export function CG_GetActiveCgame(): CgameExports {
-  return ensureActiveCgame();
+  return ensureActiveCgame().exports;
 }
 
 export function CG_SetActiveCgame(cgame: CgameExports): void {
-  activeCgame = cgame;
+  activeCgame = { exports: cgame, Pmove: null };
+}
+
+/** The active cgame's own movement code, for cl_pred.ts's replay loop --
+ *  q2repro predict.c's `cgame->Pmove`. Null means "this cgame does not own
+ *  movement", i.e. the classic path, which predicts through qcommon/pmove.ts
+ *  directly (see BuiltCgame's own comment). Constructs the cgame if it has
+ *  not been built yet, exactly as CG_DrawHUD does. */
+export function CG_GetActiveCgamePmove(): CgamePmoveFn | null {
+  return ensureActiveCgame().Pmove;
 }
 
 // Selection seam: picks which of the two registered factories
@@ -952,7 +1348,7 @@ export function CG_GetActiveCgameKind(): CgameKind {
 // comments above).
 export function CG_DrawHUD(): void {
   const data: ClassicHudDataT = { layout: cl.layout, inventory: cl.inventory };
-  ensureActiveCgame().DrawHUD(cl.playernum, cl.frame.playerstate, data);
+  ensureActiveCgame().exports.DrawHUD(cl.playernum, cl.frame.playerstate, data);
 }
 
 // The engine side of CgameExports.TouchPics -- called from cl_scrn.ts's
@@ -960,14 +1356,15 @@ export function CG_DrawHUD(): void {
 // behind this member while the crosshair precache stayed put) and from
 // cl_view.ts's CL_PrepRefresh path that already calls SCR_TouchPics.
 export function CG_TouchPics(): void {
-  ensureActiveCgame().TouchPics();
+  ensureActiveCgame().exports.TouchPics();
   // q2repro's own SCR_LoadKFont call site is inside SCR_Init, right after
   // `cgame->TouchPics()` -- this is the closest counterpart this port's
-  // architecture has to that timing (see ensureKfont's own doc comment,
-  // top of file, for why the actual load is memoized by `re` identity
-  // rather than needing a true one-shot init hook: this call and every
-  // draw/measure call below it are equally safe to trigger the real load).
-  ensureKfont();
+  // architecture has to that timing (see ensureActiveKfont's own doc
+  // comment, top of file, for why the actual load is memoized by `re`
+  // identity plus the resolved cl_kfont_source rather than needing a true
+  // one-shot init hook: this call and every draw/measure call below it are
+  // equally safe to trigger the real load).
+  ensureActiveKfont();
   // q2repro's precache.c calls CL_Wheel_Precache() from its own per-level
   // asset-touch chain, alongside the rest of TouchPics' pic registrations --
   // this is the closest counterpart this port has to that call site (there
@@ -978,4 +1375,4 @@ export function CG_TouchPics(): void {
 
 // Exposed for test/cgame_activation.test.ts's ps-view/server-data conversion
 // spot checks -- pure functions, no engine state touched.
-export { kexPlayerStateViewFromClassic, kexServerDataViewFromClassic, kexPmTypeFromEngine };
+export { kexPlayerStateViewFromClassic, kexServerDataViewFromClassic, kexPmTypeFromEngine, kexPmoveStateViewFromClassic };

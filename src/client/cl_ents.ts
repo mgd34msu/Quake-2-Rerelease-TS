@@ -54,6 +54,7 @@ import {
   RF_SHELL_DOUBLE,
   RF_SHELL_HALF_DAM,
   Q_strcasecmp,
+  PM_TypeIsAlive,
 } from "../shared/q_shared";
 import type { ModelS } from "./ref";
 import { EntityT } from "./ref";
@@ -1024,8 +1025,13 @@ function CL_CalcViewValues(): void {
     cl.refdef.vieworg[2] += cl.current_viewheight + (cl.prev_viewheight - cl.current_viewheight) * viewheight_lerp * 0.01;
   }
 
-  // if not running a demo or on a locked frame, add the local angle movement
-  if (cl.frame.playerstate.pmove.pm_type < PmTypeT.PM_DEAD) {
+  // if not running a demo or on a locked frame, add the local angle movement.
+  // The C source's test is `pm_type < PM_DEAD`; PM_TypeIsAlive (q_shared.ts)
+  // is that same test written as an explicit membership check, because the
+  // engine's PmTypeT appends PM_GRAPPLE/PM_NOCLIP at 5/6 rather than
+  // interleaving them the way the kex enum does. Identical result for every
+  // classic-family value.
+  if (PM_TypeIsAlive(cl.frame.playerstate.pmove.pm_type)) {
     // use predicted values
     for (let i2 = 0; i2 < 3; i2++) cl.refdef.viewangles[i2] = cl.predicted_angles[i2];
   } else {

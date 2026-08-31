@@ -27,7 +27,7 @@ import {
 } from "./client";
 import { CL_AddShadowLights } from "./cl_fx";
 import { crosshair, crosshair_height, crosshair_pic, crosshair_width, scr_vrect, setCrosshair } from "./screen";
-import { entitycmpfnc, SCR_AddDirtyPoint, SCR_TouchPics, SCR_UpdateScreen } from "./cl_scrn";
+import { entitycmpfnc, SCR_AddDirtyPoint, SCR_TouchPics, SCR_UpdateScreen, SCR_DrawPOIs, SCR_DrawDamageDisplays, SCR_GetHelpPathMarkers } from "./cl_scrn";
 import { CL_AddEntities } from "./cl_ents";
 import { CL_RegisterTEntModels } from "./cl_tent";
 import { CL_LoadClientinfo, CL_ParseClientinfo } from "./cl_parse";
@@ -111,6 +111,29 @@ export function V_AddParticle(org: Vec3, color: number, alpha: number): void {
   p.origin.set(org);
   p.color = color;
   p.alpha = alpha;
+}
+
+// [item 2, help path] ADAPTED submission of cl_scrn.ts's SCR_GetHelpPathMarkers
+// store into the 3D scene -- see that file's own "Help path" section header
+// for the full writeup of why this is a particle-based adaptation of
+// tent.c's CL_AddHelpPath (`ex_marker` explosion-pool entries) rather than a
+// byte-for-byte port: cl_tent.ts has neither an explosion pool slot for
+// this nor an `ex_marker` ExptypeT variant, and is out of this unit's
+// territory. V_AddParticle is this file's own pre-existing scene-submission
+// primitive (used by V_TestParticles just below for the same "one particle
+// per stored point" shape) -- called once per frame, right after
+// CL_AddEntities() in V_RenderView, mirroring where the C's own explosion-
+// pool markers would otherwise ride the normal entity refresh. Color 0xe0
+// (a bright yellow-orange in the classic Q2 palette) and full alpha are
+// fixed, cosmetic choices with no C equivalent to match (the real marker
+// model has no palette-index color at all -- it's a lit md2 model) since
+// V_AddParticle's `color` parameter is the classic 8-bit palette index
+// convention every other particle submission in this file already uses.
+function V_AddHelpPathMarkers(): void {
+  const HELP_PATH_MARKER_COLOR = 0xe0;
+  for (const marker of SCR_GetHelpPathMarkers()) {
+    V_AddParticle(marker.position, HELP_PATH_MARKER_COLOR, 1.0);
+  }
 }
 
 /*
@@ -489,9 +512,26 @@ export function SCR_DrawCrosshair(): void {
     SCR_TouchPics();
   }
 
-  if (!crosshair_pic) return;
+  // q2repro screen.c:1960-1987's SCR_DrawCrosshair: POIs draw BEFORE the
+  // crosshair pic itself (screen.c:1969), damage-direction wedges AFTER it
+  // (screen.c:1986, past SCR_DrawHitMarker -- no hit-marker system exists
+  // in this port, nothing to slot in there). Both live in cl_scrn.ts (this
+  // unit's own store+draw home for those two systems -- see that file's
+  // "DAMAGE INDICATORS / POINTS OF INTEREST / HELP PATH" section header);
+  // called from here since this IS cl_view.c's own SCR_DrawCrosshair, the
+  // exact call site the C uses.
+  SCR_DrawPOIs();
 
-  re?.DrawPic(scr_vrect.x + ((scr_vrect.width - crosshair_width) >> 1), scr_vrect.y + ((scr_vrect.height - crosshair_height) >> 1), crosshair_pic);
+  if (crosshair_pic) {
+    re?.DrawPic(scr_vrect.x + ((scr_vrect.width - crosshair_width) >> 1), scr_vrect.y + ((scr_vrect.height - crosshair_height) >> 1), crosshair_pic);
+  }
+
+  // Not nested under the `if (crosshair_pic)` check above: that check is
+  // this port's own pre-existing (non-C) guard against an unresolved
+  // crosshair pic name, not something q2repro's SCR_DrawDamageDisplays
+  // depends on -- the C only gates the whole function on scr_crosshair's
+  // own on/off cvar (this function's own early return at the top).
+  SCR_DrawDamageDisplays();
 }
 
 /*
@@ -522,6 +562,7 @@ export function V_RenderView(stereo_separation: number): void {
     // v_forward, etc.
     CL_AddEntities();
     CL_AddShadowLights(); // task #25 (v1.1.0): CS_SHADOWLIGHTS-fed per-pixel lights
+    V_AddHelpPathMarkers(); // [item 2, help path] see this function's own doc comment above
 
     if (cl_testparticles?.value) V_TestParticles();
     if (cl_testentities?.value) V_TestEntities();

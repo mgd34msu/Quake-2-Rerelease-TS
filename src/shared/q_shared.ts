@@ -177,6 +177,17 @@ export class CsurfaceT {
   name = "";
   flags = 0;
   value = 0;
+  // [Paril-KEX] q2repro's csurface_t.material (inc/shared/shared.h: `char
+  // material[16]`) -- resolved from "textures/<name>.mat" by
+  // cmodel.ts's CMod_LoadSurfaces (see that function's own comment; ported
+  // from q2repro's src/common/bsp.c BSP_LoadMaterials, which does the same
+  // resolution for the client's cl.bsp so retail's footstep/impact sounds
+  // can key off it -- this port resolves it on the server-side collision
+  // model instead, since that is what feeds the kex game import boundary's
+  // trace surfaces, per this port's own material unit). Empty string when
+  // unresolved (no .mat file, "default" material, or an invalid file
+  // content), matching the C field's zeroed-buffer default.
+  material = "";
 }
 
 // used internally due to name len probs //ZOID
@@ -220,6 +231,55 @@ export enum PmTypeT {
   PM_DEAD,
   PM_GIB, // different bounding box
   PM_FREEZE,
+
+  // -------------------------------------------------------------------------
+  // [Paril-KEX] additions -- APPENDED, not interleaved
+  // -------------------------------------------------------------------------
+  // kexapi/game.ts's KexPmTypeT declares these two between PM_NORMAL and
+  // PM_SPECTATOR (PM_NORMAL=0, PM_GRAPPLE=1, PM_NOCLIP=2, PM_SPECTATOR=3,
+  // PM_DEAD=4, PM_GIB=5, PM_FREEZE=6). This enum CANNOT adopt that numbering:
+  // pm_type travels as a raw byte on every protocol this engine speaks
+  // (vanilla.ts/r1q2.ts/q2pro.ts/mvd.ts all `MSG_WriteByte(ps.pmove.pm_type)`),
+  // so renumbering PM_SPECTATOR..PM_FREEZE would change protocol-34 bytes for
+  // every classic-family game. Appending at 5/6 leaves all five classic
+  // members on their historical wire values, which is why nothing in the
+  // classic path -- codecs, qcommon/pmove.ts, the vanilla/ctf/xatrix/rogue
+  // games -- changes at all: those games never produce these two values.
+  //
+  // The consequence of appending is that the kex source's ORDINAL tests
+  // (`pm_type < PM_DEAD` meaning "alive", `pm_type <= PM_GRAPPLE` meaning
+  // "normal or grappling") do not translate literally. Two engine-side sites
+  // compare ordinally; grep `pm_type\s*[<>]` to find them:
+  //   - client/cl_ents.ts's "alive and steering" check runs for BOTH families
+  //     (it reads whatever pm_type the snapshot carried) and is rewritten
+  //     below as PM_TypeIsAlive, an explicit membership test.
+  //   - qcommon/pmove.ts's `pm.s.pm_type >= PM_DEAD` is vanilla's own line and
+  //     is left exactly as vanilla wrote it, because that function is only
+  //     ever reached with classic-family values: no classic game module
+  //     (game/, ctf/, xatrix/, rogue/) produces 5 or 6, and a kex session's
+  //     client predicts through the kex cgame's Pmove instead
+  //     (client/cl_pred.ts's family dispatch), never this one.
+  //
+  // Wire note: protocol 1038 (protocol/q2repro.ts) writes/reads this value as
+  // a plain byte, so 5/6 travel end to end with no codec change. Our 1038
+  // pm_type byte numbering therefore does NOT match upstream rerelease's
+  // (which would send GRAPPLE=1, SPECTATOR=3); it did not match before this
+  // change either (we already sent SPECTATOR=1 where upstream sends 3). Making
+  // the 1038 byte upstream-exact is a separate change that also has to fix
+  // real-demo ingest (test/protocol_kexdemo.test.ts) and is left as a
+  // follow-up rather than folded into a prediction unit.
+  PM_GRAPPLE = 5, // [Paril-KEX] pull towards velocity, no gravity
+  PM_NOCLIP = 6, // [Paril-KEX] noclip as a pm_type, not a movetype
+}
+
+/** True for the pm_types the player is still "alive and steering" in --
+ *  q2repro's own `pm_type < PM_DEAD` test, written as an explicit membership
+ *  test because this enum appends PM_GRAPPLE/PM_NOCLIP instead of
+ *  interleaving them (see PmTypeT above). For every classic-family game the
+ *  result is identical to the old `< PM_DEAD` comparison: PM_NORMAL and
+ *  PM_SPECTATOR true, PM_DEAD/PM_GIB/PM_FREEZE false. */
+export function PM_TypeIsAlive(t: PmTypeT): boolean {
+  return t === PmTypeT.PM_NORMAL || t === PmTypeT.PM_SPECTATOR || t === PmTypeT.PM_GRAPPLE || t === PmTypeT.PM_NOCLIP;
 }
 
 // pmove->pm_flags
@@ -238,7 +298,15 @@ export class PmoveStateT {
   origin: Int16Array = new Int16Array(3); // 12.3
   velocity: Int16Array = new Int16Array(3); // 12.3
   pm_flags = 0; // ducked, jump_held, etc
-  pm_time = 0; // each unit = 8 ms
+  // UNITS ARE FAMILY-DEPENDENT. Classic (protocol 34 / qcommon/pmove.ts):
+  // each unit = 8 ms, and the value is a byte on the wire. Rerelease/kex
+  // (protocol 1038 / kexgame/p_move.ts): PLAIN MILLISECONDS, compared
+  // directly against cmd.msec (p_move.ts:1447-1452, values up to 2048), and
+  // carried as a short by protocol/q2repro.ts's PS_M_TIME. Nothing in this
+  // engine rescales the field in either direction -- each family's own pmove
+  // reads it in its own units, so the client's prediction bridge
+  // (client/cgame/host.ts) passes it through verbatim.
+  pm_time = 0;
   gravity = 0;
   delta_angles: Int16Array = new Int16Array(3); // add to command angles to get view direction
   // [Paril-KEX] re-release eye height, shared/shared.h:1076 (`int8_t

@@ -68,14 +68,14 @@ import { Com_Error, Com_Printf, Com_DPrintf, Com_ServerState } from "../qcommon/
 import { Cvar_Set } from "../qcommon/cvar";
 import { Cbuf_AddText, Cbuf_Execute, Cmd_Argc, Cmd_Argv } from "../qcommon/cmd";
 import { FS_LoadFile, FS_Gamedir, FS_CreatePath, FS_FOpenFileWrite, FS_Write, FS_FCloseFile, FS_ReadRawFile, FS_WriteFile, FS_RemoveFile, FS_AddPak, fs_gamedirvar } from "../qcommon/files";
-import { COM_StripExtension } from "../shared/math";
+import { COM_StripExtension, type Vec3, vec3, VectorNormalize } from "../shared/math";
 import { Loc_Localize } from "../qcommon/loc";
 import { CM_InlineModel } from "../qcommon/cmodel";
 import { CL_ClearState, CL_RequestNextDownload, CL_WriteDemoMessage } from "./cl_main";
 import { HTTP_QueueDownload, HTTP_RescanQueue, type HttpDlType } from "./cl_http";
 import { CG_SetActiveCgameKind } from "./cgame/host";
 import { SCR_PlayCinematic } from "./cl_cin";
-import { SCR_CenterPrint } from "./cl_scrn";
+import { SCR_CenterPrint, SCR_AddToDamageDisplay, SCR_AddPOI, SCR_RemovePOI, SCR_AddHelpPath } from "./cl_scrn";
 import { con } from "./console";
 import { S_StartSound, S_StartLocalSound, S_BeginRegistration, S_RegisterSound, S_EndRegistration } from "./snd_dma";
 import { CL_RegisterTEntSounds, CL_ParseTEnt } from "./cl_tent";
@@ -1118,9 +1118,27 @@ function CL_ParseServerMessageLoop(): void {
         readSpawnbaselineblastKex(); // decoded for real; NOT applied to cl_entities baselines (see report)
         break;
 
-      case ServerCommandT.svc_damage:
-        readDamageKex();
+      case ServerCommandT.svc_damage: {
+        // q2repro parse.c:1135-1156's CL_ParseDamage: builds a normalized
+        // health/shield/armor color vector per entry, then routes into
+        // SCR_AddToDamageDisplay (cl_scrn.ts) -- see that file's "DAMAGE
+        // INDICATORS" section for the store+draw side, previously
+        // decode-only here.
+        const entries = readDamageKex();
+        for (const entry of entries) {
+          const color: Vec3 = vec3();
+          if (entry.health) color[0] += 1.0;
+          if (entry.shield) color[1] += 1.0;
+          if (entry.armor) {
+            color[0] += 1.0;
+            color[1] += 1.0;
+            color[2] += 1.0;
+          }
+          VectorNormalize(color);
+          SCR_AddToDamageDisplay(entry.damage, color, entry.direction);
+        }
         break;
+      }
 
       case ServerCommandT.svc_locprint: {
         // q2repro parse.c:1226-1248 CL_ParseLocPrint: localize base+args via
@@ -1157,13 +1175,27 @@ function CL_ParseServerMessageLoop(): void {
         readFog();
         break;
 
-      case ServerCommandT.svc_poi:
-        readPoiKex();
+      case ServerCommandT.svc_poi: {
+        // q2repro parse.c:1203-1224's CL_ParsePOI: time===USHRT_MAX (0xffff)
+        // is the "delete this keyed POI" sentinel, routed to SCR_RemovePOI;
+        // anything else adds/replaces via SCR_AddPOI (cl_scrn.ts) -- see
+        // that file's own "Points of interest" section, previously decode-
+        // only here.
+        const poi = readPoiKex();
+        if (poi.time === 0xffff) SCR_RemovePOI(poi.key);
+        else SCR_AddPOI(poi.key, poi.time, poi.pos, poi.image, poi.color, poi.flags);
         break;
+      }
 
-      case ServerCommandT.svc_help_path:
-        readHelpPathKex();
+      case ServerCommandT.svc_help_path: {
+        // q2repro parse.c:1378's CL_AddHelpPath call -- routed to
+        // cl_scrn.ts's SCR_AddHelpPath (see that file's own "Help path"
+        // section for the store, and cl_view.ts's V_AddHelpPathMarkers for
+        // the adapted draw side), previously decode-only here.
+        const helpPath = readHelpPathKex();
+        SCR_AddHelpPath(helpPath.pos, helpPath.dir, helpPath.start);
         break;
+      }
 
       case ServerCommandT.svc_muzzleflash3:
         readMuzzleflash3Kex();

@@ -40,6 +40,7 @@ import {
   crosshair,
   crosshair_pic,
   crosshair_width,
+  crosshair_height,
   setCrosshairPic,
   setCrosshairDims,
 } from "./screen";
@@ -49,17 +50,33 @@ import { viddef } from "./vid";
 import { Cvar_Get, Cvar_Set, Cvar_SetValue } from "../qcommon/cvar";
 import { Cmd_AddCommand, Cmd_Argc, Cmd_Argv } from "../qcommon/cmd";
 import { Com_Printf, developer } from "../qcommon/common";
-import { Com_sprintf, CVAR_ARCHIVE, type CvarT } from "../shared/q_shared";
-import { type Vec3, vec3 } from "../shared/math";
+import { Com_sprintf, CVAR_ARCHIVE, YAW, type CvarT } from "../shared/q_shared";
+import { type Vec3, vec3, DotProduct, VectorAdd, VectorCopy, VectorNormalize, VectorSubtract, AngleVectors } from "../shared/math";
 import { Sys_Milliseconds } from "../platform/sys";
 import { S_StopAllSounds } from "./snd_dma";
 import { Con_CheckResize, Con_DrawConsole as Con_DrawConsoleImpl, Con_DrawNotify, Con_ClearNotify } from "./console_impl";
 import { SCR_DrawCinematic } from "./cl_cin";
 import { V_RenderView } from "./cl_view";
 import { M_Draw } from "./menu";
-import type { EntityT } from "./ref";
-import { CG_DrawHUD, CG_TouchPics } from "./cgame/host";
+import type { EntityT, DrawColorT } from "./ref";
+import { CG_DrawHUD, CG_TouchPics, CG_GetActiveCgame } from "./cgame/host";
 import { CL_Carousel_Draw, CL_Wheel_Draw } from "./cl_wheel";
+import { CDAudio_Play } from "../platform/cd_ogg";
+// Palette lookup for svc_poi's `color` field (a classic 8-bit palette
+// index, matching q2repro screen.c:1944's own `d_8to24table[poi->color]`).
+// q2repro's own screen.c reaches directly into the renderer's global
+// palette table for exactly this (`extern uint32_t d_8to24table[256];`,
+// screen.c:1851) rather than threading a resolved RGB value through the
+// svc_poi wire format -- this is the same "client code reaches one layer
+// below the ref.ts RefExports boundary for a renderer primitive ref.ts
+// doesn't expose" shape as this file's own kfont/TTF integration (see
+// cgame/host.ts's item-5 doc comment for that precedent's full writeup).
+// Only the GL renderer's copy is reachable this way -- ref_soft/r_image.ts
+// has no exported equivalent -- so a POI's color falls back to (0,0,0,255)
+// under the software renderer; reported, not silently wrong (the position/
+// image/scale/fade machinery below all still work correctly, only the
+// tint is affected).
+import { d_8to24table } from "../ref_gl/gl_local";
 
 function atof(s: string): number {
   const n = Number.parseFloat(s);
@@ -92,6 +109,25 @@ let scr_graphheight: CvarT | null = null;
 let scr_graphscale: CvarT | null = null;
 let scr_graphshift: CvarT | null = null;
 let scr_drawall: CvarT | null = null;
+// Damage-indicator / POI cvars (screen.c:69-74) -- registered (bare
+// Cvar_Get, values unused) by a prior unit's cvar-parity audit sweep;
+// captured here for real now that this section has store+draw consumers.
+let scr_damage_indicators: CvarT | null = null;
+let scr_damage_indicator_time: CvarT | null = null;
+let scr_pois: CvarT | null = null;
+let scr_poi_edge_frac: CvarT | null = null;
+let scr_poi_max_scale: CvarT | null = null;
+// [item 3] menu music -- q2repro's ogg_menu_track (src/client/sound/
+// ogg.c:815-816), already registered by platform/cd_ogg.ts's own
+// registerCdCvars() but not captured anywhere with a live call site (see
+// that file's own header note, and SCR_UpdateScreen's new call below).
+// Cvar_Get is idempotent (shared/q_shared.ts convention used throughout
+// this codebase -- see this file's own scr_font/scr_alpha precedent just
+// below) so registering it a second time here, with the exact same
+// name/default/flags cd_ogg.ts uses, just returns cd_ogg.ts's existing
+// CvarT instance once that module has run, or creates it fresh if this
+// file's SCR_UpdateScreen happens to run first.
+let ogg_menu_track: CvarT | null = null;
 
 class DirtyT {
   x1 = 0;
@@ -307,9 +343,38 @@ cg_screen.cpp's CG_ParseCenterPrint(str, isplit, instant): true draws the
 whole message immediately (and flushes the queue back to slot 0); false
 queues it behind whatever's displaying and types it out one codepoint at a
 time.
+
+[item 6, %bind hint lines] This file's own header comment already flagged
+the reason a from-scratch adaptation of cg_screen.cpp's algorithm lives
+here at all: "src/client/cgame/host.ts never wires the kex cgame's own
+ParseCenterPrint export to the live client path; host.ts is out of this
+unit's territory". host.ts now has that wiring (CgameExports.ParseCenterPrint
+-- see that file's own doc comment for the full writeup), so the fix is a
+delegation check here rather than reimplementing %bind:...% expansion a
+second time: when the ACTIVE cgame exposes a real ParseCenterPrint (the kex
+cgame, once CG_SetActiveCgameKind("kex") has run -- cl_parse.ts's
+CL_ParseServerData does this for real on a rerelease/1038 connection), hand
+the raw string straight to it. The kex cgame's own CG_ParseCenterPrint
+(src/kexgame/cgame/cg_screen.ts:548-630) strips leading "%bind:cmd:purpose%"
+tokens into `center.binds` and its own CG_DrawCenterString draws each one
+through cgi.SCR_DrawBind -- already wired for real in host.ts's
+buildCgameImports() ("[key] purpose" via Key_GetBinding + Loc_Localize,
+e.g. "CTRL Crouch here" for the loc test suite's real
+"%bind:+movedown:$m_crouch%Crouch here." example) -- so this single
+delegation line is sufficient; no bind-expansion logic needs to be
+duplicated in THIS file. The classic cgame has no ParseCenterPrint member
+(CgameExports.ParseCenterPrint is optional -- see host.ts's own doc comment
+on why), so classic sessions fall through unchanged to this file's own
+queue/typewriter implementation below, exactly as before.
 ==============
 */
 export function SCR_CenterPrint(str: string, instant = true): void {
+  const activeParseCenterPrint = CG_GetActiveCgame().ParseCenterPrint;
+  if (activeParseCenterPrint) {
+    activeParseCenterPrint(str, 0, instant);
+    return;
+  }
+
   const center = SCR_QueueCenterPrint(instant);
   center.lines = [];
 
@@ -611,12 +676,15 @@ export function SCR_Init(): void {
   Cvar_Get("scr_showstats", "0", 0); // screen.c:1495
   Cvar_Get("scr_showpmove", "0", 0); // screen.c:1496
   Cvar_Get("scr_hit_marker_time", "500", 0); // screen.c:1499
-  Cvar_Get("scr_damage_indicators", "1", 0); // screen.c:1501
-  Cvar_Get("scr_damage_indicator_time", "1000", 0); // screen.c:1502
-  Cvar_Get("scr_pois", "1", 0); // screen.c:1504
-  Cvar_Get("scr_poi_edge_frac", "0.15", 0); // screen.c:1505
-  Cvar_Get("scr_poi_max_scale", "1.0", 0); // screen.c:1506
-  Cvar_Get("scr_safe_zone", "0.02", 0); // screen.c:1507
+  // Captured (not bare Cvar_Get calls) now that SCR_AddToDamageDisplay/
+  // SCR_DrawDamageDisplays and SCR_AddPOI/SCR_RemovePOI/SCR_DrawPOIs below
+  // are real consumers.
+  scr_damage_indicators = Cvar_Get("scr_damage_indicators", "1", 0); // screen.c:1501
+  scr_damage_indicator_time = Cvar_Get("scr_damage_indicator_time", "1000", 0); // screen.c:1502
+  scr_pois = Cvar_Get("scr_pois", "1", 0); // screen.c:1504
+  scr_poi_edge_frac = Cvar_Get("scr_poi_edge_frac", "0.15", 0); // screen.c:1505
+  scr_poi_max_scale = Cvar_Get("scr_poi_max_scale", "1.0", 0); // screen.c:1506
+  Cvar_Get("scr_safe_zone", "0.02", 0); // screen.c:1507 -- still unconsumed: no splitscreen/overscan-safe-zone rect concept exists in this port's cgame->DrawHUD call (see cgame/host.ts's kexHudVrect doc comment), same gap as this file's own pre-existing note on the classic HUD path.
 
   //
   // register our commands
@@ -931,6 +999,20 @@ export function SCR_TouchPics(): void {
 
   CG_TouchPics();
 
+  // [item 1] damage indicator pic (screen.c:1262-1263's own
+  // `scr.damage_display_pic = R_RegisterPic("damage_indicator");
+  // R_GetPicSize(&scr.damage_display_width, &scr.damage_display_height,
+  // scr.damage_display_pic);`). No "pics/" prefix -- matches R_RegisterPic's
+  // own bare name, letting Draw_FindPic's existing search-order/format-
+  // fallback chain (pics/damage_indicator.pcx, then .png/.tga, etc.) resolve
+  // it; the rerelease pak only ships a .png/.tga for this asset (see this
+  // file's own report), which that fallback chain already handles -- no
+  // special-casing needed here.
+  re.RegisterPic(DAMAGE_DISPLAY_PIC);
+  const damageSize = re.DrawGetPicSize(DAMAGE_DISPLAY_PIC);
+  damage_display_width = damageSize.w;
+  damage_display_height = damageSize.h;
+
   if (crosshair && crosshair.value) {
     let cv = crosshair.value;
     if (cv > 3 || cv < 0) {
@@ -951,6 +1033,475 @@ export function SCR_TouchPics(): void {
 // interface (CG_DrawHUD, ./cgame/host.ts), called from SCR_UpdateScreen
 // below in the exact same place/order/conditions this file used to call
 // them directly.
+
+/*
+===============================================================================
+
+DAMAGE INDICATORS / POINTS OF INTEREST / HELP PATH -- the kex on-screen
+indicator systems. q2repro src/client/screen.c's SCR_AddToDamageDisplay/
+SCR_DrawDamageDisplays (damage-direction wedges fading around the
+crosshair) and SCR_AddPOI/SCR_RemovePOI/SCR_DrawPOIs (world-projected
+compass markers), plus a documented adaptation of tent.c's CL_AddHelpPath
+(the compass "help path" breadcrumb trail). Decode-side already existed
+(qcommon/protocol/kexdemo.ts's readDamageKex/readPoiKex/readHelpPathKex,
+routed here from cl_parse.ts's svc_damage/svc_poi/svc_help_path cases) --
+this section is the store+draw consumer that was missing.
+
+Drawn from cl_view.ts's SCR_DrawCrosshair (that file's own home for the
+crosshair pic itself, cl_view.c in the original) rather than from this
+file's own SCR_UpdateScreen, matching q2repro's own call order exactly:
+screen.c:1969 calls SCR_DrawPOIs() BEFORE drawing the crosshair pic itself,
+then screen.c:1986 calls SCR_DrawDamageDisplays() AFTER it -- see
+SCR_DrawPOIs/SCR_DrawDamageDisplays' own export comments below and
+cl_view.ts's SCR_DrawCrosshair for the two call sites.
+
+===============================================================================
+*/
+
+// -----------------------------------------------------------------------
+// Damage indicators (screen.c:1675-1745)
+// -----------------------------------------------------------------------
+
+interface ScrDamageEntryT {
+  damage: number;
+  color: Vec3;
+  dir: Vec3;
+  time: number; // cls.realtime-scale expiry; <= cls.realtime means "free slot"
+}
+
+const MAX_DAMAGE_ENTRIES = 32; // client.h:1172
+const DAMAGE_ENTRY_BASE_SIZE = 3; // client.h:1173
+const DAMAGE_DISPLAY_PIC = "damage_indicator"; // screen.c:1262
+let damage_display_width = 0;
+let damage_display_height = 0;
+
+const scr_damage_entries: ScrDamageEntryT[] = Array.from({ length: MAX_DAMAGE_ENTRIES }, () => ({ damage: 0, color: vec3(), dir: vec3(), time: 0 }));
+
+// vectoangles2's YAW-only half (cl_newfx.ts's own vectoangles2, "this is
+// duplicated in the game DLL, but I need it here" -- same duplication
+// idiom, one more file needing it): SCR_DrawDamageDisplays only ever reads
+// angles[YAW] off the result (screen.c:1726-1727), so this only computes
+// that component.
+function vectoyaw(dir: Vec3): number {
+  if (dir[1] === 0 && dir[0] === 0) return 0;
+  let yaw: number;
+  if (dir[0]) yaw = (Math.atan2(dir[1], dir[0]) * 180) / Math.PI;
+  else if (dir[1] > 0) yaw = 90;
+  else yaw = 270;
+  if (yaw < 0) yaw += 360;
+  return yaw;
+}
+
+// SCR_AllocDamageDisplay (screen.c:1675-1697): reuse a slot already tracking
+// a near-identical direction (dot >= 0.95) so repeated hits from roughly the
+// same angle accumulate into one wedge instead of spawning a new one each
+// time; otherwise take the first free (expired) slot, falling back to
+// slot 0 if every slot is still active (matches the C's own `entry =
+// scr.damage_entries;` unconditional fallback after the loop).
+function SCR_AllocDamageDisplay(dir: Vec3): ScrDamageEntryT {
+  for (const entry of scr_damage_entries) {
+    if (entry.time <= cls.realtime) {
+      entry.damage = 0;
+      entry.color = vec3();
+      return entry;
+    }
+    if (DotProduct(entry.dir, dir) >= 0.95) return entry;
+  }
+  const entry = scr_damage_entries[0]!;
+  entry.damage = 0;
+  entry.color = vec3();
+  return entry;
+}
+
+/** q2repro screen.c:1699-1712's SCR_AddToDamageDisplay -- store half. Called
+ *  from cl_parse.ts's svc_damage case (parse.c:1135-1156's CL_ParseDamage,
+ *  which builds `color` from the health/shield/armor bits before calling
+ *  this, normalized the same way). */
+export function SCR_AddToDamageDisplay(damage: number, color: Vec3, dir: Vec3): void {
+  if (!scr_damage_indicators || !scr_damage_indicators.value) return;
+
+  const entry = SCR_AllocDamageDisplay(dir);
+  entry.damage += damage;
+  VectorAdd(entry.color, color, entry.color);
+  VectorNormalize(entry.color);
+  VectorCopy(dir, entry.dir);
+  entry.time = cls.realtime + (scr_damage_indicator_time ? scr_damage_indicator_time.value : 1000);
+}
+
+/** q2repro screen.c:1714-1745's SCR_DrawDamageDisplays -- draw half. Called
+ *  from cl_view.ts's SCR_DrawCrosshair, AFTER the crosshair pic itself
+ *  (screen.c:1986's own call order).
+ *
+ *  DEVIATION (renderer primitive gap, not silently dropped): the C rotates
+ *  the whole pic around the crosshair via R_DrawStretchRotatePic(x, y, w, h,
+ *  color, yaw_diff, pivot_x, pivot_y, pic) -- this port's RefExports (ref.ts)
+ *  has no rotated-stretch-pic primitive (DrawPic/DrawStretchPic/
+ *  DrawColorPic/DrawStretchPicRegion are all axis-aligned), and adding one
+ *  would mean extending ref.ts/gl_draw.ts/r_draw.ts, outside this unit's
+ *  territory (cl_scrn.ts/cl_view.ts/console_impl.ts/cl_parse.ts routing/
+ *  host.ts items 5-6/keys_impl.ts/test -- see this file's own task report).
+ *  Adapted instead: the pivot offset (0, -(crosshair_height + h/2)) that the
+ *  C rotates the PIC around is rotated here as a plain 2D point around the
+ *  crosshair center by the same yaw_diff, and the (unrotated) pic is drawn
+ *  centered on that rotated point via DrawColorPic. This preserves the
+ *  signal that actually matters (a wedge appears at the correct clock
+ *  position around the crosshair for the hit direction, fading over
+ *  scr_damage_indicator_time) without rotating the wedge graphic itself to
+ *  visually point that way. */
+export function SCR_DrawDamageDisplays(): void {
+  if (!re) return;
+  if (!scr_damage_indicators || !scr_damage_indicators.value) return;
+  if (!damage_display_width || !damage_display_height) return; // SCR_TouchPics never ran (no renderer, or pic missing)
+
+  const durationMs = scr_damage_indicator_time ? scr_damage_indicator_time.value : 1000;
+  const centerX = viddef.width / 2;
+  const centerY = viddef.height / 2;
+  const myYaw = cl.predicted_angles[YAW];
+
+  for (const entry of scr_damage_entries) {
+    if (entry.time <= cls.realtime) continue;
+
+    const frac = (entry.time - cls.realtime) / durationMs;
+    const damageYaw = vectoyaw(entry.dir);
+    const yawDiffRad = ((myYaw - damageYaw - 180) * Math.PI) / 180;
+
+    const size = Math.min(damage_display_width, DAMAGE_ENTRY_BASE_SIZE * entry.damage);
+    const w = size;
+    const h = damage_display_height;
+
+    const ox = 0;
+    const oy = -(crosshair_height + h / 2);
+    const cosA = Math.cos(yawDiffRad);
+    const sinA = Math.sin(yawDiffRad);
+    const rx = ox * cosA - oy * sinA;
+    const ry = ox * sinA + oy * cosA;
+
+    const color: DrawColorT = {
+      r: Math.round(Math.max(0, Math.min(1, entry.color[0])) * 255),
+      g: Math.round(Math.max(0, Math.min(1, entry.color[1])) * 255),
+      b: Math.round(Math.max(0, Math.min(1, entry.color[2])) * 255),
+      a: Math.round(Math.max(0, Math.min(1, frac)) * 255),
+    };
+
+    re.DrawColorPic(Math.trunc(centerX + rx - w / 2), Math.trunc(centerY + ry - h / 2), Math.trunc(w), Math.trunc(h), DAMAGE_DISPLAY_PIC, color);
+  }
+}
+
+// -----------------------------------------------------------------------
+// Points of interest (screen.c:1747-1958)
+// -----------------------------------------------------------------------
+
+const POI_FLAG_HIDE_ON_AIM = 1; // screen.c:1856
+
+interface ScrPoiT {
+  id: number;
+  time: number; // cl.time-scale expiry (NOT cls.realtime -- matches screen.c's own `poi->time = cl.time + time`)
+  position: Vec3;
+  imageName: string; // resolved pic name -- this port's DrawColorPic takes names, not qhandle_t, so the name is resolved and stored once here instead of a qhandle_t (screen.c's own `poi->image = cl.image_precache[image]`)
+  width: number;
+  height: number;
+  color: number; // classic 8-bit palette index (d_8to24table), NOT a resolved RGB -- resolved at draw time
+  flags: number;
+}
+
+const MAX_TRACKED_POIS = 32; // client.h:1185
+const scr_pois_store: ScrPoiT[] = Array.from({ length: MAX_TRACKED_POIS }, () => ({ id: 0, time: 0, position: vec3(), imageName: "", width: 0, height: 0, color: 0, flags: 0 }));
+
+/** q2repro screen.c:1747-1767's SCR_RemovePOI. Routed from cl_parse.ts's
+ *  svc_poi case when the wire's `time` field is the USHRT_MAX sentinel
+ *  (q2proto_q2repro_client_read_poi's own convention, kexdemo.ts's
+ *  readPoiKex -- see parse.c:1213-1223's CL_ParsePOI, which this mirrors). */
+export function SCR_RemovePOI(id: number): void {
+  if (!scr_pois || !scr_pois.value) return;
+  if (id === 0) {
+    Com_Printf("tried to remove unkeyed POI\n");
+    return;
+  }
+  for (const poi of scr_pois_store) {
+    if (poi.id === id) {
+      poi.id = 0;
+      poi.time = 0;
+      break;
+    }
+  }
+}
+
+/** q2repro screen.c:1769-1849's SCR_AddPOI, ported allocation-strategy
+ *  faithfully (id===0 "unkeyed, prefer the oldest still-live unkeyed slot"
+ *  vs. id!==0 "replace a matching id, else a free slot, else the oldest
+ *  unkeyed slot" -- see the C's own extensive comments, reproduced above
+ *  each branch here too). `image` is a CS_IMAGES-relative index (same
+ *  convention cl_wheel.ts's CL_LoadWheelIcons already uses for its own icon
+ *  indices: `cl.configstrings[cls.csr.images + iconIndex]`) -- resolved to
+ *  a pic NAME here (not a qhandle_t/ImageS, since this port's DrawColorPic
+ *  draws by name) and registered via re.RegisterPic + re.DrawGetPicSize,
+ *  mirroring the C's own `poi->image = cl.image_precache[image];
+ *  R_GetPicSize(&poi->width, &poi->height, poi->image);` pair. */
+export function SCR_AddPOI(id: number, time: number, p: Vec3, image: number, color: number, flags: number): void {
+  if (!scr_pois || !scr_pois.value) return;
+
+  let poi: ScrPoiT | null = null;
+
+  if (id === 0) {
+    // find any free non-key'd POI. we'll find
+    // the oldest POI as a fallback to replace.
+    let oldest: ScrPoiT | null = null;
+    for (const rover of scr_pois_store) {
+      if (rover.time > cl.time) {
+        if (rover.id) continue; // keyed
+        if (!oldest || rover.time < oldest.time) oldest = rover;
+      } else {
+        poi = rover; // expired
+        break;
+      }
+    }
+    if (!poi) poi = oldest;
+  } else {
+    // we must replace a matching POI with the ID
+    // if one exists, otherwise we pick a free POI,
+    // and finally we pick the oldest non-key'd POI.
+    let oldest: ScrPoiT | null = null;
+    let free: ScrPoiT | null = null;
+    for (const rover of scr_pois_store) {
+      if (rover.id === id) {
+        poi = rover; // found matching ID, just re-use that one
+        break;
+      }
+      if (rover.time <= cl.time) {
+        if (!free) free = rover; // expired
+      } else if (!rover.id) {
+        // not expired; we should only ever replace non-key'd POIs
+        if (!oldest || rover.time < oldest.time) oldest = rover;
+      }
+    }
+    if (!poi) poi = free ?? oldest;
+  }
+
+  if (!poi) {
+    Com_Printf("couldn't add a POI\n");
+    return;
+  }
+
+  poi.id = id;
+  poi.time = cl.time + time;
+  VectorCopy(p, poi.position);
+  poi.imageName = cl.configstrings[cls.csr.images + image] ?? "";
+  if (re && poi.imageName) {
+    re.RegisterPic(poi.imageName);
+    const size = re.DrawGetPicSize(poi.imageName);
+    poi.width = size.w;
+    poi.height = size.h;
+  } else {
+    poi.width = 0;
+    poi.height = 0;
+  }
+  poi.color = color;
+  poi.flags = flags;
+}
+
+function clipf(v: number, lo: number, hi: number): number {
+  return v < lo ? lo : v > hi ? hi : v;
+}
+
+/** q2repro screen.c:1859-1958's SCR_DrawPOIs. Called from cl_view.ts's
+ *  SCR_DrawCrosshair, BEFORE the crosshair pic itself (screen.c:1969's own
+ *  call order).
+ *
+ *  Projection is re-derived analytically (view-space dot products against
+ *  AngleVectors(cl.predicted_angles, ...) + a symmetric perspective divide
+ *  by tan(fov/2)) rather than building the C's own 4x4 frustum/view/
+ *  multiply/TransformVec4 matrix stack (Matrix_Frustum/Matrix_FromOriginAxis/
+ *  Matrix_Multiply/Matrix_TransformVec4 have no port in this codebase, and
+ *  this is the only call site that would ever need them) -- mathematically
+ *  equivalent for a symmetric frustum (this engine never uses an off-center
+ *  one), verified against the C's own gluProject-style formula it cites.
+ *  `w` (the C's `sp[3]`, pre-divide) is exactly the view-space forward
+ *  distance under this formulation, so `behind = w < 0` still means "camera
+ *  is looking away from this point", matching the C's `sp[3] < 0.f` check.
+ *
+ *  DEVIATION (preserved q2repro quirk, FIDELITY RAZOR rule 17 -- NOT fixed
+ *  here): screen.c:1935-1956 draws the stretch pic at `hw`/`hh` -- HALF of
+ *  `poi->width * scale` / `poi->height * scale` -- even though the centering
+ *  math (`sp[0] -= hw`) and the position clamp bound
+ *  (`scr.hud_width - hw`) both read as if a FULL-size draw of `hw*2`/`hh*2`
+ *  was intended. This looks like a real upstream half-size rendering quirk,
+ *  not a deliberate "draw at half scale" design; reproduced byte-for-byte
+ *  here rather than silently "corrected" to a full-size draw, per this
+ *  codebase's own established preserve-real-quirks policy (see e.g.
+ *  cgame/host.ts's kfont line-height doc comment for the same policy
+ *  applied elsewhere). hud_width/hud_height are `viddef.width`/
+ *  `viddef.height` directly -- this port's SCR_UpdateScreen never applies
+ *  q2repro's own scr.hud_scale/R_SetScale wrapping (no SCR_Draw2D
+ *  equivalent exists here), so there is no separate scaled "hud" surface to
+ *  distinguish from the real one. */
+export function SCR_DrawPOIs(): void {
+  if (!re) return;
+  if (!scr_pois || !scr_pois.value) return;
+
+  const hudWidth = viddef.width;
+  const hudHeight = viddef.height;
+  const maxHeight = hudHeight * 0.75;
+  const maxScale = scr_poi_max_scale ? scr_poi_max_scale.value : 1.0;
+  const edgeFrac = scr_poi_edge_frac ? scr_poi_edge_frac.value : 0.15;
+
+  const forward = vec3();
+  const right = vec3();
+  const up = vec3();
+  AngleVectors(cl.predicted_angles, forward, right, up);
+
+  const tanX = Math.tan((cl.refdef.fov_x * Math.PI) / 360);
+  const tanY = Math.tan((cl.refdef.fov_y * Math.PI) / 360);
+
+  for (const poi of scr_pois_store) {
+    if (poi.time <= cl.time) continue;
+    if (!poi.imageName || (!poi.width && !poi.height)) continue;
+
+    const rel = vec3();
+    VectorSubtract(poi.position, cl.refdef.vieworg, rel);
+    const xView = DotProduct(rel, right);
+    const yView = DotProduct(rel, up);
+    const zView = DotProduct(rel, forward); // the C's `sp[3]` pre-divide
+
+    const behind = zView < 0;
+
+    let spX: number;
+    let spY: number;
+    if (zView !== 0 && tanX !== 0 && tanY !== 0) {
+      const invW = 1 / zView;
+      const ndcX = (xView * invW) / tanX;
+      const ndcY = (yView * invW) / tanY;
+      spX = (ndcX * 0.5 + 0.5) * hudWidth;
+      spY = (-ndcY * 0.5 + 0.5) * hudHeight;
+    } else {
+      spX = hudWidth / 2;
+      spY = hudHeight / 2;
+    }
+
+    if (behind) {
+      spX = hudWidth - spX;
+      spY = hudHeight - spY;
+      if (spY > 0) {
+        spX = spX < hudWidth / 2 ? 0 : hudWidth - 1;
+        spY = Math.min(spY, maxHeight);
+      }
+    }
+
+    // scale the icon if they are closer to the edges of the screen
+    let scale = 1.0;
+    if (maxScale !== 1.0) {
+      const edgeDist = Math.min(hudWidth, hudHeight) * edgeFrac;
+      for (let axis = 0; axis < 2; axis++) {
+        const extent = axis === 0 ? hudWidth : hudHeight;
+        const coord = axis === 0 ? spX : spY;
+        let frac: number | null = null;
+        if (coord < edgeDist) frac = coord / edgeDist;
+        else if (coord > extent - edgeDist) frac = (extent - coord) / edgeDist;
+        if (frac === null) continue;
+        scale = clipf(1.0 + (1.0 - frac) * (maxScale - 1.0), scale, maxScale);
+      }
+    }
+
+    // center & clamp -- see this function's own doc comment: hw/hh are
+    // HALF the scaled size, and both the centering and the clamp bound
+    // deliberately reuse that half value (preserved q2repro quirk).
+    const hw = Math.trunc((poi.width * scale) / 2);
+    const hh = Math.trunc((poi.height * scale) / 2);
+
+    let drawX = spX - hw;
+    let drawY = spY - hh;
+    drawX = clipf(drawX, 0, hudWidth - hw);
+    drawY = clipf(drawY, 0, hudHeight - hh);
+
+    const packed = d_8to24table[poi.color & 0xff] ?? 0;
+    let alpha = 255;
+    if (poi.flags & POI_FLAG_HIDE_ON_AIM) {
+      const cx = hudWidth / 2 - drawX;
+      const cy = hudHeight / 2 - drawY;
+      const len = Math.sqrt(cx * cx + cy * cy);
+      alpha = Math.round(255 * clipf(len / (hw * 6 || 1), 0.25, 1.0));
+    }
+
+    const color: DrawColorT = {
+      r: packed & 0xff,
+      g: (packed >>> 8) & 0xff,
+      b: (packed >>> 16) & 0xff,
+      a: alpha,
+    };
+
+    re.DrawColorPic(Math.trunc(drawX), Math.trunc(drawY), hw, hh, poi.imageName, color);
+  }
+}
+
+/** Test-only reset -- mirrors SCR_ClearCenterPrint's own precedent just
+ *  above (module-private queue/store state a test file needs to zero
+ *  between cases without reaching into this file's internals directly). */
+export function SCR_ClearDamageAndPOIs(): void {
+  for (const entry of scr_damage_entries) {
+    entry.damage = 0;
+    entry.time = 0;
+    entry.color = vec3();
+    entry.dir = vec3();
+  }
+  for (const poi of scr_pois_store) {
+    poi.id = 0;
+    poi.time = 0;
+    poi.imageName = "";
+  }
+  scr_help_path_markers = [];
+}
+
+// -----------------------------------------------------------------------
+// Help path (tent.c:477-502's CL_AddHelpPath) -- ADAPTED, not a byte-for-
+// byte port. The real function spawns a chain of `ex_marker`-typed
+// explosion_t entries (cl_tent.c's own explosion pool: CL_AllocExplosion,
+// a `models/.../marker` md2 model at scale 2.5, RF_MINLIGHT|RF_TRANSLUCENT)
+// that ride the normal 3D entity refresh. Neither the explosion pool nor
+// an `ex_marker` ExptypeT variant exist in this port's cl_tent.ts (checked:
+// its own ExptypeT enum has ex_free/explosion/misc/flash/mflash/poly/poly2
+// only) -- and cl_tent.ts is explicitly out of this unit's territory
+// (queued unit; see this file's own task report). Reproducing the C exactly
+// would mean adding a new explosion type AND its CL_AddTEnts render-loop
+// case there, which this unit may not touch.
+//
+// Adapted instead: the same waypoint stream (position + direction + "first
+// of a new path" reset flag) is stored here, then submitted into the 3D
+// scene as plain particles via cl_view.ts's already-public V_AddParticle
+// (that file's own existing scene-building primitive, called once per
+// frame from V_RenderView right after CL_AddEntities -- see cl_view.ts's
+// SCR_AddHelpPathMarkers call site) instead of a textured/lit marker model.
+// This keeps the waypoint trail's actual signal (a visible breadcrumb path
+// through the world leading toward the compass objective) without touching
+// cl_tent.ts's explosion pool or ExptypeT enum. Reported deviation, not a
+// silent one.
+// -----------------------------------------------------------------------
+
+export interface ScrHelpPathMarkerT {
+  position: Vec3;
+  dir: Vec3;
+}
+
+const MAX_HELP_PATH_MARKERS = 64;
+let scr_help_path_markers: ScrHelpPathMarkerT[] = [];
+
+/** Routed from cl_parse.ts's svc_help_path case (readHelpPathKex). `first`
+ *  clears any previous path before adding this waypoint, matching
+ *  tent.c:479-489's own "if (first) free every ex_marker" reset. The
+ *  origin's `+16` Z offset matches tent.c:493's own `ex->ent.origin[2] +=
+ *  16.0f;` (lifts the marker up off the floor). */
+export function SCR_AddHelpPath(origin: Vec3, dir: Vec3, first: boolean): void {
+  if (first) scr_help_path_markers = [];
+  if (scr_help_path_markers.length >= MAX_HELP_PATH_MARKERS) scr_help_path_markers.shift();
+  scr_help_path_markers.push({ position: vec3(origin[0], origin[1], origin[2] + 16.0), dir: vec3(dir[0], dir[1], dir[2]) });
+}
+
+/** Read-only accessor for cl_view.ts's per-frame V_AddParticle submission
+ *  loop (SCR_AddHelpPathMarkers there) -- kept here since the STORE lives
+ *  in this file (this unit's own territory split: cl_scrn.ts owns state,
+ *  cl_ents-adjacent code it also owns -- cl_view.ts -- owns the per-frame
+ *  scene submission, since that is where V_AddParticle already lives). */
+export function SCR_GetHelpPathMarkers(): readonly ScrHelpPathMarkerT[] {
+  return scr_help_path_markers;
+}
 
 //=======================================================
 
@@ -976,6 +1527,35 @@ export function SCR_UpdateScreen(): void {
   if (!scr_initialized) return; // not initialized yet -- console.initialized folded
   // in below since Con_CheckResize/Con_Init live in console_impl.ts and
   // con.initialized is checked there already for every drawing entry point.
+
+  // [item 3] menu music -- q2repro's OGG_Play() (src/client/sound/ogg.c:
+  // 238-289) is called from many sites (CL_Disconnect, boot, refresh
+  // restart, etc., see this file's own task report for the full list) and
+  // picks ogg_menu_track vs. the server's CS_CDTRACK based on
+  // `cls.state < ca_connected`; it is itself idempotent (`if
+  // (!Q_stricmp(ogg.autotrack, s)) return;` -- ogg.c:257-258) so calling it
+  // from many places is cheap. This port's CS_CDTRACK-driven half already
+  // has its own call site (cl_view.ts's CL_PrepRefresh: `CDAudio_Play(
+  // parseInt(cl.configstrings[CS_CDTRACK]...` -- reached once actually
+  // connected/precached), but the disconnected/menu half never had one
+  // (platform/cd_ogg.ts's own registerCdCvars() doc comment flagged this
+  // exact gap: "ogg_menu_track needs a disconnected-state call site
+  // (cl_view.ts/cl_main.ts, out of this unit's territory)"). Reproduced
+  // here as a per-frame check instead of a one-shot state-transition hook
+  // in cl_main.ts's CL_Disconnect (which this unit may not touch): this
+  // function already runs every frame regardless of cls.state, and
+  // CDAudio_Play's own `if (currentTrack === track && vf) { ...; return;
+  // }` early-return (cd_ogg.ts:183-186) makes a per-frame call exactly as
+  // cheap as OGG_Play's own many-call-site pattern -- it only actually
+  // re-opens a file when the track genuinely changes (e.g. on the real
+  // disconnect transition, or connecting when this branch stops running).
+  // Deliberately narrow: this ONLY covers the ogg_menu_track branch --
+  // the CS_CDTRACK branch stays exactly where it already was, so the two
+  // never race over which track should be playing.
+  if (cls.state < ConnstateT.ca_connected) {
+    if (!ogg_menu_track) ogg_menu_track = Cvar_Get("ogg_menu_track", "77", CVAR_ARCHIVE);
+    if (ogg_menu_track) CDAudio_Play(ogg_menu_track.value, true);
+  }
 
   // range check cl_camera_separation so we don't inadvertently fry someone's brain
   if (clCvars.cl_stereo_separation && clCvars.cl_stereo_separation.value > 1.0) Cvar_SetValue("cl_stereo_separation", 1.0);

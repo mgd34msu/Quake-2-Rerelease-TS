@@ -135,15 +135,20 @@
 //     rounded/clamped to int16 (the same convention qcommon/pmove.ts's own
 //     `pm.s.origin[i] = pml.origin[i] * 8` already uses); delta_angles go
 //     through q_shared.ts's existing `ANGLE2SHORT`. `pm_type` is mapped by
-//     `toEnginePmType`: PM_GRAPPLE has no legacy equivalent (grappling hook
-//     is a [Paril-KEX] addition) and maps to PM_NORMAL; PM_NOCLIP has no
-//     legacy pmove-type equivalent either (noclip is movetype-driven in the
-//     legacy port) and maps to PM_SPECTATOR, the closest "no world
-//     collision" legacy type -- both documented lossy mappings. `viewheight`
-//     (kex, int8) has no field on this port's `PmoveStateT` at all and is
-//     dropped. pm_flags/pm_time/gravity share the same low-bit encoding on
-//     both sides (verified against kexapi/game.ts's `PmflagsT` bit
-//     positions) and are copied as raw numbers.
+//     `toEnginePmType`, 1:1 in both directions: PM_GRAPPLE and PM_NOCLIP are
+//     real members of the engine's own PmTypeT now (q_shared.ts appends them
+//     at 5/6 -- see that enum's comment for why appended rather than
+//     interleaved), so nothing collapses. They USED to map to PM_NORMAL and
+//     PM_SPECTATOR respectively, which the client could not tell apart from
+//     the real thing; that mattered once the client started predicting
+//     through the kex cgame's own Pmove (client/cl_pred.ts), because a
+//     grappled player predicted as PM_NORMAL gets gravity and friction the
+//     kex server never applies. `viewheight` (kex, int8) is carried end to
+//     end as of the eye-height fix below. pm_flags/pm_time/gravity share the
+//     same low-bit encoding on both sides (verified against kexapi/game.ts's
+//     `PmflagsT` bit positions) and are copied as raw numbers -- note that
+//     this makes `pm_time` MILLISECONDS on this path, kex's own unit, not
+//     the classic family's 8ms ticks.
 //   - stats: kex widened `MAX_STATS` to 64 (kexapi/game.ts); this port's
 //     `PlayerStateT.stats` (q_shared.ts) is sized `MAX_STATS_STORAGE=64`
 //     (distinct from `MAX_STATS=32`, which stays the CLASSIC family's wire
@@ -413,15 +418,18 @@ function toEnginePmType(t: KexPmTypeT): PmTypeT {
   switch (t) {
     case KexPmTypeT.PM_NORMAL:
       return PmTypeT.PM_NORMAL;
-    // PM_GRAPPLE is a [Paril-KEX] addition with no legacy pmove-type
-    // equivalent -- mapped to the closest "still simulated normally" type.
+    // PM_GRAPPLE/PM_NOCLIP used to collapse onto PM_NORMAL/PM_SPECTATOR
+    // because the engine's PmTypeT had no equivalent. It has both now
+    // (q_shared.ts appends them at 5/6 -- see that enum's own comment for why
+    // appended rather than interleaved), so this is a 1:1 mapping and the
+    // real move type survives to the client. That matters for prediction:
+    // the client replays through the kex cgame's own Pmove, and a grappled
+    // player predicted as PM_NORMAL gets gravity and friction the kex server
+    // never applies (the "grapple predicts gravity" divergence).
     case KexPmTypeT.PM_GRAPPLE:
-      return PmTypeT.PM_NORMAL;
-    // PM_NOCLIP has no legacy pmove-type equivalent either (noclip is
-    // movetype-driven in the legacy port) -- mapped to the closest
-    // "no world collision" legacy type.
+      return PmTypeT.PM_GRAPPLE;
     case KexPmTypeT.PM_NOCLIP:
-      return PmTypeT.PM_SPECTATOR;
+      return PmTypeT.PM_NOCLIP;
     case KexPmTypeT.PM_SPECTATOR:
       return PmTypeT.PM_SPECTATOR;
     case KexPmTypeT.PM_DEAD:
@@ -691,7 +699,11 @@ function toKexTrace(gt: GTraceT): KexTraceT {
     fraction: gt.fraction,
     endpos: gt.endpos,
     plane: gt.plane,
-    surface: gt.surface ? { name: gt.surface.name, flags: gt.surface.flags, value: gt.surface.value, id: 0, material: "" } : null,
+    // [Paril-KEX] material: q2repro's csurface_t.material (bsp.c
+    // BSP_LoadMaterials), threaded here from cmodel.ts's CMod_LoadMaterials
+    // (see that function's own comment) via CsurfaceT.material -- empty
+    // string when unresolved, same default the engine field itself has.
+    surface: gt.surface ? { name: gt.surface.name, flags: gt.surface.flags, value: gt.surface.value, id: 0, material: gt.surface.material } : null,
     contents: gt.contents,
     ent: resolveKexFromEngine(gt.ent),
     // [Paril-KEX] second-best plane/surface hit -- qcommon/cmodel.ts's
@@ -699,7 +711,7 @@ function toKexTrace(gt: GTraceT): KexTraceT {
     // including the reference's own surface2-reuses-leadside[0] quirk. See
     // that function's comment for the exact citation.
     plane2: gt.plane2 ?? new CplaneT(),
-    surface2: gt.surface2 ? { name: gt.surface2.name, flags: gt.surface2.flags, value: gt.surface2.value, id: 0, material: "" } : null,
+    surface2: gt.surface2 ? { name: gt.surface2.name, flags: gt.surface2.flags, value: gt.surface2.value, id: 0, material: gt.surface2.material } : null,
   };
 }
 
