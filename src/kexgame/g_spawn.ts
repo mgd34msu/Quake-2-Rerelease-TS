@@ -645,7 +645,13 @@ function ED_LoadColor(value: string): number {
     const g = Math.trunc(raw[1]) & 0xff;
     const b = Math.trunc(raw[2]) & 0xff;
     const a = Math.trunc(raw[3]) & 0xff;
-    return ((a | (b << 8) | (g << 16) | (r << 24)) | 0) >>> 0;
+    // SIGNED int32, exactly as the C++'s int32_t return (g_spawn.cpp:653):
+    // r=255 makes the packed value negative. A previous `>>> 0` here
+    // deviated to unsigned, and the kex savegame JSON then wrote values
+    // like 4278849791 that real q2repro's reader (signed-int32 JSON field)
+    // rejects on cross-load -- found by the live savegame cross-load unit.
+    // JS bit-extraction on the negative form yields identical bytes.
+    return (a | (b << 8) | (g << 16) | (r << 24)) | 0;
   }
   return C_atoi(value);
 }
