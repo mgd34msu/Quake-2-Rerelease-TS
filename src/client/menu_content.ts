@@ -135,6 +135,16 @@ export interface LaunchPlan {
   // loadout). Only ever meaningful under the "rerelease" ruleset -- the
   // legacy trees have no such cvar/import.
   startItems: string;
+  // True only for CTF content under the kex module: the kexgame's own
+  // ZOID init block reads the `ctf` cvar (g_main.ts) to run CTF rules
+  // (and forces deathmatch on, which IS correct for CTF). Every other
+  // launch must clear it -- a latched ctf=1 left over from an earlier
+  // CTF session otherwise makes the kex module print "Forcing
+  // deathmatch." and turn a campaign start into DM (Mike's 2026-08-31
+  // base1 session: DM inhibited the map's doors/buttons/elevator).
+  // The classic "ctf" game module needs no cvar -- it forces its own
+  // mode unconditionally (ctf/g_save.ts's own ZOID block).
+  ctf?: boolean;
 }
 
 // One entry per (content, ruleset) pair that actually exists. Absence of a
@@ -156,7 +166,7 @@ const LAUNCH_TABLE: Readonly<Record<ContentId, Partial<Record<RulesetId, LaunchP
   },
   ctf: {
     classic: { game: "ctf", map: "q2ctf1", startItems: "" },
-    rerelease: { game: "kex", map: "q2ctf1", startItems: "" },
+    rerelease: { game: "kex", map: "q2ctf1", startItems: "", ctf: true },
   },
   mg2: {
     rerelease: { game: "kex", map: "mguhub", startItems: "" },
@@ -253,6 +263,12 @@ export function PerformLaunch(plan: LaunchPlan, bsp: string, skill: number | nul
   Cvar_Set("coop", coop ? "1" : "0");
   if (coop && Cvar_VariableValue("maxclients") <= 1) Cvar_Set("maxclients", "4");
   Cvar_Set("gamerules", "0");
+  // Clear (or set, for kex CTF) the mode-forcing cvars the game modules'
+  // ZOID init blocks read -- see LaunchPlan.ctf's doc comment. Without
+  // this, a stale latched ctf/teamplay from an earlier session flips any
+  // later New Game start into deathmatch.
+  Cvar_Set("ctf", plan.ctf ? "1" : "0");
+  Cvar_Set("teamplay", "0");
   Cvar_Set("game", plan.game);
 
   if (skill !== null) Cvar_ForceSet("skill", String(skill));

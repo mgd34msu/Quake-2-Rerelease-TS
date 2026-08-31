@@ -292,6 +292,21 @@ describe("PerformLaunch -- game-mode cvars (New Game never starts deathmatch)", 
     expect(Cvar_VariableString("coop")).toBe("0");
   });
 
+  test("stale ctf/teamplay from an earlier CTF session are cleared (the 'Forcing deathmatch.' chain)", () => {
+    Cvar_ForceSet("ctf", "1");
+    Cvar_ForceSet("teamplay", "1");
+    PerformLaunch(plan, "base1", 1, false);
+    expect(Cvar_VariableString("ctf")).toBe("0");
+    expect(Cvar_VariableString("teamplay")).toBe("0");
+  });
+
+  test("kex CTF plan sets ctf 1 explicitly", () => {
+    Cvar_ForceSet("ctf", "0");
+    const ctfPlan: LaunchPlan = { game: "kex", map: "q2ctf1", startItems: "", ctf: true };
+    PerformLaunch(ctfPlan, "q2ctf1", null, false);
+    expect(Cvar_VariableString("ctf")).toBe("1");
+  });
+
   test("coop=true starts coop, not deathmatch, and widens maxclients from 1", () => {
     Cvar_ForceSet("deathmatch", "1");
     Cvar_ForceSet("coop", "0");

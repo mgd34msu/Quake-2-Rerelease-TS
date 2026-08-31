@@ -1715,6 +1715,11 @@ function Content_MenuInit(): void {
   Menu_AddItem(s_content_menu, s_content_begin_action);
 
   Menu_Center(s_content_menu);
+  // Owner request (2026-08-31): the centered menu body (and the drawn
+  // "New Game" title above it) sat flush under the banner image -- push
+  // both down a couple of text rows of breathing room. The title offset
+  // in Content_MenuDraw moves with this.
+  s_content_menu.y += 20;
 
   // set proper initial state, same call-now pattern StartServer_MenuInit
   // uses for RulesChangeFunc
@@ -1734,7 +1739,10 @@ function Content_MenuDraw(): void {
   // fully custom screen.
   if (re) {
     const title = "New Game";
-    Menu_DrawString(viddef.width / 2 - (title.length * 8) / 2, viddef.height / 2 - 80, title);
+    // -60 (was -80): moved down with the +20 menu-body offset in
+    // Content_MenuInit so the banner image keeps two clear rows above
+    // any text (owner request 2026-08-31).
+    Menu_DrawString(viddef.width / 2 - (title.length * 8) / 2, viddef.height / 2 - 60, title);
   }
 
   Menu_AdjustCursor(s_content_menu, 1);
