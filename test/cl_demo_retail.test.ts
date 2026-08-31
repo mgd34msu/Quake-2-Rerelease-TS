@@ -50,11 +50,13 @@
 // retail path isn't present (e.g. CI, or a machine without the retail
 // install), the test skips itself rather than failing.
 
-import { describe, test, expect, beforeEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { cl, cls, clCvars, setRe } from "../src/client/client";
 import { KEX_DEMO_CODEC, PROTOCOL_KEX_DEMOS } from "../src/qcommon/protocol/kexdemo";
 import { CL_PlayDemoFromBuffer } from "../src/client/cl_demo";
+import { SZ_Init } from "../src/qcommon/sizebuf";
+import { net_message, net_message_buffer } from "../src/qcommon/net_chan";
 
 const PAK_PATH = "/home/buzzkill/q2rets/rerelease/baseq2/pak0.pak";
 const DEMO_ENTRY = "demos/demo1.dm2";
@@ -99,6 +101,16 @@ beforeEach(() => {
   clCvars.cl_timedemo = null;
   clCvars.cl_showclamp = null;
   setRe(null);
+});
+
+afterEach(() => {
+  // rule 13: see test/cl_demo.test.ts's identical afterEach comment --
+  // CL_ReadDemoMessage repoints the process-wide net_message singleton at
+  // a tiny per-message buffer and never restores it; this file drives the
+  // same code path against a real, much larger retail demo, making the
+  // leftover buffer even smaller relative to net_message_buffer's real
+  // MAX_MSGLEN size. Restore before any later test file reads it.
+  SZ_Init(net_message, net_message_buffer, net_message_buffer.length);
 });
 
 const havePak = existsSync(PAK_PATH);

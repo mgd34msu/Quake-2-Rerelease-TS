@@ -45,7 +45,7 @@ import {
 } from "../src/ref_gl/gl_model";
 import { R_BuildLightMap, R_MarkLights } from "../src/ref_gl/gl_light";
 import { ModelT } from "../src/ref_gl/gl_model";
-import { SetWorldModel, r_newrefdef } from "../src/ref_gl/gl_local";
+import { SetWorldModel, r_newrefdef, glCvars } from "../src/ref_gl/gl_local";
 import { LightstyleT } from "../src/client/ref";
 import { buildBoxRoomBsp, ROOM_HALF } from "./support/bsp_builder";
 
@@ -374,9 +374,17 @@ describe("R_BuildLightMap: combines two styles into the GL RGBA block format", (
     // r_newrefdef.lightstyles is populated by gl_model.ts's
     // GL_BeginBuildingLightmaps in real use; build it directly here since
     // this test exercises R_BuildLightMap in isolation. gl_modulate/
-    // gl_monolightmap are left unset (null): R_BuildLightMap falls back to
-    // modulate=1 and monolightmap="0", matching this test's hand
-    // computation below (scale 1.0 and 0.5 respectively).
+    // gl_monolightmap need to be unset (null): R_BuildLightMap falls back
+    // to modulate=1 and monolightmap="0", matching this test's hand
+    // computation below (scale 1.0 and 0.5 respectively) -- rule 13:
+    // glCvars (src/ref_gl/gl_local.ts) is a process-wide singleton other
+    // test files' real R_Register() calls populate (e.g.
+    // test/cvar_parity.test.ts registers gl_modulate="2"), so pin this
+    // test's own precondition instead of assuming nothing else in the run
+    // has ever registered it (same pattern as test/gl_rmain.test.ts's own
+    // `glCvars.r_nocull = null` and test/gl_mesh.test.ts's own resets).
+    glCvars.gl_modulate = null;
+    glCvars.gl_monolightmap = null;
     r_newrefdef.lightstyles = [];
     for (let i = 0; i < 2; i++) {
       const ls = new LightstyleT();

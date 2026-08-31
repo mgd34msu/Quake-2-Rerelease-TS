@@ -49,9 +49,57 @@ import { NET_Shutdown } from "../src/platform/net_udp";
 import { Qcommon_Init, runFrames } from "../src/main";
 import { sv, ServerStateT } from "../src/server/server";
 import { SV_Shutdown } from "../src/server/sv_main";
-import { FS_Gamedir, FS_ReadRawFile } from "../src/qcommon/files";
+import { FS_Gamedir, FS_ReadRawFile, FS_TestSnapshotSearchPaths, FS_TestRestoreSearchPaths, type FsSearchPathSnapshotT } from "../src/qcommon/files";
 import { g_edicts, level } from "../src/kexgame/g_main_globals";
 import { Gtime_milliseconds, Gtime_from_sec } from "../src/kexgame/gtime";
+import { snapshotCvars, restoreCvars, type CvarSnapshotT } from "./support/cvar_snapshot";
+
+// rule 13 (process-wide singleton leaks, closed at the source):
+//
+// (1) fs_searchpaths / content_root -- this is the only test in the suite
+// that mounts the real retail install via content_root (src/qcommon/
+// files.ts's FS_InitFilesystem, see its own "BASEDIR REALITY" comment),
+// and neither half of that mount is undone on its own: fs_searchpaths/
+// fs_base_searchpaths are process-wide linked lists that persist for the
+// whole `bun test` run (later test files' exact-name FS_LoadFile/
+// FS_FOpenFile lookups can resolve through to genuine retail assets that
+// were never supposed to be reachable there -- FS_TestSnapshotSearchPaths/
+// FS_TestRestoreSearchPaths in src/qcommon/files.ts is the test seam this
+// half needed), AND the "content_root" cvar itself stays set to
+// RETAIL_ROOT forever, which is worse than it sounds: FS_InitFilesystem
+// re-mounts content_root's baseq2/Q2Game.kpf on EVERY call that sees it
+// non-empty, so any later test that calls FS_InitFilesystem again for its
+// own reasons (e.g. test/menu_content.test.ts's beforeEach, mounting its
+// own synthetic basedir) unknowingly re-mounts the real retail data right
+// back on top, undoing the fs_searchpaths restore.
+//
+// (2) cvar_vars -- Qcommon_Init unconditionally execs "default.cfg" and
+// "config.cfg" (src/main.ts, matching q2repro exactly: a dedicated server
+// reads these too, for archived server cvars) -- and because content_root
+// points this boot at a REAL retail install, those are a REAL, machine-
+// specific user's actual saved files, not synthetic fixtures. Any cvar
+// name in there that no code on this test's own (dedicated) boot path
+// ever Cvar_Get's -- every client-only preference: "name", "fov",
+// "sensitivity", "hand", "rate", "crosshair", "cl_run", "freelook",
+// "allow_download_players", ... -- gets created fresh by Cvar_Set2's
+// create-on-demand path (src/qcommon/cvar.ts) with that real user's saved
+// VALUE baked in as its permanent default_string. Cvar_Get's "first
+// registration wins the default" contract means no later, correct
+// Cvar_Get call (e.g. test/cvar_parity.test.ts's own real client boot)
+// can ever fix it -- observed breaking that suite's whole manifest audit
+// with a real user's fov/sensitivity/name/etc. standing in for q2repro's
+// documented defaults. Unlike (1), this isn't fixable by naming the one
+// or two known-bad cvars (a real user's config.cfg can contain anything);
+// snapshot/restore the whole registry instead. This is safe specifically
+// because this file is the ONLY consumer of real, machine-specific
+// config content in the whole suite -- nothing else should ever want a
+// leftover from it to persist, unlike test/cvar_parity.test.ts's own
+// boot (a legitimate first mover many other files' ambient cvar state
+// depends on) or any test using synthetic-only fixtures. See
+// test/support/cvar_snapshot.ts (shared with test/sdl_platform.test.ts's
+// own throwaway "+set allow_download 0"/"+set s_initsound 0" boot, the
+// identical leak shape) for the snapshot/restore recipe and its exact
+// scope/safety rationale.
 
 // Same retail-install convention as test/cl_demo_retail.test.ts: skip
 // (never fail) when this machine has no retail rerelease install.
@@ -77,8 +125,16 @@ function inuseEntityCount(): number {
 
 describe.skipIf(!haveRetail)("kex family save/load -- real retail base1 e2e (own writer, own reader)", () => {
   let tmpRoot: string;
+  let fsSnapshot: FsSearchPathSnapshotT;
+  let cvarSnapshot: CvarSnapshotT;
 
   beforeAll(async () => {
+    // Captured before ANY mutation below (including the Cvar_ForceSet calls
+    // right after) -- a snapshot taken even one mutation too late bakes
+    // that mutation in as the "restored" state.
+    fsSnapshot = FS_TestSnapshotSearchPaths();
+    cvarSnapshot = snapshotCvars();
+
     tmpRoot = mkdtempSync(join(tmpdir(), "q2save-retail-e2e-"));
 
     // Belt-and-suspenders pre-registration (see this unit's report: a live
@@ -86,8 +142,19 @@ describe.skipIf(!haveRetail)("kex family save/load -- real retail base1 e2e (own
     // despite a correct `+set basedir` argv -- Cvar_ForceSet before
     // Qcommon_Init, matching test/savegame_kex_e2e.test.ts's own existing
     // pattern, is the establish belt-and-suspenders fix).
+    //
+    // "dedicated" gets the identical treatment for the identical reason:
+    // it is CVAR_NOSET (src/main.ts's Qcommon_Init), and an earlier test
+    // file's own client boot (dedicated 0, common in this suite) can leave
+    // it registered and write-protected at 0, in which case this file's
+    // own "+set dedicated 1" argv below -- a plain, non-forced Cvar_Set2,
+    // see src/qcommon/cmd.ts's Cbuf_AddEarlyCommands -- would silently
+    // no-op and this describe block would run a full client boot (CL_Init/
+    // VID_Init/S_Init) against the real retail content_root mount instead
+    // of the dedicated boot its own header comment assumes.
     Cvar_ForceSet("basedir", tmpRoot);
     Cvar_ForceSet("content_root", RETAIL_ROOT);
+    Cvar_ForceSet("dedicated", "1");
 
     Qcommon_Init([
       "quake2",
@@ -126,6 +193,15 @@ describe.skipIf(!haveRetail)("kex family save/load -- real retail base1 e2e (own
   afterAll(async () => {
     SV_Shutdown("retail savegame E2E test finished\n", false);
     await NET_Shutdown();
+    // Unmount the real retail search paths this boot added (leak (1)
+    // above) -- this alone isn't enough on its own: restoreCvars below
+    // also has to put "content_root" itself back, or the very next test
+    // that calls FS_InitFilesystem for its own reasons re-mounts the real
+    // retail install right back on top (see leak (1)'s comment).
+    FS_TestRestoreSearchPaths(fsSnapshot);
+    // Undo every cvar this boot's real config.cfg/default.cfg exec
+    // registered or changed (leak (2) above).
+    restoreCvars(cvarSnapshot);
     rmSync(tmpRoot, { recursive: true, force: true });
   });
 

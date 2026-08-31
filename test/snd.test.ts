@@ -24,7 +24,7 @@ import {
   MAX_CHANNELS,
 } from "../src/client/snd_loc";
 import { cl, cls } from "../src/client/client";
-import { Cvar_ForceSet } from "../src/qcommon/cvar";
+import { cvar_vars, Cvar_ForceSet } from "../src/qcommon/cvar";
 import { vec3 } from "../src/shared/math";
 import { CvarT } from "../src/shared/q_shared";
 
@@ -245,6 +245,17 @@ describe("snd_mix.ts -- S_PaintChannels", () => {
 
 describe("platform/snd.ts -- SNDDMA_Init (null driver)", () => {
   test("configures a fixed-size, power-of-two ring buffer and reports success", () => {
+    // rule 13: pin this test's own precondition rather than assume no
+    // earlier file in the run has ever registered "s_khz". cvar_vars
+    // (src/qcommon/cvar.ts) is process-wide and never reset between test
+    // files -- any earlier full client boot with a non-default s_khz
+    // (e.g. real config content, see test/savegame_retail_roundtrip.
+    // test.ts's own header comment) would otherwise leak into
+    // src/platform/snd.ts's pickSpeed() here and this assertion would see
+    // a real leftover value instead of the "unregistered" default rate it
+    // means to test.
+    cvar_vars.delete("s_khz");
+
     const ok = SNDDMA_Init();
 
     expect(ok).toBe(true);

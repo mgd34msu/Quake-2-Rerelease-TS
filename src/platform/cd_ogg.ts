@@ -219,6 +219,22 @@ export function CDAudio_Init(): number {
   return lib() ? 0 : -1; // C: 0 = ok; init failure leaves the null behaviour
 }
 
+// TEST SEAM (not part of the C engine): `cd_nocd` above is module-private,
+// process-wide state used as a "have I already registered cd_nocd/ogg_*"
+// latch (registerCdCvars' own `if (cd_nocd) return`) -- correct for a real
+// one-boot-per-process engine, but in a multi-boot-per-process test run a
+// test whose own cvar-registry snapshot/restore (see test/support/
+// cvar_snapshot.ts) deletes cd_nocd/ogg_* from src/qcommon/cvar.ts's
+// cvar_vars leaves this module's own cached `cd_nocd` reference pointing
+// at an object no longer in the registry -- registerCdCvars' latch still
+// reads it as "already done" and skips re-registering ogg_* into the
+// now-empty registry. test/cvar_parity.test.ts calls this directly before
+// its own CDAudio_Play(0, false) so that call actually re-registers,
+// regardless of what any earlier test in the process did.
+export function CDAudio_TestResetRegistration(): void {
+  cd_nocd = null;
+}
+
 export function CDAudio_Shutdown(): void {
   closeTrack();
 }

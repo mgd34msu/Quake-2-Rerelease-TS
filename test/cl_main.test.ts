@@ -25,6 +25,7 @@ import { Cvar_ForceSet, Cvar_Get } from "../src/qcommon/cvar";
 import { Cbuf_AddText, Cbuf_Execute, Cmd_ExecuteString } from "../src/qcommon/cmd";
 import { CVAR_NOSET } from "../src/shared/q_shared";
 import { NET_ClearLoopback, NET_Shutdown } from "../src/platform/net_udp";
+import { snapshotCvars, restoreCvars, type CvarSnapshotT } from "./support/cvar_snapshot";
 import { Qcommon_Init, runFrames } from "../src/main";
 import { sv, ServerStateT } from "../src/server/server";
 import { SV_Shutdown, SV_Frame } from "../src/server/sv_main";
@@ -220,8 +221,32 @@ const BOOT_ENTITIES = ['{\n"classname" "worldspawn"\n"message" "cl_main test"\n}
 
 describe("cl_main.ts -- real loopback connect against a booted server", () => {
   let tmpRoot: string;
+  let cvarSnapshot: CvarSnapshotT;
 
   beforeAll(async () => {
+    // rule 13: this describe block's own throwaway boot (basedir=tmpRoot,
+    // dedicated=1, coop=1, allow_download=0, developer=1) registers
+    // several cvars via Cvar_ForceSet/Qcommon_Init argv that no earlier
+    // code in a dedicated boot has necessarily Cvar_Get'd yet -- Cvar_Get's
+    // "first registration wins the default" contract (src/qcommon/cvar.ts)
+    // means an unrestored override here (e.g. "developer 1", "allow_download
+    // 0") permanently corrupts that cvar's default_string for the rest of
+    // the process, observed breaking test/cvar_parity.test.ts's manifest
+    // audit. Snapshot/restore the whole registry (see test/support/
+    // cvar_snapshot.ts for why this is safe for a throwaway synthetic boot
+    // like this one, unlike test/cvar_parity.test.ts's own boot).
+    cvarSnapshot = snapshotCvars();
+
+    // rule 13: earlier suites may have used the rings (matches
+    // test/net.test.ts's/test/server_core.test.ts's/test/interop_q2repro.
+    // test.ts's identical precedent) -- this describe block's own
+    // afterAll already clears them on the way out, but nothing here was
+    // clearing them on the way in, so a packet an earlier test queued and
+    // never drained could still be sitting in the ring when this test's
+    // own handshake starts reading from it, desyncing the getchallenge/
+    // challenge/connect/client_connect exchange below.
+    NET_ClearLoopback();
+
     // needs a fresh bsp_builder import local to this describe block to avoid
     // depending on test/boot.test.ts having already imported it
     const { buildBoxRoomBsp } = await import("./support/bsp_builder");
@@ -303,6 +328,7 @@ describe("cl_main.ts -- real loopback connect against a booted server", () => {
     NET_ClearLoopback(); // rule 13: don't leak ring contents into later suites
     SV_Shutdown("cl_main test finished\n", false);
     await NET_Shutdown();
+    restoreCvars(cvarSnapshot);
     rmSync(tmpRoot, { recursive: true, force: true });
   });
 

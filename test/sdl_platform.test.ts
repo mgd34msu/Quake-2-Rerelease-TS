@@ -50,7 +50,8 @@ import {
   K_SHIFT,
   K_UPARROW,
 } from "../src/client/keys";
-import { Cvar_ForceSet, Cvar_VariableValue } from "../src/qcommon/cvar";
+import { cvar_vars, Cvar_ForceSet, Cvar_VariableValue } from "../src/qcommon/cvar";
+import { snapshotCvars, restoreCvars, type CvarSnapshotT } from "./support/cvar_snapshot";
 import { NET_ClearLoopback, NET_Shutdown } from "../src/platform/net_udp";
 import { SV_Shutdown } from "../src/server/sv_main";
 import { sv, ServerStateT } from "../src/server/server";
@@ -167,8 +168,23 @@ describe("src/platform/sdl.ts -- real libSDL2 under the dummy drivers", () => {
 
 describe("src/main.ts -- windowed client boot with dedicated 0", () => {
   let tmpRoot = "";
+  let cvarSnapshot: CvarSnapshotT;
 
   beforeAll(() => {
+    // rule 13 (process-wide singleton leak, closed at the source): this
+    // boot's own throwaway "+set allow_download 0"/"+set s_initsound 0"
+    // argv (below) can be the FIRST-ever registration of those cvar names
+    // in the whole `bun test` process, in which case Cvar_Get's "first
+    // registration wins the default" contract (src/qcommon/cvar.ts)
+    // permanently locks their default_string at this test's own
+    // deliberately-wrong override value -- observed breaking
+    // test/cvar_parity.test.ts's manifest audit with "allow_download:
+    // expected 1, got 0" when this file happens to run first. Snapshot
+    // before ANY mutation and restore the whole registry in afterAll (see
+    // test/support/cvar_snapshot.ts for why this is safe specifically for
+    // a throwaway synthetic boot like this one).
+    cvarSnapshot = snapshotCvars();
+
     tmpRoot = mkdtempSync(join(tmpdir(), "q2sdl-"));
     const baseq2Dir = join(tmpRoot, "baseq2");
     mkdirSync(join(baseq2Dir, "maps"), { recursive: true });
@@ -185,6 +201,21 @@ describe("src/main.ts -- windowed client boot with dedicated 0", () => {
     Cvar_ForceSet("coop", "1");
     Cvar_ForceSet("deathmatch", "0");
     Cvar_ForceSet("s_initsound", "0");
+    // rule 13: src/platform/vid.ts's VID_CheckChanges only (re)loads the
+    // refresh module while `vid_ref.modified` is true, and clears it back
+    // to false the moment a load succeeds (matching q2repro's real
+    // cvar.c/vid.c exactly -- see vid.ts's own VID_CheckChanges comment).
+    // That's correct for a real one-boot-per-process engine, where
+    // vid_ref is always freshly Cvar_Get'd (modified=true at creation);
+    // in this multi-boot-per-process test run, "vid_ref" is a process-
+    // wide singleton (src/qcommon/cvar.ts's cvar_vars) another test's
+    // earlier, successful client boot (e.g. test/cvar_parity.test.ts) can
+    // leave registered with modified=false, which would make THIS boot's
+    // own VID_CheckChanges silently skip loading the refresh and creating
+    // a window at all. Pin this test's own precondition rather than rely
+    // on whichever test happened to run before it.
+    const vidRef = cvar_vars.get("vid_ref");
+    if (vidRef) vidRef.modified = true;
   });
 
   afterAll(async () => {
@@ -193,7 +224,7 @@ describe("src/main.ts -- windowed client boot with dedicated 0", () => {
     await NET_Shutdown();
     setRe(null);
     SDL_ResetBackendForTests();
-    Cvar_ForceSet("s_initsound", "1"); // restore what the boot args disabled
+    restoreCvars(cvarSnapshot);
     rmSync(tmpRoot, { recursive: true, force: true });
   });
 

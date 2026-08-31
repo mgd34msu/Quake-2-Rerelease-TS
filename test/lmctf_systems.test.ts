@@ -883,6 +883,16 @@ describe("stdlog.ts / gslog.ts", () => {
   let logPath: string;
 
   beforeEach(() => {
+    // rule 13: stdlog.ts's `logfile`/StdLogHandle module-private state
+    // (src/lmctf/stdlog.ts's _sl_MaybeOpenFile) is cached on first use and
+    // never re-fetched from gi.cvar until sl_CloseLogFile runs -- if any
+    // earlier test (in this file or another lmctf_*.test.ts sharing the
+    // same src/lmctf/g_local.ts `gi` singleton) already triggered a log
+    // call, `logfile` can be left caching THAT call's cvar object instead
+    // of this test's own enableLogging() registration below, silently
+    // reading value 0 ("off") in _sl_MaybeOpenFile and skipping the file
+    // write entirely. Close/reset before every test, not just after.
+    sl_CloseLogFile();
     setupWorld();
     tmpDir = mkdtempSync(join(tmpdir(), "lmctf-log-"));
     logPath = join(tmpDir, "std.log");

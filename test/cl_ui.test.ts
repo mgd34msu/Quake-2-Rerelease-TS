@@ -11,20 +11,33 @@
 // relying on another test file's module-load side effects.
 
 import { describe, test, expect, beforeEach } from "bun:test";
-import { SZ_Clear, MSG_BeginReading, MSG_WriteShort } from "../src/qcommon/sizebuf";
-import { net_message } from "../src/qcommon/net_chan";
+import { SZ_Init, SZ_Clear, MSG_BeginReading, MSG_WriteShort } from "../src/qcommon/sizebuf";
+import { net_message, net_message_buffer } from "../src/qcommon/net_chan";
 import { Cmd_TokenizeString } from "../src/qcommon/cmd";
 import { MAX_ITEMS } from "../src/shared/q_shared";
 import { cl, cls, KeydestT, setRe } from "../src/client/client";
 import { M_ForceMenuOff } from "../src/client/menu";
 import { con, NUM_CON_TIMES } from "../src/client/console";
+import { viddef } from "../src/client/vid";
 import { Con_Init, Con_Print } from "../src/client/console_impl";
 import { keybindings, key_repeats, setAnykeydown } from "../src/client/keys";
 import { Key_Init, Key_Event, Key_SetBinding, Key_Bind_f, Key_Unbind_f, Key_StringToKeynum } from "../src/client/keys_impl";
 import { CL_ParseInventory } from "../src/client/cl_inv";
 
 function resetNetMessage(): void {
-  SZ_Clear(net_message);
+  // rule 13: net_message (src/qcommon/net_chan.ts) is a process-wide
+  // SizeBuf singleton whose `.data`/`.maxsize` are NOT what SZ_Clear
+  // resets -- SZ_Clear only zeroes cursize/readcount/overflowed. Demo/MVD
+  // playback code (src/client/cl_demo.ts, src/server/mvd/parse.ts) calls
+  // SZ_Init(net_message, someSmallDemoBlock, someSmallDemoBlock.length)
+  // to temporarily repoint net_message at one demo message's bytes, and
+  // never points it back at the real net_message_buffer afterward -- if
+  // an earlier test in the run exercised that path, net_message.maxsize
+  // is left far smaller than MAX_MSGLEN, and this file's MSG_WriteShort
+  // calls below overflow instead of writing MAX_ITEMS shorts. Re-run the
+  // real SZ_Init (net_chan.ts's own module-load-time call, normally only
+  // ever needed once per process) to pin this test's own precondition.
+  SZ_Init(net_message, net_message_buffer, net_message_buffer.length);
   MSG_BeginReading(net_message);
 }
 
@@ -48,10 +61,17 @@ beforeEach(() => {
   key_repeats.fill(0);
   setAnykeydown(0);
 
-  // viddef.width stays 0 in this headless port (no platform/vid.ts yet), so
-  // Con_CheckResize always takes its "video hasn't been initialized" branch:
-  // linewidth pins to 38 deterministically, which every wrap test below
-  // relies on.
+  // rule 13: viddef (src/client/vid.ts) is a process-wide singleton --
+  // this file's own comment used to assume viddef.width always stays 0
+  // ("no platform/vid.ts yet"), but a real windowed client boot elsewhere
+  // in the suite (e.g. test/cvar_parity.test.ts, test/sdl_platform.test.ts)
+  // now sets it to a real window width via VID_Init, which would make
+  // Con_CheckResize compute a real linewidth instead of the deterministic
+  // headless 38 every wrap test below relies on. Pin it back to the
+  // "video hasn't been initialized" state explicitly rather than assume
+  // nothing else in the run has ever touched it.
+  viddef.width = 0;
+  viddef.height = 0;
   Con_Init();
   Key_Init();
 });

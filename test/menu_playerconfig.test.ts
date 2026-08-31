@@ -35,7 +35,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Cvar_ForceSet } from "../src/qcommon/cvar";
-import { FS_InitFilesystem, FS_SetGamedir, FS_WriteFile, FS_AddPak } from "../src/qcommon/files";
+import { FS_InitFilesystem, FS_SetGamedir, FS_WriteFile, FS_AddPak, FS_TestSnapshotSearchPaths, FS_TestRestoreSearchPaths, type FsSearchPathSnapshotT } from "../src/qcommon/files";
+import { snapshotCvars, restoreCvars, type CvarSnapshotT } from "./support/cvar_snapshot";
 import { BASEDIRNAME } from "../src/qcommon/qcommon";
 import { cls, setRe, KeydestT } from "../src/client/client";
 import { viddef } from "../src/client/vid";
@@ -139,8 +140,32 @@ function fakeRe(calls: string[], renderedRefdefs: Parameters<RefExports["RenderF
 
 describe("menu.ts -- PlayerConfig_MenuDraw's 3D preview (2026-08-30 audit item 1)", () => {
   let tmpRoot: string;
+  let fsSnapshot: FsSearchPathSnapshotT;
+  let cvarSnapshot: CvarSnapshotT;
+  let savedViddefWidth: number;
+  let savedViddefHeight: number;
 
   beforeAll(() => {
+    // rule 13: this test mounts a real pack file (FS_AddPak below) into
+    // src/qcommon/files.ts's process-wide fs_searchpaths, then deletes the
+    // on-disk file itself in afterAll (rmSync tmpRoot) without ever
+    // unmounting the pack node -- any later test whose own lookup falls
+    // through to this stale layer gets "Couldn't reopen ...players.pak"
+    // (the file is gone) instead of whatever it expected. Snapshot before
+    // ANY mutation, restore in afterAll (see src/qcommon/files.ts's
+    // FS_TestSnapshotSearchPaths/FS_TestRestoreSearchPaths header comment).
+    fsSnapshot = FS_TestSnapshotSearchPaths();
+    // rule 13: this test's own "skin"/"hand"/"name" Cvar_ForceSet calls
+    // below are a throwaway persona for the 3D preview, not something any
+    // other test should see -- unrestored, "name" (not previously
+    // Cvar_Get'd by a dedicated boot's own code) permanently corrupts
+    // that cvar's default_string, observed breaking test/cvar_parity.
+    // test.ts's manifest audit ("name: expected unnamed, got tester").
+    // See test/support/cvar_snapshot.ts.
+    cvarSnapshot = snapshotCvars();
+    savedViddefWidth = viddef.width;
+    savedViddefHeight = viddef.height;
+
     tmpRoot = mkdtempSync(join(tmpdir(), "q2playerconfig-"));
     Cvar_ForceSet("basedir", tmpRoot);
     FS_InitFilesystem();
@@ -171,6 +196,10 @@ describe("menu.ts -- PlayerConfig_MenuDraw's 3D preview (2026-08-30 audit item 1
   });
 
   afterAll(() => {
+    FS_TestRestoreSearchPaths(fsSnapshot);
+    restoreCvars(cvarSnapshot);
+    viddef.width = savedViddefWidth;
+    viddef.height = savedViddefHeight;
     rmSync(tmpRoot, { recursive: true, force: true });
   });
 

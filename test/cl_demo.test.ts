@@ -18,12 +18,13 @@
 // demos bundled in the retail baseq2/pak0.pak (never committed, read
 // directly from the user's local retail install).
 
-import { describe, test, expect, beforeEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { MSG_WriteByte, MSG_WriteShort, MSG_WriteLong, MSG_WriteFloat, MSG_WriteString, MSG_WriteDir, SizeBuf, SZ_Init } from "../src/qcommon/sizebuf";
 import { vec3 } from "../src/shared/math";
 import { cl, cls, clCvars, setRe } from "../src/client/client";
 import { KEX_DEMO_CODEC, PROTOCOL_KEX_DEMOS } from "../src/qcommon/protocol/kexdemo";
 import { CL_PlayDemoFromBuffer, CL_OpenDemoBuffer, CL_ReadDemoMessage } from "../src/client/cl_demo";
+import { net_message, net_message_buffer } from "../src/qcommon/net_chan";
 
 beforeEach(() => {
   cl.clear();
@@ -36,6 +37,19 @@ beforeEach(() => {
   clCvars.cl_timedemo = null;
   clCvars.cl_showclamp = null;
   setRe(null);
+});
+
+afterEach(() => {
+  // rule 13: net_message (src/qcommon/net_chan.ts) is a process-wide
+  // SizeBuf singleton -- CL_ReadDemoMessage (src/client/cl_demo.ts) calls
+  // SZ_Init(net_message, block, block.length) on every demo message this
+  // suite reads, repointing net_message's `.data`/`.maxsize` at a tiny
+  // demo-block-sized buffer and never restoring the real, full-size
+  // net_message_buffer afterward. Left alone, any later test file that
+  // expects net_message to hold MAX_MSGLEN bytes (e.g.
+  // test/net_chan_fragment.test.ts's NET_GetPacket calls) overflows
+  // instead. Restore it here so this suite leaves no trace.
+  SZ_Init(net_message, net_message_buffer, net_message_buffer.length);
 });
 
 /** Builds one `.dm2`-framed block (u32 LE length + raw bytes) from a

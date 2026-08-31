@@ -103,13 +103,13 @@ import { buildBoxRoomBsp, WORLDSPAWN_ONLY_ENTITIES } from "./support/bsp_builder
 import { buildColormapPcx } from "./support/colormap_builder";
 
 import { MapDB_Init } from "../src/qcommon/mapdb";
-import { CDAudio_Play } from "../src/platform/cd_ogg";
+import { CDAudio_Play, CDAudio_TestResetRegistration } from "../src/platform/cd_ogg";
 import { R_Register } from "../src/ref_gl/gl_rmain";
 import { GL_InitImages, SetQGL } from "../src/ref_gl/gl_image";
 import { SetRefImports } from "../src/ref_gl/gl_local";
 import { QGLRecording } from "../src/ref_gl/qgl";
 import type { RefImports } from "../src/client/ref";
-import { FS_LoadFile, FS_FreeFile, FS_Gamedir } from "../src/qcommon/files";
+import { FS_LoadFile, FS_FreeFile, FS_Gamedir, FS_TestSnapshotSearchPaths, FS_TestRestoreSearchPaths, type FsSearchPathSnapshotT } from "../src/qcommon/files";
 
 // ---------------------------------------------------------------------------
 // manifest: name, q2repro-exact default string, q2repro-exact flags.
@@ -610,8 +610,25 @@ const MANIFEST: ManifestEntry[] = [
 
 describe("cvar parity audit -- full engine boot", () => {
   let tmpRoot = "";
+  let fsSnapshot: FsSearchPathSnapshotT;
 
   beforeAll(async () => {
+    // rule 13 (process-wide singleton leak, closed at the source): this
+    // suite boots a real, non-dedicated client+server (see this file's
+    // header comment) against its own throwaway tmpRoot basedir --
+    // src/qcommon/files.ts's fs_searchpaths/fs_base_searchpaths never get
+    // that mount removed on their own (see files.ts's
+    // FS_TestSnapshotSearchPaths/FS_TestRestoreSearchPaths header comment).
+    // Snapshot before ANY mutation below. NOT extended to the cvar_vars
+    // registry: this suite's whole point is registering the full manifest
+    // of cvars, and the rest of this test run relies on that registration
+    // staying around afterward (vid_modes.test.ts's own header comment
+    // documents the same "accumulates across files, never resets"
+    // contract) -- wiping cvar_vars here doesn't just clean up after this
+    // file, it un-registers cvars other, unrelated files also depend on
+    // having been registered by *some* earlier boot.
+    fsSnapshot = FS_TestSnapshotSearchPaths();
+
     tmpRoot = mkdtempSync(join(tmpdir(), "q2cvarparity-"));
     const baseq2Dir = join(tmpRoot, "baseq2");
     mkdirSync(join(baseq2Dir, "maps"), { recursive: true });
@@ -669,6 +686,12 @@ describe("cvar parity audit -- full engine boot", () => {
 
     // Not reachable through the boot above -- see this file's header.
     MapDB_Init();
+    // rule 13: force cd_ogg.ts's own registration latch to re-run
+    // regardless of what any earlier test in this process already did to
+    // it (see CDAudio_TestResetRegistration's own header comment) -- this
+    // suite's whole point is verifying ogg_enable/ogg_volume/ogg_shuffle/
+    // ogg_menu_track/ogg_remap_tracks actually get registered here.
+    CDAudio_TestResetRegistration();
     CDAudio_Play(0, false);
     // src/server/sv_mvd.ts's sv_mvd_spawn_dummy/sv_mvd_password/
     // sv_mvd_maxclients/sv_mvd_nomsgs predate this audit and register lazily
@@ -755,6 +778,8 @@ describe("cvar parity audit -- full engine boot", () => {
     await NET_Shutdown();
     setRe(null);
     SDL_ResetBackendForTests();
+    // Unmount the fs_searchpaths layer this boot added (see beforeAll).
+    FS_TestRestoreSearchPaths(fsSnapshot);
     rmSync(tmpRoot, { recursive: true, force: true });
   });
 

@@ -11,7 +11,7 @@ interface (PORTING.md/test/sv_world.test.ts's own precedent), never the game
 module's private EdictT -- makeEdict below fabricates plain objects.
 */
 
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, afterAll } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,6 +19,7 @@ import { join } from "node:path";
 import { Cvar_ForceSet, Cvar_Get } from "../src/qcommon/cvar";
 import { FS_InitFilesystem, FS_Gamedir } from "../src/qcommon/files";
 import { SizeBuf, SZ_Init, MSG_WriteByte, MSG_WriteLong, MSG_WriteShort, MSG_WriteString } from "../src/qcommon/sizebuf";
+import { net_message, net_message_buffer } from "../src/qcommon/net_chan";
 import { VANILLA_CODEC } from "../src/qcommon/protocol/vanilla";
 import { SvcOpsT } from "../src/qcommon/qcommon";
 import { CS_REMAP_OLD } from "../src/shared/cs_remap";
@@ -140,6 +141,27 @@ function makeFakeGameExportsWithDummy(edicts: Edict[], dummyPs: PlayerStateT): G
     ClientDisconnect: () => {},
   };
 }
+
+// rule 13 (whole-file scope, not per-describe): net_message (src/qcommon/
+// net_chan.ts) is a process-wide SizeBuf singleton. MVD_ParseMessage
+// (src/server/mvd/parse.ts, exercised via MVD_LoadFile all over this file)
+// calls SZ_Init(net_message, data, data.length) on whatever buffer it was
+// handed -- almost always much smaller than the real net_message_buffer
+// (MAX_MSGLEN) -- and never restores it. Left alone, this repoints
+// net_message at a shrunk buffer for the rest of the `bun test` process;
+// any later test expecting the full-size buffer (e.g.
+// test/net_chan_fragment.test.ts's NET_GetPacket calls) overflows. A
+// single top-level afterAll (once, after every test in this file has
+// finished -- NOT afterEach, which was tried first and broke
+// test/cl_main.test.ts's own loopback handshake when both files ran in
+// the same process: an afterEach here would interleave with several
+// describe blocks' OWN afterEach hooks that still need net_message in
+// ITS mid-test state for their own cleanup, e.g. draining a live MVD
+// recording or GTV stream) covers every describe block in this file
+// (many of them call MVD_LoadFile) rather than repeating this in each one.
+afterAll(() => {
+  SZ_Init(net_message, net_message_buffer, net_message_buffer.length);
+});
 
 // ---------------------------------------------------------------------------
 // A. qcommon/protocol/mvd.ts -- the "packet players" delta codec

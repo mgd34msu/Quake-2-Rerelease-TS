@@ -171,6 +171,40 @@ let fs_links: FileLinkT | null = null;
 let fs_searchpaths: SearchPathT | null = null;
 let fs_base_searchpaths: SearchPathT | null = null; // without gamedirs
 
+// TEST SEAM (not part of the C engine; see FS_InitFilesystem's own
+// "BASEDIR REALITY" comment): fs_searchpaths/fs_base_searchpaths are
+// process-wide singletons that persist for the entire `bun test` run --
+// every Qcommon_Init call PREPENDS its own search roots without ever
+// clearing what an earlier test's boot already mounted (matches the real
+// engine's own lifetime: it never tears these down mid-process either,
+// because a real process only ever calls FS_InitFilesystem once). A test
+// that mounts something unusual (e.g. test/savegame_retail_roundtrip.test.ts
+// mounting the real retail install via content_root) must snapshot the head
+// of both lists before its own FS_InitFilesystem call and restore them
+// afterward, or its mounted directories out-live the test and later exact-
+// name FS_LoadFile/FS_FOpenFile lookups in unrelated test files can resolve
+// through to real assets that were never supposed to be reachable there.
+export interface FsSearchPathSnapshotT {
+  readonly searchpaths: SearchPathT | null;
+  readonly baseSearchpaths: SearchPathT | null;
+}
+
+export function FS_TestSnapshotSearchPaths(): FsSearchPathSnapshotT {
+  return { searchpaths: fs_searchpaths, baseSearchpaths: fs_base_searchpaths };
+}
+
+export function FS_TestRestoreSearchPaths(snapshot: FsSearchPathSnapshotT): void {
+  // Close any pack fds this test's mounts opened (mirrors FS_SetGamedir's
+  // own "free up any current game dir info" loop) before dropping the
+  // nodes -- otherwise they leak open file descriptors for the rest of
+  // this test run's process.
+  for (let node = fs_searchpaths; node && node !== snapshot.searchpaths; node = node.next) {
+    if (node.kind === "pack") closeSync(node.pack.handle);
+  }
+  fs_searchpaths = snapshot.searchpaths;
+  fs_base_searchpaths = snapshot.baseSearchpaths;
+}
+
 function basedirString(): string {
   // fs_basedir is only null before FS_InitFilesystem's Cvar_Get runs; "."
   // mirrors the cvar's own default value in that window.

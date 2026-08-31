@@ -164,6 +164,17 @@ describe("GL renderer -- BSPX DECOUPLED_LM", () => {
     qgl = await import("../src/ref_gl/qgl");
 
     glLocal.SetRefImports(makeFakeRiGl());
+    // rule 13: glCvars (src/ref_gl/gl_local.ts) is a process-wide
+    // singleton other test files' real R_Register() calls populate (e.g.
+    // test/cvar_parity.test.ts registers gl_modulate="2") -- this file's
+    // own fake ri.Cvar_Get always returns null (see makeFakeRiGl above),
+    // so it never re-registers gl_modulate itself; R_LightPoint/
+    // R_BuildLightMap below assume gl_modulate is unset (falls back to a
+    // 1.0 multiplier) the same way test/gl_model.test.ts's own
+    // R_BuildLightMap test does. Pin that precondition instead of
+    // assuming nothing else in the run has ever registered it (same
+    // pattern as test/gl_rmain.test.ts's own `glCvars.r_nocull = null`).
+    glLocal.glCvars.gl_modulate = null;
     glModel.Mod_Init();
     glModel.Mod_FreeAll();
 
