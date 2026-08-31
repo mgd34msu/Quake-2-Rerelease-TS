@@ -258,7 +258,7 @@ import {
   EF_ROCKET,
   CHAN_WEAPON,
   CHAN_AUTO,
-  CHAN_BODY,
+  CHAN_AUX3,
   ATTN_NORM,
   ATTN_IDLE,
   ATTN_NONE,
@@ -297,8 +297,27 @@ import { MSG_ReadShort, MSG_ReadByte } from "../qcommon/sizebuf";
 import { monsterFlashOffset as classicMonsterFlashOffset } from "../game/m_flash";
 import { monsterFlashOffset as kexMonsterFlashOffset } from "../kexgame/m_flash";
 import { CS_REMAP_RERELEASE } from "../shared/cs_remap";
-import { CL_SmokeAndFlash, cl_sfx_footsteps } from "./cl_tent";
+import { CL_SmokeAndFlash, CL_AddMuzzleFX, CL_PlayFootstepSfx, FOOTSTEP_ID_LADDER, MuzzlefxT } from "./cl_tent";
 import { fixedLength } from "../shared/fixed";
+
+// DEVIATION FROM cl_muzzleflash's usual bare-name convention: MuzzlefxT's
+// members are referenced qualified (MuzzlefxT.MFLASH_X) everywhere below,
+// NOT destructured into module-top-level bare consts the way MZ2_*/TE_*
+// are elsewhere in this file. cl_view.ts statically imports from BOTH
+// cl_fx.ts and cl_tent.ts, which -- combined with cl_fx.ts's own static
+// import of cl_tent.ts just above -- closes a real ESM circular-import
+// loop (cl_tent.ts -> cl_view.ts -> cl_fx.ts -> cl_tent.ts). A
+// module-top-level `const { MuzzlefxT.MFLASH_MACHN } = MuzzlefxT` runs EAGERLY
+// during module evaluation and can observe `MuzzlefxT` as `undefined`
+// depending on which module enters the cycle first (reproduced: `bun -e`
+// importing cl_tent.ts directly threw "Cannot destructure property
+// 'MuzzlefxT.MFLASH_MACHN' from null or undefined value" at cl_fx.ts's own former
+// top-level destructure). Qualified access inside function bodies (every
+// use below is inside CL_ParseMuzzleFlash2, called well after module load
+// finishes) has no such ordering hazard -- same reasoning as this file's
+// existing CL_SmokeAndFlash import (a hoisted function reference, also
+// safe across the same cycle) and cl_tent.ts's own header comment about
+// this exact value-cycle, just applied to an enum instead of a function.
 
 // Which monster_flash_offset table CL_ParseMuzzleFlash2 resolves `flash_number`
 // through. Keyed off cls.csr (set by cl_parse.ts's CL_ParseServerData from the
@@ -556,6 +575,18 @@ function clRereleaseEffectsEnabled(): boolean {
   return !!cl_rerelease_effects_cvar && cl_rerelease_effects_cvar.value !== 0;
 }
 
+// SCOPE CUT (muzzle-flash MODELS unit): q2repro effects.c's CL_MuzzleFlash
+// (the real source of this function) also calls CL_AddWeaponMuzzleFX per
+// weapon case, attaching a real flash MODEL to the player's OWN first-
+// person view-weapon (state on cl.weapon.muzzle, consumed by the
+// view-weapon renderer). That renderer/state doesn't exist in this port
+// (cl_view.ts's weapon-model drawing, out of this unit's territory --
+// ref_gl/ isn't ported either, PORTING.md), so this function stays
+// dlight+sound only. CL_ParseMuzzleFlash2 below (monster/NPC muzzle
+// flashes, effects.c's CL_MuzzleFlash2) is the one this unit actually
+// ports the model system for -- it renders as a normal world entity via
+// the existing ex_mflash explosion path (CL_AddMuzzleFX, cl_tent.ts), no
+// new renderer plumbing required.
 export function CL_ParseMuzzleFlash(): void {
   const i = MSG_ReadShort(net_message);
   if (i < 1 || i >= MAX_EDICTS) {
@@ -653,12 +684,8 @@ export function CL_ParseMuzzleFlash(): void {
       S_StartSound(null, i, CHAN_WEAPON, S_RegisterSound("weapons/railgf1a.wav"), volume, ATTN_NORM, 0);
       // q2repro effects.c:301-302: rerelease adds a delayed report/echo on
       // its own channel, gated on cl_rerelease_effects (default on).
-      // CHAN_AUX3 (shared.h's [Paril-KEX] channel additions -- CHAN_AUX=5,
-      // CHAN_FOOTSTEP=6, CHAN_AUX3=7 -- not yet in this port's q_shared.ts
-      // CHAN_* set, out of this file's territory to add) used as the literal
-      // 7 here rather than a named import.
       if (clRereleaseEffectsEnabled()) {
-        S_StartSound(null, i, 7 /* CHAN_AUX3 */, S_RegisterSound("weapons/railgr1b.wav"), volume, ATTN_NORM, 0.4);
+        S_StartSound(null, i, CHAN_AUX3, S_RegisterSound("weapons/railgr1b.wav"), volume, ATTN_NORM, 0.4);
       }
       break;
     case MZ_ROCKET:
@@ -822,6 +849,15 @@ export function CL_ParseMuzzleFlash2(): void {
   origin[1] = cl_entities[ent].current.origin[1] + forward[1] * offset[0] + right[1] * offset[1];
   origin[2] = cl_entities[ent].current.origin[2] + forward[2] * offset[0] + right[2] * offset[1] + offset[2];
 
+  // [Paril-KEX] q2repro effects.c:443-452 -- `scale` (0 = default 1x) sizes
+  // both the flash model (CL_AddMuzzleFX calls below) and how far in front
+  // of `origin` the model is placed (flash_origin). See CL_AddMuzzleFX's
+  // own header comment (cl_tent.ts) for why the model's visual SIZE isn't
+  // actually affected by `scale` in this port yet.
+  const mz2_scale = cl_entities[ent].current.scale || 1;
+  const flash_origin = vec3();
+  VectorMA(origin, 4.0 * mz2_scale, forward, flash_origin);
+
   const dl = CL_AllocDlight(ent);
   VectorCopy(origin, dl.origin);
   dl.radius = 200 + (rand() & 31);
@@ -848,6 +884,7 @@ export function CL_ParseMuzzleFlash2(): void {
       CL_ParticleEffect(origin, vec3_origin, 0, 40);
       CL_SmokeAndFlash(origin);
       S_StartSound(null, ent, CHAN_WEAPON, S_RegisterSound("infantry/infatck1.wav"), 1, ATTN_NORM, 0);
+      CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_MACHN, 0, 18.0 * mz2_scale);
       break;
 
     case MZ2_SOLDIER_MACHINEGUN_1:
@@ -864,6 +901,7 @@ export function CL_ParseMuzzleFlash2(): void {
       CL_ParticleEffect(origin, vec3_origin, 0, 40);
       CL_SmokeAndFlash(origin);
       S_StartSound(null, ent, CHAN_WEAPON, S_RegisterSound("soldier/solatck3.wav"), 1, ATTN_NORM, 0);
+      CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_MACHN, 0, 13.0 * mz2_scale);
       break;
 
     case MZ2_GUNNER_MACHINEGUN_1:
@@ -880,6 +918,7 @@ export function CL_ParseMuzzleFlash2(): void {
       CL_ParticleEffect(origin, vec3_origin, 0, 40);
       CL_SmokeAndFlash(origin);
       S_StartSound(null, ent, CHAN_WEAPON, S_RegisterSound("gunner/gunatck2.wav"), 1, ATTN_NORM, 0);
+      CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_MACHN, 0, 24.0 * mz2_scale);
       break;
 
     case MZ2_ACTOR_MACHINEGUN_1:
@@ -897,6 +936,7 @@ export function CL_ParseMuzzleFlash2(): void {
       CL_ParticleEffect(origin, vec3_origin, 0, 40);
       CL_SmokeAndFlash(origin);
       S_StartSound(null, ent, CHAN_WEAPON, S_RegisterSound("infantry/infatck1.wav"), 1, ATTN_NORM, 0);
+      CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_MACHN, 0, 32.0 * mz2_scale);
       break;
 
     case MZ2_BOSS2_MACHINEGUN_L1:
@@ -910,9 +950,18 @@ export function CL_ParseMuzzleFlash2(): void {
       dl.color[1] = 1;
       dl.color[2] = 0;
 
-      CL_ParticleEffect(origin, vec3_origin, 0, 40);
-      CL_SmokeAndFlash(origin);
-      S_StartSound(null, ent, CHAN_WEAPON, S_RegisterSound("infantry/infatck1.wav"), 1, ATTN_NONE, 0);
+      // q2repro effects.c:543-551: under the extended/kex protocol family,
+      // BOSS2_MACHINEGUN_L2 specifically is re-themed as a blaster shot
+      // instead of the classic machinegun burst.
+      if (cls.csr.extended && flash_number === MZ2_BOSS2_MACHINEGUN_L2) {
+        S_StartSound(null, ent, CHAN_WEAPON, S_RegisterSound("flyer/flyatck3.wav"), 1, ATTN_NONE, 0);
+        CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_BLAST, 0, 12.0 * mz2_scale);
+      } else {
+        CL_ParticleEffect(origin, vec3_origin, 0, 40);
+        CL_SmokeAndFlash(origin);
+        S_StartSound(null, ent, CHAN_WEAPON, S_RegisterSound("infantry/infatck1.wav"), 1, ATTN_NONE, 0);
+        CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_MACHN, 0, 32.0 * mz2_scale);
+      }
       break;
 
     case MZ2_SOLDIER_BLASTER_1:
@@ -928,6 +977,7 @@ export function CL_ParseMuzzleFlash2(): void {
       dl.color[1] = 1;
       dl.color[2] = 0;
       S_StartSound(null, ent, CHAN_WEAPON, S_RegisterSound("soldier/solatck2.wav"), 1, ATTN_NORM, 0);
+      CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_BLAST, 0, 8.0 * mz2_scale);
       break;
 
     case MZ2_FLYER_BLASTER_1:
@@ -936,6 +986,7 @@ export function CL_ParseMuzzleFlash2(): void {
       dl.color[1] = 1;
       dl.color[2] = 0;
       S_StartSound(null, ent, CHAN_WEAPON, S_RegisterSound("flyer/flyatck3.wav"), 1, ATTN_NORM, 0);
+      CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_BLAST, 0, 8.0 * mz2_scale);
       break;
 
     case MZ2_MEDIC_BLASTER_1:
@@ -943,6 +994,7 @@ export function CL_ParseMuzzleFlash2(): void {
       dl.color[1] = 1;
       dl.color[2] = 0;
       S_StartSound(null, ent, CHAN_WEAPON, S_RegisterSound("medic/medatck1.wav"), 1, ATTN_NORM, 0);
+      CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_BLAST, 0, 8.0 * mz2_scale);
       break;
 
     case MZ2_HOVER_BLASTER_1:
@@ -950,6 +1002,7 @@ export function CL_ParseMuzzleFlash2(): void {
       dl.color[1] = 1;
       dl.color[2] = 0;
       S_StartSound(null, ent, CHAN_WEAPON, S_RegisterSound("hover/hovatck1.wav"), 1, ATTN_NORM, 0);
+      CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_BLAST, 0, 8.0 * mz2_scale);
       break;
 
     case MZ2_FLOAT_BLASTER_1:
@@ -957,6 +1010,7 @@ export function CL_ParseMuzzleFlash2(): void {
       dl.color[1] = 1;
       dl.color[2] = 0;
       S_StartSound(null, ent, CHAN_WEAPON, S_RegisterSound("floater/fltatck1.wav"), 1, ATTN_NORM, 0);
+      CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_BLAST, 0, 8.0 * mz2_scale);
       break;
 
     case MZ2_SOLDIER_SHOTGUN_1:
@@ -972,6 +1026,7 @@ export function CL_ParseMuzzleFlash2(): void {
       dl.color[2] = 0;
       CL_SmokeAndFlash(origin);
       S_StartSound(null, ent, CHAN_WEAPON, S_RegisterSound("soldier/solatck1.wav"), 1, ATTN_NORM, 0);
+      CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_SHOTG, 0, 17.0 * mz2_scale);
       break;
 
     case MZ2_TANK_BLASTER_1:
@@ -981,6 +1036,7 @@ export function CL_ParseMuzzleFlash2(): void {
       dl.color[1] = 1;
       dl.color[2] = 0;
       S_StartSound(null, ent, CHAN_WEAPON, S_RegisterSound("tank/tnkatck3.wav"), 1, ATTN_NORM, 0);
+      CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_BLAST, 0, 24.0 * mz2_scale);
       break;
 
     case MZ2_TANK_MACHINEGUN_1:
@@ -1016,6 +1072,7 @@ export function CL_ParseMuzzleFlash2(): void {
         ATTN_NORM,
         0,
       );
+      CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_MACHN, 0, 20.0 * mz2_scale);
       break;
 
     case MZ2_CHICK_ROCKET_1:
@@ -1024,6 +1081,7 @@ export function CL_ParseMuzzleFlash2(): void {
       dl.color[1] = 0.5;
       dl.color[2] = 0.2;
       S_StartSound(null, ent, CHAN_WEAPON, S_RegisterSound("chick/chkatck2.wav"), 1, ATTN_NORM, 0);
+      CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_ROCKET, 0, 16.0 * mz2_scale);
       break;
 
     case MZ2_TANK_ROCKET_1:
@@ -1033,6 +1091,7 @@ export function CL_ParseMuzzleFlash2(): void {
       dl.color[1] = 0.5;
       dl.color[2] = 0.2;
       S_StartSound(null, ent, CHAN_WEAPON, S_RegisterSound("tank/tnkatck1.wav"), 1, ATTN_NORM, 0);
+      CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_ROCKET, 0, 28.0 * mz2_scale);
       break;
 
     case MZ2_SUPERTANK_ROCKET_1:
@@ -1047,6 +1106,7 @@ export function CL_ParseMuzzleFlash2(): void {
       dl.color[1] = 0.5;
       dl.color[2] = 0.2;
       S_StartSound(null, ent, CHAN_WEAPON, S_RegisterSound("tank/rocket.wav"), 1, ATTN_NORM, 0);
+      CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_ROCKET, 0, 28.0 * mz2_scale);
       break;
 
     case MZ2_GUNNER_GRENADE_1:
@@ -1057,6 +1117,7 @@ export function CL_ParseMuzzleFlash2(): void {
       dl.color[1] = 0.5;
       dl.color[2] = 0;
       S_StartSound(null, ent, CHAN_WEAPON, S_RegisterSound("gunner/gunatck3.wav"), 1, ATTN_NORM, 0);
+      CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_LAUNCH, 0, 18.0 * mz2_scale);
       break;
 
     case MZ2_GLADIATOR_RAILGUN_1:
@@ -1067,6 +1128,7 @@ export function CL_ParseMuzzleFlash2(): void {
       dl.color[0] = 0.5;
       dl.color[1] = 0.5;
       dl.color[2] = 1.0;
+      CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_RAIL, 0, 32.0 * mz2_scale);
       break;
 
     // --- Xian's shit starts ---
@@ -1074,6 +1136,7 @@ export function CL_ParseMuzzleFlash2(): void {
       dl.color[0] = 0.5;
       dl.color[1] = 1;
       dl.color[2] = 0.5;
+      CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_BFG, 0, 64.0 * mz2_scale);
       break;
 
     case MZ2_MAKRON_BLASTER_1:
@@ -1097,6 +1160,7 @@ export function CL_ParseMuzzleFlash2(): void {
       dl.color[1] = 1;
       dl.color[2] = 0;
       S_StartSound(null, ent, CHAN_WEAPON, S_RegisterSound("makron/blaster.wav"), 1, ATTN_NORM, 0);
+      CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_BLAST, 0, 22.0 * mz2_scale);
       break;
 
     case MZ2_JORG_MACHINEGUN_L1:
@@ -1111,6 +1175,7 @@ export function CL_ParseMuzzleFlash2(): void {
       CL_ParticleEffect(origin, vec3_origin, 0, 40);
       CL_SmokeAndFlash(origin);
       S_StartSound(null, ent, CHAN_WEAPON, S_RegisterSound("boss3/xfire.wav"), 1, ATTN_NORM, 0);
+      CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_MACHN, 0, 32.0 * mz2_scale);
       break;
 
     case MZ2_JORG_MACHINEGUN_R1:
@@ -1124,12 +1189,14 @@ export function CL_ParseMuzzleFlash2(): void {
       dl.color[2] = 0;
       CL_ParticleEffect(origin, vec3_origin, 0, 40);
       CL_SmokeAndFlash(origin);
+      CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_MACHN, 0, 32.0 * mz2_scale);
       break;
 
     case MZ2_JORG_BFG_1:
       dl.color[0] = 0.5;
       dl.color[1] = 1;
       dl.color[2] = 0.5;
+      CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_BFG, 0, 64.0 * mz2_scale);
       break;
 
     case MZ2_BOSS2_MACHINEGUN_R1:
@@ -1139,12 +1206,20 @@ export function CL_ParseMuzzleFlash2(): void {
     case MZ2_BOSS2_MACHINEGUN_R5:
     case MZ2_CARRIER_MACHINEGUN_R1: // PMM
     case MZ2_CARRIER_MACHINEGUN_R2: // PMM
-      dl.color[0] = 1;
-      dl.color[1] = 1;
-      dl.color[2] = 0;
+      // q2repro effects.c:780-788: same extended/kex re-theme as the L-side
+      // group above, keyed on BOSS2_MACHINEGUN_R2 instead of _L2.
+      if (cls.csr.extended && flash_number === MZ2_BOSS2_MACHINEGUN_R2) {
+        S_StartSound(null, ent, CHAN_WEAPON, S_RegisterSound("flyer/flyatck3.wav"), 1, ATTN_NONE, 0);
+        CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_BLAST, 0, 12.0 * mz2_scale);
+      } else {
+        dl.color[0] = 1;
+        dl.color[1] = 1;
+        dl.color[2] = 0;
 
-      CL_ParticleEffect(origin, vec3_origin, 0, 40);
-      CL_SmokeAndFlash(origin);
+        CL_ParticleEffect(origin, vec3_origin, 0, 40);
+        CL_SmokeAndFlash(origin);
+        CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_MACHN, 0, 32.0 * mz2_scale);
+      }
       break;
 
     // ======
@@ -1192,6 +1267,7 @@ export function CL_ParseMuzzleFlash2(): void {
       dl.color[1] = 1;
       dl.color[2] = 0;
       S_StartSound(null, ent, CHAN_WEAPON, S_RegisterSound("tank/tnkatck3.wav"), 1, ATTN_NORM, 0);
+      CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_BLAST, 2, 22.0 * mz2_scale);
       break;
 
     case MZ2_WIDOW_DISRUPTOR:
@@ -1199,6 +1275,7 @@ export function CL_ParseMuzzleFlash2(): void {
       dl.color[1] = -1;
       dl.color[2] = -1;
       S_StartSound(null, ent, CHAN_WEAPON, S_RegisterSound("weapons/disint2.wav"), 1, ATTN_NORM, 0);
+      CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_DIST, 0, 32.0 * mz2_scale);
       break;
 
     case MZ2_WIDOW_PLASMABEAM:
@@ -1223,6 +1300,7 @@ export function CL_ParseMuzzleFlash2(): void {
       dl.color[1] = 1;
       dl.color[2] = 0;
       dl.die = cl.time + 200;
+      CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_BEAMER, 0, 32.0 * mz2_scale);
       break;
     // ROGUE
     // ======
@@ -2248,8 +2326,24 @@ export function CL_EntityEvent(ent: EntityStateT): void {
       CL_TeleportParticles(ent.origin);
       break;
     case EntityEventT.EV_FOOTSTEP:
+      // q2repro entities.c:255-257 -- material-based footstep system
+      // (CL_PlayFootstepSfx, cl_tent.ts) replaces the classic fixed
+      // 4-sound cl_sfx_footsteps array this case used to read from.
       if (clCvars.cl_footsteps && clCvars.cl_footsteps.value) {
-        S_StartSound(null, ent.number, CHAN_BODY, cl_sfx_footsteps[rand() & 3], 1, ATTN_NORM, 0);
+        CL_PlayFootstepSfx(-1, ent.number, 1.0, ATTN_NORM);
+      }
+      break;
+    // KEX (q2repro entities.c:259-266) -- material-based footstep system
+    // additions, both gated on the extended/kex protocol family since a
+    // classic/legacy server never emits these event values.
+    case EntityEventT.EV_OTHER_FOOTSTEP:
+      if (cls.csr.extended && clCvars.cl_footsteps && clCvars.cl_footsteps.value) {
+        CL_PlayFootstepSfx(-1, ent.number, 0.5, ATTN_IDLE);
+      }
+      break;
+    case EntityEventT.EV_LADDER_STEP:
+      if (cls.csr.extended && clCvars.cl_footsteps && clCvars.cl_footsteps.value) {
+        CL_PlayFootstepSfx(FOOTSTEP_ID_LADDER, ent.number, 0.5, ATTN_IDLE);
       }
       break;
     case EntityEventT.EV_FALLSHORT:

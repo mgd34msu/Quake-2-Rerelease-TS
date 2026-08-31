@@ -423,6 +423,10 @@ export const RF_SHELL_RED = 1024;
 export const RF_SHELL_GREEN = 2048;
 export const RF_SHELL_BLUE = 4096;
 //ROGUE
+// [Paril-KEX] q2repro inc/shared/shared.h:1223 (`BIT(13), used by YQ2`) --
+// CL_AddMuzzleFX (cl_tent.ts) sets this on the rerelease's muzzle-flash
+// model explosions.
+export const RF_NOSHADOW = 8192;
 export const RF_IR_VISIBLE = 0x00008000; // 32768
 export const RF_SHELL_DOUBLE = 0x00010000; // 65536
 export const RF_SHELL_HALF_DAM = 0x00020000;
@@ -769,6 +773,14 @@ export const CHAN_WEAPON = 1;
 export const CHAN_VOICE = 2;
 export const CHAN_ITEM = 3;
 export const CHAN_BODY = 4;
+// [Paril-KEX] q2repro inc/shared/shared.h:1405-1413 -- three more base
+// channels added alongside the material-based footstep system (CHAN_AUX is
+// unused by anything this port ports yet; CHAN_FOOTSTEP drives
+// CL_PlayFootstepSfx in cl_tent.ts; CHAN_AUX3 was previously a literal `7`
+// in cl_fx.ts's CL_ParseMuzzleFlash MZ_RAILGUN case pending this addition).
+export const CHAN_AUX = 5;
+export const CHAN_FOOTSTEP = 6;
+export const CHAN_AUX3 = 7;
 // modifier flags
 export const CHAN_NO_PHS_ADD = 8; // send to all clients, not just ones in PHS (ATTN 0 will also do this)
 export const CHAN_RELIABLE = 16; // send by reliable message, not datagram
@@ -898,6 +910,12 @@ export enum EntityEventT {
   EV_FALLFAR,
   EV_PLAYER_TELEPORT,
   EV_OTHER_TELEPORT,
+  // KEX (q2repro inc/shared/shared.h:1711-1714) -- material-based footstep
+  // system additions: a non-viewing entity's own footstep (played quieter,
+  // ATTN_IDLE, gated on the extended/kex protocol family) and the
+  // dedicated ladder-climb step sound.
+  EV_OTHER_FOOTSTEP,
+  EV_LADDER_STEP,
 }
 
 // entity_state_t is the information conveyed from the server in an update

@@ -21,24 +21,30 @@ import {
   SPLASH_SPARKS,
   RF_TRANSLUCENT,
   RF_FULLBRIGHT,
+  RF_NOSHADOW,
   RF_BEAM,
   CHAN_WEAPON,
+  CHAN_FOOTSTEP,
   ATTN_NORM,
   ATTN_NONE,
   ATTN_IDLE,
   ATTN_STATIC,
-  Com_sprintf,
   ERR_DROP,
+  Q_stricmp,
+  MASK_SOLID,
+  MASK_WATER,
   type CvarT,
 } from "../shared/q_shared";
 import { Com_Printf } from "../qcommon/common";
 import { ComError, UPDATE_MASK } from "../qcommon/qcommon";
 import { MSG_ReadByte, MSG_ReadShort, MSG_ReadLong, MSG_ReadPos, MSG_ReadDir } from "../qcommon/sizebuf";
-import { cl, net_message, re, ClSustainT, MAX_SUSTAINS } from "./client";
+import { cl, net_message, re, cl_entities, clCvars, ClSustainT, MAX_SUSTAINS } from "./client";
 import { type ModelS, EntityT, MAX_ENTITIES } from "./ref";
 import { V_AddEntity, V_AddLight } from "./cl_view";
 import { S_StartSound, S_RegisterSound } from "./snd_dma";
 import type { SfxT } from "./snd_loc";
+import { CM_BoxTrace, CM_NumTexinfo, CM_TexinfoMaterial } from "../qcommon/cmodel";
+import { FS_FOpenFile, FS_FCloseFile } from "../qcommon/files";
 import {
   CL_Flashlight,
   CL_ColorFlash,
@@ -189,7 +195,14 @@ export let cl_sfx_grenexp: SfxT | null = null;
 export let cl_sfx_watrexp: SfxT | null = null;
 // RAFAEL
 export let cl_sfx_plasexp: SfxT | null = null;
-export const cl_sfx_footsteps: (SfxT | null)[] = fixedLength("cl_sfx_footsteps", 4, [null, null, null, null]);
+// [Paril-KEX] q2repro's tent.c drops the classic 4-slot cl_sfx_footsteps
+// array entirely -- CL_RegisterTEntSounds (below) no longer registers
+// "player/step%i.wav" directly; the material-based footstep system
+// (CL_RegisterFootsteps, further down) subsumes it, registering the same
+// "#sound/player/step%i.wav" set (up to MAX_FOOTSTEP_SFX, retail ships 4)
+// under FOOTSTEP_ID_DEFAULT instead. EV_FOOTSTEP (cl_fx.ts's
+// CL_EntityEvent) now resolves through CL_PlayFootstepSfx, matching
+// entities.c:255-257 exactly.
 
 export let cl_mod_explode: ModelS | null = null;
 export let cl_mod_smoke: ModelS | null = null;
@@ -212,12 +225,291 @@ export let cl_mod_monster_heatbeam: ModelS | null = null;
 export let cl_mod_explo4_big: ModelS | null = null;
 // ROGUE
 
+// [Paril-KEX] q2repro src/client/client.h:956-970's cl_muzzlefx_t -- which
+// retail models/weapons/v_*/flash/tris.md2 model a given weapon's
+// muzzle-flash uses. Order matches muzzlenames below exactly (both are
+// read by index).
+export enum MuzzlefxT {
+  MFLASH_MACHN,
+  MFLASH_SHOTG2,
+  MFLASH_SHOTG,
+  MFLASH_ROCKET,
+  MFLASH_RAIL,
+  MFLASH_LAUNCH,
+  MFLASH_ETF_RIFLE,
+  MFLASH_DIST,
+  MFLASH_BOOMER,
+  MFLASH_BLAST, // 0 = orange, 1 = blue, 2 = green
+  MFLASH_BFG,
+  MFLASH_BEAMER,
+  MFLASH_TOTAL,
+}
+const {
+  MFLASH_MACHN,
+  MFLASH_SHOTG2,
+  MFLASH_SHOTG,
+  MFLASH_ROCKET,
+  MFLASH_RAIL,
+  MFLASH_LAUNCH,
+  MFLASH_ETF_RIFLE,
+  MFLASH_DIST,
+  MFLASH_BOOMER,
+  MFLASH_BLAST,
+  MFLASH_BFG,
+  MFLASH_BEAMER,
+  MFLASH_TOTAL,
+} = MuzzlefxT;
+
+// q2repro tent.c:278-291's muzzlenames -- directory component of
+// "models/weapons/%s/flash/tris.md2", indexed by MuzzlefxT.
+export const muzzlenames: readonly string[] = [
+  "v_machn",
+  "v_shotg2",
+  "v_shotg",
+  "v_rocket",
+  "v_rail",
+  "v_launch",
+  "v_etf_rifle",
+  "v_dist",
+  "v_boomer",
+  "v_blast",
+  "v_bfg",
+  "v_beamer",
+];
+
+export const cl_mod_muzzles: (ModelS | null)[] = new Array(MFLASH_TOTAL).fill(null);
+
+// [Paril-KEX] q2repro tent.c:38-73's material-based footstep system.
+// FOOTSTEP_ID_DEFAULT/LADDER are reserved step_ids that never come from a
+// BSP material (inc/common/bsp.h:40-44); every other id is allocated
+// per-unique-material by CL_RegisterFootsteps below.
+export const FOOTSTEP_ID_DEFAULT = 0;
+export const FOOTSTEP_ID_LADDER = 1;
+export const FOOTSTEP_RESERVED_COUNT = 2;
+const MAX_FOOTSTEP_SFX = 16;
+// q_shared.h's STEPSIZE -- redeclared locally, matching this codebase's
+// existing per-module convention (see e.g. qcommon/pmove.ts, game/m_move.ts).
+const STEPSIZE = 18;
+
+class FootstepSfxT {
+  sfx: (SfxT | null)[] = new Array(MAX_FOOTSTEP_SFX).fill(null);
+  num_sfx = 0;
+}
+
+let cl_footstep_sfx: FootstepSfxT[] = [];
+let cl_last_footstep: SfxT | null = null;
+
 // `extern cvar_t *hand;` -- a client-side "which hand holds the weapon"
 // cvar. Not registered anywhere in this port yet (only the game-side
 // userinfo key of the same name exists, in src/game/p_client.ts, a
 // different value entirely). Declared locally as a not-yet-registered
 // extern, matching cl_fx.ts's `vidref_val` treatment -- reported deviation.
 const hand: CvarT | null = null;
+
+// material string -> allocated step_id, built fresh by CL_RegisterFootsteps
+// every map load. Not exported: CL_FindFootstepSurface below is the only
+// reader.
+let cl_material_step_ids: Map<string, number> = new Map();
+
+// resolveMaterialStepId is the read path only (used by
+// CL_FindFootstepSurface); it never allocates. CL_RegisterFootsteps below
+// does the one-time allocation pass over every map texinfo material.
+function resolveMaterialStepId(material: string): number {
+  if (!material || Q_stricmp(material, "default") === 0) return FOOTSTEP_ID_DEFAULT;
+  if (Q_stricmp(material, "ladder") === 0) return FOOTSTEP_ID_LADDER;
+  return cl_material_step_ids.get(material.toLowerCase()) ?? FOOTSTEP_ID_DEFAULT;
+}
+
+// Test-support accessors, same rationale as cmodel.ts's CM_NumTexinfo/
+// CM_TexinfoMaterial (added purely so tests can assert on
+// CL_RegisterFootsteps' result without reaching into module-private
+// state): no production caller needs these, only test/cl_tent_footsteps.
+export function CL_MaterialStepId(material: string): number {
+  return resolveMaterialStepId(material);
+}
+export function CL_NumFootstepMaterials(): number {
+  return cl_footstep_sfx.length;
+}
+export function CL_FootstepSfxCount(stepId: number): number {
+  return cl_footstep_sfx[stepId]?.num_sfx ?? 0;
+}
+
+/*
+=================
+CL_FindFootstepSurface
+
+[Paril-KEX] q2repro tent.c:82-148. Traces downward from the entity's
+lerped origin to find which BSP surface (and therefore which material) is
+underfoot, returning the step_id CL_RegisterFootsteps assigned it.
+
+DEVIATION: q2repro's centity_t carries per-entity vec3_t mins/maxs
+(decoded from the wire's packed solid bounds by entities.c's
+parse_entity_update), used here as the trace's box half-extents so the
+sweep covers the entity's own X/Y footprint. This port's CentityT
+(client.ts) has no mins/maxs field -- decoding packed solid bounds into
+per-entity state is entity-delta-parsing plumbing (cl_ents.ts, out of this
+unit's territory), a real, cited gap. This trace therefore always uses a
+zero-size (point) box and the C's "cover every monster" -66 fallback
+offset, which is EXACTLY what the C itself does for any entity whose
+solid isn't a real bbox (VectorClear(ent->mins); VectorClear(ent->maxs);
+trace_end[2] -= 66) -- same code path, same result, just taken
+unconditionally instead of solid-gated. The only behavioral difference
+from a full port is at material BOUNDARIES under a wide entity, where a
+point trace can resolve a different (adjacent) material than a box sweep
+would; the common case (uniform material underfoot) is unaffected.
+=================
+*/
+function CL_FindFootstepSurface(entnum: number): number {
+  const footstep_id_default = FOOTSTEP_ID_DEFAULT;
+  const cent = cl_entities[entnum];
+
+  // skip if no materials loaded
+  if (cl_footstep_sfx.length <= FOOTSTEP_RESERVED_COUNT) return footstep_id_default;
+
+  // not in our frame so don't bother doing calculations
+  if (cent.serverframe !== cl.frame.serverframe) return footstep_id_default;
+
+  // allow custom footsteps to be disabled
+  if (clCvars.cl_footsteps && clCvars.cl_footsteps.value >= 2) return footstep_id_default;
+
+  const trace_mins = vec3(0, 0, 0);
+  const trace_maxs = vec3(0, 0, 0);
+
+  const trace_start = vec3();
+  trace_start[0] = cent.prev.origin[0] + (cent.current.origin[0] - cent.prev.origin[0]) * cl.lerpfrac;
+  trace_start[1] = cent.prev.origin[1] + (cent.current.origin[1] - cent.prev.origin[1]) * cl.lerpfrac;
+  trace_start[2] = cent.prev.origin[2] + (cent.current.origin[2] - cent.prev.origin[2]) * cl.lerpfrac;
+  trace_start[2] += 1;
+
+  const trace_end = vec3();
+  VectorCopy(trace_start, trace_end);
+  trace_end[2] -= STEPSIZE / 2;
+  // DEVIATION (see header comment): no per-entity mins/maxs to branch on,
+  // so this always takes the C's non-bbox "cover every monster" fallback.
+  trace_end[2] -= 66;
+
+  let tr = CM_BoxTrace(trace_start, trace_end, trace_mins, trace_maxs, 0, MASK_SOLID);
+
+  if (tr.fraction === 1.0) return footstep_id_default;
+
+  let footstep_id = footstep_id_default;
+  if (tr.surface) {
+    footstep_id = resolveMaterialStepId(tr.surface.material);
+
+    const new_end = vec3();
+    VectorCopy(tr.endpos, new_end);
+    new_end[2] += 1;
+
+    tr = CM_BoxTrace(trace_start, new_end, trace_mins, trace_maxs, 0, MASK_SOLID | MASK_WATER);
+    if (tr.surface) footstep_id = resolveMaterialStepId(tr.surface.material);
+  }
+
+  return footstep_id;
+}
+
+/*
+=================
+CL_PlayFootstepSfx
+
+[Paril-KEX] q2repro tent.c:152-183.
+=================
+*/
+export function CL_PlayFootstepSfx(stepIdOrNegativeOne: number, entnum: number, volume: number, attenuation: number): void {
+  if (cl_footstep_sfx.length === 0) return; // should not really happen
+
+  const step_id = stepIdOrNegativeOne === -1 ? CL_FindFootstepSurface(entnum) : stepIdOrNegativeOne;
+
+  let sfx = cl_footstep_sfx[step_id];
+  if (!sfx || !sfx.num_sfx) sfx = cl_footstep_sfx[FOOTSTEP_ID_DEFAULT] ?? null;
+  if (!sfx || !sfx.num_sfx) return; // no footsteps, not even fallbacks
+
+  // pick a random footstep sound, but avoid playing the same one twice in a row
+  let sfx_num = Math.floor(clFxMod().rand() % sfx.num_sfx);
+  let footstep_sfx = sfx.sfx[sfx_num];
+  if (footstep_sfx === cl_last_footstep) {
+    sfx_num = (sfx_num + 1) % sfx.num_sfx;
+    footstep_sfx = sfx.sfx[sfx_num];
+  }
+  if (!footstep_sfx) return;
+
+  S_StartSound(null, entnum, CHAN_FOOTSTEP, footstep_sfx, volume, attenuation, 0);
+  cl_last_footstep = footstep_sfx;
+}
+
+/*
+=================
+CL_RegisterFootstep
+
+[Paril-KEX] q2repro tent.c:187-210. Probes for up to MAX_FOOTSTEP_SFX
+numbered sound files ("#sound/player/steps/<material><i>.wav", or
+"#sound/player/step<i>.wav" for the default/null material), stopping at
+the first missing file, matching retail's own numbering exactly (the
+default set ships 4 files; most material sets ship 4-5).
+=================
+*/
+function CL_RegisterFootstep(sfx: FootstepSfxT, material: string | null): void {
+  let i = 0;
+  for (; i < MAX_FOOTSTEP_SFX; i++) {
+    const name = material ? `#sound/player/steps/${material}${i + 1}.wav` : `#sound/player/step${i + 1}.wav`;
+    const open = FS_FOpenFile(name.slice(1));
+    if (!open) break;
+    FS_FCloseFile(open.handle);
+    sfx.sfx[i] = S_RegisterSound(name);
+  }
+  sfx.num_sfx = i;
+}
+
+/*
+=================
+CL_RegisterFootsteps
+
+[Paril-KEX] q2repro tent.c:214-247, driven by this port's own material
+resolution (CM_TexinfoMaterial, ../qcommon/cmodel.ts's CMod_LoadMaterials
+-- see that function's header comment for why this port resolves BSP
+materials over the SERVER's collision model instead of a separate
+client-side cl.bsp) instead of a second, client-side BSP_LoadMaterials
+pass. CM_NumTexinfo() > 0 stands in for the C's `if (!cl.bsp)` check: this
+port has no separate "is a map currently loaded" flag to read, but every
+real BSP has at least one texinfo, so an empty/never-loaded state and a
+zero-texinfo state are indistinguishable in practice.
+=================
+*/
+export function CL_RegisterFootsteps(): void {
+  cl_last_footstep = null;
+  cl_footstep_sfx = [];
+  cl_material_step_ids = new Map();
+
+  const numtexinfo = CM_NumTexinfo();
+  if (numtexinfo <= 0) return;
+
+  // reserved footsteps
+  const defaultSfx = new FootstepSfxT();
+  const ladderSfx = new FootstepSfxT();
+  cl_footstep_sfx[FOOTSTEP_ID_DEFAULT] = defaultSfx;
+  cl_footstep_sfx[FOOTSTEP_ID_LADDER] = ladderSfx;
+  CL_RegisterFootstep(defaultSfx, null);
+  CL_RegisterFootstep(ladderSfx, "ladder");
+
+  // load the rest -- one CL_RegisterFootstep call per unique material
+  // string this map's texinfo actually uses (bsp.c's own backward-scan
+  // "already allocated?" check, expressed as a map lookup instead of an
+  // O(numtexinfo^2) scan; same final id assignment either way, since both
+  // approaches key strictly off the material STRING).
+  for (let i = 0; i < numtexinfo; i++) {
+    const material = CM_TexinfoMaterial(i);
+    if (!material || Q_stricmp(material, "default") === 0) continue;
+    if (Q_stricmp(material, "ladder") === 0) continue;
+
+    const key = material.toLowerCase();
+    if (cl_material_step_ids.has(key)) continue;
+
+    const step_id = cl_footstep_sfx.length;
+    cl_material_step_ids.set(key, step_id);
+    const sfx = new FootstepSfxT();
+    cl_footstep_sfx[step_id] = sfx;
+    CL_RegisterFootstep(sfx, material);
+  }
+}
 
 /*
 =================
@@ -243,10 +535,7 @@ export function CL_RegisterTEntSounds(): void {
   S_RegisterSound("player/fall2.wav");
   S_RegisterSound("player/fall1.wav");
 
-  for (let i = 0; i < 4; i++) {
-    const name = Com_sprintf("player/step%i.wav", i + 1);
-    cl_sfx_footsteps[i] = S_RegisterSound(name);
-  }
+  CL_RegisterFootsteps();
 
   // PGM
   cl_sfx_lightning = S_RegisterSound("weapons/tesla.wav");
@@ -301,6 +590,14 @@ export function CL_RegisterTEntModels(): void {
   cl_mod_heatbeam = re.RegisterModel("models/proj/beam/tris.md2");
   cl_mod_monster_heatbeam = re.RegisterModel("models/proj/widowbeam/tris.md2");
   // ROGUE
+
+  // [Paril-KEX] q2repro tent.c:317-318 -- retail's real muzzle-flash
+  // models (models/weapons/v_*/flash/tris.md2), one per MuzzlefxT entry.
+  // CL_AddMuzzleFX/CL_AddWeaponMuzzleFX below render these instead of the
+  // classic dlight-only muzzle flash.
+  for (let i = 0; i < MFLASH_TOTAL; i++) {
+    cl_mod_muzzles[i] = re.RegisterModel(`models/weapons/${muzzlenames[i]}/flash/tris.md2`);
+  }
 }
 
 /*
@@ -394,6 +691,48 @@ function CL_AllocExplosion(): ExplosionT {
   ex.start = 0;
   ex.baseframe = 0;
   return ex;
+}
+
+/*
+=================
+CL_AddMuzzleFX
+
+[Paril-KEX] q2repro tent.c:450-474's CL_AddMuzzleFX -- renders a monster's
+(or other non-viewing entity's) real muzzle-flash MODEL (retail's
+models/weapons/v_<name>/flash/tris.md2) as a short-lived ex_mflash explosion,
+alongside the existing dlight+sound CL_ParseMuzzleFlash2 already does in
+cl_fx.ts. `skin` selects among a flash model's skins (only MFLASH_BLAST
+uses more than skin 0: 0=orange, 1=blue, 2=green).
+
+DEVIATION: q2repro's entity_t carries a per-entity vec3_t scale
+(VectorSet(ex->ent.scale, scale, scale, scale)) that this port's EntityT
+(ref.ts) has no field for -- ref_gl/ is not ported (PORTING.md), so no
+renderer here consumes entity scale at all yet, and V_AddEntity's
+field-by-field copy (cl_view.ts, out of this unit's territory) would need
+its own update even if the field existed. The `scale` parameter is still
+threaded through and used to size the position offset (VectorMA) exactly
+like the C, matching every OTHER effect of scale; only the model's visual
+size is unaffected until a renderer + V_AddEntity scale field lands.
+=================
+*/
+export function CL_AddMuzzleFX(origin: Vec3, angles: Vec3, fx: MuzzlefxT, skin: number, scale: number): void {
+  if (!clCvars.cl_muzzleflashes || !clCvars.cl_muzzleflashes.value) return;
+
+  if (fx >= cl_mod_muzzles.length) throw new ComError(ERR_DROP, "CL_AddMuzzleFX: bad fx");
+
+  const model = cl_mod_muzzles[fx];
+  if (!model) return;
+
+  const ex = CL_AllocExplosion();
+  VectorCopy(origin, ex.ent.origin);
+  VectorCopy(angles, ex.ent.angles);
+  ex.type = ExptypeT.ex_mflash;
+  ex.ent.flags = RF_TRANSLUCENT | RF_NOSHADOW | RF_FULLBRIGHT;
+  ex.ent.alpha = 1.0;
+  ex.start = cl.frame.servertime - 100;
+  ex.ent.model = model;
+  ex.ent.skinnum = skin;
+  if (fx !== MFLASH_BOOMER) ex.ent.angles[2] = clFxMod().rand() % 360;
 }
 
 /*
@@ -1525,7 +1864,13 @@ function CL_AddExplosions(): void {
 
     switch (ex.type) {
       case ExptypeT.ex_mflash:
-        if (f >= ex.frames - 1) ex.type = ExptypeT.ex_free;
+        // [Paril-KEX] q2repro tent.c:542-548 -- time-based (50ms), not
+        // frame-based like every other case here, and DOES render (this
+        // case was vestigial/unreachable in vanilla -- see cl_tent.c:1617
+        // in the classic reference source -- until CL_AddMuzzleFX above
+        // started allocating ex_mflash explosions for real).
+        if (cl.time - ex.start > 50) ex.type = ExptypeT.ex_free;
+        else V_AddEntity(ent);
         break;
       case ExptypeT.ex_misc:
         if (f >= ex.frames - 1) {

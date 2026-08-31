@@ -603,6 +603,11 @@ export const clCvars: {
   cl_add_entities: CvarT | null;
   cl_predict: CvarT | null;
   cl_footsteps: CvarT | null;
+  // q2repro src/client/tent.c:1735: `cl_muzzleflashes = Cvar_Get(...)` --
+  // gates CL_AddMuzzleFX/CL_AddWeaponMuzzleFX (cl_tent.ts), the rerelease's
+  // real muzzle-flash MODEL rendering. Was registered bare (return value
+  // discarded) in cl_main.ts pending this consumer; now wired.
+  cl_muzzleflashes: CvarT | null;
   cl_noskins: CvarT | null;
   cl_autoskins: CvarT | null;
   cl_upspeed: CvarT | null;
@@ -649,6 +654,7 @@ export const clCvars: {
   cl_add_entities: null,
   cl_predict: null,
   cl_footsteps: null,
+  cl_muzzleflashes: null,
   cl_noskins: null,
   cl_autoskins: null,
   cl_upspeed: null,

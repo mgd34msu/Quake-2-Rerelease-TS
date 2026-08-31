@@ -1581,8 +1581,11 @@ export function CL_InitLocal(): void {
   // existing vanilla particle-spiral rail effect -- q2repro's
   // type/color/width-configurable polygon-beam rail renderer these cvars
   // drive is a different rendering model entirely, not a drop-in parameter
-  // substitution, so all of the below are registered, consumer unported.
-  Cvar_Get("cl_muzzleflashes", "1", 0); // tent.c:1735
+  // substitution, so all but cl_muzzleflashes below are registered,
+  // consumer unported. cl_muzzleflashes (tent.c:1735) now has a real
+  // consumer -- CL_AddMuzzleFX/CL_AddWeaponMuzzleFX in cl_tent.ts -- so its
+  // return value is captured into clCvars like cl_footsteps above.
+  clCvars.cl_muzzleflashes = Cvar_Get("cl_muzzleflashes", "1", 0); // tent.c:1735
   Cvar_Get("cl_railtrail_type", "0", 0); // tent.c:1736
   Cvar_Get("cl_railtrail_time", "1.0", 0); // tent.c:1737
   Cvar_Get("cl_railcore_color", "red", 0); // tent.c:1740
