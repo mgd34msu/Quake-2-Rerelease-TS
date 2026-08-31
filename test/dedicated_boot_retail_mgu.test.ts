@@ -28,6 +28,8 @@ import { Qcommon_Init, runFrames } from "../src/main";
 import { sv, ServerStateT } from "../src/server/server";
 import { SV_Shutdown } from "../src/server/sv_main";
 import { geHolder } from "../src/server/sv_game";
+import { FS_TestSnapshotSearchPaths, FS_TestRestoreSearchPaths, type FsSearchPathSnapshotT } from "../src/qcommon/files";
+import { snapshotCvars, restoreCvars, type CvarSnapshotT } from "./support/cvar_snapshot";
 
 const RETAIL_BASEDIR = "/home/buzzkill/q2rets/rerelease";
 const havePak = existsSync(`${RETAIL_BASEDIR}/baseq2/pak0.pak`);
@@ -43,7 +45,33 @@ async function bootMap(mapname: string): Promise<void> {
 }
 
 describe.skipIf(!havePak)("dedicated server boot -- real retail mguhub.bsp (QBSP)", () => {
+  let fsSnapshot: FsSearchPathSnapshotT;
+  let cvarSnapshot: CvarSnapshotT;
+
   beforeAll(async () => {
+    // rule 13 (process-wide singleton leaks, closed at the source): this
+    // boot points `basedir` directly at the real retail install, so
+    // Qcommon_Init's unconditional "exec default.cfg"/"exec config.cfg"
+    // (src/main.ts, matching q2repro exactly) reads that real, machine-
+    // specific user's actual saved kex/config.cfg -- not a synthetic
+    // fixture. Any client-only cvar name no code on this (dedicated) boot
+    // path ever Cvar_Get's first ("name", "fov", "sensitivity", "hand",
+    // "rate", "crosshair", "cl_run", "freelook", "vid_ref", ...) gets
+    // created fresh by Cvar_Set2's create-on-demand path with that real
+    // user's saved value baked in as its permanent default_string --
+    // Cvar_Get's "first registration wins the default" contract means no
+    // later, correct Cvar_Get call (e.g. test/cvar_parity.test.ts's own
+    // real client boot) can ever fix it. Same leak shape as
+    // test/savegame_retail_roundtrip.test.ts's own header comment
+    // (content_root instead of basedir, identical mechanism); see
+    // test/support/cvar_snapshot.ts for the snapshot/restore recipe and
+    // why it's safe here (this boot is entirely throwaway). Also snapshot
+    // fs_searchpaths: FS_InitFilesystem's mount of the real retail basedir
+    // is never undone on its own (src/qcommon/files.ts's own header
+    // comment). Capture both before ANY mutation below.
+    fsSnapshot = FS_TestSnapshotSearchPaths();
+    cvarSnapshot = snapshotCvars();
+
     Cvar_ForceSet("basedir", RETAIL_BASEDIR);
     Cvar_Get("game", "", CVAR_LATCH | CVAR_SERVERINFO | CVAR_NOARCHIVE);
     Cvar_ForceSet("game", "kex");
@@ -60,6 +88,8 @@ describe.skipIf(!havePak)("dedicated server boot -- real retail mguhub.bsp (QBSP
   afterAll(async () => {
     SV_Shutdown("mguhub boot test finished\n", false);
     await NET_Shutdown();
+    restoreCvars(cvarSnapshot);
+    FS_TestRestoreSearchPaths(fsSnapshot);
   });
 
   test(
@@ -74,7 +104,18 @@ describe.skipIf(!havePak)("dedicated server boot -- real retail mguhub.bsp (QBSP
 });
 
 describe.skipIf(!havePak)("dedicated server boot -- real retail mgu1m1.bsp (QBSP)", () => {
+  let fsSnapshot: FsSearchPathSnapshotT;
+  let cvarSnapshot: CvarSnapshotT;
+
   beforeAll(async () => {
+    // See the mguhub describe block above (same file) for the full
+    // rationale: this boot also points `basedir` directly at the real
+    // retail install, so it must snapshot/restore both fs_searchpaths and
+    // cvar_vars independently of that block (each describe's own boot is
+    // its own leak).
+    fsSnapshot = FS_TestSnapshotSearchPaths();
+    cvarSnapshot = snapshotCvars();
+
     Cvar_ForceSet("basedir", RETAIL_BASEDIR);
     Cvar_Get("game", "", CVAR_LATCH | CVAR_SERVERINFO | CVAR_NOARCHIVE);
     Cvar_ForceSet("game", "kex");
@@ -91,6 +132,8 @@ describe.skipIf(!havePak)("dedicated server boot -- real retail mgu1m1.bsp (QBSP
   afterAll(async () => {
     SV_Shutdown("mgu1m1 boot test finished\n", false);
     await NET_Shutdown();
+    restoreCvars(cvarSnapshot);
+    FS_TestRestoreSearchPaths(fsSnapshot);
   });
 
   test(

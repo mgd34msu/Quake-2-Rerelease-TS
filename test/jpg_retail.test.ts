@@ -80,31 +80,43 @@ describe("decodeJPG -- real retail .jpg data (baseq2/pak0.pak's vault/ artwork, 
   ];
 
   for (const c of cases) {
-    test.skipIf(!havePak)(`${c.name} decodes to ${c.width}x${c.height} with plausible (non-zero variance) pixel data`, () => {
-      const bytes = extractFromPak(PAK_PATH, c.name);
-      expect(bytes).not.toBeNull();
+    test.skipIf(!havePak)(
+      `${c.name} decodes to ${c.width}x${c.height} with plausible (non-zero variance) pixel data`,
+      () => {
+        const bytes = extractFromPak(PAK_PATH, c.name);
+        expect(bytes).not.toBeNull();
 
-      const result = decodeJPG(bytes!);
-      expect(result.ok).toBe(true);
-      if (!result.ok) return;
+        const result = decodeJPG(bytes!);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
 
-      expect(result.image.width).toBe(c.width);
-      expect(result.image.height).toBe(c.height);
-      expect(result.image.pixels.length).toBe(c.width * c.height * 4);
+        expect(result.image.width).toBe(c.width);
+        expect(result.image.height).toBe(c.height);
+        expect(result.image.pixels.length).toBe(c.width * c.height * 4);
 
-      // Every alpha byte is opaque (JPEG has no alpha channel).
-      let allOpaque = true;
-      for (let i = 3; i < result.image.pixels.length; i += 4) {
-        if (result.image.pixels[i] !== 255) {
-          allOpaque = false;
-          break;
+        // Every alpha byte is opaque (JPEG has no alpha channel).
+        let allOpaque = true;
+        for (let i = 3; i < result.image.pixels.length; i += 4) {
+          if (result.image.pixels[i] !== 255) {
+            allOpaque = false;
+            break;
+          }
         }
-      }
-      expect(allOpaque).toBe(true);
+        expect(allOpaque).toBe(true);
 
-      const variance = varianceOfRedChannel(result.image.pixels, result.image.width, result.image.height);
-      expect(variance).toBeGreaterThan(0);
-    });
+        const variance = varianceOfRedChannel(result.image.pixels, result.image.width, result.image.height);
+        expect(variance).toBeGreaterThan(0);
+      },
+      // bun:test's default 5000ms per-test timeout is tight for a real JPEG
+      // decode (pak0.pak extraction + full baseline decode) once this runs
+      // deep inside the full ~2800-test suite rather than standalone --
+      // measured passing in ~2s standalone but timing out at 5000ms under
+      // full-suite CPU contention (host scheduling/GC pressure from ~195
+      // other test files, not from any shared-state leak: this file passes
+      // cleanly in isolation every time). Generous fixed budget instead of
+      // chasing a moving contention target.
+      15000,
+    );
   }
 
   test.skipIf(!havePak)(
