@@ -54,10 +54,10 @@
 //   as the C originals' fopen(name, "wb")/fopen(src, "rb") do.
 
 import { openSync, closeSync, readSync, writeSync, writeFileSync, unlinkSync, fstatSync, existsSync, readdirSync, mkdirSync } from "node:fs";
-import { homedir } from "node:os";
 import { type CvarT, CVAR_NOSET, CVAR_LATCH, CVAR_SERVERINFO, CVAR_NOARCHIVE, Q_strcasecmp } from "../shared/q_shared";
 import { Com_Error, Com_Printf, Com_DPrintf, dedicated } from "./common";
 import { ERR_FATAL, BASEDIRNAME } from "./qcommon";
+import { Sys_GetDefaultHomedir } from "../platform/sys";
 import type * as CvarModule from "./cvar";
 import type * as CmdModule from "./cmd";
 import type * as LocModule from "./loc";
@@ -165,6 +165,11 @@ export let fs_cddir: CvarT | null = null;
 // reachable no matter which basedir the client actually launched with).
 export let fs_content_root: CvarT | null = null;
 export let fs_gamedirvar: CvarT | null = null;
+// homedir <path> -- q2repro's per-user writable directory (src/common/
+// files.c, src/unix/system.c:210, src/windows/system.c:955). See
+// FS_InitFilesystem's own comment at the registration site and
+// platform/sys.ts's Sys_GetDefaultHomedir for the citations.
+export let fs_homedir: CvarT | null = null;
 
 let fs_links: FileLinkT | null = null;
 
@@ -209,6 +214,22 @@ function basedirString(): string {
   // fs_basedir is only null before FS_InitFilesystem's Cvar_Get runs; "."
   // mirrors the cvar's own default value in that window.
   return fs_basedir ? fs_basedir.string : ".";
+}
+
+function homedirValue(): string {
+  // fs_homedir is only null before FS_InitFilesystem's Cvar_Get runs, same
+  // guard shape as basedirString() above.
+  return fs_homedir ? fs_homedir.string : "";
+}
+
+// q2repro's setup_base_gamedir (src/common/files.c:3739-3747): the write
+// root is homedir when the "homedir" cvar's string is non-empty, else
+// basedir -- same home-else-base pick generalized here for FS_SetGamedir's
+// mod-directory case (q2repro's setup_game_paths, files.c:3714-3736 makes
+// the identical choice per fs_game directory rather than just BASEGAME).
+function writeRoot(): string {
+  const home = homedirValue();
+  return home.length > 0 ? home : basedirString();
 }
 
 //=============================================================================
@@ -874,7 +895,12 @@ export function FS_SetGamedir(dir: string): void {
     cmdMod().Cbuf_AddText("vid_restart\nsnd_restart\n");
   }
 
-  fs_gamedir = `${basedirString()}/${dir}`;
+  // q2repro's setup_base_gamedir/setup_game_paths pick homedir over
+  // basedir as the write root whenever "homedir" is set (files.c:3739-3747,
+  // 3714-3736); writeRoot() makes the same choice. This also covers the
+  // dir-resets-to-BASEDIRNAME/"" branch below, where no further
+  // FS_AddGameDirectory call runs afterward to override this assignment.
+  fs_gamedir = `${writeRoot()}/${dir}`;
 
   if (dir === BASEDIRNAME || dir.length === 0) {
     cvarMod().Cvar_FullSet("gamedir", "", CVAR_SERVERINFO | CVAR_NOSET);
@@ -887,6 +913,18 @@ export function FS_SetGamedir(dir: string): void {
       FS_AddGameDirectory(`${fs_cddir.string}/${dir}`);
     }
     FS_AddGameDirectory(`${basedirString()}/${dir}`);
+
+    // home paths override system paths (q2repro src/common/files.c:3724-
+    // 3729 setup_game_paths): mounted last, after the basedir mount above,
+    // so FS_AddGameDirectory's head-prepend makes it win both search-order
+    // priority (checked first on read) and fs_gamedir (the write path) --
+    // unconditionally, even if the directory doesn't exist on disk yet
+    // (matches setup_game_paths' add_game_dir(..., skip_if_not_exist=false)
+    // call for the home case; it gets created lazily on first write via
+    // FS_CreatePath).
+    if (homedirValue().length > 0) {
+      FS_AddGameDirectory(`${homedirValue()}/${dir}`);
+    }
   }
 }
 
@@ -1110,17 +1148,25 @@ export function FS_InitFilesystem(): void {
   cvar.Cvar_Get("fs_fuzz_factor", "0", 0);
   cvar.Cvar_Get("fs_fuzz_filter", "*", 0);
 
-  // q2repro src/unix/system.c:210-211 (Sys_Init). "homedir" is the C
-  // engine's per-user config/save directory (getpwuid-derived, distinct
-  // from "basedir" below); this port has no separate per-user data
-  // directory concept (everything lives under basedir), so registered,
-  // consumer unported, defaulting to the actual OS home directory rather
-  // than a placeholder. "libdir" is a fixed install-prefix path baked in at
-  // compile time by q2repro's meson build (LIBDIR); this port has no
-  // install prefix (it always runs from the repo checkout via bun), so
-  // there is no real value to assign -- registered empty, consumer
+  // homedir <path>
+  // q2repro src/unix/system.c:210-211 / src/windows/system.c:955
+  // (Sys_Init). The C engine's per-user writable directory: when non-empty,
+  // it shadows basedir for reads and becomes the write root (configs,
+  // saves, screenshots, demos, downloads) instead of the game install
+  // tree -- see setup_base_paths/setup_game_paths (files.c:3697-3736) and
+  // open_file_write's FS_PATH_BASE branch (files.c:903-910). Default value
+  // is platform/sys.ts's Sys_GetDefaultHomedir(), which resolves to "" for this
+  // port's deployment shape (see that function's header comment for the
+  // per-platform citations) -- an empty string here means every mount/
+  // write-path decision below that checks homedirValue().length is a
+  // no-op, so today's basedir-only behavior is preserved exactly until
+  // something explicitly sets this cvar (Cvar_ForceSet, since it's
+  // CVAR_NOSET like the original). "libdir" is a fixed install-prefix path
+  // baked in at compile time by q2repro's meson build (LIBDIR); this port
+  // has no install prefix (it always runs from the repo checkout via bun),
+  // so there is no real value to assign -- registered empty, consumer
   // unported.
-  cvar.Cvar_Get("homedir", homedir(), CVAR_NOSET);
+  fs_homedir = cvar.Cvar_Get("homedir", Sys_GetDefaultHomedir(), CVAR_NOSET);
   cvar.Cvar_Get("libdir", "", CVAR_NOSET);
 
   // basedir <path>
@@ -1140,8 +1186,8 @@ export function FS_InitFilesystem(): void {
   // added next so an actual baseq2/pak0.pak entry of the same name always
   // wins, matching q2repro's setup_base_paths call order. fs_cddir has no
   // KPF counterpart mounted here: q2repro's only other add_game_kpf call
-  // site is the equivalent of a home directory, a search-path root this
-  // port doesn't have (see FS_InitFilesystem's basedir/cddir cvars above).
+  // site is the homedir mount below, added once the basedir tier is fully
+  // laid down (see that mount's own comment for why it has to come after).
   add_game_kpf(basedirString());
 
   // content_root <path>
@@ -1178,6 +1224,25 @@ export function FS_InitFilesystem(): void {
 
   // start up with baseq2 by default
   FS_AddGameDirectory(`${basedirString()}/${BASEDIRNAME}`);
+
+  // homedir shadowing (q2repro src/common/files.c:3697-3712
+  // setup_base_paths): when "homedir" is non-empty, mount homedir/baseq2
+  // (and its own Q2Game.kpf, if any) ABOVE basedir/baseq2 in search
+  // priority. FS_AddGameDirectory always prepends to the head of
+  // fs_searchpaths, so calling it here, AFTER the basedir mount above,
+  // makes the homedir copy of any given file win a name collision on read
+  // (FS_FOpenFile walks the list head-first) and leaves fs_gamedir (this
+  // port's FS_Gamedir()/write-path root) pointing at homedir/baseq2 --
+  // exactly setup_base_gamedir's home-else-base pick (files.c:3739-3747),
+  // generalized as writeRoot() above for FS_SetGamedir's mod-directory
+  // case. Skipped entirely when homedirValue() is "" (this port's default,
+  // see Sys_GetDefaultHomedir's comment), so unset homedir preserves
+  // today's basedir-only behavior exactly -- no extra search-path entries,
+  // no change to fs_gamedir.
+  if (homedirValue().length > 0) {
+    add_game_kpf(homedirValue());
+    FS_AddGameDirectory(`${homedirValue()}/${BASEDIRNAME}`);
+  }
 
   // any set gamedirs will be freed up to here
   fs_base_searchpaths = fs_searchpaths;

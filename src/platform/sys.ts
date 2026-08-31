@@ -77,3 +77,44 @@ export function Sys_SendKeyEvents(): void {
   if (!sdl.SDL_BackendEnabled()) return;
   sdl.SDL_PumpInput(sys_frame_time);
 }
+
+/*
+q2repro's per-platform "homedir" default (the per-user directory that
+shadows basedir for writes -- see files.ts's FS_InitFilesystem for the
+consumer). Both reference implementations resolve to the empty string for
+this port's deployment shape:
+
+- src/unix/system.c:195-208 (Sys_Init) tilde-expands a build-time HOMEDIR
+  macro against $HOME, but meson.build:318 only sets that macro to a
+  non-empty value ('~/.q2pro', meson_options.txt:52-55) when the build was
+  configured with `-Dsystem-wide=true` (meson.build:321-326); the ordinary
+  build HOMEDIR resolves to '', so Sys_Init registers "homedir" CVAR_NOSET
+  with an empty default (src/unix/system.c:210).
+- src/windows/system.c:955 registers "homedir" CVAR_NOSET with a literal ""
+  default unconditionally -- there is no meson-configured HOMEDIR macro on
+  Windows at all (meson.build:702-705 only sets HOMEDIR `if not win32`).
+  Windows' only non-empty default comes from FS_FindBaseDir's Windows-only
+  rerelease-mode branch (src/common/files.c:3999-4003), which calls
+  Sys_GetRereleaseHomeDir (src/windows/system.c:1291-1312) to redirect to
+  the OS "Saved Games\NightDive Studios\Quake II" folder via
+  SHGetKnownFolderPath(FOLDERID_SavedGames) -- reached only after first
+  detecting an actual Steam/GOG-installed rerelease package
+  (gamepath_funcs, windows/system.c:1281-1287). This port has no
+  "-Dsystem-wide" build variant (there's exactly one Bun runtime shape) and
+  no Steam/GOG/Xbox installation-detection layer, so neither reference
+  platform's non-empty branch applies here -- the faithfully-ported default
+  for THIS deployment shape is "" on every platform bun runs on, same as
+  q2repro's own ordinary (non-packaged) build produces on both of its
+  platforms.
+
+files.ts's FS_InitFilesystem gates all homedir shadowing/write-redirection
+behind this string being non-empty (mirrors q2repro's
+`sys_homedir->string[0]` checks throughout files.c), so an empty default
+here means today's basedir-only behavior is preserved exactly until
+something explicitly sets the "homedir" cvar (there is presently no
+`-homedir`/`+set homedir` wiring at boot; that is a follow-up, tracked in
+.orch/followups.md, not bundled into this default-resolution function).
+*/
+export function Sys_GetDefaultHomedir(): string {
+  return "";
+}
