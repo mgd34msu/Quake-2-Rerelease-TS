@@ -41,6 +41,14 @@ interface Recorder {
   cvar_set: Array<{ name: string; value: string }>;
   cvar_forceset: Array<{ name: string; value: string }>;
   error: string[];
+  // g_spawn.ts's ED_ParseField/ED_CallSpawn/SpawnEntities resolve the
+  // "developer" cvar dynamically via gi.cvar("developer", ...) rather than
+  // through gameCvars (see the deviation comment in g_spawn.ts above
+  // C_atoi). One shared CvarT per Recorder -- like the real engine's
+  // Cvar_Get, repeated lookups of the same name return the same object --
+  // so a test can flip .value mid-run and have every later gi.cvar() call
+  // see it.
+  developerCvar: CvarT;
 }
 
 function makeRecorder(): Recorder {
@@ -53,6 +61,7 @@ function makeRecorder(): Recorder {
     cvar_set: [],
     cvar_forceset: [],
     error: [],
+    developerCvar: fakeCvar(0),
   };
 }
 
@@ -125,7 +134,7 @@ function buildFakeImports(rec: Recorder): GameImports {
     WritePosition: () => {},
     WriteDir: () => {},
     WriteAngle: () => {},
-    cvar: () => fakeCvar(0),
+    cvar: (var_name: string) => (var_name === "developer" ? rec.developerCvar : fakeCvar(0)),
     cvar_set: (var_name: string, value: string) => {
       rec.cvar_set.push({ name: var_name, value });
       return fakeCvar(0, value);
@@ -206,9 +215,10 @@ describe("ED_ParseEdict", () => {
     expect(st.lip).toBe(8);
   });
 
-  test("an unknown key is reported via gi.dprintf and does not throw", () => {
+  test("developer 1: an unknown key is reported via gi.dprintf and does not throw (byte-identical vanilla line)", () => {
     const rec = makeRecorder();
     setupWorld(rec);
+    rec.developerCvar.value = 1;
 
     const raw = '"classname" "worldspawn" "totally_bogus_key" "1" }';
     const state: ComParseState = { data: raw, index: 0 };
@@ -217,13 +227,30 @@ describe("ED_ParseEdict", () => {
     ED_ParseEdict(state, ent);
 
     expect(rec.dprintf).toContain("totally_bogus_key is not a field\n");
+
+    rec.developerCvar.value = 0; // restore, rule 13
+  });
+
+  test("developer 0: an unknown key is counted silently, not printed, and does not throw", () => {
+    const rec = makeRecorder();
+    setupWorld(rec);
+    rec.developerCvar.value = 0;
+
+    const raw = '"classname" "worldspawn" "totally_bogus_key" "1" }';
+    const state: ComParseState = { data: raw, index: 0 };
+    const ent = new EdictT();
+
+    ED_ParseEdict(state, ent);
+
+    expect(rec.dprintf.some((m) => m.includes("totally_bogus_key"))).toBe(false);
   });
 });
 
 describe("ED_CallSpawn", () => {
-  test("a classname with no spawns[] entry is reported via dprintf and is NOT freed (bug-for-bug: this v3.19 source has no G_FreeEdict fallback here, only the spawnflags-inhibit path in SpawnEntities does that)", () => {
+  test("developer 1: a classname with no spawns[] entry is reported via dprintf and is NOT freed (bug-for-bug: this v3.19 source has no G_FreeEdict fallback here, only the spawnflags-inhibit path in SpawnEntities does that)", () => {
     const rec = makeRecorder();
     setupWorld(rec);
+    rec.developerCvar.value = 1;
 
     const ent = new EdictT();
     ent.inuse = true;
@@ -232,6 +259,23 @@ describe("ED_CallSpawn", () => {
     ED_CallSpawn(ent);
 
     expect(rec.dprintf).toContain("totally_unknown_classname_xyz doesn't have a spawn function\n");
+    expect(ent.inuse).toBe(true);
+
+    rec.developerCvar.value = 0; // restore, rule 13
+  });
+
+  test("developer 0: a classname with no spawns[] entry is counted silently, not printed, and is NOT freed", () => {
+    const rec = makeRecorder();
+    setupWorld(rec);
+    rec.developerCvar.value = 0;
+
+    const ent = new EdictT();
+    ent.inuse = true;
+    ent.classname = "totally_unknown_classname_xyz";
+
+    ED_CallSpawn(ent);
+
+    expect(rec.dprintf.some((m) => m.includes("totally_unknown_classname_xyz"))).toBe(false);
     expect(ent.inuse).toBe(true);
   });
 
@@ -321,5 +365,62 @@ describe("SpawnEntities", () => {
     // parse loop even starts.
     expect(level.mapname).toBe("q2dm1");
     expect(game.spawnpoint).toBe("start");
+  });
+
+  // Mike's ruling (2026-08-31): "quiet it" -- see .orch/followups.md finding
+  // 14 and the deviation comment in g_spawn.ts above C_atoi. A
+  // rerelease-authored entity string carrying KEX-era fields/classnames the
+  // frozen LEGACY game DLL has never heard of (fog_color, shadowlight,
+  // mangle / dynamic_light, info_landmark, target_poi -- the exact examples
+  // from finding 14) drives both gates through the real SpawnEntities path.
+  // "fog_color" repeats across two entities to prove distinct-name counting.
+  const noisyEntities =
+    '{ "classname" "worldspawn" } ' +
+    '{ "classname" "dynamic_light" "fog_color" "1 1 1" } ' +
+    '{ "classname" "info_landmark" "shadowlight" "1" } ' +
+    '{ "classname" "target_poi" "mangle" "0 0 0" "fog_color" "1 1 1" }';
+
+  test("developer 0 (default): unknown fields/classnames are suppressed and rolled into one correctly-counted summary line", () => {
+    const rec = makeRecorder();
+    setupWorld(rec);
+    InitItems();
+    rec.developerCvar.value = 0;
+
+    expect(() => SpawnEntities("mgu1_rerelease", noisyEntities, "")).not.toThrow();
+
+    // none of the per-line vanilla strings leaked through
+    expect(rec.dprintf.some((m) => m.includes("is not a field"))).toBe(false);
+    expect(rec.dprintf.some((m) => m.includes("doesn't have a spawn function"))).toBe(false);
+
+    // 3 distinct unknown fields (fog_color counted once despite 2
+    // occurrences), 3 distinct unknown classnames.
+    expect(rec.dprintf).toContain(
+      "SpawnEntities: 3 unknown fields, 3 unknown classnames suppressed (developer 1 for detail)\n",
+    );
+
+    rec.developerCvar.value = 0; // restore, rule 13
+  });
+
+  test("developer 1: every unknown field/classname prints its byte-identical vanilla line, and no summary line appears", () => {
+    const rec = makeRecorder();
+    setupWorld(rec);
+    InitItems();
+    rec.developerCvar.value = 1;
+
+    expect(() => SpawnEntities("mgu1_rerelease", noisyEntities, "")).not.toThrow();
+
+    expect(rec.dprintf).toContain("fog_color is not a field\n");
+    expect(rec.dprintf).toContain("shadowlight is not a field\n");
+    expect(rec.dprintf).toContain("mangle is not a field\n");
+    expect(rec.dprintf).toContain("dynamic_light doesn't have a spawn function\n");
+    expect(rec.dprintf).toContain("info_landmark doesn't have a spawn function\n");
+    expect(rec.dprintf).toContain("target_poi doesn't have a spawn function\n");
+    // "fog_color is not a field\n" prints once per occurrence under
+    // developer 1 (2 occurrences), unlike developer 0's deduped count.
+    expect(rec.dprintf.filter((m) => m === "fog_color is not a field\n")).toHaveLength(2);
+
+    expect(rec.dprintf.some((m) => m.startsWith("SpawnEntities:"))).toBe(false);
+
+    rec.developerCvar.value = 0; // restore, rule 13
   });
 });
