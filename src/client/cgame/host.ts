@@ -767,13 +767,12 @@ function kexPmoveStateViewFromClassic(src: PmoveStateT): KexPmoveStateT {
     pm_time: src.pm_time,
     gravity: src.gravity,
     delta_angles: shortAngles3(src.delta_angles),
-    // viewheight (kex-only, int8_t): kex.ts's syncPlayerStateKexToEngine
-    // documents this field as having no counterpart on this port's classic
-    // PmoveStateT and drops it going kex -> engine; there is therefore
-    // nothing to recover going the other way either. Defaults to 0 (the
-    // classic engine's own implicit viewheight before ducking/crouch
-    // adjustment), same "documented, not silently different" gap.
-    viewheight: 0,
+    // viewheight (int8_t): a real field on this port's PmoveStateT now
+    // (q_shared.ts) and carried end to end on protocol 1038 as
+    // PS_RR_VIEWHEIGHT, so the classic -> kex direction recovers it instead
+    // of hardcoding 0. Vanilla-family servers never set it, which is exactly
+    // the 0 this used to hardcode.
+    viewheight: src.viewheight,
   };
 }
 

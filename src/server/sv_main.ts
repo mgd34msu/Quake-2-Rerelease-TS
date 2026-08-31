@@ -15,6 +15,7 @@ import {
   VERSION,
   SvcOpsT,
   MAX_MSGLEN,
+  ERR_DROP,
 } from "../qcommon/qcommon";
 import type { ProtocolCodec } from "../qcommon/protocol/codec";
 import { VANILLA_CODEC } from "../qcommon/protocol/vanilla";
@@ -27,7 +28,7 @@ import { NET_CompareBaseAdr, NET_AdrToString, NET_IsLocalAddress, NET_GetPacket 
 import { MSG_BeginReading, MSG_ReadLong, MSG_ReadStringLine, MSG_WriteByte, MSG_WriteString, SZ_Init, SZ_Clear } from "../qcommon/sizebuf";
 import { Cmd_TokenizeString, Cmd_Argv, Cmd_Argc, Cmd_ExecuteString } from "../qcommon/cmd";
 import { Cvar_Get, Cvar_Serverinfo } from "../qcommon/cvar";
-import { Com_Printf, Com_DPrintf, Com_BeginRedirect, Com_EndRedirect, Com_SetServerState, comTiming, dedicated, host_speeds } from "../qcommon/common";
+import { Com_Printf, Com_DPrintf, Com_Error, Com_BeginRedirect, Com_EndRedirect, Com_SetServerState, comTiming, dedicated, host_speeds } from "../qcommon/common";
 import { FS_FreeFile, FS_FCloseFile } from "../qcommon/files";
 import { Sys_Milliseconds } from "../platform/sys";
 import {
@@ -850,6 +851,24 @@ export function SV_RunGameFrame(): void {
   }
 
   if (host_speeds && host_speeds.value) comTiming.time_after_game = Sys_Milliseconds();
+
+  // main.c:1736-1744, verbatim in intent: the game module writes message
+  // bytes through gi.WriteByte/WriteString/... into the shared multicast
+  // buffer (sv.multicast here, msg_write there) and is expected to flush
+  // them with a multicast/unicast before returning. The re-release game does
+  // NOT always do that -- G_ReportMatchDetails (kexgame/p_hud.ts) writes a
+  // whole scoreboard and then hands it to gi.ReportMatchDetails_Multicast,
+  // a console-platform hook with no wire form. If those bytes survive the
+  // frame they prepend the NEXT multicast and the receiving client parses
+  // garbage. The binding clears the buffer itself (bindings/kex.ts's
+  // ReportMatchDetails_Multicast, matching q2repro's PF_ReportMatchDetails_
+  // Multicast at server/game.c:892-899); this is the reference's own
+  // second line of defence for every other game module that might leak.
+  if (sv.multicast.overflowed) Com_Error(ERR_DROP, "SV_RunGameFrame: message buffer overflowed");
+  if (sv.multicast.cursize) {
+    Com_Printf("WARNING: Game left %i bytes in multicast buffer, cleared.\n", sv.multicast.cursize);
+    SZ_Clear(sv.multicast);
+  }
 }
 
 /*

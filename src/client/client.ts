@@ -310,6 +310,17 @@ export class ClStateT {
   predicted_angles: Vec3 = vec3();
   prediction_error: Vec3 = vec3();
 
+  // [Paril-KEX] re-release eye-height smoothing -- q2repro client/client.h:
+  // 255-257 (`int8_t current_viewheight; int8_t prev_viewheight; int
+  // viewheight_change_time;`). The re-release keeps eye height out of
+  // `viewoffset` and ships it as ps.pmove.viewheight instead, so the client
+  // adds it to refdef.vieworg itself, easing crouch/stand transitions over
+  // 100ms (entities.c:1528-1536 records the change, :1601-1610 applies it).
+  // All three stay 0 on vanilla-family servers, which never set the field.
+  current_viewheight = 0; // int8_t
+  prev_viewheight = 0; // int8_t
+  viewheight_change_time = 0; // cl.time when a viewheight change was noticed
+
   frame: FrameT = new FrameT(); // received from server
   surpressCount = 0; // number of messages rate supressed
   frames: FrameT[] = Array.from({ length: UPDATE_BACKUP }, () => new FrameT());
@@ -410,6 +421,9 @@ export class ClStateT {
     this.predicted_origins = Array.from({ length: CMD_BACKUP }, () => new Int16Array(3));
     this.predicted_step = 0;
     this.predicted_step_time = 0;
+    this.current_viewheight = 0;
+    this.prev_viewheight = 0;
+    this.viewheight_change_time = 0;
     this.predicted_origin = vec3();
     this.predicted_angles = vec3();
     this.prediction_error = vec3();

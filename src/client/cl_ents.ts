@@ -485,6 +485,12 @@ export function CL_ParseFrame(): void {
       cl.predicted_origin[1] = cl.frame.playerstate.pmove.origin[1] * 0.125;
       cl.predicted_origin[2] = cl.frame.playerstate.pmove.origin[2] * 0.125;
       VectorCopy(cl.frame.playerstate.viewangles, cl.predicted_angles);
+      // q2repro client/entities.c:319-322: seed both eye-height slots from
+      // the first frame and zero the change timer, so entering a level does
+      // not play a 100ms "stand up" ease from 0.
+      cl.current_viewheight = cl.frame.playerstate.pmove.viewheight;
+      cl.prev_viewheight = cl.frame.playerstate.pmove.viewheight;
+      cl.viewheight_change_time = 0;
       if (cls.disable_servercount !== cl.servercount && cl.refresh_prepped) {
         SCR_EndLoadingPlaque(); // get rid of loading plaque
       }
@@ -995,6 +1001,27 @@ function CL_CalcViewValues(): void {
     for (let i2 = 0; i2 < 3; i2++)
       cl.refdef.vieworg[i2] =
         ops.pmove.origin[i2] * 0.125 + ops.viewoffset[i2] + lerp * (ps.pmove.origin[i2] * 0.125 + ps.viewoffset[i2] - (ops.pmove.origin[i2] * 0.125 + ops.viewoffset[i2]));
+  }
+
+  // [Paril-KEX] re-release eye height. Vanilla folds eye height into
+  // `viewoffset` (already added above); the re-release deliberately does not
+  // -- q2repro's server/entities.c:610-612 states it outright ("Rerelease
+  // game doesn't include viewheight in viewoffset, vanilla does") -- and
+  // ships it as ps.pmove.viewheight instead, which the client adds here.
+  // q2repro client/entities.c:1528-1536 records the change, :1605-1609
+  // eases it: `viewheight_lerp = 100 - min(cl.time - change_time, 100);
+  // viewheight = current + (prev - current) * viewheight_lerp * 0.01;
+  // cl.refdef.vieworg[2] += viewheight;`. Vanilla-family servers leave
+  // pmove.viewheight at 0, so this whole block is a no-op there.
+  if (cl.current_viewheight !== ps.pmove.viewheight) {
+    cl.prev_viewheight = cl.current_viewheight;
+    cl.current_viewheight = ps.pmove.viewheight;
+    cl.viewheight_change_time = cl.time;
+  }
+  {
+    let viewheight_lerp = cl.time - cl.viewheight_change_time;
+    viewheight_lerp = 100 - Math.min(viewheight_lerp, 100);
+    cl.refdef.vieworg[2] += cl.current_viewheight + (cl.prev_viewheight - cl.current_viewheight) * viewheight_lerp * 0.01;
   }
 
   // if not running a demo or on a locked frame, add the local angle movement

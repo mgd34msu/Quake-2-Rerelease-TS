@@ -53,6 +53,7 @@ export function clonePlayerState(ps: PlayerStateT): PlayerStateT {
   c.pmove.pm_time = ps.pmove.pm_time;
   c.pmove.gravity = ps.pmove.gravity;
   c.pmove.delta_angles.set(ps.pmove.delta_angles);
+  c.pmove.viewheight = ps.pmove.viewheight;
   VectorCopy(ps.viewangles, c.viewangles);
   VectorCopy(ps.viewoffset, c.viewoffset);
   VectorCopy(ps.kick_angles, c.kick_angles);

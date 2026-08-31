@@ -241,6 +241,17 @@ export class PmoveStateT {
   pm_time = 0; // each unit = 8 ms
   gravity = 0;
   delta_angles: Int16Array = new Int16Array(3); // add to command angles to get view direction
+  // [Paril-KEX] re-release eye height, shared/shared.h:1076 (`int8_t
+  // viewheight; // view height, added to origin[2] + viewoffset[2], for
+  // crouching`). The re-release game does NOT fold this into `viewoffset`
+  // the way vanilla does -- q2repro's own server/entities.c:610-612 says so
+  // in as many words ("Rerelease game doesn't include viewheight in
+  // viewoffset, vanilla does") -- so it travels as its own wire field
+  // (PS_RR_VIEWHEIGHT, protocol/q2repro.ts) and the client adds it to
+  // refdef.vieworg itself (client/cl_ents.ts, per q2repro client/
+  // entities.c:1601-1610). Stays 0 for every vanilla-family game, whose
+  // viewoffset already carries the eye height, so no classic path changes.
+  viewheight = 0; // int8_t
 }
 
 //

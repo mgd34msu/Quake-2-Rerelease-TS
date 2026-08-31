@@ -160,6 +160,7 @@ function copyPmoveState(dst: PmoveStateT, src: PmoveStateT): void {
   dst.pm_time = src.pm_time;
   dst.gravity = src.gravity;
   dst.delta_angles.set(src.delta_angles);
+  dst.viewheight = src.viewheight;
 }
 
 function copyUsercmd(dst: UsercmdT, src: UsercmdT): void {

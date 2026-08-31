@@ -59,6 +59,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { vec3 } from "../src/shared/math";
+import { sv } from "../src/server/server";
+import { SZ_Init, SZ_Clear, MSG_WriteByte } from "../src/qcommon/sizebuf";
 import { PlayerStateT } from "../src/shared/q_shared";
 import { GAME_API_VERSION as LEGACY_GAME_API_VERSION } from "../src/game/game";
 import type { KexGameImports, KexGameExports, KexEdictT } from "../src/kexapi/game";
@@ -482,5 +484,85 @@ describe("multicast KexMulticastT -> MulticastT mapping", () => {
     // real correctness check on the mapping, not just a smoke test.
     expect(() => imports.multicast(vec3(0, 0, 0), KexMulticastT.MULTICAST_ALL, false)).not.toThrow();
     expect(() => imports.multicast(vec3(0, 0, 0), KexMulticastT.MULTICAST_ALL, true)).not.toThrow();
+  });
+});
+
+// =============================================================================
+// pmove.viewheight -- the [Paril-KEX] eye-height field. The re-release keeps
+// eye height OUT of ps.viewoffset (q2repro server/entities.c:610-612:
+// "Rerelease game doesn't include viewheight in viewoffset, vanilla does"),
+// so the binding dropping it here is what made every re-release player render
+// permanently crouched: the camera ended up at the player's feet.
+// =============================================================================
+
+describe("syncPlayerStateKexToEngine -- pmove.viewheight", () => {
+  function engineViewheightFor(kexViewheight: number): number {
+    const log: CallLog = { calls: [] };
+    const world = fakeEdict(0);
+    const clientEdict = fakeEdict(1);
+    clientEdict.client = defaultGClient();
+    clientEdict.client.ps.pmove.viewheight = kexViewheight;
+
+    const adapter = adaptKexGameExports(fakeKexGameExports([world, clientEdict], log));
+    adapter.Init();
+    const engineClient = adapter.edicts[1].client as { ps: PlayerStateT } | null;
+    expect(engineClient).not.toBeNull();
+    return engineClient ? engineClient.ps.pmove.viewheight : Number.NaN;
+  }
+
+  test("standing eye height (22) crosses kex -> engine instead of being dropped", () => {
+    expect(engineViewheightFor(22)).toBe(22);
+  });
+
+  test("ducked eye height (4) crosses too -- the value that actually differs while crouching", () => {
+    expect(engineViewheightFor(4)).toBe(4);
+  });
+
+  test("a negative (dead-player) eye height crosses without wrapping", () => {
+    expect(engineViewheightFor(-16)).toBe(-16);
+  });
+
+  test("kex's int32 field clamps to the int8 the wire and shared/shared.h:1076 both use", () => {
+    expect(engineViewheightFor(1000)).toBe(127);
+    expect(engineViewheightFor(-1000)).toBe(-128);
+  });
+});
+
+// =============================================================================
+// ReportMatchDetails_Multicast -- q2repro server/game.c:892-899. The hook has
+// no wire form ("solely for platforms that need match result data"), but the
+// re-release game writes a whole scoreboard into the shared multicast buffer
+// before calling it (kexgame/p_hud.ts's G_ReportMatchDetails), so the C's
+// entire body is the buffer clear: "rerelease game writes some message data
+// prior to calling this, at least discard that data". A bare no-op leaves
+// those bytes to prepend the NEXT real multicast -- and g_main.ts:1377-1382
+// fires the report every 45 seconds of play, plus once at intermission.
+// =============================================================================
+
+describe("ReportMatchDetails_Multicast -- discards the game's leftover message bytes", () => {
+  const imports = BuildKexImports();
+
+  test("clears every byte the game wrote into sv.multicast before the call", () => {
+    SZ_Init(sv.multicast, sv.multicast_buf, sv.multicast_buf.length);
+    SZ_Clear(sv.multicast);
+
+    // stand-in for G_ReportMatchDetails' own gi.WriteByte run (p_hud.ts:
+    // 1091-1139): team-count byte, player-count byte, then per-player rows.
+    MSG_WriteByte(sv.multicast, 0);
+    MSG_WriteByte(sv.multicast, 1);
+    MSG_WriteByte(sv.multicast, 7);
+    expect(sv.multicast.cursize).toBe(3);
+
+    imports.ReportMatchDetails_Multicast(false);
+
+    expect(sv.multicast.cursize).toBe(0);
+  });
+
+  test("is safe on an already-empty buffer (intermission can fire it twice)", () => {
+    SZ_Init(sv.multicast, sv.multicast_buf, sv.multicast_buf.length);
+    SZ_Clear(sv.multicast);
+    imports.ReportMatchDetails_Multicast(true);
+    imports.ReportMatchDetails_Multicast(true);
+    expect(sv.multicast.cursize).toBe(0);
   });
 });

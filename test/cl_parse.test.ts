@@ -356,3 +356,82 @@ describe("CL_AddEntities", () => {
     expect(() => CL_AddEntities()).not.toThrow();
   });
 });
+
+// =============================================================================
+// [Paril-KEX] eye height in the view. Vanilla folds eye height into
+// ps.viewoffset; the re-release deliberately does not (q2repro
+// server/entities.c:610-612: "Rerelease game doesn't include viewheight in
+// viewoffset, vanilla does") and ships it as ps.pmove.viewheight, which the
+// client adds to refdef.vieworg itself, eased over 100ms (q2repro
+// client/entities.c:1528-1536 records the change, :1605-1609 applies it).
+// Dropping this is what put the camera at the player's feet and made every
+// re-release player look permanently crouched.
+// =============================================================================
+
+describe("CL_CalcViewValues -- ps.pmove.viewheight raises the eye above the origin, eased over 100ms", () => {
+  // Runs the deterministic (non-predicted) branch: clCvars.cl_predict stays
+  // null, so CL_CalcViewValues interpolates ops->ps instead of using
+  // cl.predicted_origin. oldframe resolves back to cl.frame (no frame at
+  // serverframe-1), so ops === ps and the positional lerp is a no-op --
+  // leaving the viewheight term as the only thing that moves vieworg[2].
+  const ORIGIN_Z = -104;
+
+  function seedActiveFrame(viewheight: number): void {
+    cls.state = ConnstateT.ca_active;
+    cl.frame.valid = true;
+    cl.frame.serverframe = 1;
+    cl.frame.num_entities = 0;
+    cl.frame.playerstate.pmove.origin[2] = ORIGIN_Z * 8; // 12.3 fixed point
+    cl.frame.playerstate.pmove.viewheight = viewheight;
+  }
+
+  function eyeAboveOriginAt(servertime: number): number {
+    cl.frame.servertime = servertime;
+    cl.time = servertime;
+    CL_AddEntities();
+    return cl.refdef.vieworg[2] - ORIGIN_Z;
+  }
+
+  test("the frame a new eye height first arrives still renders the OLD one (ease starts, not jumps)", () => {
+    seedActiveFrame(22);
+    // cl.current_viewheight starts at 0 (cl.clear() in beforeEach), so this
+    // frame records the 0 -> 22 change and viewheight_lerp is a full 100.
+    expect(eyeAboveOriginAt(1000)).toBeCloseTo(0, 5);
+  });
+
+  test("halfway through the 100ms window the eye is halfway up", () => {
+    seedActiveFrame(22);
+    eyeAboveOriginAt(1000); // records the change at cl.time = 1000
+    // 1050 - 1000 = 50 -> viewheight_lerp = 50 -> 22 + (0 - 22) * 50 * 0.01 = 11
+    expect(eyeAboveOriginAt(1050)).toBeCloseTo(11, 5);
+  });
+
+  test("after the 100ms window the eye sits the full standing 22 units above the origin", () => {
+    seedActiveFrame(22);
+    eyeAboveOriginAt(1000);
+    expect(eyeAboveOriginAt(1100)).toBeCloseTo(22, 5);
+    // and stays there -- min(elapsed, 100) clamps, it does not keep drifting
+    expect(eyeAboveOriginAt(1500)).toBeCloseTo(22, 5);
+  });
+
+  test("crouching (22 -> 4) eases the eye DOWN over the same window", () => {
+    seedActiveFrame(22);
+    eyeAboveOriginAt(1000);
+    eyeAboveOriginAt(1100);
+    expect(eyeAboveOriginAt(1200)).toBeCloseTo(22, 5);
+
+    cl.frame.playerstate.pmove.viewheight = 4;
+    // the change frame renders the old 22 ...
+    expect(eyeAboveOriginAt(1300)).toBeCloseTo(22, 5);
+    // ... halfway: 4 + (22 - 4) * 50 * 0.01 = 13
+    expect(eyeAboveOriginAt(1350)).toBeCloseTo(13, 5);
+    // ... settled at the ducked height
+    expect(eyeAboveOriginAt(1400)).toBeCloseTo(4, 5);
+  });
+
+  test("a vanilla-family playerstate (viewheight left at 0) puts the eye exactly at the origin -- no classic behavior changed", () => {
+    seedActiveFrame(0);
+    expect(eyeAboveOriginAt(1000)).toBeCloseTo(0, 5);
+    expect(eyeAboveOriginAt(1100)).toBeCloseTo(0, 5);
+  });
+});

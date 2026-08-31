@@ -250,7 +250,13 @@ export function SV_BuildClientFrame(client: ClientT): void {
   const org = vec3(
     clientPs.pmove.origin[0] * 0.125 + clientPs.viewoffset[0],
     clientPs.pmove.origin[1] * 0.125 + clientPs.viewoffset[1],
-    clientPs.pmove.origin[2] * 0.125 + clientPs.viewoffset[2],
+    // q2repro server/entities.c:610-612: "Rerelease game doesn't include
+    // viewheight in viewoffset, vanilla does" -- so the re-release family
+    // has to add ps.pmove.viewheight here or the PVS is computed from the
+    // player's feet instead of the eyes (visibly wrong through low doorways
+    // and over railings). Vanilla-family games leave the field at 0, so
+    // this term is a no-op for them and no classic behavior changes.
+    clientPs.pmove.origin[2] * 0.125 + clientPs.viewoffset[2] + clientPs.pmove.viewheight,
   );
 
   const leafnum = CM_PointLeafnum(org);

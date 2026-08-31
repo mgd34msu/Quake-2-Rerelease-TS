@@ -72,17 +72,21 @@
 // dormant until the (out-of-scope) native KEX demo codec exists.
 //
 // ---------------------------------------------------------------------------
-// KNOWN GAP: pmove's PM_VIEWHEIGHT bit
+// pmove's PM_VIEWHEIGHT bit (was a KNOWN GAP; now carried for real)
 // ---------------------------------------------------------------------------
-// Q2P_PSD_PM_VIEWHEIGHT / PS_RR_VIEWHEIGHT (q2repro.c:2033-2034,2196-2197) is
-// part of the RERELEASE feature set (PLAYER_GUNRATE_VIEWHEIGHT), but this
-// port's PmoveStateT (shared/q_shared.ts) has no viewheight field --
-// src/server/bindings/kex.ts:554 already documents dropping KEX's
-// `pmove.viewheight` (int8) for the same reason ("no field on this port's
-// PmoveStateT"). This codec therefore NEVER sets PS_RR_VIEWHEIGHT (the flag
-// bit stays permanently 0, matching "unchanged" for a field this engine
-// cannot represent) -- a pre-existing, documented gap this task does not
-// expand scope to fix (the task's own field list never names pm_viewheight).
+// Q2P_PSD_PM_VIEWHEIGHT / PS_RR_VIEWHEIGHT (BIT(15) of `flags`,
+// q2proto_internal_protocol.h:263) is part of the RERELEASE feature set
+// (Q2PROTO_FEATURE_FLAG_PLAYER_GUNRATE_VIEWHEIGHT). It is written as an i8
+// immediately after EPS_GUNRATE's gunrate byte and before EPS_CLIENTNUM
+// (q2proto_proto_q2repro.c:2192-2198 write / :734-736 read).
+//
+// This used to be skipped because PmoveStateT had no viewheight field at
+// all. It does now (shared/q_shared.ts), because dropping it is exactly what
+// made a re-release player render permanently crouched: the re-release game
+// keeps eye height OUT of `viewoffset` (q2repro server/entities.c:610-612,
+// "Rerelease game doesn't include viewheight in viewoffset, vanilla does"),
+// so a client that never receives pm_viewheight puts the camera at the
+// player's feet instead of 22 units up.
 //
 // ---------------------------------------------------------------------------
 // KNOWN GAP: usercmd upmove
@@ -163,8 +167,8 @@
 // port's pmove precision budget, not a new precision loss introduced here.
 
 import type { SizeBuf } from "../sizebuf";
-import { MSG_WriteByte, MSG_WriteShort, MSG_WriteLong, MSG_WriteLong64, MSG_WriteFloat, MSG_WriteString, MSG_WriteDeltaUsercmd, SZ_Write } from "../sizebuf";
-import { MSG_ReadByte, MSG_ReadShort, MSG_ReadLong, MSG_ReadLong64, MSG_ReadFloat, MSG_ReadString, MSG_ReadDeltaUsercmd, MSG_ReadData } from "../sizebuf";
+import { MSG_WriteByte, MSG_WriteChar, MSG_WriteShort, MSG_WriteLong, MSG_WriteLong64, MSG_WriteFloat, MSG_WriteString, MSG_WriteDeltaUsercmd, SZ_Write } from "../sizebuf";
+import { MSG_ReadByte, MSG_ReadChar, MSG_ReadShort, MSG_ReadLong, MSG_ReadLong64, MSG_ReadFloat, MSG_ReadString, MSG_ReadDeltaUsercmd, MSG_ReadData } from "../sizebuf";
 import {
   U_ORIGIN1,
   U_ORIGIN2,
@@ -208,6 +212,7 @@ import {
   PS_WEAPONINDEX,
   PS_WEAPONFRAME,
   PS_RDFLAGS,
+  PS_RR_VIEWHEIGHT,
   CM_ANGLE1,
   CM_ANGLE2,
   CM_ANGLE3,
@@ -702,7 +707,9 @@ function encodePlayerStateDelta(from: PlayerStateT, to: PlayerStateT): PlayerSta
   )
     flags |= PS_M_DELTA_ANGLES;
 
-  // PS_RR_VIEWHEIGHT: never set -- see file header's "KNOWN GAP" note.
+  // q2proto_proto_q2repro.c:2033-2034. Re-release eye height (int8); see the
+  // file header's PM_VIEWHEIGHT section.
+  if (to.pmove.viewheight !== from.pmove.viewheight) flags |= PS_RR_VIEWHEIGHT;
 
   const toViewoffset = [encodeFixed16(to.viewoffset[0], VIEWOFFSET_SCALE), encodeFixed16(to.viewoffset[1], VIEWOFFSET_SCALE), encodeFixed16(to.viewoffset[2], VIEWOFFSET_SCALE)];
   const fromViewoffset = [
@@ -860,6 +867,10 @@ function encodePlayerStateDelta(from: PlayerStateT, to: PlayerStateT): PlayerSta
       }
 
       if (extraflags & EPS_GUNRATE) MSG_WriteByte(msg, to.gunrate);
+
+      // q2proto_proto_q2repro.c:2196-2197: i8, immediately after gunrate and
+      // before EPS_CLIENTNUM (which this codec never sets).
+      if (flags & PS_RR_VIEWHEIGHT) MSG_WriteChar(msg, to.pmove.viewheight);
     },
   };
 }
@@ -1185,6 +1196,7 @@ function readPlayerStateFields(msg: SizeBuf, from: PlayerStateT, to: PlayerState
   to.pmove.pm_time = from.pmove.pm_time;
   to.pmove.gravity = from.pmove.gravity;
   to.pmove.delta_angles.set(from.pmove.delta_angles);
+  to.pmove.viewheight = from.pmove.viewheight;
   to.viewangles.set(from.viewangles);
   to.viewoffset.set(from.viewoffset);
   to.kick_angles.set(from.kick_angles);
@@ -1293,6 +1305,10 @@ function readPlayerStateFields(msg: SizeBuf, from: PlayerStateT, to: PlayerState
   }
 
   if (extraflags & EPS_GUNRATE) to.gunrate = MSG_ReadByte(msg);
+
+  // q2proto_proto_q2repro.c:734-735: i8 (SIGNED -- a dead player's viewheight
+  // goes negative), read right after gunrate.
+  if (flags & PS_RR_VIEWHEIGHT) to.pmove.viewheight = MSG_ReadChar(msg);
 }
 
 // Public op (unchanged wire format): reads flags(u16)+extraflags(u8) from

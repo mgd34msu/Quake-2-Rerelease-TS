@@ -216,6 +216,11 @@ export const PS_FOV = 1 << 11;
 export const PS_WEAPONINDEX = 1 << 12;
 export const PS_WEAPONFRAME = 1 << 13;
 export const PS_RDFLAGS = 1 << 14;
+// Q2rePRO (protocol 1038) only: re-release eye height, an i8 written after
+// gunrate. q2proto_internal_protocol.h:263 (`#define PS_RR_VIEWHEIGHT
+// BIT(15) // Q2rePRO`); Q2PRO's extended protocols spend the SAME bit on
+// PS_MOREBITS instead (:264), so only protocol/q2repro.ts may use this name.
+export const PS_RR_VIEWHEIGHT = 1 << 15;
 
 //==============================================================
 // CMD

@@ -133,7 +133,7 @@
 //   inc/q2proto/q2proto_limits.h         -- Q2PROTO_MAX_DAMAGE_INDICATORS(4)/
 //                                            Q2PROTO_MAX_LOCALIZATION_ARGS(8)
 
-import { SizeBuf, SZ_Init, MSG_BeginReading, MSG_ReadByte, MSG_ReadShort, MSG_ReadLong, MSG_ReadFloat, MSG_ReadString, MSG_ReadData, MSG_ReadDir } from "../sizebuf";
+import { SizeBuf, SZ_Init, MSG_BeginReading, MSG_ReadByte, MSG_ReadChar, MSG_ReadShort, MSG_ReadLong, MSG_ReadFloat, MSG_ReadString, MSG_ReadData, MSG_ReadDir } from "../sizebuf";
 import {
   U_ORIGIN1,
   U_ORIGIN2,
@@ -487,6 +487,7 @@ function readKexPlayerStateFields(from: PlayerStateT, to: PlayerStateT, flags: n
   to.pmove.pm_time = from.pmove.pm_time;
   to.pmove.gravity = from.pmove.gravity;
   to.pmove.delta_angles.set(from.pmove.delta_angles);
+  to.pmove.viewheight = from.pmove.viewheight;
   to.viewangles.set(from.viewangles);
   to.viewoffset.set(from.viewoffset);
   to.kick_angles.set(from.kick_angles);
@@ -544,14 +545,15 @@ function readKexPlayerStateFields(from: PlayerStateT, to: PlayerStateT, flags: n
     // SAME setter q2repro.c itself uses (q2proto_coords.c:302, shared
     // between the two source files) -- THEN an unconditional pm_viewheight
     // i8 immediately after (kex.c:678-682, present on both 2022 and 2023
-    // despite older docs claiming otherwise). This port's PmoveStateT has
-    // no viewheight field (a pre-existing, cited gap -- see q2repro.ts's
-    // own file header, "KNOWN GAP: pmove's PM_VIEWHEIGHT bit"); the byte is
-    // read and discarded, matching that established precedent exactly.
+    // despite older docs claiming otherwise). This byte used to be read and
+    // discarded because PmoveStateT had no viewheight field; it does now
+    // (q_shared.ts), and dropping it is what made a re-release player render
+    // permanently crouched, so it is applied here too. SIGNED: a dead
+    // player's eye height goes negative.
     to.viewoffset[0] = MSG_ReadShort(net_message) / VIEWOFFSET_SCALE;
     to.viewoffset[1] = MSG_ReadShort(net_message) / VIEWOFFSET_SCALE;
     to.viewoffset[2] = MSG_ReadShort(net_message) / VIEWOFFSET_SCALE;
-    MSG_ReadByte(net_message); // pm_viewheight (i8) -- discarded, see above
+    to.pmove.viewheight = MSG_ReadChar(net_message); // pm_viewheight (i8)
   }
 
   if (flags & PS_VIEWANGLES) {

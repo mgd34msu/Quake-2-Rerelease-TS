@@ -323,6 +323,7 @@ import { Cmd_Argc, Cmd_Argv, Cmd_Args, Cbuf_AddText } from "../../qcommon/cmd";
 import { CM_SetAreaPortalState, CM_AreasConnected } from "../../qcommon/cmodel";
 import { FS_WriteFile, FS_ReadRawFile } from "../../qcommon/files";
 import { sv, SV_MaxEdicts } from "../server";
+import { SZ_Clear } from "../../qcommon/sizebuf";
 import { SV_Multicast, SV_StartSound, SV_BroadcastPrintf } from "../sv_send";
 import { SV_ModelIndex, SV_SoundIndex, SV_ImageIndex } from "../sv_init";
 import { SV_LinkEdict, SV_UnlinkEdict, SV_AreaEdicts, SV_Trace, SV_Clip, SV_PointContents } from "../sv_world";
@@ -449,6 +450,16 @@ function clampInt16(v: number): number {
   return v;
 }
 
+// kex's `pmove_state_t::viewheight` is `int32_t` (kexapi/game.ts); the wire
+// field and shared/shared.h:1076 are both `int8_t`. Real values are 22
+// (standing) / 4 (ducked) / -16..-ish (dead), so the clamp never fires in
+// practice -- it exists so a game-side outlier truncates instead of wrapping.
+function clampInt8(v: number): number {
+  if (v > 127) return 127;
+  if (v < -128) return -128;
+  return v;
+}
+
 //===============================================================
 // The edict bridge: parallel engine-shaped views, index-aligned with
 // kexgame's own edicts array (see file header for the full design).
@@ -571,8 +582,15 @@ function syncPlayerStateKexToEngine(src: KexPlayerStateT, dst: PlayerStateT): vo
   dst.pmove.pm_flags = src.pmove.pm_flags;
   dst.pmove.pm_time = src.pmove.pm_time;
   dst.pmove.gravity = src.pmove.gravity;
-  // src.pmove.viewheight (int8) has no field on this port's PmoveStateT --
-  // dropped, documented in the file header.
+  // [Paril-KEX] eye height. The re-release game deliberately keeps this OUT
+  // of `viewoffset` (p_view.cpp's SV_CalcViewOffset never adds it; q2repro's
+  // server/entities.c:610-612 spells out the difference -- "Rerelease game
+  // doesn't include viewheight in viewoffset, vanilla does"), so it has to
+  // reach the client as its own field or the camera renders at the player's
+  // feet and every player looks permanently crouched. Carried end to end as
+  // of this fix: PmoveStateT.viewheight (q_shared.ts) -> PS_RR_VIEWHEIGHT
+  // (protocol/q2repro.ts) -> refdef.vieworg (client/cl_ents.ts).
+  dst.pmove.viewheight = clampInt8(Math.round(src.pmove.viewheight));
 
   VectorCopy(src.viewangles, dst.viewangles);
   VectorCopy(src.viewoffset, dst.viewoffset);
@@ -958,7 +976,21 @@ export function BuildKexImports(): KexGameImports {
       SV_DebugDraw_Arrow(start, end, size, lineColor, arrowColor, lifeTime, depthTest);
     },
 
-    ReportMatchDetails_Multicast: () => {},
+    // q2repro server/game.c:892-899. "This function is solely for platforms
+    // that need match result data" -- there is no wire form for it, so the
+    // body is just the buffer clear, and the reference's own comment says
+    // why that clear is mandatory: "Anyhow, rerelease game writes some
+    // message data prior to calling this, at least discard that data".
+    // p_hud.ts's G_ReportMatchDetails does exactly that: a run of
+    // gi.WriteByte/WriteLong/WriteString into the shared multicast buffer,
+    // then this call. Leaving them behind (which a bare no-op does) makes a
+    // whole scoreboard prepend the next real multicast -- and g_main.ts:
+    // 1377-1382 fires it every 45 seconds of play, plus once at
+    // intermission. src/server/sv_main.ts's SV_RunGameFrame carries the
+    // reference's second line of defence (main.c:1736-1744).
+    ReportMatchDetails_Multicast: () => {
+      SZ_Clear(sv.multicast);
+    },
 
     ServerFrame: () => sv.framenum,
 

@@ -275,6 +275,67 @@ describe("Q2REPRO_CODEC.writePlayerStateDelta -- golden bytes", () => {
     expect(bytes).toEqual([17, 0, 16, 0, 5, 96]);
   });
 
+  // PS_RR_VIEWHEIGHT (BIT(15) of `flags`, q2proto_internal_protocol.h:263) --
+  // the re-release-only eye-height field. Written as an i8 by
+  // q2proto_proto_q2repro.c:2196-2197, at the very end of the playerstate
+  // body (after EPS_GUNRATE's gunrate byte, before EPS_CLIENTNUM, which this
+  // codec never sets); the flag is chosen at :2033-2034.
+  //   flags = 0x8000 -> LE [0,128]; extraflags = 0; then the single i8.
+  //
+  // This is the wire half of the "player renders permanently crouched"
+  // defect: the re-release keeps eye height OUT of viewoffset (q2repro
+  // server/entities.c:610-612, "Rerelease game doesn't include viewheight in
+  // viewoffset, vanilla does"), so a codec that never sets this bit leaves
+  // the client's camera at the player's feet.
+  test("PS_RR_VIEWHEIGHT: standing eye height (22) is one i8 after a 0x8000 flags word", () => {
+    const from = new PlayerStateT();
+    const to = new PlayerStateT();
+    to.pmove.viewheight = 22;
+    const bytes = bufOf((msg) => Q2REPRO_CODEC.writePlayerStateDelta(msg, from, to));
+    expect(bytes).toEqual([17, 0, 128, 0, 22]);
+  });
+
+  // The field is SIGNED (READ_CHECKED(..., i8) / WRITE_CHECKED(..., i8)) --
+  // p_move.cpp's PM_SetDimensions drives it negative for a dead/gibbed
+  // player, so an unsigned read would put the camera 240 units in the air.
+  test("PS_RR_VIEWHEIGHT: a negative eye height round-trips as a signed i8", () => {
+    const from = new PlayerStateT();
+    const to = new PlayerStateT();
+    to.pmove.viewheight = -16;
+    const bytes = bufOf((msg) => Q2REPRO_CODEC.writePlayerStateDelta(msg, from, to));
+    expect(bytes).toEqual([17, 0, 128, 0, 0xf0]); // -16 two's complement
+
+    const msg = new SizeBuf();
+    SZ_Init(msg, new Uint8Array(64), 64);
+    Q2REPRO_CODEC.writePlayerStateDelta(msg, from, to);
+    MSG_BeginReading(msg);
+    msg.readcount = 1; // consume the svc_playerinfo tag
+    const out = new PlayerStateT();
+    Q2REPRO_CODEC.readPlayerStateDelta(msg, from, out);
+    expect(out.pmove.viewheight).toBe(-16);
+  });
+
+  // Delta semantics: an unchanged viewheight sets no bit at all, and the
+  // read side inherits it from the `from` baseline (readPlayerStateFields'
+  // copy-forward step) rather than resetting it to 0 -- otherwise the camera
+  // would drop to the feet on every frame that happened not to change it.
+  test("PS_RR_VIEWHEIGHT: unchanged viewheight sets no bit and is inherited from the baseline", () => {
+    const from = new PlayerStateT();
+    from.pmove.viewheight = 22;
+    const to = new PlayerStateT();
+    to.pmove.viewheight = 22;
+    expect(bufOf((msg) => Q2REPRO_CODEC.writePlayerStateDelta(msg, from, to))).toEqual([17, 0, 0, 0]);
+
+    const msg = new SizeBuf();
+    SZ_Init(msg, new Uint8Array(64), 64);
+    Q2REPRO_CODEC.writePlayerStateDelta(msg, from, to);
+    MSG_BeginReading(msg);
+    msg.readcount = 1;
+    const out = new PlayerStateT();
+    Q2REPRO_CODEC.readPlayerStateDelta(msg, from, out);
+    expect(out.pmove.viewheight).toBe(22);
+  });
+
   // QUIRK (faithfully reproduced): PS_WEAPONINDEX is gated on Q2P_PSD_GUNINDEX
   // ONLY (q2repro.c:2053 -- `if (delta_bits & Q2P_PSD_GUNINDEX) flags |=
   // PS_WEAPONINDEX;`, no Q2P_PSD_GUNSKIN check anywhere in that function). A

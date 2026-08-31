@@ -750,3 +750,149 @@ describe("loc.ts against the real retail Q2Game.kpf's loc_english.txt (skipped i
     }
   });
 });
+
+// =============================================================================
+// Section 6: `##P<n>` player-name tokens (src/client/cl_parse.ts's
+// CL_TranslatePlayerNameTokens, ported from q2repro src/client/parse.c:
+// 935-967, called at the top of CL_HandlePrint, :970-974).
+//
+// Live-play defect this covers: a falling death printed the RAW token
+// "##P0 cratered." to the console. Nothing was wrong with localization --
+// the re-release game deliberately emits the token and leaves substitution
+// to the client. p_client.cpp:2566 builds it (`return std::string("##P") +
+// std::to_string(playernum);`), this port's src/kexgame/p_client.ts:2742
+// reproduces that line, and q2repro's own PF_Loc_Print says so at
+// src/server/game.c:801-804: "the client is supposed to translate `##P<n>`
+// to player names ... ##P0 translates to player 0's configstring name ...
+// It only occurs for BROADCAST prints." This port's svc_print handler simply
+// never ran that pass.
+// =============================================================================
+
+describe("cl_parse.ts svc_print -- ##P<n> tokens become player names", () => {
+  beforeEach(() => {
+    cl.clear();
+    cls.clear();
+    SZ_Clear(net_message);
+    MSG_BeginReading(net_message);
+    clCvars.cl_shownet = null;
+    setRe(null);
+  });
+
+  function sendPrint(level: number, message: string): string {
+    SZ_Clear(net_message);
+    MSG_WriteByte(net_message, SvcOpsT.svc_print);
+    MSG_WriteByte(net_message, level);
+    MSG_WriteString(net_message, message);
+    MSG_BeginReading(net_message);
+
+    let captured = "";
+    Com_BeginRedirect(1, 1 << 16, (_target, buffer) => {
+      captured += buffer;
+    });
+    try {
+      CL_ParseServerMessage();
+    } finally {
+      Com_EndRedirect();
+    }
+    return captured;
+  }
+
+  test("the exact reported symptom: '##P0 cratered.' prints the player's name", () => {
+    cl.clientinfo[0].name = "Ranger";
+    expect(sendPrint(PrintTypeT.PRINT_HIGH, "##P0 cratered.\n")).toBe("Ranger cratered.\n");
+  });
+
+  test("multi-digit player numbers consume every digit (##P12 is player 12, not player 1 then '2')", () => {
+    cl.clientinfo[1].name = "One";
+    cl.clientinfo[12].name = "Twelve";
+    expect(sendPrint(PrintTypeT.PRINT_HIGH, "##P12 died.\n")).toBe("Twelve died.\n");
+  });
+
+  test("several tokens in one string are all substituted", () => {
+    cl.clientinfo[0].name = "Alpha";
+    cl.clientinfo[3].name = "Bravo";
+    expect(sendPrint(PrintTypeT.PRINT_HIGH, "##P0 was railed by ##P3\n")).toBe("Alpha was railed by Bravo\n");
+  });
+
+  test("an out-of-range player number consumes the token and substitutes nothing (parse.c:955-960 has no fallback)", () => {
+    expect(sendPrint(PrintTypeT.PRINT_HIGH, "##P999 cratered.\n")).toBe(" cratered.\n");
+  });
+
+  test("an unknown client's empty name substitutes as empty, not as the raw token", () => {
+    expect(sendPrint(PrintTypeT.PRINT_HIGH, "##P5 cratered.\n")).toBe(" cratered.\n");
+  });
+
+  test("'##P' not followed by a digit is left alone (the C's strncmp+Q_isdigit guard)", () => {
+    expect(sendPrint(PrintTypeT.PRINT_HIGH, "##Pineapple\n")).toBe("##Pineapple\n");
+    expect(sendPrint(PrintTypeT.PRINT_HIGH, "no tokens here\n")).toBe("no tokens here\n");
+  });
+
+  test("substitution happens for centerprint levels too -- the C runs it before the level branch", () => {
+    cl.clientinfo[0].name = "Ranger";
+    const out = sendPrint(PrintTypeT.PRINT_CENTER, "##P0 cratered.");
+    expect(out).toContain("Ranger cratered.");
+    expect(out).not.toContain("##P0");
+  });
+});
+
+// =============================================================================
+// Section 7: the whole obituary path end to end against the REAL retail
+// loc_english.txt -- game key -> Loc_Localize -> svc_print -> console. Same
+// skip-if-absent + copy-the-KPF-entry-into-a-temp-basedir shape as Section 5
+// (see its header for why the retail tree is never mounted directly).
+// =============================================================================
+
+describe("falling obituary end to end against the real retail loc_english.txt (skipped if the retail install isn't present)", () => {
+  test.skipIf(!haveRetailKpf)("$g_mod_generic_falling + ##P0 becomes '<name> cratered.'", () => {
+    const kpfBytes = new Uint8Array(readFileSync(RETAIL_KPF_PATH));
+    const archive = ZipArchive.open(kpfBytes);
+    expect(archive).not.toBeNull();
+    const locBytes = archive!.readFile("localization/loc_english.txt");
+    expect(locBytes).not.toBeNull();
+
+    const root = mkdtempSync(join(tmpdir(), "q2loc-obit-e2e-"));
+    try {
+      const locDir = join(root, "baseq2", "localization");
+      mkdirSync(locDir, { recursive: true });
+      writeFileSync(join(locDir, "loc_english.txt"), Buffer.from(locBytes!));
+
+      Cvar_ForceSet("loc_file", "localization/loc_english.txt");
+      Cvar_ForceSet("basedir", root);
+      FS_InitFilesystem();
+
+      // Server side: ClientObituary (p_client.cpp:112) picks
+      // "$g_mod_generic_falling" for MOD_FALLING with no attacker, and
+      // passes the victim's GetPlayerName() -- the "##P<n>" token, not the
+      // netname (p_client.cpp:2566). gi.Loc_Print localizes the key and
+      // substitutes {0} with that token, leaving the token intact.
+      const localized = Loc_Localize("$g_mod_generic_falling", true, ["##P0"], 1);
+      expect(localized).toBe("##P0 cratered.\n"); // exactly what the owner saw on screen
+
+      // Client side: the svc_print handler resolves the token.
+      cl.clear();
+      cls.clear();
+      clCvars.cl_shownet = null;
+      setRe(null);
+      cl.clientinfo[0].name = "Ranger";
+
+      SZ_Clear(net_message);
+      MSG_WriteByte(net_message, SvcOpsT.svc_print);
+      MSG_WriteByte(net_message, PrintTypeT.PRINT_MEDIUM);
+      MSG_WriteString(net_message, localized);
+      MSG_BeginReading(net_message);
+
+      let captured = "";
+      Com_BeginRedirect(1, 1 << 16, (_target, buffer) => {
+        captured += buffer;
+      });
+      try {
+        CL_ParseServerMessage();
+      } finally {
+        Com_EndRedirect();
+      }
+      expect(captured).toBe("Ranger cratered.\n");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
