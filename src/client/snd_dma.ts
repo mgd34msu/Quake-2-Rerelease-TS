@@ -23,6 +23,7 @@ import { type Vec3, vec3, DotProduct, VectorCopy, VectorNormalize, VectorSubtrac
 import { ATTN_STATIC, CVAR_ARCHIVE, CVAR_SOUND, Com_PageInMemory, Com_sprintf, ERR_DROP, ERR_FATAL, RDF_UNDERWATER, type EntityStateT } from "../shared/q_shared";
 import { Haptics_TriggerSound } from "../platform/haptics";
 import { cl, cl_entities, cl_parse_entities, clCvars, cls, ConnstateT, MAX_PARSE_ENTITIES } from "./client";
+import { MAX_SOUNDS_WIDE } from "../shared/cs_remap";
 import { CL_GetEntitySoundOrigin } from "./cl_ents";
 import {
   ChannelT,
@@ -60,7 +61,17 @@ let soundStarted = false;
 // during registration it is possible to have more sounds than could
 // actually be referenced during gameplay, because we don't want to free
 // anything until we are sure we won't need it.
-const MAX_SFX = 256 * 2; // MAX_SOUNDS*2 (MAX_SOUNDS is q_shared.ts's networked sound-index limit)
+// q2repro sound/main.c:50 `#define MAX_SFX (MAX_SOUNDS*2)` -- MAX_SOUNDS there is
+// ALWAYS the wide 2048 constant, unconditionally (this internal sfx_t registry
+// is not protocol-family aware at all, unlike client.ts's networked
+// cl.sound_precache[] array, which IS indexed by the wire sound number and is
+// separately sized off MAX_SOUNDS_WIDE there). Previously hardcoded to the
+// classic-only 256*2=512; widened here to match, since a kex-family session
+// can legitimately register more than 512 total distinct sound assets across
+// its lifetime (unlike the network index cap, this is a monotonically
+// growing "every sound ever loaded this session" table, gated by
+// s_registration_sequence, not per-frame).
+const MAX_SFX = MAX_SOUNDS_WIDE * 2;
 let known_sfx: SfxT[] = Array.from({ length: MAX_SFX }, () => new SfxT());
 let num_sfx = 0;
 

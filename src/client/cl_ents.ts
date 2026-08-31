@@ -6,7 +6,6 @@ import {
   EntityStateT,
   PlayerStateT,
   PmTypeT,
-  MAX_EDICTS,
   PMF_NO_PREDICTION,
   VIDREF_GL,
   EntityEventT,
@@ -301,7 +300,12 @@ function CL_ParsePacketEntities(oldframe: FrameT | null, newframe: FrameT): void
 
   for (;;) {
     const { number: newnum, bits } = CL_ParseEntityBits();
-    if (newnum >= MAX_EDICTS) {
+    // q2repro parse.c:183 `if (newnum < 0 || newnum >= cl.csr.max_edicts)` --
+    // bound against the ACTIVE family's csr, not a compile-time constant:
+    // protocol 34/35/36 (CS_REMAP_OLD) stays capped at 1024 exactly as
+    // vanilla always was, while 1038/kex (CS_REMAP_RERELEASE) allows the
+    // full 8192-entity range cl_entities is now sized to hold.
+    if (newnum >= cls.csr.max_edicts) {
       Com_Error(ERR_DROP, "CL_ParsePacketEntities: bad number:%i", newnum);
     }
 
@@ -1095,7 +1099,8 @@ Called to get the sound spatialization origin
 ===============
 */
 export function CL_GetEntitySoundOrigin(ent: number, org: Vec3): void {
-  if (ent < 0 || ent >= MAX_EDICTS) {
+  // q2repro entities.c:1650 `if (entnum >= cl.csr.max_edicts)` -- family-active bound.
+  if (ent < 0 || ent >= cls.csr.max_edicts) {
     Com_Error(ERR_DROP, "CL_GetEntitySoundOrigin: bad ent");
   }
   const old = cl_entities[ent];

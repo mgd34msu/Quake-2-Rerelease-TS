@@ -101,7 +101,6 @@ import {
   CVAR_CHEAT,
   CVAR_PRIVATE,
   MAX_CLIENTS,
-  MAX_EDICTS,
   CS_NAME,
   CS_SKY,
   Q_stricmp,
@@ -309,7 +308,12 @@ export function CL_Record_f(): void {
   }
 
   // baselines
-  for (let i = 0; i < MAX_EDICTS; i++) {
+  // q2repro demo.c:593/1022 `for (i = 1; i < cl.csr.max_edicts; i++)` -- family-
+  // active bound (was the vanilla-only MAX_EDICTS constant) and starts at
+  // entity 1, skipping the world entity exactly like the reference (harmless
+  // either way here since entity 0's baseline.modelindex is always 0, but
+  // matching upstream's own loop bounds now that this is being touched).
+  for (let i = 1; i < cls.csr.max_edicts; i++) {
     const ent = cl_entities[i].baseline;
     if (!ent.modelindex) continue;
 

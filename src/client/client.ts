@@ -36,7 +36,6 @@ import { type Vec3, vec3 } from "../shared/math";
 import {
   MAX_QPATH,
   MAX_CLIENTS,
-  MAX_EDICTS,
   MAX_ITEMS,
   CmodelT,
   EntityStateT,
@@ -51,7 +50,16 @@ import { type ModelS, type ImageS, type RefExports, RefdefT, MAX_DLIGHTS } from 
 import type { SfxT } from "./snd_loc";
 import type { ProtocolCodec } from "../qcommon/protocol/codec";
 import { VANILLA_CODEC } from "../qcommon/protocol/vanilla";
-import { type CsRemapT, CS_REMAP_OLD, CS_REMAP_RERELEASE, MAX_MODELS_WIDE, MAX_SOUNDS_WIDE, MAX_IMAGES_WIDE, MAX_SHADOW_LIGHTS_WIDE } from "../shared/cs_remap";
+import {
+  type CsRemapT,
+  CS_REMAP_OLD,
+  CS_REMAP_RERELEASE,
+  MAX_EDICTS_WIDE,
+  MAX_MODELS_WIDE,
+  MAX_SOUNDS_WIDE,
+  MAX_IMAGES_WIDE,
+  MAX_SHADOW_LIGHTS_WIDE,
+} from "../shared/cs_remap";
 
 //=============================================================================
 
@@ -693,13 +701,40 @@ export class CdlightT {
   minlight = 0; // don't add when contributing less
 }
 
-export const cl_entities: CentityT[] = Array.from({ length: MAX_EDICTS }, () => new CentityT());
+// client-side wide-arrays widening unit (v1.0.0 queue item, .orch/followups.md
+// "CLIENT-SIDE WIDE ARRAYS"): q2repro's client.h declares `centity_t
+// cl_entities[MAX_EDICTS]` where MAX_EDICTS is ALWAYS the wide 8192 constant
+// (inc/shared/shared.h:90, unconditional -- the classic family's narrow 1024
+// only exists as MAX_EDICTS_OLD, a separate constant q2repro's own client
+// array declarations never use). This mirrors that: cl_entities is allocated
+// at the wide ceiling unconditionally, the same way this file's model_draw/
+// model_clip/sound_precache/image_precache/configstrings below already are;
+// per-connection code bound-checks writes against the ACTIVE family's
+// cls.csr.max_edicts (narrower under classic/protocol 34, matching q2repro's
+// own runtime `cl.csr.max_edicts` checks in parse.c/entities.c/newfx.c), not
+// this array's own length. Previously sized off q_shared.ts's MAX_EDICTS
+// (1024, the classic-only constant) -- a real kex-family bug, since a
+// baseline or delta for an entity number 1024..8191 indexed past the end of
+// a plain 1024-length array, reading back `undefined` and crashing the very
+// next `.baseline`/`.current` property access.
+export const cl_entities: CentityT[] = Array.from({ length: MAX_EDICTS_WIDE }, () => new CentityT());
 export const cl_dlights: CdlightT[] = Array.from({ length: MAX_DLIGHTS }, () => new CdlightT());
 
 // the cl_parse_entities must be large enough to hold UPDATE_BACKUP frames of
 // entities, so that when a delta compressed message arrives from the
 // server it can be un-deltad from the original
-export const MAX_PARSE_ENTITIES = 1024;
+//
+// q2repro's inc/common/protocol.h:114-117: MAX_PACKET_ENTITIES_OLD=128 (classic
+// wire cap) vs MAX_PACKET_ENTITIES=512 (wide, unconditional compile-time
+// constant -- like MAX_EDICTS above, q2repro's client.h always allocates
+// against the wide one: `entity_state_t entityStates[MAX_PARSE_ENTITIES]`,
+// MAX_PARSE_ENTITIES = MAX_PACKET_ENTITIES * UPDATE_BACKUP = 512*16 = 8192).
+// Previously hardcoded to 1024 -- too small to hold even one full wide-family
+// frame's worth of packet entities (512) replicated across UPDATE_BACKUP(16)
+// history slots without the ring wrapping mid-frame and un-deltaing against
+// the wrong entity_state_t.
+export const MAX_PACKET_ENTITIES_WIDE = 512;
+export const MAX_PARSE_ENTITIES = MAX_PACKET_ENTITIES_WIDE * UPDATE_BACKUP;
 export const cl_parse_entities: EntityStateT[] = Array.from({ length: MAX_PARSE_ENTITIES }, () => new EntityStateT());
 
 //=============================================================================

@@ -59,7 +59,6 @@ import {
   CS_CDTRACK,
   MAX_CLIENTS,
   MAX_LIGHTSTYLES,
-  MAX_EDICTS,
   PRINT_CHAT,
   ERR_DISCONNECT,
   Com_sprintf,
@@ -562,6 +561,15 @@ export function CL_ParseBaseline(): void {
   const nullstate = new EntityStateT();
 
   const { number: newnum, bits } = CL_ParseEntityBits();
+  // q2repro parse.c:533-538's CL_ParseBaseline has a bound check this port's
+  // version was missing entirely (`if (spawnbaseline->entnum < 1 ||
+  // spawnbaseline->entnum >= cl.csr.max_edicts) Com_Error(...)`); without it,
+  // a bad/oversized entnum indexed straight into cl_entities and threw an
+  // opaque "Cannot read properties of undefined" instead of this function's
+  // own diagnostic. Added, family-active bound.
+  if (newnum < 1 || newnum >= cls.csr.max_edicts) {
+    Com_Error(ERR_DROP, "CL_ParseBaseline: bad index: %i", newnum);
+  }
   const es = cl_entities[newnum].baseline;
   CL_ParseDelta(nullstate, es, newnum, bits);
 }
@@ -796,7 +804,11 @@ export function CL_ParseStartSoundPacket(): void {
     // entity reletive
     channel = MSG_ReadShort(net_message);
     ent = channel >> 3;
-    if (ent > MAX_EDICTS) Com_Error(ERR_DROP, "CL_ParseStartSoundPacket: ent = %i", ent);
+    // q2repro parse.c:852-853 `if (snd.entity >= cl.csr.max_edicts) Com_Error(...)`
+    // -- family-active bound (was the vanilla-only MAX_EDICTS constant, and
+    // `>` instead of the reference's `>=`; both fixed here since this function
+    // runs for EVERY live protocol family's svc_sound, including 1038/kex).
+    if (ent >= cls.csr.max_edicts) Com_Error(ERR_DROP, "CL_ParseStartSoundPacket: ent = %i", ent);
 
     channel &= 7;
   } else {
@@ -822,7 +834,11 @@ export function CL_ParseStartSoundPacket(): void {
 // SND_KEX_LARGE_ENT-widened entchan, demo-precision SND_POS).
 function CL_ParseStartSoundPacketKex(): void {
   const sound = readSoundKex();
-  if (sound.entity > MAX_EDICTS) Com_Error(ERR_DROP, "CL_ParseStartSoundPacketKex: ent = %i", sound.entity);
+  // Same family-active bound as CL_ParseStartSoundPacket above -- this path
+  // is only ever reached under cls.csr === CS_REMAP_RERELEASE (KEX_DEMO_CODEC),
+  // so this is functionally cls.csr.max_edicts's wide value, kept symbolic
+  // rather than hardcoded to match its sibling function exactly.
+  if (sound.entity >= cls.csr.max_edicts) Com_Error(ERR_DROP, "CL_ParseStartSoundPacketKex: ent = %i", sound.entity);
   if (!cl.sound_precache[sound.index]) return;
   S_StartSound(sound.pos, sound.entity, sound.channel, cl.sound_precache[sound.index], sound.volume, sound.attenuation, sound.timeofs);
 }

@@ -284,7 +284,7 @@ import { MAX_PARTICLES, MAX_LIGHTSTYLES, type EntityT } from "./ref";
 import { V_AddParticle, V_AddLight, V_AddLightStyle, V_AddLightEx } from "./cl_view";
 import { S_StartSound, S_RegisterSound } from "./snd_dma";
 import { ComError } from "../qcommon/qcommon";
-import { ERR_DROP, MAX_EDICTS } from "../shared/q_shared";
+import { ERR_DROP } from "../shared/q_shared";
 import { MSG_ReadShort, MSG_ReadByte } from "../qcommon/sizebuf";
 // Family-aware muzzleflash offset table: game/m_flash.ts's own header
 // comment ("this file is included in both the game dll and quake2, the
@@ -589,7 +589,12 @@ function clRereleaseEffectsEnabled(): boolean {
 // new renderer plumbing required.
 export function CL_ParseMuzzleFlash(): void {
   const i = MSG_ReadShort(net_message);
-  if (i < 1 || i >= MAX_EDICTS) {
+  // q2repro's own CL_ParseMuzzleFlashPacket (parse.c:840-845) has NO bound
+  // check on the wire entity number at all -- kept here (this port already
+  // had it, a deliberate extra safety net not present upstream) but widened
+  // to the ACTIVE family's cls.csr.max_edicts so a real kex-family entity
+  // above the vanilla 1024 cap doesn't spuriously throw.
+  if (i < 1 || i >= cls.csr.max_edicts) {
     throw new ComError(ERR_DROP, "CL_ParseMuzzleFlash: bad entity");
   }
 
@@ -813,7 +818,10 @@ export function CL_ParseMuzzleFlash(): void {
 
 export function CL_ParseMuzzleFlash2(): void {
   const ent = MSG_ReadShort(net_message);
-  if (ent < 1 || ent >= MAX_EDICTS) {
+  // Same reasoning as CL_ParseMuzzleFlash above: q2repro's CL_ParseMuzzleFlashPacket
+  // has no bound check upstream; this port's own extra guard is widened to
+  // the active family's cls.csr.max_edicts instead of the vanilla-only constant.
+  if (ent < 1 || ent >= cls.csr.max_edicts) {
     throw new ComError(ERR_DROP, "CL_ParseMuzzleFlash2: bad entity");
   }
 

@@ -98,9 +98,17 @@ describe("client.ts default structs", () => {
   });
 
   test("module-level arrays are sized per their C #define bounds", () => {
-    expect(cl_entities.length).toBe(1024); // MAX_EDICTS
+    // Widened by the client-side wide-arrays unit (.orch/followups.md
+    // "CLIENT-SIDE WIDE ARRAYS"): q2repro's client.h declares both
+    // cl_entities[MAX_EDICTS] and entityStates[MAX_PARSE_ENTITIES] against
+    // the WIDE compile-time constants unconditionally (MAX_EDICTS=8192,
+    // MAX_PARSE_ENTITIES=MAX_PACKET_ENTITIES(512)*UPDATE_BACKUP(16)=8192),
+    // bound-checking writes against the ACTIVE connection family's
+    // cls.csr.max_edicts at runtime instead -- see test/cl_wide_entities.test.ts
+    // for the family-dispatch coverage.
+    expect(cl_entities.length).toBe(8192); // MAX_EDICTS_WIDE
     expect(cl_dlights.length).toBe(32); // MAX_DLIGHTS (ref.h)
-    expect(cl_parse_entities.length).toBe(1024); // MAX_PARSE_ENTITIES
+    expect(cl_parse_entities.length).toBe(8192); // MAX_PARSE_ENTITIES (wide)
   });
 
   test("clCvars holder keys exist for every C-registered client cvar", () => {
