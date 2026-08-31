@@ -21,34 +21,41 @@
 //     because the NOVOICE_OK block that would have used slot 6 never
 //     compiles -- a real, easy-to-miss quirk, preserved exactly).
 //
-// Cross-dependencies into files this unit does not own (g_cmds.ts/
-// p_client.ts/g_ctffunc.ts/g_tourney.ts/g_main.ts/g_utils.ts foundation
-// completions owned by unit A) stay local throwing stubs cited at their
-// use sites below, per .orch/preferences.md rule 12 -- EXCEPT
-// G_CopyString, which (like g_skins.ts's CopyString and g_spawn.c's
-// ED_NewString elsewhere in this port) is a pure strdup with exactly one
-// possible correct behavior in a language with no manual memory
-// management; Menu_Set below reproduces it inline (`text` unchanged)
-// instead of stubbing a function whose entire body would be "return the
-// input", since a real g_utils.ts G_CopyString could never disagree with
-// that.
+// Cross-dependencies into files this unit does not own: ALL twelve
+// (Cmd_Team_f/Team_Change/Cmd_ToggleFastSwitch_f/Drop_All/PlayTeamSound/
+// PlayVoiceSound/ForceCommand from g_cmds.ts, Cmd_Observe_f/ClientSetSkin/
+// TeamJoin from p_client.ts, ctf_ChangeMap/ctf_validateflags from
+// g_ctffunc.ts, StartMatch/KillMatch/SetPause/Match_Mode/GamePaused from
+// g_tourney.ts) are now real imports -- no throwing stubs remain for any
+// of them. G_CopyString is the one exception that was never a stub to
+// begin with (like g_skins.ts's CopyString and g_spawn.c's ED_NewString
+// elsewhere in this port, it is a pure strdup with exactly one possible
+// correct behavior in a language with no manual memory management;
+// Menu_Set below reproduces it inline (`text` unchanged) instead of
+// importing a function whose entire body would be "return the input").
 //
 // `helptext`/`maplist`/`maplistindex`/`shortList` are runtime state
 // g_save.c populates by parsing config files at startup (not static C
 // data -- confirmed by reading g_save.c's assignments into them) --
 // neither a function this port can stub nor data this port can inline.
 // They stay local, empty-by-default module state here (matching the
-// server's real state before any config has ever been read), swappable
-// for g_main.ts's real copies once unit A lands them; every function that
-// reads them degrades to "no entries" rather than throwing, since an
-// empty result is exactly what the real server shows before startup
-// config parsing completes.
+// server's real state before any config has ever been read); every
+// function that reads them degrades to "no entries" rather than throwing,
+// since an empty result is exactly what the real server shows before
+// startup config parsing completes. This is the one class of stub this
+// unit's own SCOPE cannot resolve (it needs g_save.c's maplist.txt/
+// motd.txt file-I/O parser, not a function some other file could export).
 //
-// `refset`/`fastswitch`/`server_file` cvars (registered by g_save.c,
-// unit A's pending file) are likewise local stand-ins carrying their C
-// defaults ("0", "0", "server.cfg"). SaveServer_Exec's file I/O goes
-// through src/qcommon/files.ts's FS_LoadFile/FS_WriteFile (the sanctioned
-// FS seam -- same channel g_skins.ts/g_save.ts use), not gi.TagMalloc+fopen.
+// `refset`/`fastswitch` are now real cvars (g_main.ts's InitGame registers
+// both, this pass) -- Ref_Practice_Menu/Ref_PracticeFlagRed_Exec/
+// Ref_PracticeFlagBlue_Exec/Ref_Settings_Menu read/write them for real
+// now via `refsetBits()`/gameCvars.fastswitch instead of a local shadow
+// variable. `server_file` still has no real cvar anywhere in this port
+// (g_save.c's own registration is out of SCOPE) and remains a local
+// stand-in carrying its C default ("server.cfg"). SaveServer_Exec's file
+// I/O goes through src/qcommon/files.ts's FS_LoadFile/FS_WriteFile (the
+// sanctioned FS seam -- same channel g_skins.ts/g_save.ts use), not
+// gi.TagMalloc+fopen.
 
 import { FS_LoadFile, FS_WriteFile } from "../qcommon/files";
 import { Com_sprintf, DF_ALLOW_EXIT, DF_FIXED_FOV, DF_FORCE_RESPAWN, DF_INFINITE_AMMO, DF_INSTANT_ITEMS, DF_MODELTEAMS, DF_NO_ARMOR, DF_NO_FALLING, DF_NO_FRIENDLY_FIRE, DF_NO_HEALTH, DF_NO_ITEMS, DF_QUAD_DROP, DF_SAME_LEVEL, DF_SKINTEAMS, DF_SPAWN_FARTHEST, DF_WEAPONS_STAY, PRINT_HIGH, va } from "../shared/q_shared";
@@ -60,6 +67,7 @@ import {
   CTF_TEAM_OBSERVER_RED,
   CTF_TEAM_RED,
   CTF_TEAM_UNDEFINED,
+  ctf_ChangeMap,
   ctf_findplayer,
   ctf_SafePrint,
   ctf_validateflags,
@@ -90,10 +98,19 @@ import {
   svc_layout,
 } from "./g_local";
 import { FindItem } from "./g_items";
-import { GamePaused, Match_Mode } from "./g_tourney";
+import { GamePaused, KillMatch, Match_Mode, SetPause, StartMatch } from "./g_tourney";
 import { SkinGetList, SkinListInUse } from "./g_skins";
-import { ForceCommand } from "./g_cmds";
-import { TeamJoin } from "./p_client";
+import {
+  Cmd_Observe_f,
+  Cmd_Team_f,
+  Cmd_ToggleFastSwitch_f,
+  Drop_All,
+  ForceCommand,
+  PlayTeamSound,
+  PlayVoiceSound,
+  Team_Change,
+} from "./g_cmds";
+import { ClientSetSkin, TeamJoin } from "./p_client";
 
 // lmctf60/g_menu.h:12-18
 export const MENU_LOCAL = 0;
@@ -121,76 +138,25 @@ export interface MenuData {
 }
 
 // ---------------------------------------------------------------------
-// Cross-dependencies into files this unit does not own. TeamJoin
-// (p_client.ts) and ctf_validateflags (g_ctffunc.ts) have since landed for
-// real and are imported above (removed from the stub list below). Still
-// outstanding: g_cmds.ts (Cmd_Team_f/Team_Change/Cmd_ToggleFastSwitch_f/
-// Drop_All/PlayTeamSound/PlayVoiceSound), p_client.ts (Cmd_Observe_f --
-// lives in p_observer.ts's own newer implementation instead, not a drop-in
-// signature match; ClientSetSkin -- lmctf60/p_client.c:3145, not ported by
-// any unit yet), g_ctffunc.ts's own ctf_ChangeMap (lmctf60/g_ctffunc.c:1548
-// is a real, small function, but it unconditionally calls KillMatch,
-// g_tourney.c's match-flow system, not ported anywhere in this port), and
-// g_tourney.ts (StartMatch/KillMatch/SetPause -- only Match_Mode/
-// GamePaused exist there today). Each remaining stub throws if
-// actually invoked and cites its C source plus owner.
+// Cross-dependencies into files this unit does not own -- ALL now real,
+// imported above: TeamJoin/ClientSetSkin (p_client.ts), ctf_validateflags/
+// ctf_ChangeMap (g_ctffunc.ts), StartMatch/KillMatch/SetPause/Match_Mode/
+// GamePaused (g_tourney.ts), and Cmd_Team_f/Team_Change/
+// Cmd_ToggleFastSwitch_f/Drop_All/PlayTeamSound/PlayVoiceSound/
+// Cmd_Observe_f/ForceCommand (g_cmds.ts). No throwing stubs remain in this
+// section.
 // ---------------------------------------------------------------------
-
-function Cmd_Team_f(_ent: EdictT): void {
-  throw new Error("Cmd_Team_f not yet ported (lmctf60/g_cmds.c; owned by unit A's g_cmds.ts completion)");
-}
-
-function Team_Change(_ent: EdictT, _newnum: number): void {
-  throw new Error("Team_Change not yet ported (lmctf60/g_cmds.c; owned by unit A's g_cmds.ts completion)");
-}
-
-function Cmd_ToggleFastSwitch_f(_ent: EdictT): void {
-  throw new Error("Cmd_ToggleFastSwitch_f not yet ported (lmctf60/g_cmds.c; owned by unit A's g_cmds.ts completion)");
-}
-
-function Drop_All(_ent: EdictT): void {
-  throw new Error("Drop_All not yet ported (lmctf60/g_cmds.c:1065, the live definition; owned by unit A's g_cmds.ts completion)");
-}
-
-function PlayTeamSound(_ent: EdictT, _sound: string): void {
-  throw new Error("PlayTeamSound not yet ported (lmctf60/g_cmds.c; owned by unit A's g_cmds.ts completion)");
-}
-
-function PlayVoiceSound(_ent: EdictT, _sound: string): void {
-  throw new Error("PlayVoiceSound not yet ported (lmctf60/g_cmds.c; owned by unit A's g_cmds.ts completion)");
-}
-
-function Cmd_Observe_f(_ent: EdictT, _observerType: number): void {
-  throw new Error("Cmd_Observe_f not yet ported (lmctf60/p_client.c; owned by unit A's pending p_client.ts)");
-}
-
-function ClientSetSkin(_ent: EdictT, _skin: string): void {
-  throw new Error("ClientSetSkin not yet ported (lmctf60/p_client.c; owned by unit A's pending p_client.ts)");
-}
-
-function ctf_ChangeMap(_mapname: string | null, _immediate: boolean): void {
-  throw new Error("ctf_ChangeMap not yet ported (lmctf60/g_ctffunc.c:1548; owned by unit A's g_ctffunc.ts completion -- itself blocked on KillMatch, g_tourney.c, not yet ported)");
-}
-
-function StartMatch(_mapname: string | null): void {
-  throw new Error("StartMatch not yet ported (lmctf60/g_tourney.c; owned by unit A's g_tourney.ts completion)");
-}
-
-function KillMatch(): void {
-  throw new Error("KillMatch not yet ported (lmctf60/g_tourney.c; owned by unit A's g_tourney.ts completion)");
-}
-
-function SetPause(_pause: boolean): void {
-  throw new Error("SetPause not yet ported (lmctf60/g_tourney.c; owned by unit A's g_tourney.ts completion)");
-}
-
+// `refset`/`fastswitch` are now real cvars (g_main.ts's InitGame registers
+// both); `refsetBits()` re-reads gameCvars.refset.value fresh at each call
+// site instead of caching a local shadow copy (gi.cvar_set mutates the
+// CvarT object in place, same convention every other cvar read in this
+// file already uses). `server_file` still has no real cvar anywhere in
+// this port (g_save.c's own registration is out of SCOPE, see this file's
+// header), so serverFileName remains a local stand-in.
 // ---------------------------------------------------------------------
-// Local stand-ins for cvars g_save.c registers (unit A's pending
-// g_save.ts) -- carry the exact C defaults so behavior is unchanged once
-// real cvars replace them.
-// ---------------------------------------------------------------------
-let refsetValue = 0; // lmctf60/g_save.c: `gi.cvar("refset", "0", CVAR_SERVERINFO)`
-let fastswitchValue = 0; // lmctf60/g_save.c: `gi.cvar("fastswitch", "0", 0)`
+function refsetBits(): number {
+  return Math.floor(gameCvars.refset?.value ?? 0);
+}
 let serverFileName = "server.cfg"; // lmctf60/g_save.c: `gi.cvar("server_file", "server.cfg", 0)`
 
 // ---------------------------------------------------------------------
@@ -884,34 +850,37 @@ export function Ref_Practice_Menu(ent: EdictT): void {
   ctf_validateflags();
   Menu_Set(ent, 1, "LMCTF Practice Menu", Ref_Main_Menu);
   Menu_Set(ent, 2, "-------------------", null);
-  Menu_Set(ent, 3, `Red Flag:     ${redflag !== null && (refsetValue & CTF_RED_FLAG_FROZEN) !== 0 ? "FROZEN" : "NORMAL"}`, Ref_PracticeFlagRed_Exec);
-  Menu_Set(ent, 4, `Blue Flag:    ${blueflag !== null && (refsetValue & CTF_BLUE_FLAG_FROZEN) !== 0 ? "FROZEN" : "NORMAL"}`, Ref_PracticeFlagBlue_Exec);
+  Menu_Set(ent, 3, `Red Flag:     ${redflag !== null && (refsetBits() & CTF_RED_FLAG_FROZEN) !== 0 ? "FROZEN" : "NORMAL"}`, Ref_PracticeFlagRed_Exec);
+  Menu_Set(ent, 4, `Blue Flag:    ${blueflag !== null && (refsetBits() & CTF_BLUE_FLAG_FROZEN) !== 0 ? "FROZEN" : "NORMAL"}`, Ref_PracticeFlagBlue_Exec);
   Menu_Draw(ent);
 }
 
 /*
 =================
 Ref_PracticeFlagRed_Exec / Ref_PracticeFlagBlue_Exec (lmctf60/g_menu.c:947,
-956)
+956) -- read/write the real `refset` cvar (g_main.ts's InitGame registers
+it) instead of a local stand-in now that it exists.
 =================
 */
 export function Ref_PracticeFlagRed_Exec(ent: EdictT): void {
-  if (redflag !== null && (refsetValue & CTF_RED_FLAG_FROZEN) !== 0) {
-    refsetValue &= ~CTF_RED_FLAG_FROZEN;
+  let bits = refsetBits();
+  if (redflag !== null && (bits & CTF_RED_FLAG_FROZEN) !== 0) {
+    bits &= ~CTF_RED_FLAG_FROZEN;
   } else {
-    refsetValue |= CTF_RED_FLAG_FROZEN;
+    bits |= CTF_RED_FLAG_FROZEN;
   }
-  gi.cvar_set("refset", `${refsetValue}`);
+  gi.cvar_set("refset", `${bits}`);
   Ref_Practice_Menu(ent);
 }
 
 export function Ref_PracticeFlagBlue_Exec(ent: EdictT): void {
-  if (blueflag !== null && (refsetValue & CTF_BLUE_FLAG_FROZEN) !== 0) {
-    refsetValue &= ~CTF_BLUE_FLAG_FROZEN;
+  let bits = refsetBits();
+  if (blueflag !== null && (bits & CTF_BLUE_FLAG_FROZEN) !== 0) {
+    bits &= ~CTF_BLUE_FLAG_FROZEN;
   } else {
-    refsetValue |= CTF_BLUE_FLAG_FROZEN;
+    bits |= CTF_BLUE_FLAG_FROZEN;
   }
-  gi.cvar_set("refset", `${refsetValue}`);
+  gi.cvar_set("refset", `${bits}`);
   Ref_Practice_Menu(ent);
 }
 
@@ -996,7 +965,7 @@ export function Ref_Settings_Menu(ent: EdictT): void {
   Menu_Set(ent, 4, va("Fraglimit:           %3d", gameCvars.fraglimit?.value ?? 0), Ref_Fraglimit_Menu);
   Menu_Set(ent, 5, va("DMFlags:           %5d", (gameCvars.dmflags?.value ?? 0) & 0xffff), Ref_DMFlags_Menu);
   Menu_Set(ent, 6, va("CTFFlags:          %5d", (gameCvars.ctfflags?.value ?? 0) & 0xffff), Ref_CTFFlags_Menu);
-  Menu_Set(ent, 7, va("Fast Weap Switch:  %5d", fastswitchValue & 0xffff), null);
+  Menu_Set(ent, 7, va("Fast Weap Switch:  %5d", Math.floor(gameCvars.fastswitch?.value ?? 0) & 0xffff), null);
   Menu_Set(ent, 8, va("Teams Locked:      %5d", game.teamslocked ? 1 : 0), null);
   const svp = gi.cvar("sv_password", "", 0);
   if (svp !== null && svp.string.length > 0) {

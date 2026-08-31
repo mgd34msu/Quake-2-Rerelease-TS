@@ -186,13 +186,16 @@ import {
   CTF_TEAM_LIMIT,
   CTF_TEAM_MIN_LIMIT,
   CTF_TEAM_OBSERVER,
+  CTF_TEAM_OPPOSING,
   CTF_TEAM_RED,
   CTF_TEAM_UNDEFINED,
   ctf_BSafePrint,
   ctf_findplayer,
+  ctf_getteamflag,
   ctf_SetEntTeamEx,
 } from "./g_ctffunc";
 import { vectoangles } from "./g_utils";
+import { SkinListInUse, SkinRandom, SkinValid } from "./g_skins";
 
 // gameCvars entries are `CvarT | null` until InitGame resolves them; mirrors
 // every other file's local cvarNum-style helper.
@@ -1454,7 +1457,11 @@ export function ClientConnect(entIn: Edict, userinfoIn: string): { allowed: bool
 
   ClientUserinfoChanged(ent, userinfo);
 
-  client.spam_band_count = 24; // CTF_SPAM_BAND_MAX (g_ctffunc.h, not exported -- literal per that header's #define)
+  // lmctf60/p_client.c:2471-2473 -- CTF_SPAM_BAND_MAX/CTF_SPAM_FREQ_MIN
+  // (g_ctffunc.h) are 450/0; this line previously had the wrong literal
+  // (24) for CTF_SPAM_BAND_MAX -- fixed now that ctf_SpamCheck (g_ctffunc.ts,
+  // gates PlayTeamSound/PlayVoiceSound, g_cmds.ts) is a real dependent.
+  client.spam_band_count = 450; // CTF_SPAM_BAND_MAX
   client.spam_freq_count = 0; // CTF_SPAM_FREQ_MIN
   client.spam_freq_time = level.time;
 
@@ -1500,6 +1507,27 @@ export function ClientDisconnect(entIn: Edict): void {
 
   const playernum = EDICT_NUM(ent) - 1;
   gi.configstring(CS_PLAYERSKINS + playernum, "");
+}
+
+/*
+=================
+ClientHasFlag (lmctf60/p_client.c:106) -- byte-identical to the C source.
+Needed by g_cmds.ts's Drop_All (drops the enemy flag on death/observer
+transition if the client is currently carrying one).
+=================
+*/
+export function ClientHasFlag(ent: EdictT): EdictT | null {
+  if (ent.client === null) return null;
+  const teamnum = ent.client.ctf.teamnum;
+
+  // Were we carrying a flag?
+  const flag = ctf_getteamflag(teamnum, CTF_TEAM_OPPOSING);
+
+  if (flag !== null && flag.item !== null) {
+    if (ent.client.pers.inventory[ITEM_INDEX(flag.item)]) return flag;
+    return null;
+  }
+  return null;
 }
 
 //==============================================================
@@ -1579,6 +1607,170 @@ export function TeamJoin(ent: EdictT): void {
   } else {
     ctf_SetEntTeamEx(ent, newTeam, 0);
   }
+}
+
+//==============================================================
+// ClientSetSkin / ClientOldSetSkin (lmctf60/p_client.c:3145/3181)
+//==============================================================
+
+function cvarNumSkin(c: { value: number } | null): number {
+  return c === null ? 0 : c.value;
+}
+
+/*
+=================
+ClientOldSetSkin (lmctf60/p_client.c:3181)
+
+The legacy (pre-SkinListInUse) skin resolver: picks a team-colored
+male/female skin variant, preferring to preserve the caller's existing
+gender/number choice when their current skin string already parses as a
+valid "<dir>/<set>-<color><gender><num>" name. `sscanf(s, "%d", &skinnum)`
+(does `s` start with a parseable integer at all?) is reproduced as
+Number.parseInt(s, 10) not being NaN; the finer-grained
+"%[^/]/%[^-]-%c%c%d" parse is reproduced with a regex capturing the same
+five fields.
+=================
+*/
+export function ClientOldSetSkin(ent: EdictT, _input: string): void {
+  if (ent.client === null) return;
+
+  let curset: string;
+  switch (Math.floor(cvarNumSkin(gameCvars.skinset))) {
+    case 1:
+      curset = "lm";
+      break;
+    case 2:
+      curset = "cr";
+      break;
+    case 3:
+      curset = "w";
+      break;
+    default:
+      curset = "rb";
+      break;
+  }
+
+  // get skin
+  const s = Info_ValueForKey(ent.client.pers.userinfo, "skin");
+
+  let num = -1;
+  let gender = "u"; // unassigned
+  let color = "u"; // unassigned
+  let skinvalid = false;
+  let dirvalid = 0;
+  let matchedDir = "";
+  let matchedSet = "";
+  const skinnumParsed = Number.parseInt(s, 10);
+  const skinnum = Number.isNaN(skinnumParsed) ? 0 : skinnumParsed;
+
+  // See if we have only specified a skin number (C: `sscanf(s, "%d", &skinnum)`
+  // -- true whenever `s` starts with a parseable integer, matched here by
+  // `s` beginning with an optional sign then a digit)
+  if (/^[+-]?\d/.test(s)) {
+    // First, check if skin matches proper format "<dir>/<set>-<color><gender><num>"
+    const m = /^([^/]+)\/([^-]+)-(.)(.)(\d+)/.exec(s);
+    if (m !== null) {
+      const dir = m[1] ?? "";
+      matchedDir = dir;
+      matchedSet = m[2] ?? "";
+      const parsedGender = m[4] ?? "";
+      const parsedNum = Number.parseInt(m[5] ?? "0", 10);
+
+      if (dir === "female") {
+        dirvalid = 2;
+        if (parsedGender === "f" && parsedNum <= 2 && parsedNum >= 1) {
+          skinvalid = true;
+          gender = parsedGender;
+          num = parsedNum;
+          color = m[3] ?? "u";
+        }
+      } else if (dir === "male") {
+        dirvalid = 1;
+        if (parsedGender === "m" && parsedNum <= 3 && parsedNum >= 1) {
+          skinvalid = true;
+          gender = parsedGender;
+          num = parsedNum;
+          color = m[3] ?? "u";
+        }
+      }
+    }
+  }
+
+  let finalSkin: string | null = null;
+
+  // If our skin is valid, only change if our color doesn't match
+  if (skinvalid) {
+    if (
+      (ent.client.ctf.teamnum === CTF_TEAM_RED && color !== "r") ||
+      (ent.client.ctf.teamnum === CTF_TEAM_BLUE && color !== "b") ||
+      matchedSet !== curset
+    ) {
+      color = ent.client.ctf.teamnum === CTF_TEAM_RED ? "r" : "b";
+      finalSkin = `${matchedDir}/${curset}-${color}${gender}${num}`;
+    }
+  } else {
+    // Did we have a valid gender?
+    let dir: string;
+    if (dirvalid === 0 || dirvalid === 1) {
+      dir = "male";
+      gender = "m";
+      color = ent.client.ctf.teamnum === CTF_TEAM_RED ? "r" : "b";
+      num = skinnum % 4 === 0 ? Math.floor(Math.random() * 3) + 1 : skinnum % 4;
+    } else {
+      // female
+      dir = "female";
+      gender = "f";
+      color = ent.client.ctf.teamnum === CTF_TEAM_RED ? "r" : "b";
+      num = skinnum % 3 === 0 ? Math.floor(Math.random() * 2) + 1 : skinnum % 3;
+    }
+    finalSkin = `${dir}/${curset}-${color}${gender}${num}`;
+  }
+
+  const playernum = EDICT_NUM(ent) - 1;
+  const displaySkin = finalSkin ?? s;
+
+  // combine name and skin into a configstring
+  gi.configstring(CS_PLAYERSKINS + playernum, `${ent.client.pers.netname}\\${displaySkin}`);
+
+  if (finalSkin !== null) {
+    ent.client.pers.userinfo = Info_SetValueForKey(ent.client.pers.userinfo, "skin", finalSkin);
+    ent.client.ctf.goodskin = false; // We need to re-force our skin
+  }
+}
+
+/*
+=================
+ClientSetSkin (lmctf60/p_client.c:3145) -- byte-identical to the C source.
+Wires to g_skins.ts's real SkinListInUse/SkinValid/SkinRandom (the "new"
+skin-list system); falls back to ClientOldSetSkin above when no skin list
+is loaded, exactly like the C source.
+=================
+*/
+export function ClientSetSkin(ent: EdictT, skin: string): void {
+  if (ent.client === null) return;
+
+  if (!SkinListInUse()) {
+    ClientOldSetSkin(ent, skin);
+    return;
+  }
+
+  // get skin
+  const s = Info_ValueForKey(ent.client.pers.userinfo, "skin");
+
+  let newskin: string;
+  if (!SkinValid(ent, skin)) {
+    newskin = SkinValid(ent, s) ? s : SkinRandom(ent);
+  } else {
+    newskin = skin;
+  }
+
+  const playernum = EDICT_NUM(ent) - 1;
+
+  // combine name and skin into a configstring
+  gi.configstring(CS_PLAYERSKINS + playernum, `${ent.client.pers.netname}\\${newskin}`);
+
+  ent.client.pers.userinfo = Info_SetValueForKey(ent.client.pers.userinfo, "skin", newskin);
+  ent.client.ctf.goodskin = false; // We need to re-force our skin
 }
 
 //==============================================================

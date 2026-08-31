@@ -11,9 +11,9 @@
 // ExitLevel/CreateTargetChangeLevel/CheckDMRules/ClientEndServerFrames
 // group (ported below, same shape as src/ctf/g_main.ts's G_RunFrame family
 // with CTF-specific match/capture rules dropped -- see RunFrame's own doc
-// comment). ClientCommand remains the minimal "hook"/"unhook" dispatcher
-// from this unit's first pass (lmctf60/g_cmds.c's real ~90-branch
-// ClientCommand is g_cmds.ts's own SCOPE, not completed by this unit).
+// comment). ClientCommand's real ~90-branch dispatch table now lives in
+// g_cmds.ts (imported/re-exported here for GetGameAPI) -- see that file's
+// own header for exactly which commands are ported.
 //
 // STILL NOT PORTED, reported explicitly:
 //   - InitGame's maplist.txt/motd.txt/help.txt file I/O and StdLog/gslog
@@ -26,15 +26,18 @@
 //     M_CheckGround re-check (both monster-only; no monster subsystem
 //     exists in this port, see g_phys.ts's own SV_Physics_Step citation)
 //     and CTFNextMap/CTFCheckRules/CTFInMatch (ctf/g_ctf.c-specific match
-//     logic with no LM_CTF equivalent ported -- g_tourney.ts's own file
-//     header already documents SpawnTourneyClock/StartMatch/Victory/
-//     Match_End as NOT ported by this unit, so a capture-limit or
-//     match-timer-driven level end cannot be reached through this
+//     logic with no LM_CTF equivalent ported -- g_tourney.ts now has a real
+//     match-flow system (StartMatch/KillMatch/SetPause/SpawnTourneyClock/
+//     Tourney_Think/Match_Start/Victory/Match_End), but nothing in this
+//     RunFrame calls into it (that's g_cmds.ts's "startmatch"/"stopmatch"
+//     client commands and g_menu.ts's referee menu, not a per-frame
+//     RunFrame check in the C source either), so a capture-limit or
+//     match-timer-driven level end still cannot be reached through this
 //     RunFrame; only plain fraglimit/timelimit/DF_SAME_LEVEL/maplist
 //     rotation work, matching base game's non-CTF EndDMLevel).
 
 import { Com_sprintf, CVAR_ARCHIVE, CVAR_LATCH, CVAR_NOSET, CVAR_SERVERINFO, CVAR_USERINFO, PRINT_HIGH, Q_stricmp } from "../shared/q_shared";
-import { Cmd_Hook_f, Cmd_Unhook_f } from "./g_cmds";
+import { ClientCommand } from "./g_cmds";
 import { InitItems } from "./g_items";
 import { type Edict, GAME_API_VERSION, type GameExports, type GameImports } from "./game";
 import {
@@ -145,6 +148,14 @@ export function InitGame(): void {
   // lmctf60/g_save.c:208 -- `runes = gi.cvar("runes", "15", CVAR_SERVERINFO);`
   // 15 = RUNE_DAMAGE|RUNE_RESIST|RUNE_HASTE|RUNE_REGEN (not RUNE_VAMP).
   gameCvars.runes = gi.cvar("runes", "15", CVAR_SERVERINFO);
+  // lmctf60/g_save.c:223-224 -- match-flow cvars g_tourney.ts's
+  // SetPause/KillMatch/StartMatch/SpawnTourneyClock read.
+  gameCvars.autolock = gi.cvar("autolock", "0", 0);
+  gameCvars.countdown_time = gi.cvar("countdown_time", "15", 0);
+  // lmctf60/g_save.c:194 -- `railtime = gi.cvar("railtime", "0", CVAR_SERVERINFO);`
+  gameCvars.railtime = gi.cvar("railtime", "0", CVAR_SERVERINFO);
+  // lmctf60/g_save.c -- `fastswitch = gi.cvar("fastswitch", "0", 0);`
+  gameCvars.fastswitch = gi.cvar("fastswitch", "0", 0);
 
   gameCvars.sv_maplist = gi.cvar("sv_maplist", "", 0);
 
@@ -181,26 +192,14 @@ function makeEdicts(count: number): EdictT[] {
   return list;
 }
 
-/*
-=================
-ClientCommand (lmctf60/g_cmds.c's real dispatch table, lines 2626/2628 for
-the two entries reproduced here) -- MINIMAL, see file header. Dispatches
-only "hook" and "unhook" (case-insensitive, matching Q_stricmp); every
-other of the ~90 real commands falls through to nothing.
-=================
-*/
-export function ClientCommand(ent: Edict): void {
-  const cmd = gi.argv(0).toLowerCase();
-  const fullEdict = g_edicts[ent.s.number];
-  if (fullEdict === undefined) return;
-
-  if (cmd === "hook") {
-    Cmd_Hook_f(fullEdict);
-  } else if (cmd === "unhook") {
-    Cmd_Unhook_f(fullEdict);
-  }
-  // every other lmctf60/g_cmds.c command: not ported, see file header.
-}
+// ClientCommand (lmctf60/g_cmds.c's real ~90-branch dispatch table) now
+// lives in g_cmds.ts (matching src/ctf/g_cmds.ts's own
+// ClientCommand-lives-here convention); imported at this file's top and
+// re-exported here for test/lmctf_client.test.ts's existing `import {
+// ClientCommand } from "../src/lmctf/g_main"` -- see g_cmds.ts's own file
+// header for exactly which commands are ported and which still fall
+// through to its chat catch-all.
+export { ClientCommand };
 
 /*
 =================

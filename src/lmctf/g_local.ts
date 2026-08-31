@@ -1203,6 +1203,15 @@ export const gameCvars: {
   // SpawnEntities scatters at level load, read by g_spawn.ts's
   // SpawnEntities tail.
   runes: CvarT | null;
+  // lmctf60/g_local.h:611-612, 564 -- match-flow cvars read by g_tourney.ts
+  // (SetPause/KillMatch/StartMatch/SpawnTourneyClock/Match_Start).
+  autolock: CvarT | null; // lock/unlock teams with match status
+  countdown_time: CvarT | null; // seconds to count down before match start
+  railtime: CvarT | null; // MATCH_RAILGUN_COUNTDOWN round length, seconds
+  // lmctf60/g_local.h: `extern cvar_t *fastswitch;` -- read/toggled by
+  // g_cmds.ts's Cmd_ToggleFastSwitch_f, shown by g_menu.ts's
+  // Ref_Settings_Menu.
+  fastswitch: CvarT | null;
 } = {
   maxentities: null,
   deathmatch: null,
@@ -1237,6 +1246,10 @@ export const gameCvars: {
   skinset: null,
   flag_init: null,
   runes: null,
+  autolock: null,
+  countdown_time: null,
+  railtime: null,
+  fastswitch: null,
 };
 
 //===============================================================

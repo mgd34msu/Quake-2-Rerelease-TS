@@ -296,7 +296,12 @@ interface SpawnT {
 // below.
 //
 // `damage_rune` (lmctf60/g_runes.c SP_damage_rune) is now ported for real
-// too (g_runes.ts).
+// too (g_runes.ts). resist_rune/haste_rune/regen_rune are now real too
+// (g_items.ts's makeResistRuneItem/makeHasteRuneItem/makeRegenRuneItem) --
+// none of the three get a spawns[] entry below because the C source's own
+// spawns[] table doesn't have one for them either (confirmed by direct
+// read of g_spawn.c: only "damage_rune" is registered there); ED_CallSpawn
+// below finds them via the item table first, same as "flag"/"damage_rune".
 import { RUNE_DAMAGE, RUNE_HASTE, RUNE_REGEN, RUNE_RESIST, RUNE_VAMP, SP_damage_rune, SpawnRune } from "./g_runes";
 import { ctf_validateflags } from "./g_ctffunc";
 import { sl_GameStart } from "./gslog";

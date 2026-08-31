@@ -9,11 +9,16 @@
 // only need `ent.flags`/`ent.client.pers.inventory` to be zeroed, which is
 // EdictT/ClientPersistentT's default state, not a populated item table).
 // The itemlist contains "weapon_hook" (the one item Cmd_Hook_f (g_cmds.ts)
-// and Weapon_Hook (p_weapon.ts) look up by name) and "flag" (SP_flag below,
-// needed by g_spawn.ts's registry for the flag entity spawn chain). The
-// other ~40 item entries (weapons, ammo, armor, powerups, runes) are NOT
-// ported -- FindItem/GetItemByIndex will not find them. This is a
-// deliberately partial file, not a finished one.
+// and Weapon_Hook (p_weapon.ts) look up by name), "flag" (SP_flag below,
+// needed by g_spawn.ts's registry for the flag entity spawn chain), and all
+// four runes -- damage_rune/resist_rune/haste_rune/regen_rune (see
+// makeDamageRuneItem/makeResistRuneItem/makeHasteRuneItem/makeRegenRuneItem
+// below; g_runes.ts's effect logic was already ported, this file's ITEMLIST
+// entries are what let a map (or g_runes.ts's own SpawnRune) actually
+// instantiate one instead of hitting ED_CallSpawn's "doesn't have a spawn
+// function" fallback in g_spawn.ts). The other ~35 item entries (weapons,
+// ammo, armor, most powerups) are NOT ported -- FindItem/GetItemByIndex will
+// not find them. This is a deliberately partial file, not a finished one.
 
 import { vec3, VectorAdd, VectorCopy } from "../shared/math";
 import {
@@ -160,13 +165,9 @@ function makeFlagItem(): GItemT {
 }
 
 // lmctf60/g_items.c ~2413: the "damage_rune" itemlist entry -- byte-
-// identical field values to the C source. Only this one rune entry is
-// ported (the task naming it explicitly: "damage_rune spawn wiring"); the
-// other three (resist_rune/haste_rune/regen_rune, ~2437-2503) are NOT
-// ported -- their SP_ spawn functions don't exist in g_spawn.ts's
-// registry either, so a map placing one of those three still falls
-// through to "doesn't have a spawn function" exactly like before this
-// change, a documented follow-up, not a silent gap.
+// identical field values to the C source. The other three rune entries
+// (resist_rune/haste_rune/regen_rune, ~2437-2503) are now ported too --
+// see makeResistRuneItem/makeHasteRuneItem/makeRegenRuneItem below.
 //
 // Pickup_Rune/Drop_Rune (g_runes.ts) are resolved via a lazy require, not
 // a static import, same reasoning as makeFlagItem's ctf_flagtouch/
@@ -193,6 +194,100 @@ function makeDamageRuneItem(): GItemT {
   item.world_model_flags = EF_ROTATE;
   item.icon = "a_strength";
   item.pickup_name = "Damage Artifact";
+  item.count_width = 3;
+  item.flags = IT_POWERUP;
+  item.precaches = "misc/tele_up.wav world/klaxon1.wav";
+  return item;
+}
+
+// lmctf60/g_items.c ~2437: the "resist_rune" itemlist entry -- byte-
+// identical field values to the C source, same pickup/use/drop wiring as
+// makeDamageRuneItem above (Pickup_Rune/Drop_Rune, g_runes.ts, resolved
+// lazily for the same import-cycle reason). The C source has NO spawns[]
+// entry for "resist_rune" (confirmed by direct read of g_spawn.c's spawns[]
+// table -- only "damage_rune" gets one, at {"damage_rune", SP_damage_rune}):
+// ED_CallSpawn (g_spawn.ts) checks the item table before spawns[], so this
+// ITEMLIST entry alone is the complete spawn path for a "resist_rune" map
+// entity or a g_runes.ts SpawnRune(RUNE_RESIST) call -- no g_spawn.ts
+// registry entry is needed or present in the C source to mirror.
+function makeResistRuneItem(): GItemT {
+  const item = new GItemT();
+  item.classname = "resist_rune";
+  item.pickup = (ent: EdictT, other: EdictT): boolean => {
+    const mod = require("./g_runes") as { Pickup_Rune: (ent: EdictT, other: EdictT) => boolean };
+    return mod.Pickup_Rune(ent, other);
+  };
+  item.use = (ent: EdictT, gitem: GItemT): void => {
+    const mod = require("./g_runes") as { Drop_Rune: (ent: EdictT, item: GItemT | null) => void };
+    mod.Drop_Rune(ent, gitem);
+  };
+  item.drop = (ent: EdictT, gitem: GItemT): void => {
+    const mod = require("./g_runes") as { Drop_Rune: (ent: EdictT, item: GItemT | null) => void };
+    mod.Drop_Rune(ent, gitem);
+  };
+  item.pickup_sound = "items/pkup.wav";
+  item.world_model = "models/ctf/resist/tris.md2";
+  item.world_model_flags = EF_ROTATE;
+  item.icon = "a_resist";
+  item.pickup_name = "Resist Artifact";
+  item.count_width = 3;
+  item.flags = IT_POWERUP;
+  item.precaches = "misc/tele_up.wav world/klaxon1.wav";
+  return item;
+}
+
+// lmctf60/g_items.c ~2459: the "haste_rune" itemlist entry -- byte-
+// identical field values to the C source; same "no spawns[] entry in the
+// C source" note as makeResistRuneItem above applies here too.
+function makeHasteRuneItem(): GItemT {
+  const item = new GItemT();
+  item.classname = "haste_rune";
+  item.pickup = (ent: EdictT, other: EdictT): boolean => {
+    const mod = require("./g_runes") as { Pickup_Rune: (ent: EdictT, other: EdictT) => boolean };
+    return mod.Pickup_Rune(ent, other);
+  };
+  item.use = (ent: EdictT, gitem: GItemT): void => {
+    const mod = require("./g_runes") as { Drop_Rune: (ent: EdictT, item: GItemT | null) => void };
+    mod.Drop_Rune(ent, gitem);
+  };
+  item.drop = (ent: EdictT, gitem: GItemT): void => {
+    const mod = require("./g_runes") as { Drop_Rune: (ent: EdictT, item: GItemT | null) => void };
+    mod.Drop_Rune(ent, gitem);
+  };
+  item.pickup_sound = "items/pkup.wav";
+  item.world_model = "models/ctf/haste/tris.md2";
+  item.world_model_flags = EF_ROTATE;
+  item.icon = "a_haste";
+  item.pickup_name = "Haste Artifact";
+  item.count_width = 3;
+  item.flags = IT_POWERUP;
+  item.precaches = "misc/tele_up.wav world/klaxon1.wav";
+  return item;
+}
+
+// lmctf60/g_items.c ~2481: the "regen_rune" itemlist entry -- byte-
+// identical field values to the C source; same "no spawns[] entry in the
+// C source" note as makeResistRuneItem above applies here too.
+function makeRegenRuneItem(): GItemT {
+  const item = new GItemT();
+  item.classname = "regen_rune";
+  item.pickup = (ent: EdictT, other: EdictT): boolean => {
+    const mod = require("./g_runes") as { Pickup_Rune: (ent: EdictT, other: EdictT) => boolean };
+    return mod.Pickup_Rune(ent, other);
+  };
+  item.use = (ent: EdictT, gitem: GItemT): void => {
+    const mod = require("./g_runes") as { Drop_Rune: (ent: EdictT, item: GItemT | null) => void };
+    mod.Drop_Rune(ent, gitem);
+  };
+  item.drop = (ent: EdictT, gitem: GItemT): void => {
+    const mod = require("./g_runes") as { Drop_Rune: (ent: EdictT, item: GItemT | null) => void };
+    mod.Drop_Rune(ent, gitem);
+  };
+  item.pickup_sound = "items/pkup.wav";
+  item.world_model = "models/ctf/regen/tris.md2";
+  item.world_model_flags = EF_ROTATE;
+  item.icon = "a_regen";
+  item.pickup_name = "Regen Artifact";
   item.count_width = 3;
   item.flags = IT_POWERUP;
   item.precaches = "misc/tele_up.wav world/klaxon1.wav";
@@ -301,7 +396,17 @@ function makeHealthItem(): GItemT {
 // null item in the C source (`{}` first entry so index 0 means "no item");
 // preserved here for the same ITEM_INDEX-is-1-based convention src/ctf/g_items.ts
 // uses.
-const ITEMLIST: GItemT[] = [new GItemT(), makeHookItem(), makeFlagItem(), makeBlasterItem(), makeHealthItem(), makeDamageRuneItem()];
+const ITEMLIST: GItemT[] = [
+  new GItemT(),
+  makeHookItem(),
+  makeFlagItem(),
+  makeBlasterItem(),
+  makeHealthItem(),
+  makeDamageRuneItem(),
+  makeResistRuneItem(),
+  makeHasteRuneItem(),
+  makeRegenRuneItem(),
+];
 // lmctf60/g_items.c's real InitItems() sets `game.num_items` (among other
 // precache work this partial port does not do); `game` is a shared mutable
 // singleton that InitGame's own `game.clear()`/reassignment can wipe after

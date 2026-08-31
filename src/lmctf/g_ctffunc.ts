@@ -11,12 +11,11 @@
 // alongside the offhand-hook priority feature's earlier pass
 // (ctf_findplayer, ctf_validateplayer, ctf_SafePrint's queueing half,
 // ctf_hook_abort, ctf_teamstring, ctf_SetEntTeamEx/ctf_SetEntTeam,
-// ctf_flagwave, ctf_BSafePrint). ctf_ChangeMap (g_ctffunc.c:1548) is the
-// one function still NOT ported -- it unconditionally calls KillMatch
-// (g_tourney.c's match-flow system, not ported anywhere in this game
-// family); g_menu.ts's own local stub still cites it. The replace_* text-
-// macro helpers live in g_replace.c per g_ctffunc.h's own comment, not
-// here, and are g_replace.ts's own SCOPE.
+// ctf_flagwave, ctf_BSafePrint). ctf_ChangeMap (g_ctffunc.c:1548) is now
+// ported too, now that g_tourney.ts's KillMatch/SetMatchState exist (both
+// resolved via a lazy require -- see ctf_ChangeMap's own doc comment).
+// The replace_* text-macro helpers live in g_replace.c per g_ctffunc.h's
+// own comment, not here, and are g_replace.ts's own SCOPE.
 
 import {
   ATTN_NONE,
@@ -40,6 +39,7 @@ import { AngleVectors, vec3, type Vec3, VectorAdd, VectorClear, VectorCopy, Vect
 import {
   blueflag,
   CHAN_CTF,
+  CTF_EXTRAFLAGS_REFEREE,
   CTF_FLAGS_NOFLAGS,
   CTF_SCORE_BALANCE,
   DamageT,
@@ -261,6 +261,71 @@ export function ctf_BSafePrint(print_priority: number, buf: string): void {
     ctf_SafePrint(ent, print_priority, buf);
     ent = ctf_findplayer(ent, null, CTF_TEAM_IGNORETEAM);
   }
+}
+
+// lmctf60/g_ctffunc.h:53-67 -- spam-control tuning constants. CTF_SPAM_BAND_MAX/
+// CTF_SPAM_FREQ_MIN are also each client's ClientConnect reset values
+// (p_client.ts) -- kept as duplicated literals there (not imported) for the
+// same reason RUNE_REGEN is duplicated in g_items.ts (a single
+// never-changing #define, size/risk tradeoff documented there).
+export const CTF_SPAM_BAND_MAX = 450;
+export const CTF_SPAM_BAND_RADIO = 150;
+export const CTF_SPAM_BAND_VOICE = 75;
+export const CTF_SPAM_BAND_SAY = 60;
+const CTF_SPAM_BAND_WARN_LEVEL = 90;
+const CTF_SPAM_LOCKOUT_TIME = 5;
+const CTF_SPAM_FREQ_MAX_ALLOWED = 50;
+const CTF_SPAM_FREQ_EXTRA_PENALTY_TIME = 0.25;
+const CTF_SPAM_FREQ_EXTRA_PENALTY = 20;
+const CTF_SPAM_FREQ_BAND_EXTRA_PENALTY_LEVEL = 190;
+const CTF_SPAM_FREQ_BAND_EXTRA_PENALTY = 5;
+
+/*
+=================
+ctf_SpamCheck (lmctf60/g_ctffunc.c:1288) -- byte-identical to the C
+source. Referees always pass. Otherwise gates on remaining "bandwidth"
+(spam_band_count), request frequency (spam_freq_count), and a short
+lockout window (spam_lock_time) -- printing a spam-control message and
+starting the lockout timer on failure, a bandwidth warning near the
+threshold on success. The frequency-penalty accrual at the bottom runs
+unconditionally (pass or fail), exactly like the C source.
+=================
+*/
+export function ctf_SpamCheck(ent: EdictT): boolean {
+  if (ent.client === null) return false;
+  const client = ent.client;
+  let result = false;
+
+  if ((client.ctf.extra_flags & CTF_EXTRAFLAGS_REFEREE) !== 0) {
+    result = true;
+  } else if (
+    client.spam_band_count <= 0 || // no bandwidth available
+    client.spam_freq_count > CTF_SPAM_FREQ_MAX_ALLOWED || // no frequency available
+    level.time - client.spam_lock_time < CTF_SPAM_LOCKOUT_TIME // already in penalty box
+  ) {
+    ctf_SafePrint(ent, PRINT_HIGH, "That action has been blocked by spam control.\n");
+    client.spam_lock_time = level.time; // you triggered spam lock
+  } else {
+    result = true;
+
+    // here we have a player who has done too many long says, or some such
+    if (client.spam_band_count < CTF_SPAM_BAND_WARN_LEVEL) {
+      ctf_SafePrint(ent, PRINT_HIGH, "Warning: Approaching spam bandwidth limits.\n");
+    }
+  }
+
+  // here we have a player who has done a few actions in a short time
+  if (client.spam_freq_time - level.time < CTF_SPAM_FREQ_EXTRA_PENALTY_TIME) {
+    client.spam_freq_count += CTF_SPAM_FREQ_EXTRA_PENALTY;
+    if (client.spam_band_count < CTF_SPAM_FREQ_BAND_EXTRA_PENALTY_LEVEL) {
+      // compound penalty for bandwidth
+      client.spam_freq_count += CTF_SPAM_FREQ_BAND_EXTRA_PENALTY;
+    }
+  }
+
+  client.spam_freq_time = level.time; // see test of this above
+
+  return result;
 }
 
 // ---------------------------------------------------------------------
@@ -1025,5 +1090,38 @@ export function ctf_hook_abort(ent: EdictT | null): void {
     client.hook.hook_target = null;
     G_FreeEdict(client.hook);
     client.hook = null;
+  }
+}
+
+// lmctf60/g_tourney.c's KillMatch -- lazy require, not a static import:
+// this file already statically imports matchstate/MatchStatesT from
+// g_tourney.ts, so a static import back here would close a value cycle.
+// Per PORTING.md's rule, g_tourney.ts (imported first) is not the side
+// that breaks it.
+function tourneyModule(): typeof import("./g_tourney") {
+  return require("./g_tourney") as typeof import("./g_tourney");
+}
+
+/*
+=================
+ctf_ChangeMap (lmctf60/g_ctffunc.c:1548) -- byte-identical to the C
+source, now that g_tourney.ts's KillMatch has landed. `matchstate` is
+this file's own already-imported live binding (module-level `let` export
+from g_tourney.ts); C's `extern int matchstate;` local redeclaration
+inside the function is a no-op once real modules replace `extern`.
+=================
+*/
+export function ctf_ChangeMap(mapname: string | null, startmatch: boolean): void {
+  const command = `gamemap "${mapname ?? ""}"\n`;
+  gi.AddCommandString(command);
+  level.changemap = null;
+  level.exitintermission = 0;
+  level.intermissiontime = 0;
+  (require("./p_stats") as typeof import("./p_stats")).stats_cleanup(); // STATS - LM_Hati
+  tourneyModule().KillMatch();
+  if (startmatch) {
+    tourneyModule().SetMatchState(MatchStatesT.MATCH_COUNTDOWN);
+  } else {
+    tourneyModule().SetMatchState(MatchStatesT.MATCH_NONE);
   }
 }
