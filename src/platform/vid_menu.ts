@@ -54,7 +54,7 @@ import {
 } from "../client/qmenu_impl";
 import { K_ESCAPE, K_UPARROW, K_DOWNARROW, K_LEFTARROW, K_RIGHTARROW, K_ENTER } from "../client/keys";
 import { Cvar_Get, Cvar_Set, Cvar_SetValue, Cvar_VariableValue } from "../qcommon/cvar";
-import { CVAR_ARCHIVE, type CvarT } from "../shared/q_shared";
+import { CVAR_ARCHIVE, CVAR_FILES, type CvarT } from "../shared/q_shared";
 import { viddef } from "../client/vid";
 import { re } from "../client/client";
 import { VID_ClampCustomHeight, VID_ClampCustomWidth, VID_ClampScale } from "./vid_scale";
@@ -161,12 +161,12 @@ const resolutions = [
   "[960 720  ]",
   "[1024 768 ]",
   "[1152 864 ]",
-  "[1280 960 ]", // win32 pairing: vid.ts mode 8 is 1280x960 (linux label said 1024)
-  "[1600 1200]",
   "[1280 720 ]",
+  "[1280 960 ]",
   "[1366 768 ]",
   "[1440 900 ]",
   "[1600 900 ]",
+  "[1600 1200]",
   "[1920 1080]",
   "[1920 1200]",
   "[2048 1536]",
@@ -246,7 +246,8 @@ export function VID_MenuInit(): void {
   const yesno_names = ["no", "yes"];
 
   if (!gl_driver) gl_driver = Cvar_Get("gl_driver", "opengl32", 0);
-  if (!gl_picmip) gl_picmip = Cvar_Get("gl_picmip", "0", 0);
+  // q2repro src/refresh/texture.c:1261: `gl_picmip = Cvar_Get("gl_picmip", "0", CVAR_FILES);`
+  if (!gl_picmip) gl_picmip = Cvar_Get("gl_picmip", "0", CVAR_FILES);
   if (!gl_mode) gl_mode = Cvar_Get("gl_mode", "3", 0);
   if (!sw_mode) sw_mode = Cvar_Get("sw_mode", "0", 0);
   if (!gl_ext_palettedtexture) gl_ext_palettedtexture = Cvar_Get("gl_ext_palettedtexture", "1", CVAR_ARCHIVE);

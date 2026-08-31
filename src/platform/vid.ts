@@ -52,7 +52,7 @@ import { Cvar_Get, Cvar_Set, Cvar_SetValue } from "../qcommon/cvar";
 import { Com_Error, Com_Printf, Com_DPrintf } from "../qcommon/common";
 import { FS_Gamedir, FS_LoadFile, FS_FreeFile } from "../qcommon/files";
 import { ERR_FATAL, EXEC_NOW } from "../qcommon/qcommon";
-import { CVAR_ARCHIVE, PRINT_ALL, type CvarT } from "../shared/q_shared";
+import { CVAR_ARCHIVE, CVAR_REFRESH, PRINT_ALL, type CvarT } from "../shared/q_shared";
 import { API_VERSION, type RefExports, type RefImports } from "../client/ref";
 import { cl, cls, re, setRe, KeydestT } from "../client/client";
 import { viddef } from "../client/vid";
@@ -94,6 +94,10 @@ class VidmodeT {
 }
 
 const vid_modes: VidmodeT[] = [
+  // One flat table in strictly ascending width-then-height order --
+  // Mike's ruling: no split between a preserved 'vanilla block' and a
+  // modern block (vanilla index compatibility above the common low modes
+  // was already fiction once the table was extended). Custom = mode -1.
   new VidmodeT("Mode 0: 320x240", 320, 240, 0),
   new VidmodeT("Mode 1: 400x300", 400, 300, 1),
   new VidmodeT("Mode 2: 512x384", 512, 384, 2),
@@ -102,21 +106,12 @@ const vid_modes: VidmodeT[] = [
   new VidmodeT("Mode 5: 960x720", 960, 720, 5),
   new VidmodeT("Mode 6: 1024x768", 1024, 768, 6),
   new VidmodeT("Mode 7: 1152x864", 1152, 864, 7),
-  new VidmodeT("Mode 8: 1280x960", 1280, 960, 8),
-  new VidmodeT("Mode 9: 1600x1200", 1600, 1200, 9),
-  // Modern-display extension past the genuine vanilla 0-9 set (vid_dll.c's
-  // table continued only to mode 10 = 2048x1536, restored below in its
-  // ascending-order slot). Indices 0-9 are the ones decades of configs pin
-  // via sw_mode/gl_mode and stay untouched; everything at 10+ is this
-  // port's own table, kept in plain ascending width/height order so the
-  // menu spinner reads naturally (1080p sits between 1600x900 and
-  // 1920x1200 where a human looks for it). q2repro carries no numeric mode
-  // table at all to supersede -- its vid_modelist is a string spec parsed
-  // by VID_GetFullscreen, not an indexable array.
-  new VidmodeT("Mode 10: 1280x720", 1280, 720, 10),
-  new VidmodeT("Mode 11: 1366x768", 1366, 768, 11),
-  new VidmodeT("Mode 12: 1440x900", 1440, 900, 12),
-  new VidmodeT("Mode 13: 1600x900", 1600, 900, 13),
+  new VidmodeT("Mode 8: 1280x720", 1280, 720, 8),
+  new VidmodeT("Mode 9: 1280x960", 1280, 960, 9),
+  new VidmodeT("Mode 10: 1366x768", 1366, 768, 10),
+  new VidmodeT("Mode 11: 1440x900", 1440, 900, 11),
+  new VidmodeT("Mode 12: 1600x900", 1600, 900, 12),
+  new VidmodeT("Mode 13: 1600x1200", 1600, 1200, 13),
   new VidmodeT("Mode 14: 1920x1080", 1920, 1080, 14),
   new VidmodeT("Mode 15: 1920x1200", 1920, 1200, 15),
   new VidmodeT("Mode 16: 2048x1536", 2048, 1536, 16),
@@ -390,6 +385,26 @@ export function VID_Init(): void {
   vid_ypos = Cvar_Get("vid_ypos", "22", CVAR_ARCHIVE);
   vid_fullscreen = Cvar_Get("vid_fullscreen", "0", CVAR_ARCHIVE);
   Cvar_Get("vid_gamma", "1", CVAR_ARCHIVE);
+  // q2repro src/unix/video/sdl.c:317 -- toggles SDL_{Get,Set}WindowGammaRamp
+  // hardware gamma. Registered, consumer unported: src/platform/sdl.ts has
+  // no FFI bindings for SDL_GetWindowGammaRamp/SDL_SetWindowGammaRamp, so
+  // this port always uses whatever the OS/compositor applies, never a
+  // per-window hardware ramp.
+  Cvar_Get("vid_hwgamma", "0", CVAR_REFRESH);
+  // q2repro src/client/refresh.c:341,344-345,393 (CL_InitRefresh). Registered,
+  // consumer unported:
+  //  - vid_driver selects among multiple compiled-in video backends
+  //    (vid_drivers[]) -- this port has exactly one (SDL, src/platform/sdl.ts).
+  //  - _vid_fullscreen/vid_geometry are q2repro's own window-geometry-restore
+  //    additions on top of vid_fullscreen; this port's fullscreen toggle
+  //    (below) has no saved-geometry restore path.
+  //  - vid_modelist's C default is a dynamic list from the active driver's
+  //    get_mode_list(); this port has no display-mode enumeration, so it
+  //    defaults empty.
+  Cvar_Get("vid_driver", "", CVAR_REFRESH);
+  Cvar_Get("_vid_fullscreen", "1", CVAR_ARCHIVE);
+  Cvar_Get("vid_geometry", "640x480", CVAR_ARCHIVE); // VID_GEOMETRY build option, build/config.h:96
+  Cvar_Get("vid_modelist", "", 0);
   // v1.0.0 RC: custom resolution (mode -1) and internal-render-resolution
   // scaling -- see VID_GetModeInfo/VID_GetScale above for the semantics and
   // this unit's report for why neither has a q2repro precedent to match.

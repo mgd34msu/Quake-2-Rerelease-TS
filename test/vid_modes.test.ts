@@ -66,17 +66,21 @@ describe("src/platform/vid.ts -- mode table integrity", () => {
     }
   });
 
-  test("the genuine vanilla table (modes 0-9) keeps its original resolutions -- never renumbered", () => {
+  test("one flat table, strictly ascending width-then-height (Mike's ruling: no split vanilla/modern blocks)", () => {
     expect(VID_GetModeInfo(0)).toEqual({ width: 320, height: 240 });
+    expect(VID_GetModeInfo(1)).toEqual({ width: 400, height: 300 });
+    expect(VID_GetModeInfo(2)).toEqual({ width: 512, height: 384 });
     expect(VID_GetModeInfo(3)).toEqual({ width: 640, height: 480 });
-    expect(VID_GetModeInfo(9)).toEqual({ width: 1600, height: 1200 });
-  });
-
-  test("the modern-display set (modes 10-20) is in ascending order with 1080p in its natural slot and vanilla's 2048x1536 restored", () => {
-    expect(VID_GetModeInfo(10)).toEqual({ width: 1280, height: 720 });
-    expect(VID_GetModeInfo(11)).toEqual({ width: 1366, height: 768 });
-    expect(VID_GetModeInfo(12)).toEqual({ width: 1440, height: 900 });
-    expect(VID_GetModeInfo(13)).toEqual({ width: 1600, height: 900 });
+    expect(VID_GetModeInfo(4)).toEqual({ width: 800, height: 600 });
+    expect(VID_GetModeInfo(5)).toEqual({ width: 960, height: 720 });
+    expect(VID_GetModeInfo(6)).toEqual({ width: 1024, height: 768 });
+    expect(VID_GetModeInfo(7)).toEqual({ width: 1152, height: 864 });
+    expect(VID_GetModeInfo(8)).toEqual({ width: 1280, height: 720 });
+    expect(VID_GetModeInfo(9)).toEqual({ width: 1280, height: 960 });
+    expect(VID_GetModeInfo(10)).toEqual({ width: 1366, height: 768 });
+    expect(VID_GetModeInfo(11)).toEqual({ width: 1440, height: 900 });
+    expect(VID_GetModeInfo(12)).toEqual({ width: 1600, height: 900 });
+    expect(VID_GetModeInfo(13)).toEqual({ width: 1600, height: 1200 });
     expect(VID_GetModeInfo(14)).toEqual({ width: 1920, height: 1080 });
     expect(VID_GetModeInfo(15)).toEqual({ width: 1920, height: 1200 });
     expect(VID_GetModeInfo(16)).toEqual({ width: 2048, height: 1536 });
