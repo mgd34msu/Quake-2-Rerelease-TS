@@ -267,6 +267,12 @@ export function CL_Record_f(): void {
     return;
   }
   cls.demofile = handle;
+  // vanilla cl_main.c CL_Record_f: `cls.demorecording = true;` right after
+  // the file opens. This line was dropped in the port, and since
+  // cl_parse.ts's per-frame write gate is `demorecording && !demowaiting`,
+  // its absence meant no .dm2 ever contained a single frame message (found
+  // by the demo cross-play harness).
+  cls.demorecording = true;
 
   // don't start saving messages until a non-delta compressed message is received
   cls.demowaiting = true;
@@ -286,15 +292,31 @@ export function CL_Record_f(): void {
     buf.cursize = 0;
   };
 
-  // send the serverdata
-  MSG_WriteByte(buf, SvcOpsT.svc_serverdata);
-  MSG_WriteLong(buf, PROTOCOL_VERSION);
-  MSG_WriteLong(buf, 0x10000 + cl.servercount);
-  MSG_WriteByte(buf, 1); // demos are always attract loops
-  MSG_WriteString(buf, cl.gamedir);
-  MSG_WriteShort(buf, cl.playernum);
-
-  MSG_WriteString(buf, cl.configstrings[CS_NAME]);
+  // send the serverdata -- through the NEGOTIATED family's codec, not a
+  // hand-written vanilla-shaped block. The old code hardcoded
+  // PROTOCOL_VERSION (34) and the six vanilla fields while the
+  // configstring/baseline loops below use the live cls.csr/cls.codec, so
+  // every non-vanilla recording carried a header its own body contradicted:
+  // replay's selectServerCodec picked the narrow vanilla codec and threw
+  // "configstring > MAX_CONFIGSTRINGS" (and, once past that, 1038's extra
+  // serverdata fields were simply missing from the stream). Found by the
+  // demo cross-play harness. Vanilla sessions are byte-identical to before
+  // (vanilla.ts's writeServerData emits exactly the old shape).
+  cls.codec.writeServerData(buf, {
+    // vanilla cl_main.c CL_Record_f writes `0x10000 + cl.servercount` as
+    // the demo's servercount marker; q2pro's demo.c does the same.
+    servercount: 0x10000 + cl.servercount,
+    attractloop: true, // demos are always attract loops
+    gamedir: cl.gamedir,
+    clientnum: cl.playernum,
+    levelname: cl.configstrings[CS_NAME],
+    // ss_game: recording requires ca_active, which only exists against a
+    // running game server. Read-side, this port's own CL_ParseServerData
+    // discards the byte (no client consumer), so the literal matches
+    // sv_ccmds.ts's server-side demo-record precedent without importing
+    // the server's ServerStateT enum into client code.
+    serverState: 2,
+  });
 
   // configstrings
   for (let i = 0; i < cls.csr.end; i++) {

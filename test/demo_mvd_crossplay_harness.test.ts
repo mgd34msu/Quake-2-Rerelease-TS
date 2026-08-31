@@ -399,12 +399,11 @@ async function runActiveTicksWithCheckpoints(ticks: number): Promise<DemoCheckpo
 // in ~/q2rets/rerelease/baseq2/pak0.pak (q2dm1 for vanilla, base1 for kex --
 // base1 is the exact map scripts/interop-matrix.sh's cell_f already proves
 // reachable via a live two-process compiled-binary self-play session).
-// `expectHeaderFamilyBug`: true for the kex-family case only -- see the call
-// site below and the test body's own comment for the confirmed root cause
-// (CL_Record_f, src/client/cl_main.ts, hardcodes PROTOCOL_VERSION into the
-// demo's own svc_serverdata header regardless of the session's actual wire
-// family, which is out of this unit's territory to fix).
-function runSelfPlayDemoCase(label: string, gameCvar: string, mapname: string, expectHeaderFamilyBug: boolean): void {
+// Both families run the identical full checkpoint-parity flow; the two
+// recording bugs this harness originally surfaced (demorecording never set,
+// protocol 34 hardcoded into the demo header) are fixed in cl_main.ts and
+// guarded by assertions in the body below.
+function runSelfPlayDemoCase(label: string, gameCvar: string, mapname: string): void {
   describe(`${label} self-play demo record -> playback (real retail ${mapname}.bsp)`, () => {
     let cvarSnapshot: CvarSnapshotT;
     let fsSnapshot: FsSearchPathSnapshotT;
@@ -528,27 +527,15 @@ function runSelfPlayDemoCase(label: string, gameCvar: string, mapname: string, e
         await runActiveTicksWithCheckpoints(3);
 
         Cmd_ExecuteString("record harnessdemo");
-        // CONFIRMED BUG, out of this unit's territory (src/client/cl_main.ts,
-        // not src/server/sv_mvd.ts or a new test file) -- reported per this
-        // brief's own instruction, not fixed: CL_Record_f (cl_main.ts, the
-        // function registered as the "record" command) opens cls.demofile
-        // and sets cls.demowaiting=true, but NEVER sets
-        // cls.demorecording=true anywhere in this codebase. A full-tree grep
-        // for `demorecording\s*=` finds exactly two writers: CL_Stop_f
-        // setting it back to false, and ClientT's own class-field defaults
-        // (also false). Because cl_parse.ts:918's write gate is
-        // `if (cls.demorecording && !cls.demowaiting) CL_WriteDemoMessage();`,
-        // this field staying permanently false means NO protocol family's
-        // "record" command has ever appended a single per-frame message to
-        // a .dm2 file in this engine -- every recording contains only
-        // CL_Record_f's own synthetic startup gamestate block, and "stop"
-        // itself is a no-op (CL_Stop_f's guard reads the same field), so the
-        // file is never even EOF-terminated. Worked around HERE, test-side
-        // only, so the rest of this harness (per-message demo writes, codec
-        // correctness, playback checkpoint parity) can still be exercised
-        // end-to-end without touching cl_main.ts.
         expect(cls.demofile).not.toBeNull();
-        cls.demorecording = true;
+        // Regression check for a bug this harness originally found:
+        // CL_Record_f never set cls.demorecording, so cl_parse.ts's
+        // per-frame write gate (`demorecording && !demowaiting`) meant no
+        // .dm2 ever contained a single frame message and "stop" was a
+        // no-op. Fixed in cl_main.ts (vanilla cl_main.c parity); this
+        // asserts the flag so any regression fails here, right at the
+        // cause, instead of ambiguously in the parity block below.
+        expect(cls.demorecording).toBe(true);
 
         // Real held movement input -- CL_SendCommand's own CL_CreateCmd path
         // (cl_input.ts) scales forwardmove by however long +forward has been
@@ -567,32 +554,13 @@ function runSelfPlayDemoCase(label: string, gameCvar: string, mapname: string, e
         expect(demoBytes).not.toBeNull();
         if (!demoBytes) return;
 
-        if (expectHeaderFamilyBug) {
-          // CONFIRMED BUG, out of this unit's territory (src/client/
-          // cl_main.ts, not src/server/sv_mvd.ts or a new test file) --
-          // reported per this brief's own instruction, not fixed:
-          // CL_Record_f writes its demo's OWN svc_serverdata header with a
-          // hardcoded `MSG_WriteLong(buf, PROTOCOL_VERSION)` (34, vanilla)
-          // regardless of the session's actual negotiated family, while the
-          // SAME function's configstring/baseline loops right below it
-          // correctly use the live `cls.csr`/`cls.codec` (the wide/
-          // rerelease family under game=kex, csr.end far larger than
-          // classic's). On replay, CL_ParseServerData/selectServerCodec
-          // (cl_parse.ts) reads that hardcoded 34 and picks VANILLA_CODEC +
-          // CS_REMAP_OLD (the narrow classic csr) to parse configstring
-          // indices that were actually written against the wide
-          // CS_REMAP_RERELEASE layout -- CL_ParseConfigString then throws
-          // "configstring > MAX_CONFIGSTRINGS" (cl_parse.ts:709) the moment
-          // it hits an index past the narrow csr's own `end` bound. Verified
-          // live by this exact test before this branch was added (the
-          // uncaught throw and full stack are in this unit's own report).
-          // Every kex-family (and, by the same mechanism, R1Q2/Q2PRO)
-          // recording is affected; only vanilla (protocol 34) demos survive
-          // replay today, because 34 is what CL_Record_f always claims
-          // regardless of the truth.
-          expect(() => replayWithCheckpoints(demoBytes)).toThrow(/configstring > MAX_CONFIGSTRINGS/);
-          return;
-        }
+        // (A second bug this harness originally found lived here:
+        // CL_Record_f hardcoded protocol 34 into the demo's svc_serverdata
+        // header while writing the body with the negotiated family's codec,
+        // so kex/R1Q2/Q2PRO recordings threw "configstring >
+        // MAX_CONFIGSTRINGS" on replay. Fixed in cl_main.ts -- the header
+        // now declares cls.serverProtocol -- so BOTH families run the full
+        // checkpoint-parity block below.)
 
         const replayCheckpoints = replayWithCheckpoints(demoBytes);
 
@@ -623,6 +591,6 @@ function runSelfPlayDemoCase(label: string, gameCvar: string, mapname: string, e
 }
 
 describe.skipIf(!havePak)("B/C. client demo record -> playback self-play, both wire families", () => {
-  runSelfPlayDemoCase("B. vanilla-family (protocol 34)", "", "q2dm1", false);
-  runSelfPlayDemoCase("C. kex-family (protocol 1038)", "kex", "base1", true);
+  runSelfPlayDemoCase("B. vanilla-family (protocol 34)", "", "q2dm1");
+  runSelfPlayDemoCase("C. kex-family (protocol 1038)", "kex", "base1");
 });
