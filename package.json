@@ -1,6 +1,6 @@
 {
   "name": "quake-2-re-ts",
-  "version": "0.0.1",
+  "version": "1.0.0-rc1",
   "private": true,
   "type": "module",
   "scripts": {

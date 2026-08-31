@@ -12,6 +12,10 @@
 export { PRINT_ALL, PRINT_DEVELOPER } from "../shared/q_shared";
 
 export const VERSION = 3.21;
+// This port's own release identity, drawn in the console corner where the
+// C drew "v%4.2f" VERSION (console.c Con_DrawConsole). VERSION above stays
+// 3.21 untouched -- protocol/compat code still keys off it.
+export const APP_VERSION_STRING = "Quake 2 Re-release Typescript v1.0.0-rc1";
 export const BASEDIRNAME = "baseq2";
 
 // #ifdef WIN32/__linux__/... BUILDSTRING/CPUSTRING selection dropped; this

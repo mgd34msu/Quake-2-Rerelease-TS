@@ -38,8 +38,8 @@ import { chat_team, chat_buffer, chat_bufferlen, setChatTeam } from "./keys";
 import { Cvar_Get, Cvar_Set, Cvar_VariableValue } from "../qcommon/cvar";
 import { Cmd_AddCommand, Cmd_Argc, Cmd_Argv, Cbuf_AddText } from "../qcommon/cmd";
 import { SetConPrintHandler, Com_Printf, Com_ServerState } from "../qcommon/common";
-import { Com_sprintf, type CvarT } from "../shared/q_shared";
-import { VERSION } from "../qcommon/qcommon";
+import { Com_sprintf, CVAR_ARCHIVE, type CvarT } from "../shared/q_shared";
+import { APP_VERSION_STRING } from "../qcommon/qcommon";
 import { FS_Gamedir, FS_CreatePath, FS_FOpenFileWrite, FS_Write, FS_FCloseFile } from "../qcommon/files";
 import { SCR_EndLoadingPlaque, SCR_AddDirtyPoint } from "./cl_scrn";
 import { M_ForceMenuOff } from "./menu";
@@ -301,6 +301,26 @@ export function Con_Init(): void {
   //
   con_notifytime = Cvar_Get("con_notifytime", "3", 0);
 
+  // --- cvar-parity audit: remaining src/client/console.c cvars ---
+  // None of these (notify-line count, digital clock overlay, resizable
+  // height/alpha/scale, custom font/background image, scrollback speed,
+  // timestamp prefixes, persisted history size, auto-open-on-chat) have a
+  // consumer anywhere in this port's console rendering -- all registered,
+  // consumer unported.
+  Cvar_Get("con_notifylines", "4", 0); // console.c:457
+  Cvar_Get("con_clock", "0", 0); // console.c:458
+  Cvar_Get("con_height", "0.5", CVAR_ARCHIVE); // console.c:459
+  Cvar_Get("con_alpha", "1", CVAR_ARCHIVE); // console.c:461
+  Cvar_Get("con_scale", "0", CVAR_ARCHIVE); // console.c:462
+  Cvar_Get("con_font", "conchars", 0); // console.c:464
+  Cvar_Get("con_background", "conback", 0); // console.c:466
+  Cvar_Get("con_scroll", "0", 0); // console.c:468
+  Cvar_Get("con_history", "128", 0); // console.c:469 -- STRINGIFY(HISTORY_SIZE), inc/common/prompt.h:24
+  Cvar_Get("con_timestamps", "0", 0); // console.c:470
+  Cvar_Get("con_timestampsformat", "%H:%M:%S ", 0); // console.c:472
+  Cvar_Get("con_timestampscolor", "#aaa", 0); // console.c:474
+  Cvar_Get("con_auto_chat", "0", 0); // console.c:477
+
   Cmd_AddCommand("toggleconsole", Con_ToggleConsole_f);
   Cmd_AddCommand("togglechat", Con_ToggleChat_f);
   Cmd_AddCommand("messagemode", Con_MessageMode_f);
@@ -514,8 +534,11 @@ export function Con_DrawConsole(frac: number): void {
   SCR_AddDirtyPoint(0, 0);
   SCR_AddDirtyPoint(viddef.width - 1, lines - 1);
 
-  const version = Com_sprintf("v%4.2f", VERSION);
-  for (let x = 0; x < 5; x++) re.DrawChar(viddef.width - 44 + x * 8, lines - 12, 128 + version.charCodeAt(x));
+  // Branded port identity instead of the C's "v%4.2f" VERSION -- same
+  // right-justified slot and green-charset (+128) convention, generalized
+  // from the C's fixed 5-glyph loop/x offset to the string's real length.
+  const version = APP_VERSION_STRING;
+  for (let x = 0; x < version.length; x++) re.DrawChar(viddef.width - (version.length - x) * 8 - 4, lines - 12, 128 + version.charCodeAt(x));
 
   // draw the text
   con.vislines = lines;
