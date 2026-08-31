@@ -86,7 +86,7 @@ import {
   MSG_WriteMvdPlayersEnd,
   MSG_WriteMvdCmd,
 } from "../qcommon/protocol/mvd";
-import { EntityStateT, PlayerStateT, PmTypeT, PMF_NO_PREDICTION, MAX_EDICTS, MAX_CLIENTS, MulticastT, CHAN_NO_PHS_ADD, CHAN_RELIABLE, UsercmdT, CVAR_LATCH, CVAR_PRIVATE } from "../shared/q_shared";
+import { EntityStateT, PlayerStateT, PmTypeT, PMF_NO_PREDICTION, MAX_CLIENTS, MulticastT, CHAN_NO_PHS_ADD, CHAN_RELIABLE, UsercmdT, CVAR_LATCH, CVAR_PRIVATE } from "../shared/q_shared";
 import { clonePlayerState, cloneEntityStateInto } from "../shared/state_copy";
 import { sv, svs, maxclients, ClientT, ClientStateT, ServerStateT } from "./server";
 import { geHolder, currentGameFamily } from "./sv_game";
@@ -136,7 +136,18 @@ const mvd: MvdRecorderStateT = {
   active: false,
   recording: null,
   players: new Array(MAX_CLIENTS).fill(null),
-  entities: new Array(MAX_EDICTS).fill(null),
+  // q2repro SV_MvdPostInit (mvd.c:2128) `mvd.entities = SV_Malloc(sizeof(
+  // mvd.entities[0]) * svs.csr.max_edicts);` -- sized off the active csr,
+  // not a compile-time constant, so a kex-family (wide) server's MVD stream
+  // can carry entity numbers up to svs.csr.max_edicts - 1 (8192-wide) rather
+  // than truncating at the classic-family 1024 bound. svs.csr is settled by
+  // SV_InitGameProgs before this module-init runs (see server.ts's
+  // SV_MaxEdicts comment for the same "read live" reasoning); this line
+  // itself only reads whatever svs.csr defaults to at import time
+  // (CS_REMAP_OLD), matching mvd.c's own module-load-time default before
+  // SV_MvdPostInit's family is known -- buildGamestate() below re-sizes this
+  // against the real, settled svs.csr once recording actually starts.
+  entities: new Array(svs.csr.max_edicts).fill(null),
   numframes: 0,
   rerelease: false,
   message: new SizeBuf(),
@@ -327,7 +338,12 @@ function activeClientCount(): number {
 function buildGamestate(): void {
   const n = activeClientCount();
   mvd.players = new Array(MAX_CLIENTS).fill(null);
-  mvd.entities = new Array(MAX_EDICTS).fill(null);
+  // q2repro build_gamestate (mvd.c:572) `memset(mvd.entities, 0,
+  // sizeof(mvd.entities[0]) * svs.csr.max_edicts);` -- re-sized against the
+  // NOW-settled svs.csr (recording only starts after SV_InitGameProgs has
+  // picked the family), so a kex-family session gets the wide 8192-entry
+  // bound instead of the module-init default above.
+  mvd.entities = new Array(svs.csr.max_edicts).fill(null);
 
   const ge = geHolder.ge;
   if (!ge) return;
@@ -1275,7 +1291,11 @@ export function SV_MvdResetForTests(): void {
   if (mvd.recording !== null) FS_FCloseFile(mvd.recording);
   mvd.recording = null;
   mvd.players = new Array(MAX_CLIENTS).fill(null);
-  mvd.entities = new Array(MAX_EDICTS).fill(null);
+  // Test-only helper, no direct mvd.c call site -- sized the same way as
+  // buildGamestate() above (svs.csr.max_edicts, mvd.c:572) so a test that
+  // resets between a kex-family case and a classic-family case doesn't
+  // leave the array capped at the narrower of the two.
+  mvd.entities = new Array(svs.csr.max_edicts).fill(null);
   mvd.numframes = 0;
   SZ_Clear(mvd.message);
   SZ_Clear(mvd.datagram);
