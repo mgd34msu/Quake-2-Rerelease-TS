@@ -64,7 +64,14 @@ import { imageExtCandidates, type ImgExtT } from "../qcommon/img_resolve";
 // written through r_model.ts's export (see file header deviation note).
 
 
-const MAX_RIMAGES = 1024;
+// Vanilla's cap (r_image.c). Kept 1024 through the whole classic era, but
+// rerelease data + the universal extension fallback (9ad6d01) load far more
+// images successfully than a 1997 pak ever presented -- a real base1 boot
+// against the rerelease pak overflowed the table at map load. Same
+// renderer-capacity class as the dc7e1a6 sweep: raised to a sanity ceiling
+// rather than made growable, preserving the C's fixed-array shape and its
+// ERR_DROP overflow behavior at the (now far larger) limit.
+const MAX_RIMAGES = 8192;
 const r_images: ImageT[] = [];
 let numr_images = 0;
 
