@@ -50,8 +50,8 @@ import { CplaneT, CONTENTS_SOLID, SURF_SKY, SURF_WARP, SURF_TRANS33, SURF_TRANS6
 import {
   type LumpT,
   MAX_MAP_LEAFS,
-  MAX_MAP_SURFEDGES,
   IDBSPHEADER,
+  IDBSPHEADER_EXT,
   BSPVERSION,
   DVERTEX_T_SIZE,
   DEDGE_T_SIZE,
@@ -82,6 +82,17 @@ import {
   readTexinfo,
   dvisNumClusters,
   dvisBitofs,
+  DEDGE_EXT_T_SIZE,
+  DFACE_EXT_T_SIZE,
+  LEAFFACE_EXT_SIZE,
+  DLEAF_EXT_T_SIZE,
+  DNODE_EXT_T_SIZE,
+  readDedgeExt,
+  readDfaceExt,
+  readUint32,
+  readDleafExt,
+  readDnodeExt,
+  DSURF_PLANEBACK,
 } from "../qcommon/qfiles";
 import { parseBspxDirectory, parseDecoupledLM, parseLightgrid, type DecoupledLmResultT, type LightgridT } from "../qcommon/bspx";
 import {
@@ -598,6 +609,7 @@ export function Mod_ForName(name: string, crash: boolean): ModelT | null {
       break;
 
     case IDBSPHEADER:
+    case IDBSPHEADER_EXT:
       Mod_LoadBrushModel(mod, buf);
       break;
 
@@ -747,6 +759,33 @@ function Mod_LoadEdges(l: LumpT): void {
 
 /*
 =================
+Mod_LoadEdgesExt
+
+QBSP extended format (bsp_template.c's BSP_LoadEdgesExt). v[0]/v[1] widen
+from uint16 to uint32; adds the "Bad vertnum" bounds check bsp.c performs
+that the classic Mod_LoadEdges above skips.
+=================
+*/
+function Mod_LoadEdgesExt(l: LumpT): void {
+  if (l.filelen % DEDGE_EXT_T_SIZE) ri.Sys_Error(ERR_DROP, `MOD_LoadBmodel: funny lump size in ${loadmodel.name}`);
+  const count = l.filelen / DEDGE_EXT_T_SIZE;
+  const out: MedgeT[] = [];
+  for (let i = 0; i < count; i++) {
+    const din = readDedgeExt(mod_view, l.fileofs + i * DEDGE_EXT_T_SIZE);
+    const e = new MedgeT();
+    for (let j = 0; j < 2; j++) {
+      if (din.v[j] >= loadmodel.numvertexes) ri.Sys_Error(ERR_DROP, "Bad vertnum");
+    }
+    e.v[0] = din.v[0];
+    e.v[1] = din.v[1];
+    out.push(e);
+  }
+  loadmodel.edges = out;
+  loadmodel.numedges = count;
+}
+
+/*
+=================
 Mod_LoadTexinfo
 =================
 */
@@ -870,8 +909,16 @@ function Mod_LoadFaces(l: LumpT): void {
 
     s.plane = loadmodel.planes[planenum];
 
-    const ti = mod_view.getInt16(base + 10, true);
-    if (ti < 0 || ti >= loadmodel.numtexinfo) ri.Sys_Error(ERR_DROP, "MOD_LoadBmodel: bad texinfo number");
+    // classic dface_t's texinfo field is `unsigned short` on disk (q2repro's
+    // own classic BSP_LoadFaces reads it via BSP_Short(), an unsigned 16-bit
+    // read -- see bsp_template.c). A signed getInt16 read here silently
+    // turned any texinfo index >= 32768 negative; retail's classic-ident
+    // maps/mgu*.bsp entries (not every mgu map is QBSP -- see qfiles.ts's
+    // IDBSPHEADER_EXT comment) can exceed that threshold. Fixed to getUint16
+    // to match q2repro; no observable change for any texinfo count under
+    // 32768 (every currently-passing map), since the top bit is never set.
+    const ti = mod_view.getUint16(base + 10, true);
+    if (ti >= loadmodel.numtexinfo) ri.Sys_Error(ERR_DROP, "MOD_LoadBmodel: bad texinfo number");
     s.texinfo = loadmodel.texinfo[ti];
 
     CalcSurfaceExtents(s);
@@ -888,6 +935,93 @@ function Mod_LoadFaces(l: LumpT): void {
     // rerelease BSP the classic dface_t lightofs field above is -1 for
     // every face (verified against baseq2/maps/base1.bsp: all 16787 faces);
     // this is the only source of lightmap data for such a map.
+    const dlmFace = loadmodel.bspx?.decoupledLm?.faces[surfnum] ?? null;
+    if (dlmFace) {
+      s.decoupledLm = {
+        width: dlmFace.lmWidth,
+        height: dlmFace.lmHeight,
+        axis: [vec3(dlmFace.lmAxis[0][0], dlmFace.lmAxis[0][1], dlmFace.lmAxis[0][2]), vec3(dlmFace.lmAxis[1][0], dlmFace.lmAxis[1][1], dlmFace.lmAxis[1][2])],
+        offset: dlmFace.lmOffset,
+      };
+      s.samples = dlmFace.lightofs === null ? null : loadmodel.lightdata ? loadmodel.lightdata.subarray(dlmFace.lightofs) : null;
+    }
+
+    // set the drawing flags
+    if (s.texinfo.flags & SURF_WARP) {
+      s.flags |= SURF_DRAWTURB;
+      s.extents[0] = 16384;
+      s.extents[1] = 16384;
+      s.texturemins[0] = -8192;
+      s.texturemins[1] = -8192;
+      GL_SubdivideSurface(s); // cut up polygon for warps
+    }
+
+    // create lightmaps and polygons
+    if (!(s.texinfo.flags & (SURF_SKY | SURF_TRANS33 | SURF_TRANS66 | SURF_WARP))) safeCreateSurfaceLightmap(s);
+
+    if (!(s.texinfo.flags & SURF_WARP)) GL_BuildPolygonFromSurface(s);
+  }
+
+  GL_EndBuildingLightmaps();
+}
+
+/*
+=================
+Mod_LoadFacesExt
+
+QBSP extended format (bsp_template.c's BSP_LoadFacesExt). planenum/numedges/
+texinfo widen from uint16 to uint32; drawflags replaces the classic side
+bool (readDfaceExt pre-masks it to DSURF_PLANEBACK so the SURF_PLANEBACK
+flagging below is identical to the classic branch's `if (side)`). Adds the
+"Bad planenum"/"Bad surfedges"/"Bad texinfo" cross-reference checks bsp.c
+performs that the classic Mod_LoadFaces above skips. Otherwise identical
+rendering setup (CalcSurfaceExtents, lightmap/polygon building, and the same
+BSPX DECOUPLED_LM per-face override Mod_LoadFaces applies above) to the
+classic loader.
+=================
+*/
+function Mod_LoadFacesExt(l: LumpT): void {
+  if (l.filelen % DFACE_EXT_T_SIZE) ri.Sys_Error(ERR_DROP, `MOD_LoadBmodel: funny lump size in ${loadmodel.name}`);
+  const count = l.filelen / DFACE_EXT_T_SIZE;
+  const out: MsurfaceT[] = [];
+  for (let i = 0; i < count; i++) out.push(new MsurfaceT());
+  loadmodel.surfaces = out;
+  loadmodel.numsurfaces = count;
+
+  SetCurrentModel(loadmodel);
+
+  GL_BeginBuildingLightmaps(loadmodel);
+
+  for (let surfnum = 0; surfnum < count; surfnum++) {
+    const base = l.fileofs + surfnum * DFACE_EXT_T_SIZE;
+    const din = readDfaceExt(mod_view, base);
+    const s = out[surfnum];
+
+    if (din.planenum >= loadmodel.numplanes) ri.Sys_Error(ERR_DROP, "Bad planenum");
+    if (din.numedges < 3 || din.numedges > 4096 || din.firstedge + din.numedges > loadmodel.numsurfedges) {
+      ri.Sys_Error(ERR_DROP, "Bad surfedges");
+    }
+    if (din.texinfo >= loadmodel.numtexinfo) ri.Sys_Error(ERR_DROP, "Bad texinfo");
+
+    s.firstedge = din.firstedge;
+    s.numedges = din.numedges;
+    s.flags = 0;
+    s.polys = null;
+
+    if (din.drawflags & DSURF_PLANEBACK) s.flags |= SURF_PLANEBACK;
+
+    s.plane = loadmodel.planes[din.planenum];
+    s.texinfo = loadmodel.texinfo[din.texinfo];
+
+    CalcSurfaceExtents(s);
+
+    // lighting info
+    for (let i = 0; i < MAXLIGHTMAPS; i++) s.styles[i] = din.styles[i];
+    s.samples = din.lightofs === -1 ? null : loadmodel.lightdata ? loadmodel.lightdata.subarray(din.lightofs) : null;
+
+    // BSPX DECOUPLED_LM override -- same unconditional per-face overwrite as
+    // Mod_LoadFaces above (see that function's comment and q2repro's
+    // BSP_ParseDecoupledLM).
     const dlmFace = loadmodel.bspx?.decoupledLm?.faces[surfnum] ?? null;
     if (dlmFace) {
       s.decoupledLm = {
@@ -971,6 +1105,62 @@ function Mod_LoadNodes(l: LumpT): void {
 
 /*
 =================
+Mod_LoadNodesExt
+
+QBSP extended format (bsp_template.c's BSP_LoadNodesExt). planenum/children
+stay signed 4-byte BSP_Long() reads in both formats (only mins/maxs/
+firstface/numfaces widen); adds the "Bad planenum"/"Bad faces"/"Bad leafnum"/
+"Bad nodenum" cross-reference checks bsp.c performs that the classic
+Mod_LoadNodes above skips.
+
+Call order dependency (see Mod_LoadBrushModel): needs loadmodel.leafs already
+set (Leafs loads before Nodes in the extended branch), unlike the classic
+loader above, which validates no child bounds and so has no such requirement.
+=================
+*/
+function Mod_LoadNodesExt(l: LumpT): void {
+  if (l.filelen % DNODE_EXT_T_SIZE) ri.Sys_Error(ERR_DROP, `MOD_LoadBmodel: funny lump size in ${loadmodel.name}`);
+  const count = l.filelen / DNODE_EXT_T_SIZE;
+  const out: MnodeT[] = [];
+  for (let i = 0; i < count; i++) out.push(new MnodeT());
+  loadmodel.nodes = out;
+  loadmodel.numnodes = count;
+
+  for (let i = 0; i < count; i++) {
+    const din = readDnodeExt(mod_view, l.fileofs + i * DNODE_EXT_T_SIZE);
+    const n = out[i];
+
+    if (din.planenum >= loadmodel.numplanes) ri.Sys_Error(ERR_DROP, "Bad planenum");
+    if (din.firstface + din.numfaces > loadmodel.numsurfaces) ri.Sys_Error(ERR_DROP, "Bad faces");
+
+    for (let j = 0; j < 3; j++) {
+      n.minmaxs[j] = din.mins[j];
+      n.minmaxs[3 + j] = din.maxs[j];
+    }
+
+    n.plane = loadmodel.planes[din.planenum];
+    n.firstsurface = din.firstface;
+    n.numsurfaces = din.numfaces;
+    n.contents = CONTENTS_NODE; // differentiate from leafs
+
+    for (let j = 0; j < 2; j++) {
+      const p = din.children[j];
+      if (p >= 0) {
+        if (p >= count) ri.Sys_Error(ERR_DROP, "Bad nodenum");
+        n.children[j] = loadmodel.nodes[p];
+      } else {
+        const leafnum = -1 - p;
+        if (leafnum >= loadmodel.numleafs) ri.Sys_Error(ERR_DROP, "Bad leafnum");
+        n.children[j] = loadmodel.leafs[leafnum];
+      }
+    }
+  }
+
+  Mod_SetParent(loadmodel.nodes[0], null); // sets nodes and leafs
+}
+
+/*
+=================
 Mod_LoadLeafs
 =================
 */
@@ -1006,16 +1196,113 @@ function Mod_LoadLeafs(l: LumpT): void {
 
 /*
 =================
+Mod_LoadLeafsExt
+
+QBSP extended format (bsp_template.c's BSP_LoadLeafsExt). Widens
+cluster/area/firstleafface/numleaffaces from int16/uint16 to uint32.
+readDleafExt already normalizes the on-disk null-cluster sentinel to -1
+(solid leafs); otherwise falls back to cluster 0 when the map has no vis
+lump ("map has no vis, use 0 as default"), or validates the cluster against
+the vis header's own numclusters ("Bad cluster") -- same fallback/validation
+Mod_LoadVisibility's nullable loadmodel.vis already supports. area has no
+sentinel and no bounds check at this (ref-only) layer: this file has no
+concept of areas/areaportals (that is cmodel.ts-only state), so din.area is
+stored as-is, matching what the classic loader above already does. Adds the
+"Bad leaffaces" cross-reference check bsp.c performs that the classic loader
+skips.
+
+Call order dependency (see Mod_LoadBrushModel): needs loadmodel.vis and
+loadmodel.marksurfaces already set (Visibility and LeafFaces load before
+Leafs in the extended branch).
+=================
+*/
+function Mod_LoadLeafsExt(l: LumpT): void {
+  if (l.filelen % DLEAF_EXT_T_SIZE) ri.Sys_Error(ERR_DROP, `MOD_LoadBmodel: funny lump size in ${loadmodel.name}`);
+  const count = l.filelen / DLEAF_EXT_T_SIZE;
+  const out: MleafT[] = [];
+  for (let i = 0; i < count; i++) out.push(new MleafT());
+  loadmodel.leafs = out;
+  loadmodel.numleafs = count;
+
+  const numclusters = loadmodel.vis ? dvisNumClusters(new DataView(loadmodel.vis.buffer, loadmodel.vis.byteOffset, loadmodel.vis.byteLength)) : 0;
+
+  for (let i = 0; i < count; i++) {
+    const din = readDleafExt(mod_view, l.fileofs + i * DLEAF_EXT_T_SIZE);
+    const lf = out[i];
+
+    for (let j = 0; j < 3; j++) {
+      lf.minmaxs[j] = din.mins[j];
+      lf.minmaxs[3 + j] = din.maxs[j];
+    }
+
+    lf.contents = din.contents;
+
+    if (din.cluster === -1) {
+      // solid leafs use special -1 cluster
+      lf.cluster = -1;
+    } else if (loadmodel.vis === null) {
+      // map has no vis, use 0 as default
+      lf.cluster = 0;
+    } else {
+      if (din.cluster >= numclusters) ri.Sys_Error(ERR_DROP, "Bad cluster");
+      lf.cluster = din.cluster;
+    }
+
+    lf.area = din.area;
+
+    if (din.firstleafface + din.numleaffaces > loadmodel.marksurfaces.length) ri.Sys_Error(ERR_DROP, "Bad leaffaces");
+    lf.firstmarksurface = loadmodel.marksurfaces.slice(din.firstleafface);
+    lf.nummarksurfaces = din.numleaffaces;
+
+    // gl underwater warp: dropped, see the classic loader's identical comment
+    // above.
+  }
+}
+
+/*
+=================
 Mod_LoadMarksurfaces
 =================
 */
 function Mod_LoadMarksurfaces(l: LumpT): void {
   if (l.filelen % 2) ri.Sys_Error(ERR_DROP, `MOD_LoadBmodel: funny lump size in ${loadmodel.name}`);
   const count = l.filelen / 2;
+  // classic LUMP_LEAFFACES is an `unsigned short` array on disk (q2repro's
+  // own classic BSP_LoadLeafFaces reads it via BSP_Short(), an unsigned
+  // 16-bit read -- see bsp_template.c). A signed getInt16 read here silently
+  // turned any facenum >= 32768 negative; retail's classic-ident
+  // maps/mgu*.bsp entries (not every mgu map is QBSP -- see qfiles.ts's
+  // IDBSPHEADER_EXT comment) reach 43290+ faces, well over that threshold.
+  // Fixed to getUint16 to match q2repro; no observable change for any face
+  // count under 32768 (every currently-passing map), since the top bit is
+  // never set, and the now-impossible `j < 0` branch is dropped along with
+  // it.
   const out: MsurfaceT[] = [];
   for (let i = 0; i < count; i++) {
-    const j = mod_view.getInt16(l.fileofs + i * 2, true);
-    if (j < 0 || j >= loadmodel.numsurfaces) ri.Sys_Error(ERR_DROP, "Mod_ParseMarksurfaces: bad surface number");
+    const j = mod_view.getUint16(l.fileofs + i * 2, true);
+    if (j >= loadmodel.numsurfaces) ri.Sys_Error(ERR_DROP, "Mod_ParseMarksurfaces: bad surface number");
+    out.push(loadmodel.surfaces[j]);
+  }
+  loadmodel.marksurfaces = out;
+  loadmodel.nummarksurfaces = count;
+}
+
+/*
+=================
+Mod_LoadMarksurfacesExt
+
+QBSP extended format (bsp_template.c's BSP_LoadLeafFacesExt). facenum widens
+from uint16 to uint32; same "Bad surface number" bounds check as the classic
+loader above, just against a wider on-disk field.
+=================
+*/
+function Mod_LoadMarksurfacesExt(l: LumpT): void {
+  if (l.filelen % LEAFFACE_EXT_SIZE) ri.Sys_Error(ERR_DROP, `MOD_LoadBmodel: funny lump size in ${loadmodel.name}`);
+  const count = l.filelen / LEAFFACE_EXT_SIZE;
+  const out: MsurfaceT[] = [];
+  for (let i = 0; i < count; i++) {
+    const j = readUint32(mod_view, l.fileofs + i * LEAFFACE_EXT_SIZE);
+    if (j >= loadmodel.numsurfaces) ri.Sys_Error(ERR_DROP, "Mod_ParseMarksurfaces: bad surface number");
     out.push(loadmodel.surfaces[j]);
   }
   loadmodel.marksurfaces = out;
@@ -1030,9 +1317,12 @@ Mod_LoadSurfedges
 function Mod_LoadSurfedges(l: LumpT): void {
   if (l.filelen % 4) ri.Sys_Error(ERR_DROP, `MOD_LoadBmodel: funny lump size in ${loadmodel.name}`);
   const count = l.filelen / 4;
-  if (count < 1 || count >= MAX_MAP_SURFEDGES) {
+  if (count < 1) {
     ri.Sys_Error(ERR_DROP, `MOD_LoadBmodel: bad surfedges count in ${loadmodel.name}: ${count}`);
   }
+  // no upper bound cap here -- bsp.c's SurfEdges loader has none, see
+  // qfiles.ts's file header comment. Retail's maps/mgu*.bsp reach 307373
+  // surfedges, over the old 256000 MAX_MAP_SURFEDGES cap.
   const out: number[] = [];
   for (let i = 0; i < count; i++) out.push(mod_view.getInt32(l.fileofs + i * 4, true));
   loadmodel.surfedges = out;
@@ -1077,6 +1367,23 @@ function Mod_LoadBrushModel(mod: ModelT, buffer: Uint8Array): void {
   }
 
   const header = readDheader(mod_view, 0);
+
+  // bsp.c's ident dispatch (BSP_Load's `switch (LittleLong(header->ident))`):
+  // IDBSPHEADER ('IBSP') selects the classic per-lump record widths,
+  // IDBSPHEADER_EXT ('QBSP') selects the extended ones (see qfiles.ts's
+  // IDBSPHEADER_EXT comment) -- both share the same BSPVERSION. Anything
+  // else is Q_ERR_UNKNOWN_FORMAT in bsp.c; mirrored here as a Sys_Error, same
+  // dispatch cmodel.ts's CM_LoadMap already performs.
+  let extended: boolean;
+  if (header.ident === IDBSPHEADER) {
+    extended = false;
+  } else if (header.ident === IDBSPHEADER_EXT) {
+    extended = true;
+  } else {
+    ri.Sys_Error(ERR_DROP, `Mod_LoadBrushModel: ${mod.name} has unknown ident (${header.ident})`);
+    extended = false; // unreachable: Sys_Error never returns
+  }
+
   if (header.version !== BSPVERSION) {
     ri.Sys_Error(ERR_DROP, `Mod_LoadBrushModel: ${mod.name} has wrong version number (${header.version} should be ${BSPVERSION})`);
   }
@@ -1086,24 +1393,17 @@ function Mod_LoadBrushModel(mod: ModelT, buffer: Uint8Array): void {
   // its own fields through a little-endian DataView instead (mod_view, set
   // by Mod_ForName before this function runs).
 
-  // load into heap
-  Mod_LoadVertexes(header.lumps[LUMP_VERTEXES]);
-  Mod_LoadEdges(header.lumps[LUMP_EDGES]);
-  Mod_LoadSurfedges(header.lumps[LUMP_SURFEDGES]);
-  Mod_LoadLighting(header.lumps[LUMP_LIGHTING]);
-  Mod_LoadPlanes(header.lumps[LUMP_PLANES]);
-  Mod_LoadTexinfo(header.lumps[LUMP_TEXINFO]);
-
   // BSPX extension directory -- not part of q2repro's bsp.c (which this
   // renderer's Load* functions above are otherwise NOT ported from: this
-  // is vanilla-shape gl_model.c). Parsed here, BEFORE Mod_LoadFaces, so
-  // Mod_LoadFaces can apply DECOUPLED_LM's per-face overrides while it
-  // builds each MsurfaceT (see q2repro's src/common/bsp.c
+  // is vanilla-shape gl_model.c). Parsed here, BEFORE Mod_LoadFaces/
+  // Mod_LoadFacesExt, so either one can apply DECOUPLED_LM's per-face
+  // overrides while it builds each MsurfaceT (see q2repro's src/common/bsp.c
   // BSP_ParseDecoupledLM, which similarly overwrites bsp->faces[i] right
-  // after the classic face lump is loaded). `numfaces` is computed
-  // directly from the face lump's size rather than read from
-  // `loadmodel.numsurfaces` -- that field isn't set until Mod_LoadFaces
-  // runs, a few lines below.
+  // after the face lump is loaded). `numfaces` is computed directly from the
+  // face lump's size (format-aware: DFACE_EXT_T_SIZE for a QBSP map, per
+  // this function's own `extended` dispatch above) rather than read from
+  // `loadmodel.numsurfaces` -- that field isn't set until Mod_LoadFaces/
+  // Mod_LoadFacesExt runs, a few lines below.
   //
   // Lightgrid consumption (entity/dynamic-model lighting) is intentionally
   // NOT wired here -- deferred, optional scope. q2repro DOES consume it:
@@ -1123,15 +1423,17 @@ function Mod_LoadBrushModel(mod: ModelT, buffer: Uint8Array): void {
   // rather than the grid's smoother interpolated result; qcommon/bspx.ts's
   // lookupLightgrid remains fully implemented and unit-tested, just not
   // called from here yet.
-  {
-    const lumpsEnd = header.lumps.reduce((max, l) => Math.max(max, l.fileofs + l.filelen), 0);
-    const bspxDir = parseBspxDirectory(buffer, lumpsEnd, buffer.length);
+  const lumpsEnd = header.lumps.reduce((max, l) => Math.max(max, l.fileofs + l.filelen), 0);
+  const bspxDir = parseBspxDirectory(buffer, lumpsEnd, buffer.length);
+
+  function parseBspxLumps(): void {
     let decoupledLm: DecoupledLmResultT | null = null;
     let lightgrid: LightgridT | null = null;
 
     if (bspxDir) {
       const lightingLump = header.lumps[LUMP_LIGHTING];
-      const numfaces = header.lumps[LUMP_FACES].filelen / DFACE_T_SIZE;
+      const faceRecordSize = extended ? DFACE_EXT_T_SIZE : DFACE_T_SIZE;
+      const numfaces = header.lumps[LUMP_FACES].filelen / faceRecordSize;
 
       const dlm = bspxDir.lumps.get("DECOUPLED_LM");
       if (dlm) {
@@ -1149,12 +1451,45 @@ function Mod_LoadBrushModel(mod: ModelT, buffer: Uint8Array): void {
     loadmodel.bspx = decoupledLm || lightgrid ? { decoupledLm, lightgrid } : null;
   }
 
-  Mod_LoadFaces(header.lumps[LUMP_FACES]);
-  Mod_LoadMarksurfaces(header.lumps[LUMP_LEAFFACES]);
-  Mod_LoadVisibility(header.lumps[LUMP_VISIBILITY]);
-  Mod_LoadLeafs(header.lumps[LUMP_LEAFS]);
-  Mod_LoadNodes(header.lumps[LUMP_NODES]);
-  Mod_LoadSubmodels(header.lumps[LUMP_MODELS]);
+  if (extended) {
+    // QBSP extended format: load order matches q2repro's bsp_lumps[] table
+    // exactly (restricted to the lumps this file actually reads), because
+    // the Ext loaders above cross-validate against lumps loaded earlier in
+    // that same order (Mod_LoadFacesExt needs Planes+Texinfo+Surfedges,
+    // Mod_LoadLeafsExt needs Visibility+Marksurfaces, Mod_LoadNodesExt needs
+    // Leafs). This intentionally differs from the classic branch below,
+    // which (like id Software's original loader) validates none of those
+    // cross-references and so has no ordering requirement -- left exactly as
+    // it was.
+    Mod_LoadVisibility(header.lumps[LUMP_VISIBILITY]);
+    Mod_LoadPlanes(header.lumps[LUMP_PLANES]);
+    Mod_LoadTexinfo(header.lumps[LUMP_TEXINFO]);
+    Mod_LoadLighting(header.lumps[LUMP_LIGHTING]);
+    Mod_LoadVertexes(header.lumps[LUMP_VERTEXES]);
+    Mod_LoadEdgesExt(header.lumps[LUMP_EDGES]);
+    Mod_LoadSurfedges(header.lumps[LUMP_SURFEDGES]);
+    parseBspxLumps();
+    Mod_LoadFacesExt(header.lumps[LUMP_FACES]);
+    Mod_LoadMarksurfacesExt(header.lumps[LUMP_LEAFFACES]);
+    Mod_LoadLeafsExt(header.lumps[LUMP_LEAFS]);
+    Mod_LoadNodesExt(header.lumps[LUMP_NODES]);
+    Mod_LoadSubmodels(header.lumps[LUMP_MODELS]);
+  } else {
+    // load into heap
+    Mod_LoadVertexes(header.lumps[LUMP_VERTEXES]);
+    Mod_LoadEdges(header.lumps[LUMP_EDGES]);
+    Mod_LoadSurfedges(header.lumps[LUMP_SURFEDGES]);
+    Mod_LoadLighting(header.lumps[LUMP_LIGHTING]);
+    Mod_LoadPlanes(header.lumps[LUMP_PLANES]);
+    Mod_LoadTexinfo(header.lumps[LUMP_TEXINFO]);
+    parseBspxLumps();
+    Mod_LoadFaces(header.lumps[LUMP_FACES]);
+    Mod_LoadMarksurfaces(header.lumps[LUMP_LEAFFACES]);
+    Mod_LoadVisibility(header.lumps[LUMP_VISIBILITY]);
+    Mod_LoadLeafs(header.lumps[LUMP_LEAFS]);
+    Mod_LoadNodes(header.lumps[LUMP_NODES]);
+    Mod_LoadSubmodels(header.lumps[LUMP_MODELS]);
+  }
   mod.numframes = 2; // regular and alternate animation
 
   //

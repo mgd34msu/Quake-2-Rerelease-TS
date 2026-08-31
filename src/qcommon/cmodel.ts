@@ -6,8 +6,8 @@ cmodel.c -- model loading
 */
 
 import { type Vec3, vec3, DotProduct, VectorSubtract, VectorAdd, VectorCopy, VectorClear, VectorNegate, AngleVectors, BOX_ON_PLANE_SIDE } from "../shared/math";
-import { CplaneT, CmodelT, MapsurfaceT, TraceT, CONTENTS_SOLID, CONTENTS_MONSTER, LittleLong, LittleFloat, LittleShort, type CvarT } from "../shared/q_shared";
-import { Com_Error, Com_DPrintf } from "./common";
+import { CplaneT, CmodelT, MapsurfaceT, TraceT, CONTENTS_SOLID, CONTENTS_MONSTER, LittleLong, LittleFloat, LittleShort, Q_stricmp, type CvarT } from "../shared/q_shared";
+import { Com_Error, Com_DPrintf, Com_Printf } from "./common";
 import { ERR_DROP } from "./qcommon";
 import { Cvar_Get, Cvar_VariableValue } from "./cvar";
 import { FS_LoadFile } from "./files";
@@ -15,19 +15,11 @@ import { Com_BlockChecksum } from "./md4";
 import {
   type LumpT,
   type DareaportalT,
-  MAX_MAP_MODELS,
-  MAX_MAP_BRUSHES,
-  MAX_MAP_TEXINFO,
+  MAX_MODELS,
   MAX_MAP_AREAS,
   MAX_MAP_AREAPORTALS,
   MAX_MAP_PORTAL_BYTES,
-  MAX_MAP_PLANES,
-  MAX_MAP_NODES,
-  MAX_MAP_BRUSHSIDES,
-  MAX_MAP_LEAFS,
-  MAX_MAP_LEAFBRUSHES,
-  MAX_MAP_ENTSTRING,
-  MAX_MAP_VISIBILITY,
+  MAX_MAP_CLUSTERS,
   LUMP_ENTITIES,
   LUMP_PLANES,
   LUMP_VISIBILITY,
@@ -41,6 +33,8 @@ import {
   LUMP_AREAS,
   LUMP_AREAPORTALS,
   BSPVERSION,
+  IDBSPHEADER,
+  IDBSPHEADER_EXT,
   DVIS_PVS,
   DVIS_PHS,
   DMODEL_T_SIZE,
@@ -52,6 +46,10 @@ import {
   DBRUSH_T_SIZE,
   DAREA_T_SIZE,
   DAREAPORTAL_T_SIZE,
+  DBRUSHSIDE_EXT_T_SIZE,
+  LEAFBRUSH_EXT_SIZE,
+  DLEAF_EXT_T_SIZE,
+  DNODE_EXT_T_SIZE,
   readDheader,
   readDmodel,
   readDplane,
@@ -63,7 +61,12 @@ import {
   readDarea,
   readDareaportal,
   readUint16,
+  readUint32,
+  readDbrushsideExt,
+  readDleafExt,
+  readDnodeExt,
   dvisBitofs,
+  dvisNumClusters,
 } from "./qfiles";
 
 // cnode_t
@@ -144,8 +147,18 @@ let numbrushes = 0;
 let map_brushes: CbrushT[] = [];
 
 let numvisibility = 0;
-const map_visibility = new Uint8Array(MAX_MAP_VISIBILITY);
-const map_vis_view = new DataView(map_visibility.buffer, map_visibility.byteOffset, map_visibility.byteLength);
+// q2repro's bsp.c allocates exactly `count` bytes for this lump (BSP_ALLOC(count)
+// inside BSP_LoadVisibility) instead of capping it at a fixed MAX_MAP_VISIBILITY --
+// retail's maps/mgu*.bsp carry up to 2.9MB of vis data, over the classic port's old
+// 1MB cap. map_visibility is therefore reassigned to a freshly-sized buffer on every
+// CM_LoadMap instead of being preallocated once; map_vis_view is recomputed alongside
+// it in CMod_LoadVisibility.
+let map_visibility = new Uint8Array(0);
+let map_vis_view = new DataView(map_visibility.buffer, map_visibility.byteOffset, map_visibility.byteLength);
+// true once a non-empty Visibility lump has been loaded -- mirrors bsp.c's
+// `bsp->vis != NULL`, used by CMod_LoadLeafsExt's "no vis lump present"
+// fallback (BSP_LoadLeafsExt: `else if (bsp->vis == NULL) out->cluster = 0`).
+let map_has_vis = false;
 
 let numentitychars = 0;
 let map_entitystring = "";
@@ -218,7 +231,10 @@ function CMod_LoadSubmodels(l: LumpT): void {
   const count = l.filelen / DMODEL_T_SIZE;
 
   if (count < 1) Com_Error(ERR_DROP, "Map with no models");
-  if (count > MAX_MAP_MODELS) Com_Error(ERR_DROP, "Map has too many models");
+  // bsp.c: BSP_ENSURE(count <= MAX_MODELS - 2, "Too many models") -- MAX_MODELS
+  // is q2repro's real (engine-wide) submodel cap, not the classic port's old
+  // MAX_MAP_MODELS=1024 (see qfiles.ts's file header comment)
+  if (count > MAX_MODELS - 2) Com_Error(ERR_DROP, "Map has too many models");
 
   numcmodels = count;
   map_cmodels = [];
@@ -247,7 +263,9 @@ function CMod_LoadSurfaces(l: LumpT): void {
   if (l.filelen % TEXINFO_T_SIZE) Com_Error(ERR_DROP, "MOD_LoadBmodel: funny lump size");
   const count = l.filelen / TEXINFO_T_SIZE;
   if (count < 1) Com_Error(ERR_DROP, "Map with no surfaces");
-  if (count > MAX_MAP_TEXINFO) Com_Error(ERR_DROP, "Map has too many surfaces");
+  // bsp.c's Texinfo loader has no upper-bound count check at all (retail's
+  // maps/mgu*.bsp reach 36404 texinfos, over the classic port's old
+  // MAX_MAP_TEXINFO=8192 cap) -- see qfiles.ts's file header comment
 
   numtexinfo = count;
   map_surfaces = [];
@@ -263,6 +281,75 @@ function CMod_LoadSurfaces(l: LumpT): void {
   }
 }
 
+// q2repro's Q_ispath (inc/shared/shared.h: `Q_isalnum(c) || c == '_' || c ==
+// '-'`), used below by CMod_LoadMaterials the same way bsp.c's own
+// COM_IsPath validates a freshly-read material string.
+function isMaterialPathChar(c: string): boolean {
+  return /^[a-zA-Z0-9_-]$/.test(c);
+}
+
+/*
+=================
+CMod_LoadMaterials
+
+[Paril-KEX] Ported from q2repro's src/common/bsp.c BSP_LoadMaterials
+(bsp.c:347-406). The real engine runs this pass CLIENT-side, over cl.bsp,
+purely to drive footstep/impact sound selection (its step_id return value is
+not ported here -- no consumer in this port needs it yet, only the material
+STRING itself, per this unit's brief). This port runs the same per-texinfo
+material resolution over the SERVER's collision model instead (map_surfaces,
+built by CMod_LoadSurfaces just above), since that is what feeds the kex
+game import boundary's trace surfaces (see bindings/kex.ts's csurface
+conversion) -- the resolution logic itself (same-name reuse, else read
+"textures/<name>.mat") is identical either way.
+
+Runs as its own pass after every texinfo is loaded (matching bsp.c's own
+separate BSP_LoadMaterials call, not interleaved into CMod_LoadSurfaces'
+per-texinfo loop), so the same-name backward scan can see every
+already-resolved texinfo -- same "j = i - 1; j >= 0; j--" backward-only scan
+bsp.c performs.
+=================
+*/
+function CMod_LoadMaterials(): void {
+  for (let i = 0; i < numtexinfo; i++) {
+    const out = map_surfaces[i];
+
+    // see if already loaded material for this texinfo
+    let reused = false;
+    for (let j = i - 1; j >= 0; j--) {
+      const tex = map_surfaces[j];
+      if (Q_stricmp(tex.rname, out.rname) === 0) {
+        out.c.material = tex.c.material;
+        reused = true;
+        break;
+      }
+    }
+    if (reused) continue;
+
+    // load material file
+    const path = `textures/${out.rname}.mat`;
+    const buf = FS_LoadFile(path);
+    if (buf) {
+      // FS_Read(out->c.material, sizeof(out->c.material) - 1, f) -- reads up
+      // to 15 raw bytes (csurface_t.material is `char material[16]`); a
+      // shorter file's content is used whole, a longer one is truncated at
+      // 15 bytes exactly like the C fixed-size read (the file is NOT
+      // tokenized/trimmed -- a trailing newline or any other non-path
+      // character fails the isMaterialPathChar check below and clears the
+      // whole result, same as the C original).
+      const n = Math.min(buf.length, 15);
+      let s = "";
+      for (let k = 0; k < n; k++) s += String.fromCharCode(buf[k]);
+      out.c.material = s;
+    }
+
+    if (out.c.material.length > 0 && ![...out.c.material].every(isMaterialPathChar)) {
+      Com_Printf(`Bad material "${out.c.material}" in ${path}\n`);
+      out.c.material = "";
+    }
+  }
+}
+
 /*
 =================
 CMod_LoadNodes
@@ -274,7 +361,8 @@ function CMod_LoadNodes(l: LumpT): void {
   const count = l.filelen / DNODE_T_SIZE;
 
   if (count < 1) Com_Error(ERR_DROP, "Map has no nodes");
-  if (count > MAX_MAP_NODES) Com_Error(ERR_DROP, "Map has too many nodes");
+  // bsp.c's Nodes loader has no upper-bound count check (just count > 0) --
+  // see qfiles.ts's file header comment
 
   numnodes = count;
   map_nodes = [];
@@ -292,6 +380,54 @@ function CMod_LoadNodes(l: LumpT): void {
 
 /*
 =================
+CMod_LoadNodesExt
+
+QBSP extended format (bsp_template.c's BSP_LoadNodesExt). planenum and both
+children stay 32-bit BSP_Long() reads in *both* formats (only the trailing
+mins/maxs/firstface/numfaces span -- which cmodel.ts, a USE_REF=0 build,
+never reads -- changes width between formats: 16 bytes classic, 32 bytes
+extended), so the only real difference from CMod_LoadNodes above is the
+stride (DNODE_EXT_T_SIZE) plus the child bounds checks bsp.c's classic
+reader never had (BSP_ENSURE(child < numleafs, "Bad leafnum") /
+BSP_ENSURE(child < count, "Bad nodenum")).
+
+Call order dependency (see CM_LoadMap): needs numleafs already set (Leafs
+loads before Nodes in bsp_lumps[]), unlike classic CMod_LoadNodes above,
+which validates no child bounds and so has no such requirement.
+=================
+*/
+function CMod_LoadNodesExt(l: LumpT): void {
+  if (l.filelen % DNODE_EXT_T_SIZE) Com_Error(ERR_DROP, "MOD_LoadBmodel: funny lump size");
+  const count = l.filelen / DNODE_EXT_T_SIZE;
+
+  if (count < 1) Com_Error(ERR_DROP, "Map has no nodes");
+
+  numnodes = count;
+  map_nodes = [];
+
+  for (let i = 0; i < count; i++) {
+    const din = readDnodeExt(cmod_view, l.fileofs + i * DNODE_EXT_T_SIZE);
+    const out = new CnodeT();
+    if (din.planenum >= numplanes) Com_Error(ERR_DROP, "Bad planenum");
+    out.plane = map_planes[din.planenum];
+
+    for (let j = 0; j < 2; j++) {
+      const child = din.children[j];
+      if (child & (1 << 31)) {
+        const leafnum = ~child;
+        if (leafnum < 0 || leafnum >= numleafs) Com_Error(ERR_DROP, "Bad leafnum");
+        out.children[j] = child; // still stored as the C -1-leafnum encoding; see CnodeT/CM_PointLeaf callers
+      } else {
+        if (child >= count) Com_Error(ERR_DROP, "Bad nodenum");
+        out.children[j] = child;
+      }
+    }
+    map_nodes.push(out);
+  }
+}
+
+/*
+=================
 CMod_LoadBrushes
 
 =================
@@ -300,7 +436,8 @@ function CMod_LoadBrushes(l: LumpT): void {
   if (l.filelen % DBRUSH_T_SIZE) Com_Error(ERR_DROP, "MOD_LoadBmodel: funny lump size");
   const count = l.filelen / DBRUSH_T_SIZE;
 
-  if (count > MAX_MAP_BRUSHES) Com_Error(ERR_DROP, "Map has too many brushes");
+  // bsp.c's Brushes loader has no upper-bound count check -- see qfiles.ts's
+  // file header comment
 
   numbrushes = count;
   map_brushes = [];
@@ -325,8 +462,12 @@ function CMod_LoadLeafs(l: LumpT): void {
   const count = l.filelen / DLEAF_T_SIZE;
 
   if (count < 1) Com_Error(ERR_DROP, "Map with no leafs");
-  // need to save space for box planes
-  if (count > MAX_MAP_PLANES) Com_Error(ERR_DROP, "Map has too many planes");
+  // The old "need to save space for box planes" cap here checked the leaf
+  // count against MAX_MAP_PLANES -- a copy-paste artifact inherited from
+  // id Software's original cmodel.c (it bounded leafs by the *planes* limit,
+  // not a leaf limit). bsp.c's own Leafs loader has no upper-bound count
+  // check at all (just count > 0); dropped here too -- retail's
+  // maps/mgu*.bsp reach 94777 leafs, over the old artifact cap.
 
   numleafs = count;
   numclusters = 0;
@@ -359,6 +500,80 @@ function CMod_LoadLeafs(l: LumpT): void {
 
 /*
 =================
+CMod_LoadLeafsExt
+
+QBSP extended format (bsp_template.c's BSP_LoadLeafsExt). Widens
+cluster/area/firstleafbrush/numleafbrushes from int16/uint16 to uint32, adds
+a cluster "no vis lump" fallback and explicit bounds checks bsp.c's classic
+reader never had, and skips over the mins/maxs/firstleafface/numleaffaces
+fields cmodel.ts (a USE_REF=0 build, collision only) never reads -- same
+non-REF skip bsp_template.c's own `in += 16 * (BSP_EXTENDED + 1)` performs,
+here expressed by simply not copying those readDleafExt fields into CleafT.
+
+Call order dependency (see CM_LoadMap): needs numareas, numleafbrushes, and
+map_has_vis already set, matching bsp_lumps[]'s real load order (Visibility,
+..., LeafBrushes, AreaPortals, Areas, ..., Leafs, ...) -- unlike classic
+CMod_LoadLeafs above, which (like id Software's original) validates none of
+this and so has no such ordering requirement.
+=================
+*/
+function CMod_LoadLeafsExt(l: LumpT): void {
+  if (l.filelen % DLEAF_EXT_T_SIZE) Com_Error(ERR_DROP, "MOD_LoadBmodel: funny lump size");
+  const count = l.filelen / DLEAF_EXT_T_SIZE;
+
+  if (count < 1) Com_Error(ERR_DROP, "Map with no leafs");
+
+  numleafs = count;
+  // Unlike classic CMod_LoadLeafs (which derives numclusters defensively by
+  // scanning every leaf's cluster field, since the classic loader never
+  // trusts the vis header's own count), bsp.c's extended Leafs loader takes
+  // numclusters straight from the already-loaded Visibility lump's header
+  // (bsp->vis->numclusters) and validates every leaf's cluster field against
+  // it -- see BSP_LoadLeafsExt's `BSP_ENSURE(cluster < bsp->vis->numclusters,
+  // "Bad cluster")`. Ported the same way here.
+  numclusters = map_has_vis ? dvisNumClusters(map_vis_view) : 0;
+  map_leafs = [];
+
+  for (let i = 0; i < count; i++) {
+    const din = readDleafExt(cmod_view, l.fileofs + i * DLEAF_EXT_T_SIZE);
+    const out = new CleafT();
+    out.contents = din.contents;
+
+    if (din.cluster === -1) {
+      // solid leafs use special -1 cluster
+      out.cluster = -1;
+    } else if (!map_has_vis) {
+      // map has no vis, use 0 as a default cluster
+      out.cluster = 0;
+    } else {
+      if (din.cluster >= numclusters) Com_Error(ERR_DROP, "Bad cluster");
+      out.cluster = din.cluster;
+    }
+
+    if (din.area >= numareas) Com_Error(ERR_DROP, "Bad area");
+    out.area = din.area;
+
+    if (din.firstleafbrush + din.numleafbrushes > numleafbrushes) Com_Error(ERR_DROP, "Bad leafbrushes");
+    out.firstleafbrush = din.firstleafbrush;
+    out.numleafbrushes = din.numleafbrushes;
+
+    map_leafs.push(out);
+  }
+
+  if (map_leafs[0].contents !== CONTENTS_SOLID) Com_Error(ERR_DROP, "Map leaf 0 is not CONTENTS_SOLID");
+  solidleaf = 0;
+  emptyleaf = -1;
+  for (let i = 1; i < numleafs; i++) {
+    if (!map_leafs[i].contents) {
+      emptyleaf = i;
+      break;
+    }
+  }
+  if (emptyleaf === -1) Com_Error(ERR_DROP, "Map does not have an empty leaf");
+}
+
+/*
+=================
 CMod_LoadPlanes
 =================
 */
@@ -367,8 +582,10 @@ function CMod_LoadPlanes(l: LumpT): void {
   const count = l.filelen / DPLANE_T_SIZE;
 
   if (count < 1) Com_Error(ERR_DROP, "Map with no planes");
-  // need to save space for box planes
-  if (count > MAX_MAP_PLANES) Com_Error(ERR_DROP, "Map has too many planes");
+  // bsp.c's Planes loader has no upper-bound count check -- see qfiles.ts's
+  // file header comment. CM_InitBoxHull's extra 12 box planes are appended
+  // onto map_planes (a growable JS array, not a fixed-capacity buffer), so
+  // there is no fixed-capacity "save space" concern to enforce here either.
 
   numplanes = count;
   map_planes = [];
@@ -398,14 +615,37 @@ function CMod_LoadLeafBrushes(l: LumpT): void {
   const count = l.filelen / 2;
 
   if (count < 1) Com_Error(ERR_DROP, "Map with no planes");
-  // need to save space for box planes
-  if (count > MAX_MAP_LEAFBRUSHES) Com_Error(ERR_DROP, "Map has too many leafbrushes");
+  // bsp.c's LeafBrushes loader has no upper-bound count check -- see
+  // qfiles.ts's file header comment. Retail's maps/mgu*.bsp reach 141772
+  // leafbrushes, over the old MAX_MAP_LEAFBRUSHES=65536 cap.
 
   numleafbrushes = count;
   map_leafbrushes = [];
 
   for (let i = 0; i < count; i++) {
     map_leafbrushes.push(LittleShort(readUint16(cmod_view, l.fileofs + i * 2)));
+  }
+}
+
+/*
+=================
+CMod_LoadLeafBrushesExt
+
+QBSP extended format: mbrush_t* index widened from uint16 to uint32
+(bsp_template.c's BSP_LoadLeafBrushesExt), everything else unchanged.
+=================
+*/
+function CMod_LoadLeafBrushesExt(l: LumpT): void {
+  if (l.filelen % LEAFBRUSH_EXT_SIZE) Com_Error(ERR_DROP, "MOD_LoadBmodel: funny lump size");
+  const count = l.filelen / LEAFBRUSH_EXT_SIZE;
+
+  numleafbrushes = count;
+  map_leafbrushes = [];
+
+  for (let i = 0; i < count; i++) {
+    const brushnum = readUint32(cmod_view, l.fileofs + i * LEAFBRUSH_EXT_SIZE);
+    if (brushnum >= numbrushes) Com_Error(ERR_DROP, "Bad brushnum");
+    map_leafbrushes.push(brushnum);
   }
 }
 
@@ -418,8 +658,9 @@ function CMod_LoadBrushSides(l: LumpT): void {
   if (l.filelen % DBRUSHSIDE_T_SIZE) Com_Error(ERR_DROP, "MOD_LoadBmodel: funny lump size");
   const count = l.filelen / DBRUSHSIDE_T_SIZE;
 
-  // need to save space for box planes
-  if (count > MAX_MAP_BRUSHSIDES) Com_Error(ERR_DROP, "Map has too many planes");
+  // bsp.c's BrushSides loader has no upper-bound count check -- see
+  // qfiles.ts's file header comment. Retail's maps/mgu*.bsp reach 234232
+  // brushsides, over the old MAX_MAP_BRUSHSIDES=65536 cap.
 
   numbrushsides = count;
   map_brushsides = [];
@@ -436,6 +677,35 @@ function CMod_LoadBrushSides(l: LumpT): void {
     // read at trace time without crashing. The defined equivalent is the
     // zeroed nullsurface the C file already uses for missing texinfo.
     out.surface = j >= 0 ? map_surfaces[j] : nullsurface;
+    map_brushsides.push(out);
+  }
+}
+
+/*
+=================
+CMod_LoadBrushSidesExt
+
+QBSP extended format: planenum/texinfo widened from uint16 to uint32
+(bsp_template.c's BSP_LoadBrushSidesExt), which also gains an explicit
+planenum bounds check bsp.c's classic reader never had (BSP_ENSURE(planenum
+< bsp->numplanes, "Bad planenum")) -- kept here to match bsp.c exactly,
+without touching the classic CMod_LoadBrushSides above.
+=================
+*/
+function CMod_LoadBrushSidesExt(l: LumpT): void {
+  if (l.filelen % DBRUSHSIDE_EXT_T_SIZE) Com_Error(ERR_DROP, "MOD_LoadBmodel: funny lump size");
+  const count = l.filelen / DBRUSHSIDE_EXT_T_SIZE;
+
+  numbrushsides = count;
+  map_brushsides = [];
+
+  for (let i = 0; i < count; i++) {
+    const din = readDbrushsideExt(cmod_view, l.fileofs + i * DBRUSHSIDE_EXT_T_SIZE);
+    const out = new CbrushsideT();
+    if (din.planenum >= numplanes) Com_Error(ERR_DROP, "Bad planenum");
+    out.plane = map_planes[din.planenum];
+    if (din.texinfo !== -1 && din.texinfo >= numtexinfo) Com_Error(ERR_DROP, "Bad texinfo");
+    out.surface = din.texinfo >= 0 ? map_surfaces[din.texinfo] : nullsurface;
     map_brushsides.push(out);
   }
 }
@@ -474,9 +744,14 @@ function CMod_LoadAreaPortals(l: LumpT): void {
   if (l.filelen % DAREAPORTAL_T_SIZE) Com_Error(ERR_DROP, "MOD_LoadBmodel: funny lump size");
   const count = l.filelen / DAREAPORTAL_T_SIZE;
 
-  // bug-for-bug with the original: bounded against MAX_MAP_AREAS, not
-  // MAX_MAP_AREAPORTALS
-  if (count > MAX_MAP_AREAS) Com_Error(ERR_DROP, "Map has too many areas");
+  // The old cap here was bug-for-bug with id Software's original cmodel.c:
+  // bounded against MAX_MAP_AREAS, not MAX_MAP_AREAPORTALS. bsp.c's
+  // AreaPortals loader has no count cap at all -- its own cross-references
+  // (portalnum/otherarea) are validated afterward, once every lump is
+  // loaded, by a separate BSP_ValidateAreaPortals pass this port does not
+  // implement (portalnum/otherarea go unchecked here, same as before this
+  // change; reported as a residual gap, not something this cap was
+  // covering). Dropped to match bsp.c's per-lump loader.
 
   numareaportals = count;
   map_areaportals = [];
@@ -497,7 +772,16 @@ CMod_LoadVisibility
 */
 function CMod_LoadVisibility(l: LumpT): void {
   numvisibility = l.filelen;
-  if (l.filelen > MAX_MAP_VISIBILITY) Com_Error(ERR_DROP, "Map has too large visibility lump");
+  // bsp.c allocates exactly `count` bytes for this lump instead of capping
+  // it at a fixed size (BSP_ALLOC(count) in BSP_LoadVisibility) -- retail's
+  // maps/mgu*.bsp reach 2.9MB of vis data, over the classic port's old
+  // MAX_MAP_VISIBILITY=1MB cap. map_visibility is resized to fit every load
+  // instead; see this file's map_visibility declaration.
+  map_visibility = new Uint8Array(l.filelen);
+  map_vis_view = new DataView(map_visibility.buffer, map_visibility.byteOffset, map_visibility.byteLength);
+  map_has_vis = l.filelen > 0;
+
+  if (l.filelen === 0) return;
 
   const src = new Uint8Array(cmod_view.buffer, cmod_view.byteOffset + l.fileofs, l.filelen);
   map_visibility.set(src, 0);
@@ -506,6 +790,10 @@ function CMod_LoadVisibility(l: LumpT): void {
   // following bitofs byteswap loop, are no-ops on this little-endian-only
   // port (see PORTING.md idiom map: "take the portable little-endian C
   // path") -- the bytes are already in the right order after the copy above.
+
+  // bsp.c: BSP_ENSURE(numclusters <= MAX_MAP_CLUSTERS, "Too many clusters")
+  const numclustersOnDisk = dvisNumClusters(map_vis_view);
+  if (numclustersOnDisk > MAX_MAP_CLUSTERS) Com_Error(ERR_DROP, "Map has too many clusters");
 }
 
 /*
@@ -515,7 +803,8 @@ CMod_LoadEntityString
 */
 function CMod_LoadEntityString(l: LumpT): void {
   numentitychars = l.filelen;
-  if (l.filelen > MAX_MAP_ENTSTRING) Com_Error(ERR_DROP, "Map has too large entity lump");
+  // bsp.c's EntString loader has no size cap at all -- see qfiles.ts's file
+  // header comment.
 
   let s = "";
   for (let i = 0; i < l.filelen; i++) {
@@ -592,23 +881,66 @@ export function CM_LoadMap(name: string, clientload: boolean): { model: CmodelT;
   // the C original byteswaps every int of the header in place here; a no-op
   // on this little-endian-only port (same rationale as CMod_LoadVisibility).
 
+  // bsp.c's ident dispatch (BSP_Load's `switch (LittleLong(header->ident))`):
+  // IDBSPHEADER ('IBSP') selects the classic per-lump record widths,
+  // IDBSPHEADER_EXT ('QBSP') selects the extended ones (see qfiles.ts's
+  // IDBSPHEADER_EXT comment) -- both share the same BSPVERSION. Anything
+  // else is Q_ERR_UNKNOWN_FORMAT in bsp.c; mirrored here as a Com_Error.
+  let extended: boolean;
+  if (header.ident === IDBSPHEADER) {
+    extended = false;
+  } else if (header.ident === IDBSPHEADER_EXT) {
+    extended = true;
+  } else {
+    Com_Error(ERR_DROP, "CMod_LoadBrushModel: %s has unknown ident (%i)", name, header.ident);
+    extended = false; // unreachable: Com_Error never returns, see its own doc comment
+  }
+
   if (header.version !== BSPVERSION) {
     Com_Error(ERR_DROP, "CMod_LoadBrushModel: %s has wrong version number (%i should be %i)", name, header.version, BSPVERSION);
   }
 
-  // load into heap
-  CMod_LoadSurfaces(header.lumps[LUMP_TEXINFO]);
-  CMod_LoadLeafs(header.lumps[LUMP_LEAFS]);
-  CMod_LoadLeafBrushes(header.lumps[LUMP_LEAFBRUSHES]);
-  CMod_LoadPlanes(header.lumps[LUMP_PLANES]);
-  CMod_LoadBrushes(header.lumps[LUMP_BRUSHES]);
-  CMod_LoadBrushSides(header.lumps[LUMP_BRUSHSIDES]);
-  CMod_LoadSubmodels(header.lumps[LUMP_MODELS]);
-  CMod_LoadNodes(header.lumps[LUMP_NODES]);
-  CMod_LoadAreas(header.lumps[LUMP_AREAS]);
-  CMod_LoadAreaPortals(header.lumps[LUMP_AREAPORTALS]);
-  CMod_LoadVisibility(header.lumps[LUMP_VISIBILITY]);
-  CMod_LoadEntityString(header.lumps[LUMP_ENTITIES]);
+  if (extended) {
+    // QBSP extended format: load order matches q2repro's bsp_lumps[] table
+    // exactly (Visibility, Texinfo, Planes, BrushSides, Brushes,
+    // LeafBrushes, AreaPortals, Areas, Leafs, Nodes, SubModels, EntString --
+    // skipping the USE_REF-only lumps cmodel.ts never reads), because the
+    // Ext loaders above cross-validate against lumps loaded earlier in that
+    // same order (CMod_LoadBrushSidesExt needs Planes+Texinfo,
+    // CMod_LoadLeafsExt needs Visibility+LeafBrushes+Areas,
+    // CMod_LoadNodesExt needs Leafs). This intentionally differs from the
+    // classic branch below, which (like id Software's original loader)
+    // validates none of those cross-references and so has no ordering
+    // requirement -- left exactly as it was.
+    CMod_LoadVisibility(header.lumps[LUMP_VISIBILITY]);
+    CMod_LoadSurfaces(header.lumps[LUMP_TEXINFO]);
+    CMod_LoadMaterials();
+    CMod_LoadPlanes(header.lumps[LUMP_PLANES]);
+    CMod_LoadBrushSidesExt(header.lumps[LUMP_BRUSHSIDES]);
+    CMod_LoadBrushes(header.lumps[LUMP_BRUSHES]);
+    CMod_LoadLeafBrushesExt(header.lumps[LUMP_LEAFBRUSHES]);
+    CMod_LoadAreaPortals(header.lumps[LUMP_AREAPORTALS]);
+    CMod_LoadAreas(header.lumps[LUMP_AREAS]);
+    CMod_LoadLeafsExt(header.lumps[LUMP_LEAFS]);
+    CMod_LoadNodesExt(header.lumps[LUMP_NODES]);
+    CMod_LoadSubmodels(header.lumps[LUMP_MODELS]);
+    CMod_LoadEntityString(header.lumps[LUMP_ENTITIES]);
+  } else {
+    // load into heap
+    CMod_LoadSurfaces(header.lumps[LUMP_TEXINFO]);
+    CMod_LoadMaterials();
+    CMod_LoadLeafs(header.lumps[LUMP_LEAFS]);
+    CMod_LoadLeafBrushes(header.lumps[LUMP_LEAFBRUSHES]);
+    CMod_LoadPlanes(header.lumps[LUMP_PLANES]);
+    CMod_LoadBrushes(header.lumps[LUMP_BRUSHES]);
+    CMod_LoadBrushSides(header.lumps[LUMP_BRUSHSIDES]);
+    CMod_LoadSubmodels(header.lumps[LUMP_MODELS]);
+    CMod_LoadNodes(header.lumps[LUMP_NODES]);
+    CMod_LoadAreas(header.lumps[LUMP_AREAS]);
+    CMod_LoadAreaPortals(header.lumps[LUMP_AREAPORTALS]);
+    CMod_LoadVisibility(header.lumps[LUMP_VISIBILITY]);
+    CMod_LoadEntityString(header.lumps[LUMP_ENTITIES]);
+  }
 
   // FS_FreeFile(buf) -- no-op in this port; Uint8Array buffers are garbage
   // collected, not hand-freed (see files.ts).
@@ -667,6 +999,13 @@ export function CM_TexinfoName(i: number): string {
   return map_surfaces[i]?.rname ?? "";
 }
 
+// Additive accessor, same rationale as CM_NumTexinfo/CM_TexinfoName above:
+// exposes CMod_LoadMaterials' per-texinfo result (map_surfaces[i].c.material)
+// for test/kex-binding consumers without reaching into module-private state.
+export function CM_TexinfoMaterial(i: number): string {
+  return map_surfaces[i]?.c.material ?? "";
+}
+
 export function CM_LeafContents(leafnum: number): number {
   if (leafnum < 0 || leafnum >= numleafs) Com_Error(ERR_DROP, "CM_LeafContents: bad number");
   return map_leafs[leafnum].contents;
@@ -701,9 +1040,20 @@ export function CM_InitBoxHull(): void {
   box_headnode = numnodes;
   const planesStart = numplanes;
 
-  if (numnodes + 6 > MAX_MAP_NODES || numbrushes + 1 > MAX_MAP_BRUSHES || numleafbrushes + 1 > MAX_MAP_LEAFBRUSHES || numbrushsides + 6 > MAX_MAP_BRUSHSIDES || numplanes + 12 > MAX_MAP_PLANES) {
-    Com_Error(ERR_DROP, "Not enough room for box tree");
-  }
+  // The old capacity check here rejected a load once numnodes/numbrushes/
+  // numleafbrushes/numbrushsides/numplanes plus the box hull's own handful
+  // of extra entries exceeded the classic port's MAX_MAP_* constants -- a
+  // real concern in the original engine, where those arrays are fixed-size
+  // C buffers preallocated to exactly that capacity. This port's
+  // map_nodes/map_brushes/map_leafbrushes/map_brushsides/map_planes are
+  // growable JS arrays (see this file's header comment); appending a dozen
+  // more entries below always has room, regardless of how large the map's
+  // own counts already are. Retail's maps/mgu*.bsp already exceed several of
+  // these constants on their own (e.g. numnodes=80015 > MAX_MAP_NODES), so
+  // this check would misfire on a load that has nothing wrong with it.
+  // bsp.c/q2repro has no equivalent check either -- its box hull is built
+  // from separate fixed-size arrays outside the map's own hunk allocation,
+  // so the concept doesn't apply there at all.
 
   box_brush = new CbrushT();
   box_brush.numsides = 6;
@@ -1424,11 +1774,33 @@ function CM_DecompressVis(inBuf: Uint8Array | null, inOffset: number, out: Uint8
   } while (outIdx < row);
 }
 
-const pvsrow = new Uint8Array(MAX_MAP_LEAFS / 8);
-const phsrow = new Uint8Array(MAX_MAP_LEAFS / 8);
+// Cluster-indexed (not leaf-indexed) vis-row scratch buffers -- sized by
+// MAX_MAP_CLUSTERS/8, q2repro's real bound for a decompressed vis row
+// (bsp.c: BSP_ENSURE(numclusters <= MAX_MAP_CLUSTERS) in BSP_LoadVisibility).
+// Numerically identical to the classic port's old MAX_MAP_LEAFS/8 (both
+// 65536), so this rename has no behavioral effect; it just names the actual
+// invariant these buffers depend on (cluster count, not leaf count -- a map
+// can now have far more leafs than clusters, e.g. retail's 94777-leaf
+// maps/mguhub.bsp).
+const pvsrow = new Uint8Array(MAX_MAP_CLUSTERS / 8);
+const phsrow = new Uint8Array(MAX_MAP_CLUSTERS / 8);
 
+// bsp.c's BSP_ClusterVis leads with this exact guard (`if (!bsp || !bsp->vis)
+// { memset(mask, 0xff, sizeof(*mask)); return; }`, i.e. "no vis lump at all"
+// means "treat everything as visible") before ever touching bitofs. This
+// port never had that guard: map_visibility used to be a fixed 1MB buffer
+// preallocated regardless of whether the loaded map actually carried a
+// Visibility lump, so a no-vis map's dvisBitofs read never threw (it just
+// read stale/zeroed bytes from that oversized buffer and returned bogus-but
+// -harmless results). Now that map_visibility is sized to the lump's real
+// byte length on every load (see CMod_LoadVisibility), a no-vis map leaves
+// it zero bytes long, so the same read would throw a hard RangeError
+// instead. Ported bsp.c's real guard here to fix that, using map_has_vis
+// (mirrors bsp->vis != NULL) the same way CMod_LoadLeafsExt already does.
 export function CM_ClusterPVS(cluster: number): Uint8Array {
-  if (cluster === -1) {
+  if (!map_has_vis) {
+    pvsrow.fill(0xff);
+  } else if (cluster === -1) {
     pvsrow.fill(0, 0, (numclusters + 7) >> 3);
   } else {
     CM_DecompressVis(map_visibility, dvisBitofs(map_vis_view, cluster, DVIS_PVS), pvsrow);
@@ -1437,7 +1809,9 @@ export function CM_ClusterPVS(cluster: number): Uint8Array {
 }
 
 export function CM_ClusterPHS(cluster: number): Uint8Array {
-  if (cluster === -1) {
+  if (!map_has_vis) {
+    phsrow.fill(0xff);
+  } else if (cluster === -1) {
     phsrow.fill(0, 0, (numclusters + 7) >> 3);
   } else {
     CM_DecompressVis(map_visibility, dvisBitofs(map_vis_view, cluster, DVIS_PHS), phsrow);

@@ -27,34 +27,62 @@ q_shared.ts's stateful structs.
 */
 
 // upper design bounds
+//
+// classic (IBSP) design bounds, ported verbatim from quake-2-c/qcommon/qfiles.h.
+// Retail's "Call of the Machine" (rerelease) maps ship in the QBSP extended
+// format (see IDBSPHEADER_EXT below) with 32-bit lump records specifically so
+// these classic 16-bit-index-derived counts can be blown through. q2repro's
+// src/common/bsp.c (BSP_Load, bsp_lumps[]) enforces none of these as
+// rejection caps: it derives allocation size straight from each lump's
+// on-disk byte length and instead validates *cross-references* (e.g. "a
+// brush's firstside+numsides must not exceed numbrushsides", "a leaf's
+// cluster must be < numclusters") -- there is no upper bound on the count
+// itself. The consumers in this repo (cmodel.ts, gl_model.ts, r_model.ts)
+// follow that model: they no longer reject a load merely for exceeding
+// these classic constants, replacing the count-cap with the same
+// cross-reference bounds-check bsp.c performs at each corresponding site.
+// These MAX_MAP_* constants are kept only where something still legitimately
+// needs a size number: fixed-format struct sizing or documentation of the
+// classic wire format's own historic ceiling. MAX_MAP_AREAS remains a real
+// engine limit, see its own comment. Same "keep the wire-format constant,
+// drop the engine-arbitrary one" split files.ts's MAX_FILES_IN_PACK already
+// demonstrates (files.ts's MAX_FILES_IN_PACK checked against the .pak
+// directory's own byte-derived file count) -- applied here to the BSP loader.
+//
 // leaffaces, leafbrushes, planes, and verts are still bounded by
-// 16 bit short limits
-export const MAX_MAP_MODELS = 1024;
-export const MAX_MAP_BRUSHES = 8192;
+// 16 bit short limits (classic format only)
+export const MAX_MAP_MODELS = 1024; // superseded by MAX_MODELS - 2 below (q2repro's real submodel cap); kept only as documentation of the classic constant
+export const MAX_MAP_BRUSHES = 8192; // no longer enforced as a load-rejection cap, see file header comment
 export const MAX_MAP_ENTITIES = 2048;
-export const MAX_MAP_ENTSTRING = 0x40000;
-export const MAX_MAP_TEXINFO = 8192;
+export const MAX_MAP_ENTSTRING = 0x40000; // no longer enforced as a load-rejection cap
+export const MAX_MAP_TEXINFO = 8192; // no longer enforced as a load-rejection cap
 
-export const MAX_MAP_AREAS = 256;
+export const MAX_MAP_AREAS = 256; // real engine/network-protocol limit (area index travels in wire-sized fields elsewhere) -- q2repro's BSP_LoadAreas keeps this exact cap (BSP_ENSURE(count <= MAX_MAP_AREAS)); still enforced by every consumer
 export const MAX_MAP_AREAPORTALS = 1024;
 // q2repro inc/common/cmodel.h:25 -- bit-packed portal-state buffer size used
 // by CM_WritePortalBits/CM_SetPortalStates (the SSV2/SAV2 kex savegame
 // container's on-disk portal encoding, one bit per portal instead of the
 // legacy one-byte-per-portal CM_WritePortalState/CM_ReadPortalState layout).
 export const MAX_MAP_PORTAL_BYTES = 128;
-export const MAX_MAP_PLANES = 65536;
-export const MAX_MAP_NODES = 65536;
-export const MAX_MAP_BRUSHSIDES = 65536;
-export const MAX_MAP_LEAFS = 65536;
-export const MAX_MAP_VERTS = 65536;
-export const MAX_MAP_FACES = 65536;
-export const MAX_MAP_LEAFFACES = 65536;
-export const MAX_MAP_LEAFBRUSHES = 65536;
+export const MAX_MAP_PLANES = 65536; // no longer enforced as a load-rejection cap, see file header comment
+export const MAX_MAP_NODES = 65536; // no longer enforced as a load-rejection cap, see file header comment
+export const MAX_MAP_BRUSHSIDES = 65536; // no longer enforced as a load-rejection cap, see file header comment
+export const MAX_MAP_LEAFS = 65536; // no longer enforced as a load-rejection cap, see file header comment; still used to size cluster-indexed vis-row scratch buffers (numerically == MAX_MAP_CLUSTERS, see below)
+export const MAX_MAP_VERTS = 65536; // no longer enforced as a load-rejection cap, see file header comment
+export const MAX_MAP_FACES = 65536; // no longer enforced as a load-rejection cap, see file header comment
+export const MAX_MAP_LEAFFACES = 65536; // no longer enforced as a load-rejection cap, see file header comment
+export const MAX_MAP_LEAFBRUSHES = 65536; // no longer enforced as a load-rejection cap, see file header comment
 export const MAX_MAP_PORTALS = 65536;
-export const MAX_MAP_EDGES = 128000;
-export const MAX_MAP_SURFEDGES = 256000;
-export const MAX_MAP_LIGHTING = 0x200000;
-export const MAX_MAP_VISIBILITY = 0x100000;
+export const MAX_MAP_EDGES = 128000; // no longer enforced as a load-rejection cap, see file header comment
+export const MAX_MAP_SURFEDGES = 256000; // no longer enforced as a load-rejection cap, see file header comment
+export const MAX_MAP_LIGHTING = 0x200000; // no longer enforced as a load-rejection cap
+export const MAX_MAP_VISIBILITY = 0x100000; // no longer enforced as a load-rejection cap; map_visibility in cmodel.ts is sized dynamically per-load instead of preallocated to this constant
+
+// q2repro's real cross-format caps (src/common/bsp.c / inc/format/bsp.h,
+// inc/shared/shared.h), used by the dynamic validation model above in place
+// of the removed MAX_MAP_* rejection caps.
+export const MAX_MAP_CLUSTERS = 65536; // BSP_LoadVisibility: BSP_ENSURE(numclusters <= MAX_MAP_CLUSTERS)
+export const MAX_MODELS = 8192; // shared.h: "half is reserved for inline BSP models"; BSP_LoadSubModels: BSP_ENSURE(count <= MAX_MODELS - 2)
 
 // key / value pair sizes
 export const MAX_KEY = 32;
@@ -98,6 +126,14 @@ export const DHEADER_T_SIZE = 4 + 4 + HEADER_LUMPS * LUMP_T_SIZE;
 
 // little-endian "IBSP"
 export const IDBSPHEADER = ("P".charCodeAt(0) << 24) + ("S".charCodeAt(0) << 16) + ("B".charCodeAt(0) << 8) + "I".charCodeAt(0);
+
+// little-endian "QBSP" -- q2repro's extended-format ident (inc/format/bsp.h:
+// IDBSPHEADER_EXT). Same BSPVERSION (38) as classic IBSP; only the on-disk
+// record width of the E()-tagged lumps below changes. Ported from Call of
+// the Machine's maps/mgu*.bsp, which ship in this format because their
+// texinfo/plane/face/etc. counts exceed what IBSP's 16-bit indices can
+// address.
+export const IDBSPHEADER_EXT = ("P".charCodeAt(0) << 24) + ("S".charCodeAt(0) << 16) + ("B".charCodeAt(0) << 8) + "Q".charCodeAt(0);
 
 export const BSPVERSION = 38;
 
@@ -430,4 +466,136 @@ export function readMd2SkinNames(buffer: Uint8Array): string[] | null {
     names.push(readCString(view, ofs_skins + i * MD2_MAX_SKINNAME, MD2_MAX_SKINNAME));
   }
   return names;
+}
+
+//=============================================================================
+// QBSP extended-format ("Ext") struct readers.
+//
+// Ported field-by-field from q2repro's src/common/bsp_template.c, which is
+// compiled twice (once with BSP_EXTENDED=0, once with BSP_EXTENDED=1) to
+// produce a BSP_Load<Name> / BSP_Load<Name>Ext pair per lump. Only the
+// E()-tagged lumps in bsp.c's bsp_lumps[] table get a second, wider record
+// layout here -- every L()-tagged lump (Texinfo, Planes, Brushes,
+// AreaPortals, Areas, Vertices, SurfEdges, Lightmap, SubModels, EntString,
+// Visibility) is byte-identical between formats and reuses the existing
+// classic reader unchanged.
+//
+// Disk sizes (classic -> extended), from bsp_lumps[]'s E() rows:
+//   BrushSides   4 -> 8    LeafBrushes  2 -> 4
+//   Edges        4 -> 8    Faces       20 -> 28
+//   LeafFaces    2 -> 4    Leafs       28 -> 52
+//   Nodes       28 -> 44
+//
+// Sentinel convention: BSP_ExtNull is (uint16_t)-1 in the classic reader and
+// (uint32_t)-1 in the extended reader -- both are "all bits set" for their
+// field width, so a null texinfo/cluster reads back as -1 either way. These
+// Ext readers normalize that sentinel to -1 up front (same convention the
+// existing classic readDbrushside/readDleaf callers already rely on via
+// their signed getInt16 reads), so downstream code can treat classic and
+// extended results identically.
+
+export const DBRUSHSIDE_EXT_T_SIZE = 8;
+export interface DbrushsideExtT {
+  planenum: number;
+  texinfo: number; // -1 if the on-disk lump stored the null-texinfo sentinel
+}
+export function readDbrushsideExt(view: DataView, offset: number): DbrushsideExtT {
+  const texinfoRaw = view.getUint32(offset + 4, true);
+  return {
+    planenum: view.getUint32(offset, true),
+    texinfo: texinfoRaw === 0xffffffff ? -1 : texinfoRaw,
+  };
+}
+
+// LeafBrushes/LeafFaces have no named struct in bsp.h either in extended
+// form -- raw uint32 arrays, index validated by the caller against
+// numbrushes/numfaces (bsp.c: "Bad brushnum"/"Bad facenum"). No sentinel.
+export const LEAFBRUSH_EXT_SIZE = 4;
+export const LEAFFACE_EXT_SIZE = 4;
+export function readUint32(view: DataView, offset: number): number {
+  return view.getUint32(offset, true);
+}
+
+export const DLEAF_EXT_T_SIZE = 52;
+export interface DleafExtT {
+  contents: number;
+  cluster: number; // -1 sentinel already normalized (see file header comment)
+  area: number;
+  mins: [number, number, number];
+  maxs: [number, number, number];
+  firstleafface: number;
+  numleaffaces: number;
+  firstleafbrush: number;
+  numleafbrushes: number;
+}
+export function readDleafExt(view: DataView, offset: number): DleafExtT {
+  const clusterRaw = view.getUint32(offset + 4, true);
+  return {
+    contents: view.getInt32(offset, true),
+    cluster: clusterRaw === 0xffffffff ? -1 : clusterRaw,
+    area: view.getUint32(offset + 8, true),
+    mins: [view.getFloat32(offset + 12, true), view.getFloat32(offset + 16, true), view.getFloat32(offset + 20, true)],
+    maxs: [view.getFloat32(offset + 24, true), view.getFloat32(offset + 28, true), view.getFloat32(offset + 32, true)],
+    firstleafface: view.getUint32(offset + 36, true),
+    numleaffaces: view.getUint32(offset + 40, true),
+    firstleafbrush: view.getUint32(offset + 44, true),
+    numleafbrushes: view.getUint32(offset + 48, true),
+  };
+}
+
+export const DNODE_EXT_T_SIZE = 44;
+export interface DnodeExtT {
+  planenum: number;
+  children: [number, number];
+  mins: [number, number, number];
+  maxs: [number, number, number];
+  firstface: number;
+  numfaces: number;
+}
+export function readDnodeExt(view: DataView, offset: number): DnodeExtT {
+  return {
+    planenum: view.getInt32(offset, true),
+    children: [view.getInt32(offset + 4, true), view.getInt32(offset + 8, true)],
+    mins: [view.getFloat32(offset + 12, true), view.getFloat32(offset + 16, true), view.getFloat32(offset + 20, true)],
+    maxs: [view.getFloat32(offset + 24, true), view.getFloat32(offset + 28, true), view.getFloat32(offset + 32, true)],
+    firstface: view.getUint32(offset + 36, true),
+    numfaces: view.getUint32(offset + 40, true),
+  };
+}
+
+export const DEDGE_EXT_T_SIZE = 8;
+export interface DedgeExtT {
+  v: [number, number];
+}
+export function readDedgeExt(view: DataView, offset: number): DedgeExtT {
+  return { v: [view.getUint32(offset, true), view.getUint32(offset + 4, true)] };
+}
+
+// bsp.h: "#define DSURF_PLANEBACK 1" -- the only bit of mface_t.drawflags
+// the loader itself cares about (bsp_template.c: `out->drawflags =
+// BSP_ExtLong() & DSURF_PLANEBACK`); matches the classic reader's `side`
+// boolean field one-for-one (a nonzero classic `side` and a set
+// DSURF_PLANEBACK bit both mean "plane back").
+export const DSURF_PLANEBACK = 1;
+
+export const DFACE_EXT_T_SIZE = 28;
+export interface DfaceExtT {
+  planenum: number;
+  drawflags: number; // pre-masked to DSURF_PLANEBACK, see comment above
+  firstedge: number;
+  numedges: number;
+  texinfo: number;
+  styles: [number, number, number, number];
+  lightofs: number;
+}
+export function readDfaceExt(view: DataView, offset: number): DfaceExtT {
+  return {
+    planenum: view.getUint32(offset, true),
+    drawflags: view.getUint32(offset + 4, true) & DSURF_PLANEBACK,
+    firstedge: view.getInt32(offset + 8, true),
+    numedges: view.getUint32(offset + 12, true),
+    texinfo: view.getUint32(offset + 16, true),
+    styles: [view.getUint8(offset + 20), view.getUint8(offset + 21), view.getUint8(offset + 22), view.getUint8(offset + 23)],
+    lightofs: view.getInt32(offset + 24, true),
+  };
 }
