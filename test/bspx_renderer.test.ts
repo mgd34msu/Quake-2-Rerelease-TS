@@ -1,14 +1,14 @@
 /*
 Tests for BSPX DECOUPLED_LM consumption in the GL renderer (src/ref_gl/
-gl_model.ts, gl_rsurf.ts, gl_light.ts) and the software renderer's graceful
-refusal to load a DECOUPLED_LM map (src/ref_soft/r_model.ts) -- see this
-unit's brief: q2repro's src/refresh/surf.c build_surface_poly's
+gl_model.ts, gl_rsurf.ts, gl_light.ts) and the software renderer's per-
+surface fullbright fallback for a DECOUPLED_LM map (src/ref_soft/r_model.ts)
+-- see this unit's brief: q2repro's src/refresh/surf.c build_surface_poly's
 `if (bsp->lm_decoupled)` branch and src/common/bsp.c's BSP_ParseDecoupledLM/
 BSP_RecursiveLightPoint are the reference this port's selection logic
 matches; q2repro has no software renderer at all (verified: no sw_*.c or
 *soft* anywhere under ~/Projects/qsrc/q2repro/src/), which is why the
-software-renderer half of this file only tests a clean refusal, not any
-attempt at partial decoupled support.
+software-renderer half of this file only tests that the map still loads and
+renders (fullbright), not any attempt at real decoupled lighting support.
 
 Self-sufficient per PORTING.md rule 13: each test initializes the globals it
 reads (SetRefImports, Mod_Init/Mod_FreeAll, SetQGL, SetNoTexture) and does
@@ -486,11 +486,13 @@ describe("GL renderer -- BSPX DECOUPLED_LM", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Software renderer: src/ref_soft/r_model.ts -- graceful refusal only
+// Software renderer: src/ref_soft/r_model.ts -- per-surface fullbright
+// fallback (loads and renders, no whole-map refusal)
 // ---------------------------------------------------------------------------
 
-describe("Software renderer -- BSPX DECOUPLED_LM graceful refusal", () => {
+describe("Software renderer -- BSPX DECOUPLED_LM fullbright fallback", () => {
   const filesSoft = new Map<string, Uint8Array>();
+  let conPrints: string[] = [];
 
   function registerSoft(name: string, data: Uint8Array): void {
     filesSoft.set(name, data);
@@ -506,7 +508,9 @@ describe("Software renderer -- BSPX DECOUPLED_LM graceful refusal", () => {
       Cmd_Argc: () => 0,
       Cmd_Argv: () => "",
       Cmd_ExecuteText: () => undefined,
-      Con_Printf: () => undefined,
+      Con_Printf: (_level: number, str: string) => {
+        conPrints.push(str);
+      },
       FS_LoadFile: (name: string) => {
         const data = filesSoft.get(name);
         if (!data) return { length: -1, data: null };
@@ -555,6 +559,7 @@ describe("Software renderer -- BSPX DECOUPLED_LM graceful refusal", () => {
 
   beforeEach(async () => {
     isolationCounter++;
+    conPrints = [];
     rLocal = await import("../src/ref_soft/r_local");
     rModel = await import("../src/ref_soft/r_model" + "?bspx_renderer_test_isolation_" + isolationCounter);
 
@@ -563,26 +568,24 @@ describe("Software renderer -- BSPX DECOUPLED_LM graceful refusal", () => {
     rModel.Mod_FreeAll();
   });
 
-  test("Mod_ForName: BSPX DECOUPLED_LM box room is refused up front with a clear, specific message (not the generic 'Bad surface extents' crash)", () => {
+  test("Mod_ForName: BSPX DECOUPLED_LM box room loads successfully with a one-time fullbright-fallback warning (no whole-map refusal)", () => {
     const name = "maps/decoupled.bsp";
     registerSoft(name, appendDecoupledLm(buildBoxRoomBsp(undefined, { renderable: true }), SIX_BOX_FACES));
 
-    let caught: Error | null = null;
-    try {
-      rModel.Mod_ForName(name, false);
-    } catch (err) {
-      if (err instanceof Error) caught = err;
-    }
+    const model = rModel.Mod_ForName(name, false);
 
-    expect(caught).not.toBeNull();
-    expect(caught?.message).toMatch(/decoupled lightmaps are not supported by the software renderer/);
-    expect(caught?.message).not.toMatch(/Bad surface extents/);
+    expect(model).not.toBeNull();
+    if (!model) throw new Error("model not returned");
 
-    // the refusal happens BEFORE Mod_LoadFaces runs -- surfaces never get
-    // populated for this load attempt (proves this is the early graceful
-    // check, not some later accidental throw after faces were built).
-    expect(rModel.loadmodel.numsurfaces).toBe(0);
+    // loads all 6 faces -- no whole-map refusal.
+    expect(model.numsurfaces).toBe(6);
     expect(rModel.loadmodel.bspx?.decoupledLm).not.toBeNull();
+
+    // exactly one summary warning explaining the fullbright degrade, not a
+    // Sys_Error/thrown refusal.
+    const warnings = conPrints.filter((s) => s.includes("DECOUPLED_LM") && s.includes("fullbright"));
+    expect(warnings.length).toBe(1);
+    expect(warnings[0]).toMatch(/does not consume BSPX data/);
   });
 
   test("Mod_ForName: classic box room (no BSPX) is never rejected by the DECOUPLED_LM check, and Mod_LoadFaces populates all 6 faces", () => {

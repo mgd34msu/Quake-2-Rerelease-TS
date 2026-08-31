@@ -20,10 +20,16 @@ Tests for two independent rule-17 renderer units:
    s_blocklights buffer were already sized to 128x128 by the earlier
    DECOUPLED_LM unit, comfortably covering Q64's real measured worst case
    (65x65 texels). The software renderer has no such headroom (q2repro has
-   no software renderer to port a raised cap from -- see r_model.ts's
-   PrescanClassicSurfaceExtents comment) and continues to refuse this
-   content, now up front and with a specific message instead of a bare
-   "Bad surface extents" thrown mid-loop.
+   no software renderer to port a raised cap from -- confirmed hard, not
+   just conventional: vanilla ref_soft/r_surf.c's D_SCAlloc errors on any
+   cache width over 256) -- but a whole-map refusal was a worse degrade
+   than necessary for content that only violates the cap on a minority of
+   its faces. r_model.ts's CalcSurfaceExtents now flags just the offending
+   faces SURF_EXTENTS_SKIP instead of throwing; r_rast.ts's
+   R_RenderFace/R_RenderBmodelFace never queue a flagged face for
+   rasterization, so the rest of the map still renders, with one map-level
+   summary warning (PrescanClassicSurfaceExtents) instead of a thrown
+   Sys_Error.
 
 REAL-DATA NOTE (rule 17 "verify at loader+math level against the real
 data"): base1.bsp's real LIGHTGRID_OCTREE lump was extracted and parsed
@@ -82,7 +88,11 @@ import {
   DEDGE_T_SIZE,
   TEXINFO_T_SIZE,
   DFACE_T_SIZE,
+  DNODE_T_SIZE,
+  DLEAF_T_SIZE,
+  DMODEL_T_SIZE,
 } from "../src/qcommon/qfiles";
+import { CONTENTS_SOLID } from "../src/shared/q_shared";
 
 // q2repro src/common/bsp.h: `#define FLAG_LEAF BIT(31)` -- not exported by
 // qcommon/bspx.ts (module-private), reproduced here as a literal exactly
@@ -475,10 +485,12 @@ describe("gl_rsurf.ts -- Q64-scale surface extents fit the existing GL lightmap 
 });
 
 // ---------------------------------------------------------------------------
-// Q64 software-renderer refusal: r_model.ts's new PrescanClassicSurfaceExtents
-// (see this unit's report) turns the old bare mid-loop "Bad surface extents"
-// throw into an up-front, specifically-worded ERR_DROP, mirroring the
-// existing DECOUPLED_LM graceful refusal in test/bspx_renderer.test.ts.
+// Q64 software-renderer per-face skip: r_model.ts's CalcSurfaceExtents flags
+// an oversized face SURF_EXTENTS_SKIP instead of throwing "Bad surface
+// extents" mid-loop; PrescanClassicSurfaceExtents prints one map-level
+// summary warning up front. See test/bspx_renderer.test.ts's DECOUPLED_LM
+// fullbright-fallback tests for the analogous "load succeeds, degrade
+// gracefully" shape.
 //
 // Isolation note (same as test/bspx_renderer.test.ts's software-renderer
 // describe block): Mod_LoadBrushModel enforces "the world model must be
@@ -489,7 +501,7 @@ describe("gl_rsurf.ts -- Q64-scale surface extents fit the existing GL lightmap 
 // r_local.ts's `ri` binding via SetRefImports, same as every other test file.
 // ---------------------------------------------------------------------------
 
-describe("r_model.ts -- Q64-style oversized classic extents refused cleanly up front", () => {
+describe("r_model.ts -- Q64-style oversized classic extents skipped per-face, not refused whole-map", () => {
   const files = new Map<string, Uint8Array>();
 
   function register(name: string, data: Uint8Array): void {
@@ -627,6 +639,75 @@ describe("r_model.ts -- Q64-style oversized classic extents refused cleanly up f
       view.setInt32(16, -1, true); // lightofs
     }
 
+    // Minimal valid tree so Mod_LoadBrushModel's post-Mod_LoadFaces steps
+    // (Mod_LoadLeafs/Mod_LoadNodes/R_NumberLeafs/Mod_LoadSubmodels) run to
+    // completion now that CalcSurfaceExtents no longer aborts the load --
+    // one splitting node (reusing plane 0, the quad's own supporting
+    // plane) with a solid back leaf and an empty front leaf that marks the
+    // one oversized face via LUMP_LEAFFACES.
+    const leaffacesLump = new Uint8Array(2);
+    {
+      const view = new DataView(leaffacesLump.buffer);
+      view.setInt16(0, 0, true); // leaf 1's one marksurface: face 0
+    }
+
+    const leafsLump = new Uint8Array(2 * DLEAF_T_SIZE);
+    {
+      const view = new DataView(leafsLump.buffer);
+      // leaf 0: solid, no faces (BSP "back" side, below/behind the quad)
+      view.setInt32(0, CONTENTS_SOLID, true);
+      view.setInt16(4, -1, true); // cluster
+      view.setInt16(6, 0, true); // area
+      for (let j = 0; j < 3; j++) {
+        view.setInt16(8 + j * 2, -8192, true); // mins
+        view.setInt16(14 + j * 2, 8192, true); // maxs
+      }
+      view.setUint16(20, 0, true); // firstleafface
+      view.setUint16(22, 0, true); // numleaffaces
+      // leaf 1: empty, contains the one oversized face
+      const b1 = DLEAF_T_SIZE;
+      view.setInt32(b1 + 0, 0, true); // contents: CONTENTS_EMPTY
+      view.setInt16(b1 + 4, 0, true); // cluster
+      view.setInt16(b1 + 6, 0, true); // area
+      for (let j = 0; j < 3; j++) {
+        view.setInt16(b1 + 8 + j * 2, -8192, true); // mins
+        view.setInt16(b1 + 14 + j * 2, 8192, true); // maxs
+      }
+      view.setUint16(b1 + 20, 0, true); // firstleafface
+      view.setUint16(b1 + 22, 1, true); // numleaffaces
+    }
+
+    const nodesLump = new Uint8Array(DNODE_T_SIZE);
+    {
+      const view = new DataView(nodesLump.buffer);
+      view.setInt32(0, 0, true); // planenum: reuse plane 0
+      view.setInt32(4, -2, true); // children[0] (front, +Z): leaf 1 (-1-1)
+      view.setInt32(8, -1, true); // children[1] (back, -Z): leaf 0 (-1-0)
+      for (let j = 0; j < 3; j++) {
+        view.setInt16(12 + j * 2, -8192, true); // mins
+        view.setInt16(18 + j * 2, 8192, true); // maxs
+      }
+      view.setUint16(24, 0, true); // firstface
+      view.setUint16(26, 1, true); // numfaces
+    }
+
+    const modelsLump = new Uint8Array(DMODEL_T_SIZE);
+    {
+      const view = new DataView(modelsLump.buffer);
+      view.setFloat32(0, -halfWidth, true);
+      view.setFloat32(4, -halfHeight, true);
+      view.setFloat32(8, 0, true); // mins
+      view.setFloat32(12, halfWidth, true);
+      view.setFloat32(16, halfHeight, true);
+      view.setFloat32(20, 0, true); // maxs
+      view.setFloat32(24, 0, true);
+      view.setFloat32(28, 0, true);
+      view.setFloat32(32, 0, true); // origin
+      view.setInt32(36, 0, true); // headnode: node 0
+      view.setInt32(40, 0, true); // firstface
+      view.setInt32(44, 1, true); // numfaces
+    }
+
     const entitiesLump = new TextEncoder().encode(WORLDSPAWN_ONLY_ENTITIES);
     const empty = new Uint8Array(0);
 
@@ -635,16 +716,16 @@ describe("r_model.ts -- Q64-style oversized classic extents refused cleanly up f
       { index: LUMP_PLANES, data: planesLump },
       { index: LUMP_VERTEXES, data: vertexesLump },
       { index: LUMP_VISIBILITY, data: empty },
-      { index: LUMP_NODES, data: empty },
+      { index: LUMP_NODES, data: nodesLump },
       { index: LUMP_TEXINFO, data: texinfoLump },
       { index: LUMP_FACES, data: facesLump },
       { index: LUMP_LIGHTING, data: empty },
-      { index: LUMP_LEAFS, data: empty },
-      { index: LUMP_LEAFFACES, data: empty },
+      { index: LUMP_LEAFS, data: leafsLump },
+      { index: LUMP_LEAFFACES, data: leaffacesLump },
       { index: LUMP_LEAFBRUSHES, data: empty },
       { index: LUMP_EDGES, data: edgesLump },
       { index: LUMP_SURFEDGES, data: surfedgesLump },
-      { index: LUMP_MODELS, data: empty },
+      { index: LUMP_MODELS, data: modelsLump },
       { index: LUMP_BRUSHES, data: empty },
       { index: LUMP_BRUSHSIDES, data: empty },
       { index: LUMP_POP, data: empty },
@@ -674,24 +755,31 @@ describe("r_model.ts -- Q64-style oversized classic extents refused cleanly up f
     return out;
   }
 
-  test("a face with the real Q64 worst-case extents (1024x960) is refused up front with a specific message, not the bare mid-loop crash", () => {
+  test("a face with the real Q64 worst-case extents (1024x960) loads successfully, flagged SURF_EXTENTS_SKIP, with a one-time summary warning (not the bare mid-loop crash, not a whole-map refusal)", () => {
     const name = "maps/q64test.bsp";
+    const warnings: string[] = [];
+    rLocal.SetRefImports({
+      ...makeFakeRi(),
+      Con_Printf: (_level: number, str: string) => {
+        warnings.push(str);
+      },
+    });
     register(name, buildOversizedQuadBsp(512, 480)); // -> extents [1024, 960], matching real core.bsp's worst face
 
-    let caught: Error | null = null;
-    try {
-      rModel.Mod_ForName(name, false);
-    } catch (err) {
-      if (err instanceof Error) caught = err;
-    }
+    const model = rModel.Mod_ForName(name, false);
 
-    expect(caught).not.toBeNull();
-    expect(caught?.message).toMatch(/surface extents exceed the software renderer's 256-unit cap/);
-    expect(caught?.message).not.toBe("Bad surface extents");
+    expect(model).not.toBeNull();
+    if (!model) throw new Error("model not returned");
 
-    // refused BEFORE Mod_LoadFaces runs -- same up-front shape as the
-    // DECOUPLED_LM refusal (loadmodel.numsurfaces never gets populated).
-    expect(rModel.loadmodel.numsurfaces).toBe(0);
+    // loads the face rather than refusing the whole map.
+    expect(model.numsurfaces).toBe(1);
+    expect(model.surfaces[0].flags & rModel.SURF_EXTENTS_SKIP).toBeTruthy();
+
+    // exactly one map-level summary warning, not a thrown Sys_Error.
+    const capWarnings = warnings.filter((s) => s.includes("SURF_EXTENTS_SKIP"));
+    expect(capWarnings.length).toBe(1);
+    expect(capWarnings[0]).toMatch(/256-unit surface-extents cap/);
+    expect(capWarnings[0]).not.toBe("Bad surface extents");
   });
 
   test("an ordinary classic map (128-unit walls, well under the cap) is never rejected by the new prescan", () => {

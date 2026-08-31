@@ -27,11 +27,34 @@ live binding, written via its SetRegistrationSequence setter.
 `R_ImageList_f` (the `imagelist` console command) is not declared in
 r_local.h, is not referenced by any other ported module, and is not named
 in this unit's brief -- not ported.
+
+PNG LOADING (added, no classic-engine precedent): the rerelease retail pak
+ships several classic 2D UI assets ONLY as truecolor PNG (verified against
+baseq2/pak0.pak: pics/conchars.png and all 15 pics/m_cursor*.png have no
+.pcx sibling at all -- LoadPCX's hard miss on those names would otherwise
+leave draw_chars/the menu cursor permanently null, i.e. no console text and
+no mouse cursor in the menus, on rerelease data). This renderer's whole
+pixel pipeline (r_draw.ts, r_surf.ts, vid.colormap/d_8to24table) is
+palette-indexed 8-bit, unlike ref_gl's RGBA8 textures, so simply decoding
+the PNG (qcommon/png.ts's decodePNG, already used by gl_image.ts's LoadPNG
+for the identical rerelease-only-asset problem on the GL side) is not
+enough -- each decoded RGBA8 texel is quantized down to the nearest
+d_8to24table palette entry, mirroring gl_image.ts's GL_FindImage ".pcx"-miss
+fallback (probe the requested name first, then retry as the other supported
+truecolor extension) and its GL_Upload8's existing index-255-is-transparent
+convention (r_local.ts's TRANSPARENT_COLOR = 0xff, also see
+Draw_GetPalette's own d_8to24table population above): pixels below the
+alpha threshold become index 255 instead of participating in the nearest-
+color search, so translucent PNG edges degrade to the same "transparent
+texel" this renderer already understands from 8-bit PCX/WAL assets, rather
+than picking whatever opaque palette entry happens to be nearest to a
+mostly-transparent color.
 */
 
 import { Com_PageInMemory, Com_sprintf, ERR_DROP, MAX_QPATH, PRINT_ALL, PRINT_DEVELOPER } from "../shared/q_shared";
-import { ri, r_notexture_mip } from "./r_local";
+import { ri, r_notexture_mip, d_8to24table, TRANSPARENT_COLOR } from "./r_local";
 import { ImageT, ImagetypeT, registration_sequence, SetRegistrationSequence } from "./r_model";
+import { decodePNG } from "../qcommon/png";
 
 // r_image.c owns this counter; r_model.c's copy of the same name cannot be
 // written through r_model.ts's export (see file header deviation note).
@@ -111,6 +134,85 @@ export function LoadPCX(filename: string): { pic: Uint8Array | null; palette: Ui
   }
 
   ri.FS_FreeFile(raw);
+  return result;
+}
+
+//=================================================================
+// PNG LOADING (truecolor -> palette quantization) -- see file header.
+//=================================================================
+
+// Alpha values at or above this threshold are treated as opaque and
+// quantized to the nearest d_8to24table entry; values below it become
+// TRANSPARENT_COLOR (index 255), matching PCX's own binary (opaque or
+// fully transparent) alpha model -- there is no partial-alpha compositing
+// anywhere in this 8-bit renderer to degrade to instead. 128 is the
+// natural round-half-up midpoint of the 0-255 alpha range.
+const PNG_ALPHA_THRESHOLD = 128;
+
+// Nearest-color nearest-neighbor nsearch into d_8to24table, excluding index
+// 255: that slot is reserved for the transparent convention (r_local.ts's
+// TRANSPARENT_COLOR / GL_Upload8's identical exclusion in gl_image.ts), so
+// an opaque source pixel must never be quantized onto it even if
+// colormap.pcx's 255th palette entry happens to be a close RGB match.
+export function NearestPaletteIndex(r: number, g: number, b: number): number {
+  let best = 0;
+  let bestDist = Infinity;
+  for (let i = 0; i < TRANSPARENT_COLOR; i++) {
+    const entry = d_8to24table[i];
+    const pr = entry & 0xff;
+    const pg = (entry >>> 8) & 0xff;
+    const pb = (entry >>> 16) & 0xff;
+    const dr = r - pr;
+    const dg = g - pg;
+    const db = b - pb;
+    const dist = dr * dr + dg * dg + db * db;
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = i;
+      if (dist === 0) break;
+    }
+  }
+  return best;
+}
+
+// Quantizes a decoded RGBA8 PNG (qcommon/png.ts's DecodedPngT.pixels shape:
+// straight, non-premultiplied, row-major, top-down) into this renderer's
+// native single-byte-per-texel palette-index format (the same shape
+// LoadPCX/GL_LoadPic already produce for every other image source).
+export function QuantizeRGBAToPalette(rgba: Uint8Array, width: number, height: number): Uint8Array {
+  const count = width * height;
+  const out = new Uint8Array(count);
+  for (let i = 0; i < count; i++) {
+    const o = i * 4;
+    if (rgba[o + 3] < PNG_ALPHA_THRESHOLD) {
+      out[i] = TRANSPARENT_COLOR;
+    } else {
+      out[i] = NearestPaletteIndex(rgba[o], rgba[o + 1], rgba[o + 2]);
+    }
+  }
+  return out;
+}
+
+export function LoadPNGQuantized(name: string): { pic: Uint8Array | null; width: number; height: number } {
+  const result: { pic: Uint8Array | null; width: number; height: number } = { pic: null, width: 0, height: 0 };
+
+  const { data: buffer } = ri.FS_LoadFile(name);
+  if (!buffer) {
+    ri.Con_Printf(PRINT_DEVELOPER, `Bad png file ${name}\n`);
+    return result;
+  }
+
+  const decoded = decodePNG(buffer);
+  ri.FS_FreeFile(buffer);
+
+  if (!decoded.ok) {
+    ri.Con_Printf(PRINT_ALL, `Bad png file ${name}: ${decoded.reason}\n`);
+    return result;
+  }
+
+  result.pic = QuantizeRGBAToPalette(decoded.image.pixels, decoded.image.width, decoded.image.height);
+  result.width = decoded.image.width;
+  result.height = decoded.image.height;
   return result;
 }
 
@@ -224,10 +326,28 @@ export function R_FindImage(name: string, type: ImagetypeT): ImageT | null {
   let image: ImageT | null;
   if (ext === ".pcx") {
     const { pic, width, height } = LoadPCX(name);
-    if (!pic) return null; // ri.Sys_Error (ERR_DROP, "R_FindImage: can't load %s", name);
+    if (!pic) {
+      // Rerelease-pak fallback (no classic-engine precedent -- see file
+      // header): several 2D UI assets ship ONLY as truecolor PNG on
+      // rerelease data (verified: pics/conchars.png, all 15
+      // pics/m_cursor*.png -- no .pcx sibling at all). Mirrors
+      // gl_image.ts's GL_FindImage ".pcx"-miss fallback: probe the
+      // requested name first (keeps classic-data lookups, which only ever
+      // have the .pcx, byte-for-byte on the vanilla path), then retry as
+      // the other supported truecolor extension. Recurses through
+      // R_FindImage (not a direct LoadPNGQuantized+GL_LoadPic call) so the
+      // resulting image is cached under its real ".png" name exactly like
+      // the GL side's equivalent fallback.
+      const base = name.slice(0, len - 4);
+      return R_FindImage(`${base}.png`, type);
+    }
     image = GL_LoadPic(name, pic, width, height, type);
   } else if (ext === ".wal") {
     image = R_LoadWal(name);
+  } else if (ext === ".png") {
+    const { pic, width, height } = LoadPNGQuantized(name);
+    if (!pic) return null;
+    image = GL_LoadPic(name, pic, width, height, type);
   } else if (ext === ".tga") {
     return null; // ri.Sys_Error (ERR_DROP, "R_FindImage: can't load %s in software renderer", name);
   } else {

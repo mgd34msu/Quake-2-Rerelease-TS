@@ -86,7 +86,7 @@ import {
   yscaleinv,
   ri,
 } from "./r_local";
-import { MedgeT, MsurfaceT, MtexinfoT, type MplaneT, MvertexT, SURF_DRAWSKYBOX } from "./r_model";
+import { MedgeT, MsurfaceT, MtexinfoT, type MplaneT, MvertexT, SURF_DRAWSKYBOX, SURF_EXTENTS_SKIP } from "./r_model";
 import type * as ModelModule from "./r_model";
 
 // import-cycle rule (PORTING.md): r_model.ts statically resolves this module
@@ -536,6 +536,13 @@ R_RenderFace
 export function R_RenderFace(fa: MsurfaceT, clipflags: number): void {
   if (!fa.texinfo) throw new Error("R_RenderFace: surface has no texinfo");
 
+  // This port only -- see r_model.ts's SURF_EXTENTS_SKIP comment: this
+  // face's extents exceed the surface cache's real capacity (D_SCAlloc's
+  // own hard "bad cache width" limit), so it is never queued for
+  // rasterization at all (never reaches D_CacheSurface/D_SolidSurf), the
+  // same way SURF_TRANS33/66 below never reaches the edge renderer either.
+  if (fa.flags & SURF_EXTENTS_SKIP) return;
+
   // translucent surfaces are not drawn by the edge renderer
   if (fa.texinfo.flags & (SURF_TRANS33 | SURF_TRANS66)) {
     fa.nextalphasurface = r_alpha_surfaces;
@@ -684,6 +691,10 @@ R_RenderBmodelFace
 */
 export function R_RenderBmodelFace(pedges: BedgeT | null, psurf: MsurfaceT): void {
   if (!psurf.texinfo) throw new Error("R_RenderBmodelFace: surface has no texinfo");
+
+  // See R_RenderFace's identical check -- inline (bmodel) faces go through
+  // CalcSurfaceExtents the same as world faces and can be flagged too.
+  if (psurf.flags & SURF_EXTENTS_SKIP) return;
 
   if (psurf.texinfo.flags & (SURF_TRANS33 | SURF_TRANS66)) {
     psurf.nextalphasurface = r_alpha_surfaces;

@@ -113,6 +113,21 @@ export const SURF_DRAWBACKGROUND = 0x40;
 export const SURF_DRAWSKYBOX = 0x80; // sky box
 export const SURF_FLOW = 0x100; // PGM
 
+// This port only -- no classic-engine equivalent. Set by CalcSurfaceExtents
+// (below) on a face whose plain geometry/texture-axis extents genuinely
+// exceed this renderer's surface cache: vanilla ref_soft/r_surf.c's own
+// D_SCAlloc hard-errors ("D_SCAlloc: bad cache width %d") on any
+// r_drawsurf.surfwidth (== surface->extents[0] at mip 0) over 256, and
+// R_BuildLightMap's blocklights scratch buffer is sized for
+// smax*tmax <= 1024 (r_light.ts) -- both are real, load-bearing capacity
+// limits of the classic PC engine's software rasterizer, not just a
+// mapper convention (see CalcSurfaceExtents's own comment for the measured
+// real-content case, the Q64/N64 remaster map set, that trips this).
+// R_RenderFace/R_RenderBmodelFace (r_rast.ts) skip queuing a flagged face
+// for rasterization entirely, so the rest of the map still renders instead
+// of the whole load failing or a later D_CacheSurface call crashing.
+export const SURF_EXTENTS_SKIP = 0x200;
+
 // qfiles.h constants r_model.h depends on that qfiles.ts has not ported yet
 // (that module's own report defers MD2/SP2/WAL formats to a future unit;
 // r_model.c's brush/alias/sprite loading is itself pending, so these are
@@ -830,6 +845,23 @@ function Mod_LoadTexinfo(l: LumpT): void {
 CalcSurfaceExtents
 
 Fills in s->texturemins[] and s->extents[]
+
+Deviation from vanilla ref_soft/r_surf.c (see PrescanClassicSurfaceExtents
+and SURF_EXTENTS_SKIP's own comment for the full rationale): the original
+calls `ri.Sys_Error(ERR_DROP, "Bad surface extents")` here, which aborts
+loading the WHOLE map. That is real vanilla behavior for content the
+classic PC software rasterizer's surface cache genuinely cannot represent
+(D_SCAlloc's own "bad cache width" hard error backs this up -- this is not
+merely a load-time convention), but real content exists that trips it on
+only a MINORITY of a map's faces (measured: baseq2/maps/q64/*.bsp, the
+N64 remaster set, violates on 150-275 of several thousand faces per map --
+see the prescan's own measurements). Refusing to load the entire map over
+a few dozen faces is a worse degrade than the original's own "Bad surface
+extents" text implies is necessary: this per-face SURF_EXTENTS_SKIP flag
+(consumed by r_rast.ts's R_RenderFace/R_RenderBmodelFace, which never
+queue a flagged face for rasterization) keeps the rest of the map
+rendering. The one-time summary warning that used to accompany the abort
+now accompanies this instead -- see PrescanClassicSurfaceExtents.
 ================
 */
 function CalcSurfaceExtents(s: MsurfaceT): void {
@@ -861,7 +893,7 @@ function CalcSurfaceExtents(s: MsurfaceT): void {
     s.extents[i] = (bmax - bmin) * 16;
     if (s.extents[i] < 16) s.extents[i] = 16; // take at least one cache block
     if (!(tex.flags & (SURF_WARP | SURF_SKY)) && s.extents[i] > 256) {
-      ri.Sys_Error(ERR_DROP, "Bad surface extents");
+      s.flags |= SURF_EXTENTS_SKIP;
     }
   }
 }
@@ -1077,12 +1109,15 @@ PrescanClassicSurfaceExtents
 
 Runs CalcSurfaceExtents's own texture-axis bounding-box math over every
 face in the raw LUMP_FACES data, WITHOUT allocating any MsurfaceT objects,
-purely to detect up front whether any face would exceed the classic
-256-unit cap (excluding SURF_WARP/SURF_SKY, same exclusion CalcSurfaceExtents
-itself applies). See Mod_LoadBrushModel's call site for why this exists
-(graceful up-front refusal, mirroring the DECOUPLED_LM check immediately
-above it) -- this only reports; CalcSurfaceExtents remains the sole place
-that actually fills in texturemins/extents once loading proceeds.
+purely to print ONE up-front summary warning if any face will end up
+flagged SURF_EXTENTS_SKIP by CalcSurfaceExtents itself once Mod_LoadFaces
+actually runs (excluding SURF_WARP/SURF_SKY, same exclusion
+CalcSurfaceExtents applies). This function does not mutate anything and no
+longer aborts loading -- see SURF_EXTENTS_SKIP's own comment on
+r_model.ts's SURF_ flag block for why a whole-map refusal was replaced
+with a per-face skip. Keeping this separate prescan (rather than counting
+inside CalcSurfaceExtents's own per-face loop) is what makes the warning a
+single map-level summary instead of one line per offending face.
 =================
 */
 function PrescanClassicSurfaceExtents(mod: ModelT, l: LumpT): void {
@@ -1129,11 +1164,7 @@ function PrescanClassicSurfaceExtents(mod: ModelT, l: LumpT): void {
   if (violations > 0) {
     ri.Con_Printf(
       PRINT_ALL,
-      `${mod.name}: this map's geometry exceeds the software renderer's 256-unit surface-extents cap on ${violations} surface(s) (worst: ${worstExtent} units) -- q2repro has no software renderer to port a raised cap from, so this content (e.g. the Q64/N64 remaster map set) is not supported here\n`,
-    );
-    ri.Sys_Error(
-      ERR_DROP,
-      `${mod.name}: surface extents exceed the software renderer's 256-unit cap on ${violations} surface(s) (worst: ${worstExtent} units) -- load this map with the OpenGL renderer instead`,
+      `${mod.name}: ${violations} surface(s) exceed the software renderer's 256-unit surface-extents cap (worst: ${worstExtent} units) and will not be drawn (SURF_EXTENTS_SKIP) -- the classic PC engine's surface cache genuinely cannot represent surfaces this large (see D_SCAlloc's "bad cache width" hard error, vanilla ref_soft/r_surf.c); this content (e.g. the Q64/N64 remaster map set) was authored for a different renderer entirely. Load with the OpenGL renderer for full geometry.\n`,
     );
   }
 }
@@ -1204,64 +1235,70 @@ function Mod_LoadBrushModel(mod: ModelT, buffer: Uint8Array): void {
     loadmodel.bspx = decoupledLm || lightgrid ? { decoupledLm, lightgrid } : null;
   }
 
-  // Graceful refusal for BSPX DECOUPLED_LM maps (rule 17/FIDELITY RAZOR --
-  // Mike, 2026-08-30): q2repro (the only rerelease-era reference this port
-  // has) HAS NO SOFTWARE RENDERER AT ALL (verified: no src/refresh/*soft*,
-  // no sw_*.c anywhere in ~/Projects/qsrc/q2repro) -- there is no reference
-  // "how does the soft path handle DECOUPLED_LM" behavior to port, faithfully
-  // or otherwise. Left unhandled, a DECOUPLED_LM map's classic dface_t
-  // lightofs field is -1 for every face on real data (verified against
-  // baseq2/maps/base1.bsp: all 16787 faces) -- meaning this renderer's
-  // lighting pipeline, which never reads BSPX data, would render the whole
-  // map fully unlit, and on some DECOUPLED_LM remaster maps (verified: real
-  // baseq2/maps/rhangar1.bsp, q2dm3.bsp, rlava1.bsp, rlava2.bsp, rmine1.bsp)
-  // a handful of surfaces' plain geometry/texture-axis extents ALSO happen
-  // to exceed vanilla's 256-unit cap, which is what actually throws
-  // "Bad surface extents" below, deep inside CalcSurfaceExtents, with no
-  // context connecting the crash to BSPX at all.
+  // BSPX DECOUPLED_LM maps: q2repro (the only rerelease-era reference this
+  // port has) HAS NO SOFTWARE RENDERER AT ALL (verified: no
+  // src/refresh/*soft*, no sw_*.c anywhere in ~/Projects/qsrc/q2repro) --
+  // there is no reference "how does the soft path handle DECOUPLED_LM"
+  // behavior to port, faithfully or otherwise, and this renderer's
+  // lighting pipeline (r_light.ts/r_surf.ts) never reads BSPX data, so a
+  // DECOUPLED_LM face's real per-texel lighting cannot be reproduced here
+  // without a rewrite of the surface-cache/lightmap pipeline (it assumes
+  // one texel grid, scale 16, shared by both texture and lightmap
+  // sampling -- DECOUPLED_LM's whole point on the GL side is a SEPARATE
+  // lightmap axis/scale/offset from the texture's own, which this
+  // renderer's data model has no room for).
   //
-  // Rather than let either of those happen by accident, refuse the whole
-  // class up front with a clear reason. This does NOT touch
-  // CalcSurfaceExtents's own "Bad surface extents" check (Mod_LoadFaces
-  // below, still hit by non-BSPX content whose geometry genuinely exceeds
-  // vanilla's cap -- verified real, unrelated example: baseq2/maps/q64/*.bsp,
-  // the N64 remaster set, which carries NO BSPX at all and still violates
-  // the cap on 150-275 surfaces per map) -- that throw is vanilla's own
-  // real behavior for content the classic format was never built for, and
-  // stays exactly as it was.
+  // This was previously a whole-map refusal (ERR_DROP). Real data shows
+  // that is a worse degrade than necessary: a DECOUPLED_LM map's classic
+  // dface_t lightofs field is -1 for every face (verified against
+  // baseq2/maps/base1.bsp: all 16787 faces) -- and this renderer's own
+  // R_BuildLightMap (r_light.ts) ALREADY treats lightofs===-1 (surf.samples
+  // === null) as "no static lightmap data", clearing blocklights to 0,
+  // which the bound/invert/shift step at the end of R_BuildLightMap turns
+  // into the renderer's ordinary MAXIMUM-brightness encoding -- i.e. a
+  // ready-made, pre-existing, faithful-to-vanilla fullbright fallback for
+  // exactly this case (the same path any classic lightofs===-1 brush,
+  // decoupled or not, has always taken). So DECOUPLED_LM surfaces render
+  // with correct geometry and textures, just flat/fullbright-shaded
+  // instead of properly lit -- a per-surface flat-shade fallback, not a
+  // per-map refusal -- and need no code change at all beyond not refusing
+  // to load. (Some DECOUPLED_LM remaster maps -- verified real:
+  // baseq2/maps/rhangar1.bsp, q2dm3.bsp, rlava1.bsp, rlava2.bsp,
+  // rmine1.bsp -- separately also have a handful of surfaces whose plain
+  // geometry/texture-axis extents exceed the classic 256-unit cap; those
+  // are caught and skipped independently by SURF_EXTENTS_SKIP below, same
+  // as the non-BSPX Q64 case, not by this block.)
   if (loadmodel.bspx?.decoupledLm) {
     ri.Con_Printf(
       PRINT_ALL,
-      `${mod.name}: this map uses BSPX decoupled lightmaps (DECOUPLED_LM), which the software renderer does not support (no q2repro software renderer exists to port support from)\n`,
+      `${mod.name}: this map uses BSPX decoupled lightmaps (DECOUPLED_LM, ${loadmodel.bspx.decoupledLm.faces.length} faces) -- the software renderer does not consume BSPX data, so affected surfaces render fullbright (flat-shaded) instead of properly lit; load with the OpenGL renderer for correct lighting\n`,
     );
-    ri.Sys_Error(ERR_DROP, `${mod.name}: decoupled lightmaps are not supported by the software renderer -- load this map with the OpenGL renderer instead`);
   }
 
-  // Graceful up-front refusal for classic (non-BSPX) content whose raw
-  // geometry/texture-axis extents genuinely exceed vanilla's 256-unit
-  // surface-cache cap -- verified real, unrelated to BSPX: baseq2/maps/
-  // q64/*.bsp (the N64 remaster set, no BSPX at all) violates the cap on
-  // 150-275 surfaces per map (measured: outpost.bsp 177/4205, core.bsp
-  // 259/4528, dm1.bsp 35/824). q2repro has no software renderer to port a
-  // raised-cap fix from (verified, same as the DECOUPLED_LM check above),
-  // and raising the cap here for real would mean growing this renderer's
-  // own fixed-size surface cache / blocklights buffers (r_light.ts/
-  // r_surf.ts) well past their vanilla-derived sizes to admit textures the
-  // classic PC engine's surface cache was never built for (Q64's geometry
-  // was authored for the N64's own bespoke renderer, not this one) -- that
-  // is new capability, not a faithful port, so the cap stays put (rule 17:
-  // preserve the ORIGINAL's observed behavior, which is refusal).
+  // Classic (non-BSPX) content whose raw geometry/texture-axis extents
+  // genuinely exceed vanilla's 256-unit surface-cache cap -- verified
+  // real: baseq2/maps/q64/*.bsp (the N64 remaster set, no BSPX at all)
+  // violates the cap on 150-275 surfaces per map (measured: outpost.bsp
+  // 177/4205, core.bsp 259/4528, dm1.bsp 35/824). q2repro has no software
+  // renderer to port a raised-cap fix from (verified, same as the
+  // DECOUPLED_LM note above), and raising the cap here for real would mean
+  // growing this renderer's own fixed-size surface cache / blocklights
+  // buffers (r_light.ts/r_surf.ts) well past their vanilla-derived sizes
+  // to admit geometry the classic PC engine's surface cache was never
+  // built for (Q64's geometry was authored for the N64's own bespoke
+  // renderer, not this one; see SURF_EXTENTS_SKIP's own comment for the
+  // hard D_SCAlloc/blocklights capacity limits that make this a genuine
+  // constraint, not just a convention) -- that would be new capability,
+  // not a faithful port.
   //
-  // What changes here is only WHEN and HOW the refusal happens: without
-  // this prescan, Mod_LoadFaces below throws the bare "Bad surface
-  // extents" message (CalcSurfaceExtents) mid-loop, after already
-  // allocating and partially populating loadmodel.surfaces -- a "mid-load
-  // throw" with no map-name or fault context, same complaint the
-  // DECOUPLED_LM block above exists to avoid. This prescan runs the same
-  // extents math BEFORE Mod_LoadFaces allocates anything, so a Q64-style
-  // map is refused cleanly and up front, exactly like DECOUPLED_LM is
-  // above (loadmodel.numsurfaces stays 0). CalcSurfaceExtents's own check
-  // is left in place unchanged as a defensive backstop.
+  // Previously this was a whole-map up-front refusal (mirroring the
+  // DECOUPLED_LM block above); it is now CalcSurfaceExtents flagging only
+  // the individual offending faces SURF_EXTENTS_SKIP (r_rast.ts's
+  // R_RenderFace/R_RenderBmodelFace never queue them for rasterization),
+  // so the rest of a Q64-style map still renders. This prescan runs the
+  // same extents math BEFORE Mod_LoadFaces allocates anything purely to
+  // print one map-level summary warning up front instead of the flag
+  // silently doing its work face-by-face with no visible signal at all.
   PrescanClassicSurfaceExtents(mod, header.lumps[LUMP_FACES]);
 
   Mod_LoadFaces(header.lumps[LUMP_FACES]);
