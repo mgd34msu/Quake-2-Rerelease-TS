@@ -56,11 +56,12 @@ it (a separate, already-established, unrelated behavior this test does not
 need to re-prove).
 */
 
+import { CVAR_LATCH, CVAR_SERVERINFO, CVAR_NOARCHIVE } from "../src/shared/q_shared";
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Cvar_ForceSet } from "../src/qcommon/cvar";
+import { Cvar_ForceSet, Cvar_Get } from "../src/qcommon/cvar";
 import { Cbuf_AddText } from "../src/qcommon/cmd";
 import { NET_Shutdown } from "../src/platform/net_udp";
 import { Qcommon_Init, runFrames } from "../src/main";
@@ -99,6 +100,11 @@ describe("kex family save/load -- end-to-end (boot, save, mutate, load, verify)"
     writeFileSync(join(mapsDir, "e2eroom.bsp"), buildBoxRoomBsp(BOOT_ENTITIES));
 
     Cvar_ForceSet("basedir", tmpRoot);
+    // Pre-register with the engine's real default+flags (files.ts:1189) so
+    // this throwaway override can never become the cvar's default_string via
+    // Cvar_Get's first-registration-wins contract (the pristine-order
+    // pollution class the order-independence pass closed).
+    Cvar_Get("game", "", CVAR_LATCH | CVAR_SERVERINFO | CVAR_NOARCHIVE);
     Cvar_ForceSet("game", "kex");
     Cvar_ForceSet("port", "0");
     Cvar_ForceSet("dedicated", "1");

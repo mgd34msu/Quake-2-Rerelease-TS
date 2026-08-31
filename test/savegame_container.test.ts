@@ -62,7 +62,7 @@ import { join } from "node:path";
 
 import { FS_InitFilesystem, FS_ReadRawFile, FS_Gamedir, FS_FOpenFileWrite, FS_FCloseFile, FS_WriteFile } from "../src/qcommon/files";
 import { Cvar_ForceSet, Cvar_Get } from "../src/qcommon/cvar";
-import { CVAR_LATCH, CVAR_SERVERINFO, CS_NAME, EntityStateT, Com_sprintf, MAX_TOKEN_CHARS, MAX_OSPATH, MAX_CONFIGSTRINGS, MAX_QPATH } from "../src/shared/q_shared";
+import { CVAR_LATCH, CVAR_SERVERINFO, CS_NAME, EntityStateT, Com_sprintf, MAX_TOKEN_CHARS, MAX_OSPATH, MAX_CONFIGSTRINGS, MAX_QPATH, CVAR_NOARCHIVE } from "../src/shared/q_shared";
 import { cvar_vars } from "../src/qcommon/cvar";
 import type { GameExports, Edict } from "../src/game/game";
 import { LinkT, MAX_ENT_CLUSTERS, SolidT, GAME_API_VERSION } from "../src/game/game";
@@ -210,6 +210,11 @@ describe("SSV2/SAV2 container -- kex family header layout (save.c)", () => {
   beforeEach(() => {
     resetServerState();
     svs.csr = CS_REMAP_RERELEASE;
+    // Pre-register with the engine's real default+flags (files.ts:1189) so
+    // this throwaway override can never become the cvar's default_string via
+    // Cvar_Get's first-registration-wins contract (the pristine-order
+    // pollution class the order-independence pass closed).
+    Cvar_Get("game", "", CVAR_LATCH | CVAR_SERVERINFO | CVAR_NOARCHIVE);
     Cvar_ForceSet("game", "kex");
     geHolder.ge = makeFakeGe('{"kind":"game"}', '{"kind":"level"}');
   });

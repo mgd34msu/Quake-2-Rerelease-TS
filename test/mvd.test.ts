@@ -23,7 +23,7 @@ import { net_message, net_message_buffer } from "../src/qcommon/net_chan";
 import { VANILLA_CODEC } from "../src/qcommon/protocol/vanilla";
 import { SvcOpsT } from "../src/qcommon/qcommon";
 import { CS_REMAP_OLD } from "../src/shared/cs_remap";
-import { EntityStateT, PlayerStateT, PmTypeT, MAX_EDICTS, STAT_HEALTH, STAT_FRAGS, MulticastT, PRINT_HIGH } from "../src/shared/q_shared";
+import { EntityStateT, PlayerStateT, PmTypeT, MAX_EDICTS, STAT_HEALTH, STAT_FRAGS, MulticastT, PRINT_HIGH, CVAR_LATCH, CVAR_SERVERINFO, CVAR_NOARCHIVE } from "../src/shared/q_shared";
 import { vec3, VectorCopy } from "../src/shared/math";
 import { type Edict, LinkT, MAX_ENT_CLUSTERS, SolidT, type GameExports } from "../src/game/game";
 import { sv, svs, ClientT, ClientStateT, ServerStateT, setMaxclients } from "../src/server/server";
@@ -930,6 +930,11 @@ describe("Kex/rerelease MVD sub-protocol", () => {
     tmpRoot = mkdtempSync(join(tmpdir(), "q2mvd-kex-"));
     mkdirSync(join(tmpRoot, "baseq2"));
     Cvar_ForceSet("basedir", tmpRoot);
+    // Pre-register with the engine's real default+flags (files.ts:1189) so
+    // this throwaway override can never become the cvar's default_string via
+    // Cvar_Get's first-registration-wins contract (the pristine-order
+    // pollution class the order-independence pass closed).
+    Cvar_Get("game", "", CVAR_LATCH | CVAR_SERVERINFO | CVAR_NOARCHIVE);
     Cvar_ForceSet("game", "kex");
     FS_InitFilesystem();
 
