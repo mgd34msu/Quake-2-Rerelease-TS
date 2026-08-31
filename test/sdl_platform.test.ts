@@ -32,6 +32,7 @@ import {
   SDLVID_Present,
   SDLVID_Shutdown,
   SDL_BackendEnabled,
+  SDL_GetActiveGameController,
   SDL_KeyToQuake,
   SDL_ResetBackendForTests,
   SDL_SetBackendEnabled,
@@ -118,6 +119,16 @@ describe("src/platform/sdl.ts -- palette expansion and keymap (no SDL needed)", 
     expect(SDL_BackendEnabled()).toBe(false);
     expect(SDLVID_Init(320, 240, false)).toBe(false);
     expect(SDLVID_Active()).toBe(false);
+  });
+
+  // platform/haptics.ts's own ensureController reuses this getter instead
+  // of opening a second SDL_GameController handle for the same physical
+  // pad (this task's brief: "reuse ... do NOT duplicate") -- a controller-
+  // less/disarmed backend must report null, never throw, so that reuse
+  // path's own fallback (haptics.ts's independent scan) has a clean signal
+  // to fall back on.
+  test("SDL_GetActiveGameController is null with no controller open", () => {
+    expect(SDL_GetActiveGameController()).toBeNull();
   });
 });
 

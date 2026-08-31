@@ -142,6 +142,7 @@ test/haptics.test.ts never touches real hardware or the real SDL library.
 */
 
 import { dlopen, type Pointer } from "bun:ffi";
+import { SDL_GetActiveGameController } from "./sdl";
 import { FS_LoadFile } from "../qcommon/files";
 import { Cvar_Get } from "../qcommon/cvar";
 import type { CvarT } from "../shared/q_shared";
@@ -353,19 +354,62 @@ function ensureGameControllerSubsystem(l: HapticsLib): boolean {
 // controller lifecycle -- opportunistic: try to hold one open controller,
 // rescanning occasionally rather than on every call so a controller-less
 // machine doesn't pay a per-frame SDL cost forever.
+//
+// REUSE, DON'T DUPLICATE (the SDL gamepad INPUT layer's own task brief):
+// src/platform/sdl.ts now owns an event-driven SDL_GameController
+// open/close/hotplug lifecycle of its own (SDL_CONTROLLERDEVICEADDED/
+// REMOVED, read off the same SDL_PollEvent loop that already pumps
+// keyboard/mouse), so ensureController below asks SDL_GetActiveGameController
+// FIRST and only falls back to this file's own independent
+// scan-and-poll-GetAttached loop when that comes back null -- either because
+// sdl.ts's backend was never armed (a caller that enables haptics without
+// ever calling SDL_SetBackendEnabled(true); test/haptics.test.ts's own
+// "headless, no controller required" suite is exactly this case, since it
+// never touches src/platform/sdl.ts at all) or because no controller is
+// currently open there either. In the real client (src/main.ts's
+// Qcommon_Init arms both backends together, in that order, whenever
+// `dedicated 0`) this means the fallback path below is normally cold: the
+// controller sdl.ts already opened for button/stick input is the exact same
+// handle this file rumbles, with no second SDL_GameControllerOpen() of the
+// same physical device and no second periodic rescan loop running.
 
 let controller: Pointer | bigint | null = null;
+// true only when THIS file opened `controller` itself (the fallback path
+// below) -- a handle borrowed from sdl.ts's SDL_GetActiveGameController is
+// owned and closed by that file, never by this one.
+let controllerOwnedByUs = false;
 const CONTROLLER_RESCAN_INTERVAL_MS = 2000;
 let lastScanAttemptMs = -Infinity;
 
 function ensureController(nowMs: number): Pointer | bigint | null {
+  const shared = SDL_GetActiveGameController();
+  if (shared) {
+    if (controller && controllerOwnedByUs && controller !== shared) {
+      // sdl.ts's own handle became available after this file had already
+      // opened its own fallback one (e.g. a hotplug event landed between
+      // this file's rescans) -- drop ours in favor of the canonical one.
+      const l = lib();
+      if (l) l.symbols.SDL_GameControllerClose(controller);
+    }
+    controller = shared;
+    controllerOwnedByUs = false;
+    return controller;
+  }
+
   const l = lib();
   if (!l) return null;
 
   if (controller) {
-    if (l.symbols.SDL_GameControllerGetAttached(controller)) return controller;
-    l.symbols.SDL_GameControllerClose(controller);
-    controller = null;
+    if (!controllerOwnedByUs) {
+      // sdl.ts's handle just disappeared (disconnected); fall through to
+      // this file's own scan below instead of trusting a stale pointer.
+      controller = null;
+    } else if (l.symbols.SDL_GameControllerGetAttached(controller)) {
+      return controller;
+    } else {
+      l.symbols.SDL_GameControllerClose(controller);
+      controller = null;
+    }
   }
 
   if (nowMs - lastScanAttemptMs < CONTROLLER_RESCAN_INTERVAL_MS) return null;
@@ -379,6 +423,7 @@ function ensureController(nowMs: number): Pointer | bigint | null {
     const handle = l.symbols.SDL_GameControllerOpen(i);
     if (handle) {
       controller = handle;
+      controllerOwnedByUs = true;
       return controller;
     }
   }
@@ -512,8 +557,12 @@ export function HAPTICS_ResetForTests(): void {
   patternCache.clear();
 
   const l = library;
-  if (l && controller) l.symbols.SDL_GameControllerClose(controller);
+  // Only close a handle THIS file opened -- one borrowed from sdl.ts's
+  // SDL_GetActiveGameController is that file's to close (see ensureController's
+  // own "REUSE, DON'T DUPLICATE" doc comment above).
+  if (l && controller && controllerOwnedByUs) l.symbols.SDL_GameControllerClose(controller);
   controller = null;
+  controllerOwnedByUs = false;
   lastScanAttemptMs = -Infinity;
 
   enabled = false;

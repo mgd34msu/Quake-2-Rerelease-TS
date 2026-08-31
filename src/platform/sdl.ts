@@ -26,12 +26,22 @@ freezes its public struct layouts.
 
 import { dlopen, FFIType, type Pointer } from "bun:ffi";
 import { VID_CalcScaledRect } from "./vid_scale";
+import {
+  SDL_GamepadButtonEventToKey,
+  SDL_GamepadTriggerAxisEventToKey,
+  GamepadAxisNormalize,
+  SDL_CONTROLLER_AXIS_LEFTX,
+  SDL_CONTROLLER_AXIS_LEFTY,
+  SDL_CONTROLLER_AXIS_RIGHTX,
+  SDL_CONTROLLER_AXIS_RIGHTY,
+  SDL_CONTROLLER_AXIS_TRIGGERLEFT,
+} from "./gamepad_map";
 import { Cvar_Get, Cvar_VariableValue } from "../qcommon/cvar";
 import { Cmd_AddCommand } from "../qcommon/cmd";
 import { Com_DPrintf, Com_Printf } from "../qcommon/common";
 import type { CvarT, UsercmdT } from "../shared/q_shared";
 import { CVAR_ARCHIVE, PITCH, YAW } from "../shared/q_shared";
-import { cl, cls, in_strafe, KeydestT } from "../client/client";
+import { cl, cls, clCvars, in_strafe, KeydestT } from "../client/client";
 import { CL_Wheel_Input, CL_Wheel_Update } from "../client/cl_wheel";
 import {
   K_BACKSPACE,
@@ -112,6 +122,7 @@ function commonMod(): typeof CommonModule {
 
 const SDL_INIT_AUDIO = 0x00000010;
 const SDL_INIT_VIDEO = 0x00000020;
+const SDL_INIT_GAMECONTROLLER = 0x00002000;
 const SDL_INIT_NOPARACHUTE = 0x00100000;
 
 const SDL_WINDOWPOS_CENTERED = 0x2fff0000;
@@ -149,6 +160,15 @@ const SDL_MOUSEBUTTONDOWN = 0x401;
 const SDL_MOUSEBUTTONUP = 0x402;
 const SDL_MOUSEWHEEL = 0x403;
 
+// SDL_events.h's "Game controller events" block (verified against
+// /usr/include/SDL2/SDL_events.h on this host): SDL_CONTROLLERAXISMOTION
+// starts the run at 0x650, the rest increment from there.
+const SDL_CONTROLLERAXISMOTION = 0x650;
+const SDL_CONTROLLERBUTTONDOWN = 0x651;
+const SDL_CONTROLLERBUTTONUP = 0x652;
+const SDL_CONTROLLERDEVICEADDED = 0x653;
+const SDL_CONTROLLERDEVICEREMOVED = 0x654;
+
 const SDL_WINDOWEVENT_FOCUS_GAINED = 12;
 const SDL_WINDOWEVENT_FOCUS_LOST = 13;
 const SDL_WINDOWEVENT_CLOSE = 14;
@@ -172,6 +192,15 @@ const BUTTONEVENT_BUTTON = 16;
 const WHEELEVENT_Y = 20;
 // SDL_WindowEvent: event 12.
 const WINDOWEVENT_EVENT = 12;
+// SDL_ControllerAxisEvent: which(Sint32) 8, axis(Uint8) 12, value(Sint16) 16.
+const CAXISEVENT_AXIS = 12;
+const CAXISEVENT_VALUE = 16;
+// SDL_ControllerButtonEvent: which(Sint32) 8, button(Uint8) 12, state(Uint8) 13.
+const CBUTTONEVENT_BUTTON = 12;
+const CBUTTONEVENT_STATE = 13;
+// SDL_ControllerDeviceEvent: which(Sint32) 8 -- device index for ADDED,
+// instance id for REMOVED/REMAPPED.
+const CDEVICEEVENT_WHICH = 8;
 
 // SDL_AudioSpec: freq 0, format 4, channels 6, silence 7, samples 8,
 // padding 10, size 12, callback 16, userdata 24 (32 bytes total).
@@ -219,6 +248,19 @@ const symbols = {
   SDL_GetRelativeMouseState: { args: ["ptr", "ptr"], returns: "u32" },
   SDL_SetRelativeMouseMode: { args: ["i32"], returns: "i32" },
   SDL_ShowCursor: { args: ["i32"], returns: "i32" },
+
+  // SDL_GameController hotplug (SDL_gamecontroller.h) -- opens/closes
+  // exactly one controller at a time (this port's own "hold one open
+  // controller" scope, matching platform/haptics.ts's own precedent) in
+  // response to SDL_CONTROLLERDEVICEADDED/REMOVED events read off the same
+  // SDL_PollEvent loop that already pumps keyboard/mouse below. See
+  // SDL_GetActiveGameController's doc comment for how platform/haptics.ts
+  // reuses this handle instead of opening a second one.
+  SDL_IsGameController: { args: ["i32"], returns: "i32" },
+  SDL_GameControllerOpen: { args: ["i32"], returns: "ptr" },
+  SDL_GameControllerClose: { args: ["ptr"], returns: "void" },
+  SDL_GameControllerGetJoystick: { args: ["ptr"], returns: "ptr" },
+  SDL_JoystickInstanceID: { args: ["ptr"], returns: "i32" },
 
   SDL_OpenAudioDevice: { args: ["cstring", "i32", "ptr", "ptr", "i32"], returns: "u32" },
   SDL_CloseAudioDevice: { args: ["u32"], returns: "void" },
@@ -570,7 +612,11 @@ export function SDLGL_Shutdown(): void {
 
 //=============================================================================
 // INPUT -- rw_x11.c's HandleEvents (keyboard/mouse to Key_Event) plus
-// in_win.c's IN_MouseMove/IN_Frame/IN_ActivateMouse.
+// in_win.c's IN_MouseMove/IN_Frame/IN_ActivateMouse/IN_JoyMove. The
+// SDL_GameController gamepad layer (button/trigger -> Key_Event, hotplug,
+// left/right stick -> movement/look) lives in this same section, further
+// down -- see its own "GAMEPAD" sub-header below and gamepad_map.ts for the
+// pure event-mapping half.
 
 // SDLK_* -> the K_* numbers keys.c expects. Printable ASCII (space through
 // '~') passes through unmapped, exactly as rw_x11.c's XLateKey does after
@@ -661,6 +707,85 @@ let m_side: CvarT | null = null;
 let in_enable: CvarT | null = null;
 let in_grab: CvarT | null = null;
 
+//=============================================================================
+// GAMEPAD -- SDL_GameController hotplug, button/trigger events -> Key_Event,
+// and left/right stick axes fed into the same cmd/viewangles fields IN_Move
+// already writes for the mouse. See gamepad_map.ts for the pure event
+// mapping this section's runtime shell calls into (that file's own header
+// comment has the full design writeup and citations).
+
+let gpController: Pointer | bigint | null = null;
+let gpControllerInstanceId = -1;
+
+// Trigger axes are converted to a press/release Key_Event pair, not raw
+// analog data -- these are the latched button states
+// SDL_GamepadTriggerAxisEventToKey's `wasDown` hysteresis argument needs.
+let gpLeftTriggerDown = false;
+let gpRightTriggerDown = false;
+
+// Raw SDL_ControllerAxisEvent.value for the four movement-stick axes,
+// latched by the event pump and consumed once per frame by IN_JoyMove --
+// same "accumulate from events, apply once per frame" shape mx/my use for
+// the mouse above, minus the accumulation: each new axis event simply
+// replaces the previous value, matching SDL's own "this is the current
+// absolute position" semantics for a game controller axis (unlike relative
+// mouse motion, which really does need summing between frames).
+let gpLeftX = 0;
+let gpLeftY = 0;
+let gpRightX = 0;
+let gpRightY = 0;
+
+let in_joystick: CvarT | null = null;
+let joy_deadzone: CvarT | null = null;
+let joy_forwardsensitivity: CvarT | null = null;
+let joy_sidesensitivity: CvarT | null = null;
+let joy_yawsensitivity: CvarT | null = null;
+let joy_pitchsensitivity: CvarT | null = null;
+
+/*
+Shared controller handle: platform/haptics.ts's own rumble sink calls this
+FIRST, before falling back to its own independent open/close/rescan, so the
+real client never runs two separate SDL_GameController lifecycles against
+the same physical device (this task's brief: "reuse its controller handle
+plumbing ... do NOT duplicate"). Returns null whenever no controller is
+currently open here (headless, backend disarmed, or genuinely unplugged);
+haptics.ts's own fallback covers that case, plus any future caller that
+arms haptics without ever arming this backend.
+*/
+export function SDL_GetActiveGameController(): Pointer | bigint | null {
+  return gpController;
+}
+
+function gpCloseController(l: SdlLib): void {
+  if (gpController) l.symbols.SDL_GameControllerClose(gpController);
+  gpController = null;
+  gpControllerInstanceId = -1;
+}
+
+function gpOpenFirstAvailable(l: SdlLib, deviceIndex: number): void {
+  if (gpController) return; // single-controller policy, matching haptics.ts's own precedent
+  if (!l.symbols.SDL_IsGameController(deviceIndex)) return;
+  const handle = l.symbols.SDL_GameControllerOpen(deviceIndex);
+  if (!handle) return;
+  const joystick = l.symbols.SDL_GameControllerGetJoystick(handle);
+  gpController = handle;
+  gpControllerInstanceId = joystick ? l.symbols.SDL_JoystickInstanceID(joystick) : -1;
+}
+
+/*
+SDL_CONTROLLERDEVICEADDED/REMOVED (SDL_gamecontroller.h/SDL_events.h):
+`which` is a DEVICE INDEX for ADDED, an INSTANCE ID for REMOVED -- two
+different namespaces sharing one struct field, per SDL_ControllerDeviceEvent's
+own doc comment. Single-controller policy: an ADDED event is ignored while a
+controller is already open; a REMOVED event only closes OUR handle if its
+instance id matches the one we opened, so unplugging some OTHER, never-opened
+second controller can't drop the active one.
+*/
+function gpHandleDeviceEvent(l: SdlLib, added: boolean, which: number): void {
+  if (added) gpOpenFirstAvailable(l, which);
+  else if (which === gpControllerInstanceId) gpCloseController(l);
+}
+
 function IN_MLookDown(): void {
   mlooking = true;
 }
@@ -671,8 +796,10 @@ function IN_MLookUp(): void {
 }
 
 export function IN_Init(): void {
-  // in_win.c's IN_StartupMouse registrations, minus the joystick ones
-  // (no joystick support in this backend).
+  // in_win.c's IN_StartupMouse registrations, plus this port's own
+  // SDL_GameController registrations below (in_win.c had no equivalent --
+  // see keys.ts's own citation on why the K_GAMEPAD_* keynums are new, not
+  // ported from anything).
   in_mouse = Cvar_Get("in_mouse", "1", CVAR_ARCHIVE);
   m_filter = Cvar_Get("m_filter", "0", 0);
   sensitivity = Cvar_Get("sensitivity", "3", 0);
@@ -688,6 +815,39 @@ export function IN_Init(): void {
   // (cvar-parity fix).
   m_side = Cvar_Get("m_side", "1", 0);
 
+  // Gamepad stick movement/look: new functionality (vanilla PC Quake II
+  // never had SDL_GameController analog input at all; the nearest
+  // precedent is in_win.c's IN_JoyMove for a physical DirectInput joystick
+  // -- see IN_JoyMove's own doc comment below and gamepad_map.ts's
+  // GamepadAxisNormalize comment for the full citation/deviation writeup).
+  // Button presses (K_GAMEPAD_* keynums, dispatched from SDL_PumpInput
+  // below) are always live regardless of in_joystick, the same way
+  // keyboard/mouse-button Key_Event calls are never gated by an enable
+  // cvar -- in_joystick only gates the CONTINUOUS stick axes IN_JoyMove
+  // applies to cmd/viewangles, so a pad plugged in but not being used for
+  // movement can't fight keyboard/mouse input through stick drift.
+  in_joystick = Cvar_Get("in_joystick", "1", CVAR_ARCHIVE);
+  // in_win.c's joy_forwardthreshold/joy_sidethreshold/joy_pitchthreshold/
+  // joy_yawthreshold all defaulted to "0.15"; this port collapses that to
+  // one shared per-axis deadzone (gamepad_map.ts's GamepadAxisNormalize doc
+  // comment explains why one knob is enough for SDL_GameController's fixed
+  // 2-stick layout, where in_win.c's per-axis-remap system doesn't apply).
+  joy_deadzone = Cvar_Get("joy_deadzone", "0.15", 0);
+  joy_forwardsensitivity = Cvar_Get("joy_forwardsensitivity", "1", 0);
+  joy_sidesensitivity = Cvar_Get("joy_sidesensitivity", "1", 0);
+  joy_yawsensitivity = Cvar_Get("joy_yawsensitivity", "1", 0);
+  joy_pitchsensitivity = Cvar_Get("joy_pitchsensitivity", "1", 0);
+  gpLeftX = 0;
+  gpLeftY = 0;
+  gpRightX = 0;
+  gpRightY = 0;
+  gpLeftTriggerDown = false;
+  gpRightTriggerDown = false;
+  {
+    const gl = lib();
+    if (gl) initSubsystem(gl, SDL_INIT_GAMECONTROLLER);
+  }
+
   Cmd_AddCommand("+mlook", IN_MLookDown);
   Cmd_AddCommand("-mlook", IN_MLookUp);
 
@@ -696,6 +856,10 @@ export function IN_Init(): void {
   // pointer is captured once active. This port's CvarT has no `changed`
   // callback mechanism (in_changed_hard/in_changed_soft are not ported), so
   // both are read live at each call site below instead of via a callback.
+  // (Gamepad init above already ran and is unaffected by this mouse-only
+  // gate -- in_enable/"Mouse input disabled" has never applied to the
+  // K_GAMEPAD_* button path or the joystick axes, matching how it never
+  // applied to the keyboard either.)
   in_enable = Cvar_Get("in_enable", "1", 0);
   if (!(in_enable && in_enable.value)) {
     Com_Printf("Mouse input disabled.\n");
@@ -715,6 +879,8 @@ export function IN_Init(): void {
 export function IN_Shutdown(): void {
   IN_DeactivateMouse();
   mouse_avail = false;
+  const l = lib();
+  if (l && gpController) gpCloseController(l);
 }
 
 function IN_ActivateMouse(): void {
@@ -765,6 +931,11 @@ in_win.c's IN_MouseMove, called from IN_Move. The accumulated relative
 motion is read straight from SDL rather than from a WM_MOUSEMOVE delta.
 */
 export function IN_Move(cmd: UsercmdT): void {
+  IN_MouseMove(cmd);
+  IN_JoyMove(cmd);
+}
+
+function IN_MouseMove(cmd: UsercmdT): void {
   const l = lib();
   if (!l || !mouse_active) return;
 
@@ -820,8 +991,64 @@ export function IN_Move(cmd: UsercmdT): void {
   else cmd.forwardmove -= (m_forward ? m_forward.value : 0) * mouse_y;
 }
 
-// in_win.c's IN_Commands only reads the joystick, which this backend does
-// not support; mouse buttons already arrive as key events from the pump.
+/*
+in_win.c's IN_JoyMove shape, adapted for SDL_GameController's fixed 2-stick
+layout (gamepad_map.ts's GamepadAxisNormalize doc comment has the full
+citation/deviation writeup against in_win.c's own per-axis-remap joystick
+system). Left stick feeds forward/side movement the same fields CL_BaseMove's
+own WASD handling writes; right stick feeds yaw/pitch the same fields
+CL_AdjustAngles's own arrow-key turn handling writes (both already ran
+before CL_CreateCmd reaches IN_Move) -- scaled by the SAME cl_yawspeed/
+cl_pitchspeed cvars times cls.frametime times this axis's own
+joy_*sensitivity multiplier, rather than m_yaw/m_pitch: a stick reports a
+sustained deflection every frame, not a one-shot relative delta the way a
+mouse motion event does, so it needs the same "degrees per second of hold
+time" scaling in_win.c's own joystick turn axes used, not the mouse's
+per-event scaling.
+
+Gated on in_joystick AND cls.key_dest === key_game: a pad left plugged in
+but unused should never fight keyboard/mouse input in a menu or the
+console, the same reasoning IN_Frame already applies to mouse capture.
+*/
+function IN_JoyMove(cmd: UsercmdT): void {
+  if (!(in_joystick && in_joystick.value)) return;
+  if (cls.key_dest !== KeydestT.key_game) return;
+
+  const dz = joy_deadzone ? joy_deadzone.value : 0.15;
+  const lx = GamepadAxisNormalize(gpLeftX, dz);
+  const ly = GamepadAxisNormalize(gpLeftY, dz);
+  const rx = GamepadAxisNormalize(gpRightX, dz);
+  const ry = GamepadAxisNormalize(gpRightY, dz);
+  if (lx === 0 && ly === 0 && rx === 0 && ry === 0) return;
+
+  const sidespeed = clCvars.cl_sidespeed ? clCvars.cl_sidespeed.value : 0;
+  const forwardspeed = clCvars.cl_forwardspeed ? clCvars.cl_forwardspeed.value : 0;
+  const yawspeed = clCvars.cl_yawspeed ? clCvars.cl_yawspeed.value : 0;
+  const pitchspeed = clCvars.cl_pitchspeed ? clCvars.cl_pitchspeed.value : 0;
+
+  const fwdSens = joy_forwardsensitivity ? joy_forwardsensitivity.value : 1;
+  const sideSens = joy_sidesensitivity ? joy_sidesensitivity.value : 1;
+  const yawSens = joy_yawsensitivity ? joy_yawsensitivity.value : 1;
+  const pitchSens = joy_pitchsensitivity ? joy_pitchsensitivity.value : 1;
+
+  // Left stick: SDL's Y axis is positive DOWN, so pushing the stick up
+  // (negative Y) is forward -- the same sign convention CL_BaseMove's own
+  // in_forward/in_back pair already produces for cmd.forwardmove.
+  cmd.forwardmove += forwardspeed * fwdSens * -ly;
+  cmd.sidemove += sidespeed * sideSens * lx;
+
+  // Right stick: matches IN_MouseMove's own mouse_x/mouse_y sign convention
+  // directly above (stick right = look right = yaw decreases; stick down =
+  // look down = pitch increases).
+  cl.viewangles[YAW] -= cls.frametime * yawspeed * yawSens * rx;
+  cl.viewangles[PITCH] += cls.frametime * pitchspeed * pitchSens * ry;
+}
+
+// in_win.c's IN_Commands only reads the joystick's DIGITAL buttons (POV hat
+// etc, folded into cmd.buttons there); this port's gamepad buttons already
+// arrive as ordinary Key_Event calls from the pump (SDL_GameController
+// normalizes even the d-pad into button events, unlike a raw HAT), so there
+// is nothing left for this function to poll.
 export function IN_Commands(): void {}
 
 /*
@@ -885,6 +1112,41 @@ export function SDL_PumpInput(time: number): void {
         else if (ev === SDL_WINDOWEVENT_CLOSE) commonMod().Com_Quit();
         break;
       }
+      case SDL_CONTROLLERBUTTONDOWN:
+      case SDL_CONTROLLERBUTTONUP: {
+        const down = type === SDL_CONTROLLERBUTTONDOWN;
+        const mapped = SDL_GamepadButtonEventToKey(eventBuf[CBUTTONEVENT_BUTTON], down);
+        if (mapped) Key_Event(mapped.key, mapped.down, time);
+        break;
+      }
+      case SDL_CONTROLLERAXISMOTION: {
+        const axis = eventBuf[CAXISEVENT_AXIS];
+        const value = eventView.getInt16(CAXISEVENT_VALUE, true);
+        if (axis === SDL_CONTROLLER_AXIS_LEFTX) gpLeftX = value;
+        else if (axis === SDL_CONTROLLER_AXIS_LEFTY) gpLeftY = value;
+        else if (axis === SDL_CONTROLLER_AXIS_RIGHTX) gpRightX = value;
+        else if (axis === SDL_CONTROLLER_AXIS_RIGHTY) gpRightY = value;
+        else {
+          // trigger axes: convert to an edge-triggered Key_Event instead of
+          // storing raw analog data -- see gamepad_map.ts's own doc comment
+          // on SDL_GamepadTriggerAxisEventToKey for the threshold/hysteresis
+          // shape this implements.
+          const wasDown = axis === SDL_CONTROLLER_AXIS_TRIGGERLEFT ? gpLeftTriggerDown : gpRightTriggerDown;
+          const trig = SDL_GamepadTriggerAxisEventToKey(axis, value, wasDown);
+          if (trig) {
+            if (axis === SDL_CONTROLLER_AXIS_TRIGGERLEFT) gpLeftTriggerDown = trig.down;
+            else gpRightTriggerDown = trig.down;
+            Key_Event(trig.key, trig.down, time);
+          }
+        }
+        break;
+      }
+      case SDL_CONTROLLERDEVICEADDED:
+        gpHandleDeviceEvent(l, true, eventView.getInt32(CDEVICEEVENT_WHICH, true));
+        break;
+      case SDL_CONTROLLERDEVICEREMOVED:
+        gpHandleDeviceEvent(l, false, eventView.getInt32(CDEVICEEVENT_WHICH, true));
+        break;
       case SDL_QUIT:
         commonMod().Com_Quit();
         break;
@@ -984,6 +1246,13 @@ export function SDL_ResetBackendForTests(): void {
   SDLSND_Close();
   SDLVID_Shutdown();
   const l = library;
+  if (l && gpController) gpCloseController(l);
+  gpLeftX = 0;
+  gpLeftY = 0;
+  gpRightX = 0;
+  gpRightY = 0;
+  gpLeftTriggerDown = false;
+  gpRightTriggerDown = false;
   if (l && subsystems !== 0) {
     l.symbols.SDL_Quit();
     subsystems = 0;
