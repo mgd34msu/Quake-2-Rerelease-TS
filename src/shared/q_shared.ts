@@ -494,10 +494,16 @@ export const MZ_ITEMRESPAWN = 15;
 export const MZ_IONRIPPER = 16;
 export const MZ_BLUEHYPERBLASTER = 17;
 export const MZ_PHALANX = 18;
+
+// KEX (q2repro inc/shared/shared.h:1287-1289)
+export const MZ_BFG2 = 19;
+export const MZ_PHALANX2 = 20;
+
 export const MZ_SILENCED = 128; // bit flag ORed with one of the above numbers
 //ROGUE
 export const MZ_ETF_RIFLE = 30;
-export const MZ_UNUSED = 31;
+export const MZ_UNUSED = 31; // vanilla name for this slot; q2repro's shared.h:1293 renames it MZ_PROX (KEX) -- same numeric value, both kept
+export const MZ_PROX = 31; // KEX (q2repro inc/shared/shared.h:1293)
 export const MZ_SHOTGUN2 = 32;
 export const MZ_HEATBEAM = 33;
 export const MZ_BLASTER2 = 34;

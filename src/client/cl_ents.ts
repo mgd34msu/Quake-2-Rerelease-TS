@@ -45,6 +45,7 @@ import {
   RF_WEAPONMODEL,
   RF_DEPTHHACK,
   RF_TRANSLUCENT,
+  RF_FULLBRIGHT,
   RF_FRAMELERP,
   RF_BEAM,
   RF_SHELL_RED,
@@ -931,7 +932,11 @@ function CL_AddPacketEntities(frame: FrameT): void {
 CL_AddViewWeapon
 ==============
 */
-function CL_AddViewWeapon(ps: PlayerStateT, ops: PlayerStateT): void {
+// Exported (not just called from CL_CalcViewValues below) so tests can
+// drive the view-weapon-plus-muzzle-flash render pass directly, the same
+// way cl_tent.ts's CL_AddMuzzleFX is tested directly rather than through
+// the full CL_AddEntities pipeline.
+export function CL_AddViewWeapon(ps: PlayerStateT, ops: PlayerStateT): void {
   // allow the gun to be completely removed
   if (!clCvars.cl_gun?.value) return;
 
@@ -962,6 +967,44 @@ function CL_AddViewWeapon(ps: PlayerStateT, ops: PlayerStateT): void {
   gun.flags = RF_MINLIGHT | RF_DEPTHHACK | RF_WEAPONMODEL;
   gun.backlerp = 1.0 - cl.lerpfrac;
   VectorCopy(gun.origin, gun.oldorigin); // don't lerp at all
+  V_AddEntity(gun);
+
+  // add muzzle flash (q2repro entities.c:1320-1349). cl.weapon.muzzle is
+  // written by CL_AddWeaponMuzzleFX (cl_fx.ts, called from the LOCAL
+  // player's own CL_ParseMuzzleFlash branch only) and expires 50ms after
+  // being set -- a real short-lived flash MODEL, not the classic dlight.
+  if (!cl.weapon.muzzle.model) return;
+
+  if (cl.time - cl.weapon.muzzle.time > 50) {
+    cl.weapon.muzzle.model = null;
+    return;
+  }
+
+  gun.flags = RF_FULLBRIGHT | RF_DEPTHHACK | RF_WEAPONMODEL | RF_TRANSLUCENT;
+  gun.alpha = 1.0;
+  gun.model = cl.weapon.muzzle.model;
+  gun.skinnum = 0;
+  // DEVIATION: q2repro's entity_t.scale (VectorSet(gun.scale, muzzle.scale,
+  // muzzle.scale, muzzle.scale)) has no field on this port's EntityT
+  // (ref.ts) -- same cut cl_tent.ts's CL_AddMuzzleFX already documents for
+  // the world-entity flash model (ref_gl/ isn't ported, PORTING.md).
+  // cl.weapon.muzzle.scale is still carried on client state for a future
+  // renderer to consume.
+  gun.backlerp = 0.0;
+  gun.frame = gun.oldframe = 0;
+
+  const forward: Vec3 = new Float32Array(3);
+  const right: Vec3 = new Float32Array(3);
+  const up: Vec3 = new Float32Array(3);
+  AngleVectors(gun.angles, forward, right, up);
+
+  VectorMA(gun.origin, cl.weapon.muzzle.offset[0], forward, gun.origin);
+  VectorMA(gun.origin, cl.weapon.muzzle.offset[1], right, gun.origin);
+  VectorMA(gun.origin, cl.weapon.muzzle.offset[2], up, gun.origin);
+
+  VectorCopy(cl.refdef.viewangles, gun.angles);
+  gun.angles[2] += cl.weapon.muzzle.roll;
+
   V_AddEntity(gun);
 }
 

@@ -36,11 +36,14 @@ import {
   MZ_ROCKET,
   MZ_GRENADE,
   MZ_BFG,
+  MZ_BFG2,
   MZ_LOGIN,
   MZ_LOGOUT,
   MZ_RESPAWN,
   MZ_PHALANX,
+  MZ_PHALANX2,
   MZ_IONRIPPER,
+  MZ_PROX,
   MZ_ETF_RIFLE,
   MZ_SHOTGUN2,
   MZ_HEATBEAM,
@@ -297,7 +300,7 @@ import { MSG_ReadShort, MSG_ReadByte } from "../qcommon/sizebuf";
 import { monsterFlashOffset as classicMonsterFlashOffset } from "../game/m_flash";
 import { monsterFlashOffset as kexMonsterFlashOffset } from "../kexgame/m_flash";
 import { CS_REMAP_RERELEASE } from "../shared/cs_remap";
-import { CL_SmokeAndFlash, CL_AddMuzzleFX, CL_PlayFootstepSfx, FOOTSTEP_ID_LADDER, MuzzlefxT } from "./cl_tent";
+import { CL_SmokeAndFlash, CL_AddMuzzleFX, CL_PlayFootstepSfx, FOOTSTEP_ID_LADDER, MuzzlefxT, cl_mod_muzzles } from "./cl_tent";
 import { fixedLength } from "../shared/fixed";
 
 // DEVIATION FROM cl_muzzleflash's usual bare-name convention: MuzzlefxT's
@@ -575,18 +578,57 @@ function clRereleaseEffectsEnabled(): boolean {
   return !!cl_rerelease_effects_cvar && cl_rerelease_effects_cvar.value !== 0;
 }
 
-// SCOPE CUT (muzzle-flash MODELS unit): q2repro effects.c's CL_MuzzleFlash
-// (the real source of this function) also calls CL_AddWeaponMuzzleFX per
-// weapon case, attaching a real flash MODEL to the player's OWN first-
-// person view-weapon (state on cl.weapon.muzzle, consumed by the
-// view-weapon renderer). That renderer/state doesn't exist in this port
-// (cl_view.ts's weapon-model drawing, out of this unit's territory --
-// ref_gl/ isn't ported either, PORTING.md), so this function stays
-// dlight+sound only. CL_ParseMuzzleFlash2 below (monster/NPC muzzle
-// flashes, effects.c's CL_MuzzleFlash2) is the one this unit actually
-// ports the model system for -- it renders as a normal world entity via
-// the existing ex_mflash explosion path (CL_AddMuzzleFX, cl_tent.ts), no
-// new renderer plumbing required.
+/*
+=================
+CL_AddWeaponMuzzleFX
+
+[Paril-KEX] q2repro tent.c:428-448's CL_AddWeaponMuzzleFX -- writes the
+first-person view-weapon's muzzle-flash MODEL state (cl.weapon.muzzle) for
+the LOCAL player's own shot only (mz.entity != cl.frame.clientNum + 1 in
+the C bails for everyone else's flash). CL_AddViewWeapon (cl_ents.ts,
+q2repro entities.c:1320-1349) is the consumer: it renders this as a real
+short-lived (50ms) entity appended to the view-weapon's V_AddEntity pass,
+separate from CL_AddMuzzleFX's world-entity ex_mflash explosion (cl_tent.ts)
+that the earlier muzzle-flash-MODELS unit ported for monsters/NPCs.
+
+DEVIATION: this function's C source is tent.c, which would put it in
+cl_tent.ts per PORTING.md's one-module-per-.c-file rule -- but that file is
+out of this unit's territory (its tables/registration are read-only here,
+landed by commit 912c058). Defined locally instead, in the one file that
+calls it. `entity` is q2repro's global `mz.entity`, passed as a parameter
+here since this port's CL_ParseMuzzleFlash already has it as a local `i`
+rather than a module-global mz_t.
+
+DEVIATION: q2repro's entity_t.scale (vec3_t) has no field on this port's
+EntityT (ref.ts) -- ref_gl/ isn't ported (PORTING.md), same cut cl_tent.ts's
+CL_AddMuzzleFX already documents for the world-entity flash model. `scale`
+is still stored on cl.weapon.muzzle.scale for a future renderer to consume.
+=================
+*/
+function CL_AddWeaponMuzzleFX(entity: number, fx: MuzzlefxT, offset: Vec3, scale: number): void {
+  if (!clCvars.cl_muzzleflashes || !clCvars.cl_muzzleflashes.value) return;
+  if (entity !== cl.playernum + 1) return;
+
+  if (fx >= cl_mod_muzzles.length) throw new ComError(ERR_DROP, "CL_AddWeaponMuzzleFX: bad fx");
+
+  const model = cl_mod_muzzles[fx];
+  if (!model) return;
+
+  cl.weapon.muzzle.model = model;
+  cl.weapon.muzzle.scale = scale;
+  if (fx === MuzzlefxT.MFLASH_MACHN || fx === MuzzlefxT.MFLASH_BEAMER) cl.weapon.muzzle.roll = rand() % 360;
+  else cl.weapon.muzzle.roll = 0;
+  VectorCopy(offset, cl.weapon.muzzle.offset);
+  cl.weapon.muzzle.time = cl.frame.servertime - 100;
+}
+
+// q2repro effects.c's CL_MuzzleFlash (the real source of this function) also
+// calls CL_AddWeaponMuzzleFX (above) per weapon case, attaching a real flash
+// MODEL to the player's OWN first-person view-weapon. CL_ParseMuzzleFlash2
+// below (monster/NPC muzzle flashes, effects.c's CL_MuzzleFlash2) is the one
+// that ports the model system for everyone else -- it renders as a normal
+// world entity via the existing ex_mflash explosion path (CL_AddMuzzleFX,
+// cl_tent.ts), no new renderer plumbing required.
 export function CL_ParseMuzzleFlash(): void {
   const i = MSG_ReadShort(net_message);
   // q2repro's own CL_ParseMuzzleFlashPacket (parse.c:840-845) has NO bound
@@ -624,6 +666,7 @@ export function CL_ParseMuzzleFlash(): void {
       dl.color[1] = 1;
       dl.color[2] = 0;
       S_StartSound(null, i, CHAN_WEAPON, S_RegisterSound("weapons/blastf1a.wav"), volume, ATTN_NORM, 0);
+      CL_AddWeaponMuzzleFX(i, MuzzlefxT.MFLASH_BLAST, vec3(27.0, 7.4, -6.6), 8.0);
       break;
     case MZ_BLUEHYPERBLASTER:
       dl.color[0] = 0;
@@ -636,12 +679,14 @@ export function CL_ParseMuzzleFlash(): void {
       dl.color[1] = 1;
       dl.color[2] = 0;
       S_StartSound(null, i, CHAN_WEAPON, S_RegisterSound("weapons/hyprbf1a.wav"), volume, ATTN_NORM, 0);
+      CL_AddWeaponMuzzleFX(i, MuzzlefxT.MFLASH_BLAST, vec3(23.5, 6.0, -6.0), 9.0);
       break;
     case MZ_MACHINEGUN:
       dl.color[0] = 1;
       dl.color[1] = 1;
       dl.color[2] = 0;
       S_StartSound(null, i, CHAN_WEAPON, S_RegisterSound(Com_sprintf("weapons/machgf%ib.wav", (rand() % 5) + 1)), volume, ATTN_NORM, 0);
+      CL_AddWeaponMuzzleFX(i, MuzzlefxT.MFLASH_MACHN, vec3(29.0, 9.7, -8.0), 12.0);
       break;
     case MZ_SHOTGUN:
       dl.color[0] = 1;
@@ -649,12 +694,14 @@ export function CL_ParseMuzzleFlash(): void {
       dl.color[2] = 0;
       S_StartSound(null, i, CHAN_WEAPON, S_RegisterSound("weapons/shotgf1b.wav"), volume, ATTN_NORM, 0);
       S_StartSound(null, i, CHAN_AUTO, S_RegisterSound("weapons/shotgr1b.wav"), volume, ATTN_NORM, 0.1);
+      CL_AddWeaponMuzzleFX(i, MuzzlefxT.MFLASH_SHOTG, vec3(26.5, 8.6, -9.5), 12.0);
       break;
     case MZ_SSHOTGUN:
       dl.color[0] = 1;
       dl.color[1] = 1;
       dl.color[2] = 0;
       S_StartSound(null, i, CHAN_WEAPON, S_RegisterSound("weapons/sshotf1b.wav"), volume, ATTN_NORM, 0);
+      CL_AddWeaponMuzzleFX(i, MuzzlefxT.MFLASH_SHOTG2, vec3(25.0, 7.0, -5.5), 12.0);
       break;
     case MZ_CHAINGUN1:
       dl.radius = 200 + (rand() & 31);
@@ -662,6 +709,7 @@ export function CL_ParseMuzzleFlash(): void {
       dl.color[1] = 0.25;
       dl.color[2] = 0;
       S_StartSound(null, i, CHAN_WEAPON, S_RegisterSound(Com_sprintf("weapons/machgf%ib.wav", (rand() % 5) + 1)), volume, ATTN_NORM, 0);
+      CL_AddWeaponMuzzleFX(i, MuzzlefxT.MFLASH_MACHN, vec3(29.0, 9.7, -10.0), 12.0);
       break;
     case MZ_CHAINGUN2:
       dl.radius = 225 + (rand() & 31);
@@ -671,6 +719,7 @@ export function CL_ParseMuzzleFlash(): void {
       dl.die = cl.time + 0.1; // long delay
       S_StartSound(null, i, CHAN_WEAPON, S_RegisterSound(Com_sprintf("weapons/machgf%ib.wav", (rand() % 5) + 1)), volume, ATTN_NORM, 0);
       S_StartSound(null, i, CHAN_WEAPON, S_RegisterSound(Com_sprintf("weapons/machgf%ib.wav", (rand() % 5) + 1)), volume, ATTN_NORM, 0.05);
+      CL_AddWeaponMuzzleFX(i, MuzzlefxT.MFLASH_MACHN, vec3(29.0, 9.7, -10.0), 16.0);
       break;
     case MZ_CHAINGUN3:
       dl.radius = 250 + (rand() & 31);
@@ -681,6 +730,7 @@ export function CL_ParseMuzzleFlash(): void {
       S_StartSound(null, i, CHAN_WEAPON, S_RegisterSound(Com_sprintf("weapons/machgf%ib.wav", (rand() % 5) + 1)), volume, ATTN_NORM, 0);
       S_StartSound(null, i, CHAN_WEAPON, S_RegisterSound(Com_sprintf("weapons/machgf%ib.wav", (rand() % 5) + 1)), volume, ATTN_NORM, 0.033);
       S_StartSound(null, i, CHAN_WEAPON, S_RegisterSound(Com_sprintf("weapons/machgf%ib.wav", (rand() % 5) + 1)), volume, ATTN_NORM, 0.066);
+      CL_AddWeaponMuzzleFX(i, MuzzlefxT.MFLASH_MACHN, vec3(29.0, 9.7, -10.0), 20.0);
       break;
     case MZ_RAILGUN:
       dl.color[0] = 0.5;
@@ -692,6 +742,7 @@ export function CL_ParseMuzzleFlash(): void {
       if (clRereleaseEffectsEnabled()) {
         S_StartSound(null, i, CHAN_AUX3, S_RegisterSound("weapons/railgr1b.wav"), volume, ATTN_NORM, 0.4);
       }
+      CL_AddWeaponMuzzleFX(i, MuzzlefxT.MFLASH_RAIL, vec3(20.0, 5.2, -7.0), 12.0);
       break;
     case MZ_ROCKET:
       dl.color[0] = 1;
@@ -699,6 +750,7 @@ export function CL_ParseMuzzleFlash(): void {
       dl.color[2] = 0.2;
       S_StartSound(null, i, CHAN_WEAPON, S_RegisterSound("weapons/rocklf1a.wav"), volume, ATTN_NORM, 0);
       S_StartSound(null, i, CHAN_AUTO, S_RegisterSound("weapons/rocklr1b.wav"), volume, ATTN_NORM, 0.1);
+      CL_AddWeaponMuzzleFX(i, MuzzlefxT.MFLASH_ROCKET, vec3(20.8, 5.0, -11.0), 10.0);
       break;
     case MZ_GRENADE:
       dl.color[0] = 1;
@@ -706,12 +758,21 @@ export function CL_ParseMuzzleFlash(): void {
       dl.color[2] = 0;
       S_StartSound(null, i, CHAN_WEAPON, S_RegisterSound("weapons/grenlf1a.wav"), volume, ATTN_NORM, 0);
       S_StartSound(null, i, CHAN_AUTO, S_RegisterSound("weapons/grenlr1b.wav"), volume, ATTN_NORM, 0.1);
+      CL_AddWeaponMuzzleFX(i, MuzzlefxT.MFLASH_LAUNCH, vec3(18.0, 6.0, -6.5), 9.0);
       break;
     case MZ_BFG:
       dl.color[0] = 0;
       dl.color[1] = 1;
       dl.color[2] = 0;
       S_StartSound(null, i, CHAN_WEAPON, S_RegisterSound("weapons/bfg__f1y.wav"), volume, ATTN_NORM, 0);
+      break;
+    // q2repro effects.c:321-324: distinct from MZ_BFG above -- dlight only,
+    // no sound (the weapon fire sound is MZ_BFG's own).
+    case MZ_BFG2:
+      dl.color[0] = 0;
+      dl.color[1] = 1;
+      dl.color[2] = 0;
+      CL_AddWeaponMuzzleFX(i, MuzzlefxT.MFLASH_BFG, vec3(18.0, 8.0, -7.5), 16.0);
       break;
 
     case MZ_LOGIN:
@@ -745,12 +806,33 @@ export function CL_ParseMuzzleFlash(): void {
       dl.color[2] = 0.5;
       S_StartSound(null, i, CHAN_WEAPON, S_RegisterSound("weapons/plasshot.wav"), volume, ATTN_NORM, 0);
       break;
+    // q2repro effects.c:345-348: distinct from MZ_PHALANX above -- dlight
+    // only, no sound (the weapon fire sound is MZ_PHALANX's own).
+    case MZ_PHALANX2:
+      dl.color[0] = 1;
+      dl.color[1] = 0.5;
+      dl.color[2] = 0.5;
+      CL_AddWeaponMuzzleFX(i, MuzzlefxT.MFLASH_ROCKET, vec3(18.0, 10.0, -6.0), 9.0);
+      break;
     // RAFAEL
     case MZ_IONRIPPER:
       dl.color[0] = 1;
       dl.color[1] = 0.5;
       dl.color[2] = 0.5;
       S_StartSound(null, i, CHAN_WEAPON, S_RegisterSound("weapons/rippfire.wav"), volume, ATTN_NORM, 0);
+      CL_AddWeaponMuzzleFX(i, MuzzlefxT.MFLASH_BOOMER, vec3(24.0, 3.8, -5.5), 15.0);
+      break;
+
+    // q2repro effects.c:355-360 (KEX). cl_rerelease_effects gates the
+    // proximity-mine launcher's own delayed report/echo, same idiom as
+    // MZ_RAILGUN's railgr1b.wav above.
+    case MZ_PROX:
+      dl.color[0] = 1;
+      dl.color[1] = 0.5;
+      dl.color[2] = 0;
+      S_StartSound(null, i, CHAN_WEAPON, S_RegisterSound("weapons/grenlf1a.wav"), volume, ATTN_NORM, 0);
+      S_StartSound(null, i, CHAN_AUTO, S_RegisterSound("weapons/proxlr1a.wav"), volume, ATTN_NORM, clRereleaseEffectsEnabled() ? 0.15 : 0.1);
+      CL_AddWeaponMuzzleFX(i, MuzzlefxT.MFLASH_LAUNCH, vec3(18.0, 6.0, -6.5), 9.0);
       break;
 
     // ======================
@@ -760,18 +842,28 @@ export function CL_ParseMuzzleFlash(): void {
       dl.color[1] = 0.7;
       dl.color[2] = 0;
       S_StartSound(null, i, CHAN_WEAPON, S_RegisterSound("weapons/nail1.wav"), volume, ATTN_NORM, 0);
+      CL_AddWeaponMuzzleFX(i, MuzzlefxT.MFLASH_ETF_RIFLE, vec3(24.0, 5.25, -5.5), 4.0);
       break;
     case MZ_SHOTGUN2:
       dl.color[0] = 1;
       dl.color[1] = 1;
       dl.color[2] = 0;
       S_StartSound(null, i, CHAN_WEAPON, S_RegisterSound("weapons/shotg2.wav"), volume, ATTN_NORM, 0);
+      // q2repro effects.c:366-376: the remaster overloads this byte as
+      // MZ_ETF_RIFLE_2 under the extended (kex) protocol -- only THAT case
+      // gets a flash model; the pre-existing dlight/sound branch above is
+      // unconditional here (a gap this unit's territory doesn't cover, see
+      // report) but the flash-model gate is added faithfully.
+      if (cls.csr.extended) {
+        CL_AddWeaponMuzzleFX(i, MuzzlefxT.MFLASH_ETF_RIFLE, vec3(24.0, 4.0, -5.5), 4.0);
+      }
       break;
     case MZ_HEATBEAM:
       dl.color[0] = 1;
       dl.color[1] = 1;
       dl.color[2] = 0;
       dl.die = cl.time + 100;
+      CL_AddWeaponMuzzleFX(i, MuzzlefxT.MFLASH_BEAMER, vec3(18.0, 6.0, -8.5), 16.0);
       break;
     case MZ_BLASTER2:
       dl.color[0] = 0;
@@ -786,6 +878,7 @@ export function CL_ParseMuzzleFlash(): void {
       dl.color[1] = -1;
       dl.color[2] = -1;
       S_StartSound(null, i, CHAN_WEAPON, S_RegisterSound("weapons/disint2.wav"), volume, ATTN_NORM, 0);
+      CL_AddWeaponMuzzleFX(i, MuzzlefxT.MFLASH_DIST, vec3(18.0, 6.0, -6.5), 10.0);
       break;
     case MZ_NUKE1:
       dl.color[0] = 1;

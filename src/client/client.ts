@@ -290,6 +290,36 @@ export function newWheelT(): WheelT {
   };
 }
 
+// client_state_t.weapon.muzzle (q2repro client.h:386-397): first-person
+// view-weapon muzzle-flash MODEL state. Written by CL_AddWeaponMuzzleFX
+// (q2repro tent.c:428-448) for the LOCAL player's shots only; consumed by
+// CL_AddViewWeapon (q2repro entities.c:1320-1349) to append a short-lived
+// flash model to the view-weapon's V_AddEntity pass.
+//
+// DEVIATION (minimal-state ruling): the C's outer `weapon` struct also
+// carries frame/last_frame/server_time -- the KEX view-model gunframe-lerp
+// fields (entities.c:1272-1286) that replace the classic ps.gunframe lerp
+// with a servertime-based one gated on ps.gunrate. This port's
+// CL_AddViewWeapon (cl_ents.ts) still lerps the classic way directly from
+// ps.gunframe/ops.gunframe, so those fields have no consumer here; adding
+// them is a separate follow-up (needs PlayerStateT.gunrate, out of this
+// unit's territory), not silently dropped.
+export interface WeaponMuzzleT {
+  model: ModelS | null; // qhandle_t; 0 in C == null here
+  time: number; // cl.frame.servertime-scale (mirrors cl_tent.ts's cl.servertime->cl.frame.servertime mapping); compared against cl.time on read, same idiom as cl_tent.ts's ex_mflash 50ms gate
+  roll: number;
+  scale: number;
+  offset: Vec3;
+}
+
+export interface ClWeaponT {
+  muzzle: WeaponMuzzleT;
+}
+
+export function newClWeaponT(): ClWeaponT {
+  return { muzzle: { model: null, time: 0, roll: 0, scale: 0, offset: vec3() } };
+}
+
 //
 // the client_state_t structure is wiped completely at every server map
 // change -- ported as ClStateT (see naming ruling above)
@@ -407,6 +437,10 @@ export class ClStateT {
   carousel: CarouselT = newCarouselT();
   wheel: WheelT = newWheelT();
 
+  // client_state_t.weapon (client.h:386-397) -- see WeaponMuzzleT/ClWeaponT
+  // doc comments above for what's ported and what's cut.
+  weapon: ClWeaponT = newClWeaponT();
+
   // client_state_t.weapon_lock_time (client.h, set by CL_Carousel_Input --
   // wheel.c:202) -- briefly suppresses +attack right after a carousel weapon
   // switch. `cl.time`-scale (paused-game-aware), NOT cls.realtime-scale like
@@ -467,6 +501,7 @@ export class ClStateT {
     this.wheel_data = newWheelDataT();
     this.carousel = newCarouselT();
     this.wheel = newWheelT();
+    this.weapon = newClWeaponT();
     this.weapon_lock_time = 0;
   }
 }
