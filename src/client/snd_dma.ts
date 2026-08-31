@@ -48,6 +48,8 @@ import {
 import { S_LoadSound } from "./snd_mem";
 import { S_InitScaletable, S_PaintChannels } from "./snd_mix";
 import { SNDDMA_BeginPainting, SNDDMA_GetDMAPos, SNDDMA_Init, SNDDMA_Shutdown, SNDDMA_Submit } from "../platform/snd";
+import { S_ReverbInit, S_ReverbEndRegistration, S_ReverbShutdown, S_UpdateReverb } from "./snd_environments";
+import { S_ReverbDspReset } from "./snd_reverb_dsp";
 
 // only begin attenuating sound volumes when outside the FULLVOLUME range
 const SOUND_FULLVOLUME = 80;
@@ -152,16 +154,19 @@ export function S_Init(): void {
     sndCvars.s_underwater_gain_hf = Cvar_Get("s_underwater_gain_hf", "0.25", 0);
     Cvar_Get("s_num_channels", "64", CVAR_SOUND);
     // q2repro src/client/sound/qal.c:199-200 and al.c:640-679 -- the OpenAL
-    // backend itself (device selection, HRTF, reverb, looping-sound
-    // merging, playback timescale). This port has no OpenAL backend at all
-    // (bun:ffi binds SDL2 audio only, see src/platform/snd.ts) -- all six
-    // registered, consumer unported.
+    // backend itself (device selection, HRTF, looping-sound merging,
+    // playback timescale). This port has no OpenAL backend at all (bun:ffi
+    // binds SDL2 audio only, see src/platform/snd.ts) -- four registered,
+    // consumer unported. al_reverb/al_reverb_lerp_time are the exception:
+    // snd_environments.ts's S_ReverbInit (below) wires them up as real
+    // consumers of a from-scratch Freeverb-class DSP (snd_reverb_dsp.ts)
+    // driven by the retail sound/default.environments preset data, in place
+    // of the OpenAL EAX reverb effect al.c would have fed.
     Cvar_Get("al_device", "", 0);
     Cvar_Get("al_hrtf", "0", 0);
     Cvar_Get("al_merge_looping", "1", 0);
-    Cvar_Get("al_reverb", "1", 0);
-    Cvar_Get("al_reverb_lerp_time", "3.0", 0);
     Cvar_Get("al_timescale", "1", 0);
+    S_ReverbInit();
 
     Cmd_AddCommand("play", S_Play);
     Cmd_AddCommand("stopsound", S_StopAllSounds);
@@ -199,6 +204,9 @@ export function S_Shutdown(): void {
   if (!soundStarted) return;
 
   SNDDMA_Shutdown();
+
+  S_ReverbShutdown();
+  S_ReverbDspReset();
 
   soundStarted = false;
 
@@ -318,6 +326,14 @@ S_EndRegistration
 =====================
 */
 export function S_EndRegistration(): void {
+  // [Paril-KEX] al.c:1311-1336's AL_EndRegistration reloads
+  // sound/default.environments and resets reverb selection state at exactly
+  // this point in the registration lifecycle (once per map, after the world
+  // model and all sounds are (re)loaded but before gameplay resumes). This
+  // port has one S_EndRegistration regardless of backend, so the reload runs
+  // here unconditionally rather than behind an OpenAL-only sndapi dispatch.
+  S_ReverbEndRegistration();
+
   // free any sounds not from this registration sequence
   for (let i = 0; i < num_sfx; i++) {
     const sfx = known_sfx[i];
@@ -908,6 +924,13 @@ export function S_Update(origin: Vec3, forward: Vec3, right: Vec3, up: Vec3): vo
   VectorCopy(forward, listener_forward);
   VectorCopy(right, listener_right);
   VectorCopy(up, listener_up);
+
+  // [Paril-KEX] al.c:1260-1264's AL_Update calls AL_UpdateReverb() right
+  // after the listener position/orientation are set and before per-channel
+  // respatialization -- matched here (see snd_environments.ts's own header
+  // comment for what this port does differently from al.c's floor-probe
+  // trace call).
+  S_UpdateReverb(listener_origin, cl.time);
 
   // update spatialization for dynamic sounds
   for (let i = 0; i < MAX_CHANNELS; i++) {

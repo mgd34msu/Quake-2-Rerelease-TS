@@ -35,9 +35,16 @@ import {
 } from "./snd_loc";
 import { S_LoadSound } from "./snd_mem";
 import { S_IssuePlaysound, S_IsUnderWater } from "./snd_dma";
+import { GetActiveReverbParams } from "./snd_environments";
+import { S_ReverbProcessBlock } from "./snd_reverb_dsp";
 
 const PAINTBUFFER_SIZE = 2048;
 const paintbuffer: PortableSamplepairT[] = Array.from({ length: PAINTBUFFER_SIZE }, () => new PortableSamplepairT());
+// Scratch arrays for S_ReverbProcessBlock (snd_reverb_dsp.ts's DSP loop
+// operates on plain typed arrays, not PortableSamplepairT objects, to keep
+// that module free of a dependency on the mixer's own paint buffer type).
+const reverbScratchL = new Float64Array(PAINTBUFFER_SIZE);
+const reverbScratchR = new Float64Array(PAINTBUFFER_SIZE);
 const sndScaletable: Int32Array[] = Array.from({ length: 32 }, () => new Int32Array(256));
 let sndVol = 0;
 
@@ -356,6 +363,29 @@ export function S_PaintChannels(endtime: number): void {
             ch.sfx = null;
           }
         }
+      }
+    }
+
+    // Environmental reverb (see snd_environments.ts/snd_reverb_dsp.ts):
+    // applied before the underwater filter below, over the same buffer span,
+    // so a submerged listener's reverb tail is muffled by the underwater
+    // filter exactly like everything else already painted into the buffer
+    // -- there is no q2repro reference ordering to match here (al.c's OpenAL
+    // reverb and dma.c's underwater biquad are two different backends that
+    // never coexist upstream; see snd_reverb_dsp.ts's header comment), so
+    // this ordering is this port's own choice, not a divergence from a real
+    // original.
+    const reverbParams = GetActiveReverbParams();
+    if (reverbParams) {
+      const count = end - paintedtime;
+      for (let i = 0; i < count; i++) {
+        reverbScratchL[i] = paintbuffer[i].left;
+        reverbScratchR[i] = paintbuffer[i].right;
+      }
+      S_ReverbProcessBlock(reverbParams, dma.speed, reverbScratchL, reverbScratchR, count);
+      for (let i = 0; i < count; i++) {
+        paintbuffer[i].left = reverbScratchL[i];
+        paintbuffer[i].right = reverbScratchR[i];
       }
     }
 
