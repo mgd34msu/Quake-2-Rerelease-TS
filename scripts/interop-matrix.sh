@@ -32,6 +32,14 @@ REPO_ROOT="$(pwd)"
 Q2REPRO_SRC="${Q2REPRO_SRC:-$HOME/Projects/qsrc/q2repro}"
 Q2REPRO_BUILD="${Q2REPRO_BUILD:-$Q2REPRO_SRC/build}"
 Q2TS_BASEDIR="${Q2TS_BASEDIR:-$HOME/q2ts}"
+# Bare filename (exec'd by name, not path -- see make_play_basedir's own doc
+# comment above it for why: late-command ARGUMENTS can't contain '-', so a
+# real path like "baseq2/selfplay.cfg" would break the id parser). Used by
+# both the self-play cells (SELFPLAY_CFG) and the foreign-drive cells
+# (FOREIGN_DRIVE_CFG) -- same file, two names for historical reasons (the
+# foreign-drive cells predate cell_f's self-play pattern).
+SELFPLAY_CFG="selfplay.cfg"
+FOREIGN_DRIVE_CFG="$SELFPLAY_CFG"
 LOGDIR="$REPO_ROOT/.orch/interop-logs"
 PORT="${INTEROP_PORT:-27910}"
 

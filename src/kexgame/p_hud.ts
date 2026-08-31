@@ -65,23 +65,21 @@
 //   - G_SetStats's weapon-wheel bitmask (STAT_WEAPONS_OWNED_1/2), the
 //     AMMO_INFO wheel-fill loop, the POWERUP_INFO wheel-fill loop, and
 //     STAT_ACTIVE_WHEEL_WEAPON/STAT_ACTIVE_WEAPON's `weapon_wheel_index`
-//     reads: all resolve items via `GetItemByIndex`/`GetItemByAmmo`/
-//     `GetItemByPowerup` against the GLOBAL `itemlist[]` (g_items.cpp,
-//     genuinely not ported anywhere in src/kexgame/ -- confirmed by
-//     grepping the whole tree) AND run UNCONDITIONALLY on every
-//     G_SetStats call (no cvar/flag guards at all), so per g_combat.ts's
-//     own "an unconditionally-reached unported dep can't be a throwing
-//     stub" rule, these are left at the exact zero/`-1` value the C
-//     source's own `memset`/no-op-default state already produces before
-//     attempting to fill them, cited here rather than guessed at -- same
-//     shape g_combat.ts's `STAT_HIT_MARKER` write used to have before this
-//     enum landed (restored in the 2026-08-30 cleanup sweep once the real
-//     stat index below existed to write to).
-//   - STAT_SELECTED_ICON / STAT_KEY_A/B/C: also `itemlist[]`-dependent
-//     (icon lookup by id / an `IF_KEY`-flag scan over the whole itemlist)
-//     and reached whenever `pers.selected_item !== IT_NULL` / always (key
-//     display isn't cvar-guarded, only deathmatch-gated) -- dropped to 0
-//     for the same reason.
+//     reads: WAS dropped (resolved items via `GetItemByIndex`/`GetItemByAmmo`/
+//     `GetItemByPowerup` against the GLOBAL `itemlist[]`, g_items.cpp, which
+//     did not exist anywhere in src/kexgame/ at the time). `src/kexgame/
+//     g_items.ts` has since landed with a real, exported `itemlist` (its own
+//     `SetItemNames` populates `weapon_wheel_index`/`ammo_wheel_index`/
+//     `powerup_wheel_index` for real) -- ported for real here (2026-08-30
+//     engine-core widening sweep), matching p_hud.cpp:748-763/783-789/838-858
+//     exactly; see each call site's own comment for the line-by-line citation.
+//   - STAT_SELECTED_ICON / STAT_KEY_A/B/C: still dropped -- also
+//     `itemlist[]`-dependent (icon lookup by id / an `IF_KEY`-flag scan over
+//     the whole itemlist) and reached whenever `pers.selected_item !== IT_NULL`
+//     / always (key display isn't cvar-guarded, only deathmatch-gated), but
+//     out of this sweep's scope (task brief named the weapon-wheel/ammo-wheel
+//     stats specifically); dropped to 0 for the same "unconditionally-reached
+//     unported dep" reasoning as before.
 //   - `SetCTFStats`'s tech-icon loop and its `if (ctf->integer) {...}`
 //     team-logo block: see the STUB INVENTORY section below.
 //
@@ -167,6 +165,7 @@ import {
   CoopRespawnT,
   CtfteamT,
   type EdictT,
+  EntFlagsT,
   type GClientT,
   type GitemT,
   HandednessT,
@@ -202,11 +201,11 @@ import {
   GTIME_ZERO,
 } from "./gtime";
 import { G_FindByString, G_FreeEdict } from "./g_utils";
-import { irandom } from "./q_std";
+import { irandom, clamp } from "./q_std";
 import { SpawnFlags_has } from "./spawnflags";
 import { ArmorIndex, PowerArmorType } from "./g_combat";
 import { G_TeamplayEnabled } from "./p_view";
-import { GetItemByIndex, itemlist } from "./g_items";
+import { GetItemByIndex, GetItemByAmmo, GetItemByPowerup, itemlist } from "./g_items";
 import { CTFCalcRankings, CTFCalcScores, CTFScoreboardMessage, SetCTFStats } from "./ctf/g_ctf";
 import { PMenu_Close } from "./ctf/p_ctf_menu";
 import { respawn, P_UseCoopInstancedItems } from "./p_client";
@@ -458,6 +457,23 @@ function resolveItem(id: ItemIdT): GitemT {
   return item;
 }
 
+// g_items.cpp:62/69 `GetItemByAmmo`/`GetItemByPowerup`: the C source
+// dereferences both unconditionally, since real gameplay always calls
+// InitItems()/SetItemNames() (g_items.ts) once at game init before any
+// client can reach G_SetStats. This port's own ammo-wheel/powerup-wheel
+// loops below (p_hud.cpp:783-789/838-858) run EVERY G_SetStats call
+// regardless of what the client actually holds, so unlike `resolveItem`
+// above (only ever called for an item id the caller already confirmed is
+// held), a null here is not necessarily an invariant violation -- it is also
+// the normal state of any test fixture that exercises G_SetStats without
+// bootstrapping the item tables first (this port's own test suite has many:
+// see test/kexgame_p_view.test.ts's `setupWorld`). Skipping a null result
+// (leaving that ammo/powerup type's slot at the zero the memset-equivalent
+// loop above already wrote) is therefore the defensive choice, not a
+// silently-dropped real feature: once InitItems()/SetItemNames() has
+// actually run, every AmmoT/PowerupT value resolves for real and this branch
+// is never taken.
+
 // ---------------------------------------------------------------------------
 // activePlayers -- local copy (see p_view.ts's identical
 // `activePlayers()`/g_ai.ts's `activePlayers()` precedent: each consuming
@@ -543,13 +559,35 @@ export function G_SetStats(ent: EdictT): void {
   client.ps.stats[PlayerStatT.STAT_HEALTH] = ent.health;
 
   //
-  // weapons -- weapon-wheel bitmask/active-wheel-weapon: DROPPED (itemlist
-  // `weapon_wheel_index`, see file header)
+  // weapons -- weapon-wheel bitmask/active-wheel-weapon (p_hud.cpp:748-763).
+  // itemlist's `weapon_wheel_index` (g_items.ts's `SetItemNames`, scanning
+  // every IF_WEAPON-flagged entry) now backs this for real. The loop bound
+  // (IT_WEAPON_GRAPPLE..IT_WEAPON_DISRUPTOR) is a raw numeric range, not a
+  // "weapons only" filter -- it also crosses IT_AMMO_GRENADES/_TRAP/_TESLA,
+  // which the real itemlist (and g_local.h's own enum ordering, confirmed
+  // against quake2-rerelease-dll/rerelease/g_local.h:873-893) flags
+  // `IF_AMMO | IF_WEAPON` (grenades/trap/tesla are dual ammo+throwable-weapon
+  // items), so they legitimately carry a `weapon_wheel_index` too and belong
+  // in this scan exactly as the C source has it.
   //
-  client.ps.stats[PlayerStatT.STAT_WEAPONS_OWNED_1] = 0;
-  client.ps.stats[PlayerStatT.STAT_WEAPONS_OWNED_2] = 0;
-  client.ps.stats[PlayerStatT.STAT_ACTIVE_WHEEL_WEAPON] = -1;
-  client.ps.stats[PlayerStatT.STAT_ACTIVE_WEAPON] = -1;
+  let weaponbits = 0;
+  for (let invIndex = ItemIdT.IT_WEAPON_GRAPPLE; invIndex <= ItemIdT.IT_WEAPON_DISRUPTOR; invIndex++) {
+    // weapon_wheel_index defaults to -1 until SetItemNames() has run (see
+    // this loop's own header note); guard against `1 << -1` corrupting
+    // weaponbits for a not-yet-bootstrapped item table, same defensive
+    // reasoning as the ammo/powerup wheel loops below.
+    const wheelIndex = resolveItem(invIndex).weapon_wheel_index;
+    if (client.pers.inventory[invIndex] && wheelIndex >= 0) weaponbits |= 1 << wheelIndex;
+  }
+  client.ps.stats[PlayerStatT.STAT_WEAPONS_OWNED_1] = weaponbits & 0xffff;
+  client.ps.stats[PlayerStatT.STAT_WEAPONS_OWNED_2] = (weaponbits >>> 16) & 0xffff;
+
+  client.ps.stats[PlayerStatT.STAT_ACTIVE_WHEEL_WEAPON] = client.newweapon
+    ? client.newweapon.weapon_wheel_index
+    : client.pers.weapon
+      ? client.pers.weapon.weapon_wheel_index
+      : -1;
+  client.ps.stats[PlayerStatT.STAT_ACTIVE_WEAPON] = client.pers.weapon !== null ? client.pers.weapon.weapon_wheel_index : -1;
 
   //
   // ammo
@@ -565,9 +603,16 @@ export function G_SetStats(ent: EdictT): void {
     }
   }
 
-  // ammo wheel fill: DROPPED (itemlist `GetItemByAmmo`, see file header) --
-  // left at the zero state the C source's own `memset` produces.
+  // ammo wheel fill (p_hud.cpp:783-789): `memset` to zero, then
+  // G_SetAmmoStat per ammo type via itemlist's GetItemByAmmo/ammo_wheel_index
+  // -- now real.
   for (let i = PlayerStatT.STAT_AMMO_INFO_START; i <= STAT_AMMO_INFO_END; i++) client.ps.stats[i] = 0;
+  for (let ammoIndex = AmmoT.AMMO_BULLETS; ammoIndex < AmmoT.AMMO_MAX; ammoIndex++) {
+    const ammo = GetItemByAmmo(ammoIndex);
+    if (ammo === null) continue; // InitItems() hasn't run -- see this section's own header note
+    const val = G_CheckInfiniteAmmo(ammo) ? AMMO_VALUE_INFINITE : clamp(client.pers.inventory[ammo.id], 0, AMMO_VALUE_INFINITE - 1);
+    G_SetAmmoStat(client.ps.stats, PlayerStatT.STAT_AMMO_INFO_START, ammo.ammo_wheel_index, val);
+  }
 
   //
   // armor
@@ -598,10 +643,30 @@ export function G_SetStats(ent: EdictT): void {
     client.ps.stats[PlayerStatT.STAT_PICKUP_STRING] = 0;
   }
 
-  // owned powerups wheel fill: DROPPED (itemlist `GetItemByPowerup`, see
-  // file header) -- left at the zero state the C source's own `memset`
-  // produces.
+  // owned powerups wheel fill (p_hud.cpp:838-858): `memset` to zero, then
+  // G_SetPowerupStat per powerup type via itemlist's
+  // GetItemByPowerup/powerup_wheel_index -- now real. Power screen/shield and
+  // flashlight are 3-state (off/held/active, via FL_POWER_ARMOR/FL_FLASHLIGHT);
+  // every other powerup is its raw held count, clamped to the 2-bit field's
+  // [0,3] range.
   for (let i = STAT_POWERUP_INFO_START; i <= STAT_POWERUP_INFO_END; i++) client.ps.stats[i] = 0;
+  for (let powerupIndex = PowerupT.POWERUP_SCREEN; powerupIndex < PowerupT.POWERUP_MAX; powerupIndex++) {
+    const powerup = GetItemByPowerup(powerupIndex);
+    if (powerup === null) continue; // InitItems() hasn't run -- see this section's own header note
+    let val: number;
+    if (powerup.id === ItemIdT.IT_ITEM_POWER_SCREEN || powerup.id === ItemIdT.IT_ITEM_POWER_SHIELD) {
+      if (!client.pers.inventory[powerup.id]) val = 0;
+      else if ((ent.flags & EntFlagsT.FL_POWER_ARMOR) !== 0n) val = 2;
+      else val = 1;
+    } else if (powerup.id === ItemIdT.IT_ITEM_FLASHLIGHT) {
+      if (!client.pers.inventory[powerup.id]) val = 0;
+      else if ((ent.flags & EntFlagsT.FL_FLASHLIGHT) !== 0n) val = 2;
+      else val = 1;
+    } else {
+      val = clamp(client.pers.inventory[powerup.id], 0, 3);
+    }
+    G_SetPowerupStat(client.ps.stats, STAT_POWERUP_INFO_START, powerup.powerup_wheel_index, val);
+  }
 
   client.ps.stats[PlayerStatT.STAT_TIMER_ICON] = 0;
   client.ps.stats[PlayerStatT.STAT_TIMER] = 0;

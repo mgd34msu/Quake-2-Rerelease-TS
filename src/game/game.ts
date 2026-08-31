@@ -87,6 +87,11 @@ export interface Edict {
 
 // a trace returned to game code: same shape as q_shared.ts's TraceT, but
 // with `ent` recovered as the game-visible `Edict` instead of `unknown`.
+// plane2/surface2 are optional here (unlike the concrete TraceT class, which
+// always initializes them): the many existing hand-built GTraceT trace-stub
+// literals across the test suite predate the second-surface fields and have
+// no reason to know about them -- real production trace results (sv_world.ts's
+// toGTrace, bindings/kex.ts's toKexTrace) always populate both.
 export interface GTraceT extends Omit<TraceT, "ent"> {
   ent: Edict | null;
 }

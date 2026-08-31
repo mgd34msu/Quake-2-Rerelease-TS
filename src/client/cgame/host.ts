@@ -789,16 +789,17 @@ function kexPmoveStateViewFromClassic(src: PmoveStateT): KexPmoveStateT {
 //     kex's own field-rename convention (q_shared.ts's PlayerStateT.blend
 //     doc comment), copied by value (not aliased) so callers can't mutate
 //     the source ps through the view.
-//   - stats: this port's classic PlayerStateT.stats is a vanilla
-//     Int16Array(32) (q_shared.ts MAX_STATS); kex's own stats array is
-//     Int16Array(64) (kexapi/game.ts MAX_STATS). The reverse of kex.ts's
-//     documented 64->32 TRUNCATION is a 32->64 WIDEN: the first 32 slots
-//     are copied as-is, the remaining 32 (kex-only stats: weapon-wheel,
-//     coop-respawn, hit-marker, etc. -- see kexapi/game.ts's PlayerStatT)
-//     are zero-filled (Int16Array's own default), matching kex.ts's own
-//     "TODO(phase-2b): widen PlayerStateT.stats to 64" note -- until that
-//     lands, any kex-only stat read off this view is legitimately 0, not a
-//     guess.
+//   - stats: this port's PlayerStateT.stats is MAX_STATS_STORAGE=64-wide
+//     (q_shared.ts, "wide core" limit lift landed) -- the SAME width as
+//     kex's own stats array (Int16Array(64), kexapi/game.ts MAX_STATS), so
+//     `stats.set(src.stats)` below copies all 64 slots for real, including
+//     the kex-only stats past index 31 (weapon-wheel, coop-respawn,
+//     hit-marker, etc. -- see kexapi/game.ts's PlayerStatT). This used to be
+//     a 32->64 widen with the upper 32 zero-filled (kex.ts's former
+//     "TODO(phase-2b)" note); that gap is closed, so this is now a plain
+//     same-width copy, kept as its own named conversion only because the
+//     surrounding fields still need per-field translation (pmove, screen_blend
+//     rename, etc.).
 function kexPlayerStateViewFromClassic(src: PlayerStateT): KexPlayerStateT {
   const stats = new Int16Array(KEX_MAX_STATS);
   stats.set(src.stats);

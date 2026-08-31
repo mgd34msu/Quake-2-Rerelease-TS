@@ -198,6 +198,17 @@ export class TraceT {
   surface: CsurfaceT | null = null; // surface hit
   contents = 0; // contents on other side of surface hit
   ent: unknown = null; // not set by CM_*() functions
+  // [Paril-KEX] second-best plane/surface hit when a trace segment crosses
+  // two brush sides of the same brush at different entry fractions (q2repro
+  // src/common/cmodel.c's CM_ClipBoxToBrush, clipplane[1]/leadside[1]).
+  // surface2 is null unless a second side was actually crossed. Typed
+  // optional (not just null-defaulted) so the many pre-existing hand-built
+  // trace-result object literals across the codebase/test suite (predating
+  // this field) don't all need updating -- every real CM_BoxTrace/
+  // CM_TransformedBoxTrace result still always sets both via the class's
+  // own field initializers below.
+  plane2?: CplaneT = new CplaneT();
+  surface2?: CsurfaceT | null = null;
 }
 
 // pmove_state_t is the information necessary for client side movement prediction
@@ -709,7 +720,25 @@ export const STAT_FLASHES = 15; // cleared each frame, 1 = health, 2 = armor
 export const STAT_CHASE = 16;
 export const STAT_SPECTATOR = 17;
 
-export const MAX_STATS = 32;
+export const MAX_STATS = 32; // the CLASSIC family's WIRE bound -- vanilla/r1q2/q2pro's
+// playerstate delta codecs (qcommon/protocol/vanilla.ts, r1q2.ts, q2pro.ts) encode a
+// single 32-bit statbits long over exactly this many stats and never carry more; this
+// constant must stay 32 for those three codecs to keep matching their reference wire
+// format. It is NOT the storage width of PlayerStateT.stats below -- see MAX_STATS_STORAGE.
+
+// Storage width for PlayerStateT.stats: sized to the WIDEST family this port carries
+// (the kex/rerelease family's kexapi/game.ts MAX_STATS=64, matching kexapi's
+// KexPlayerStateT.stats exactly) so the engine can hold a full kex playerstate without
+// truncating the upper 32 slots -- STAT_WEAPONS_OWNED_1/2 (32/33), STAT_AMMO_INFO_START..
+// (34+), STAT_ACTIVE_WHEEL_WEAPON (47), STAT_ACTIVE_WEAPON (53); see
+// src/kexgame/p_hud.ts's `PlayerStatT` enum for the full kex-family layout. NOT the
+// CLASSIC wire bound above: vanilla/r1q2/q2pro still only read/write slots 0-31
+// (MAX_STATS), matching their own 32-bit statbits long -- slots 32-63 simply never
+// round-trip over a classic connection, same as the real engines they mirror. The
+// rerelease/q2repro-family wire codec (qcommon/protocol/q2repro.ts) reads/writes all
+// MAX_STATS_STORAGE slots (a 64-bit statbits mask, matching q2proto_proto_q2repro.c's
+// EPS_STATS handling -- see that file's own header for the exact wire format).
+export const MAX_STATS_STORAGE = 64;
 
 // dmflags->value flags
 export const DF_NO_HEALTH = 0x00000001; // 1
@@ -864,7 +893,7 @@ export class PlayerStateT {
 
   rdflags = 0; // refdef flags
 
-  stats: Int16Array = new Int16Array(MAX_STATS); // fast status bar updates
+  stats: Int16Array = new Int16Array(MAX_STATS_STORAGE); // fast status bar updates; 64-wide, see MAX_STATS_STORAGE
 
   team_id = 0; // KEX addition: team identifier
 }

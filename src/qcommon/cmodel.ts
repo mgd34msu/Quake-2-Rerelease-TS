@@ -970,9 +970,16 @@ CM_ClipBoxToBrush
 ================
 */
 function CM_ClipBoxToBrush(mins: Vec3, maxs: Vec3, p1: Vec3, p2: Vec3, trace: TraceT, brush: CbrushT): void {
+  // enterfrac[0]/clipplane[0]/leadside[0] is the latest (winning) entering
+  // plane; [1] is the next-best entering plane from a different brush side
+  // crossed in the same segment (q2repro cmodel.c:476-533's clipplane[2]/
+  // leadside[2] arrays -- an edge/corner case where a trace enters two
+  // sides of one brush at different fractions).
   let enterfrac = -1;
+  let enterfrac2 = -1;
   let leavefrac = 1;
   let clipplane: CplaneT | null = null;
+  let clipplane2: CplaneT | null = null;
 
   if (!brush.numsides) return;
 
@@ -981,6 +988,7 @@ function CM_ClipBoxToBrush(mins: Vec3, maxs: Vec3, p1: Vec3, p2: Vec3, trace: Tr
   let getout = false;
   let startout = false;
   let leadside: CbrushsideT | null = null;
+  let leadside2: CbrushsideT | null = null;
 
   const ofs = vec3();
 
@@ -1018,9 +1026,16 @@ function CM_ClipBoxToBrush(mins: Vec3, maxs: Vec3, p1: Vec3, p2: Vec3, trace: Tr
       // enter
       const f = (d1 - DIST_EPSILON) / (d1 - d2);
       if (f > enterfrac) {
+        // matches cmodel.c:524-527 exactly: the previous slot-0 best is
+        // simply overwritten, NOT demoted into slot 1 -- a faithful
+        // reproduction of the reference's own behavior, not a bug fixed here.
         enterfrac = f;
         clipplane = plane;
         leadside = side;
+      } else if (f > enterfrac2) {
+        enterfrac2 = f;
+        clipplane2 = plane;
+        leadside2 = side;
       }
     } else {
       // leave
@@ -1042,6 +1057,20 @@ function CM_ClipBoxToBrush(mins: Vec3, maxs: Vec3, p1: Vec3, p2: Vec3, trace: Tr
       if (clipplane) copyPlane(trace.plane, clipplane);
       if (leadside) trace.surface = leadside.surface.c;
       trace.contents = brush.contents;
+
+      // cmodel.c:565-568: `if (leadside[1]) { trace->plane2 = *clipplane[1];
+      // trace->surface2 = &(leadside[0]->texinfo->c); }` -- surface2 reads
+      // leadside[0] (the SAME leadside as the primary `trace.surface` above),
+      // not leadside[1]/leadside2, in the reference itself. Reproduced
+      // verbatim (bug-for-bug, not "fixed" here): plane2 is the real second
+      // plane, surface2 is a copy of the primary surface.
+      if (leadside2) {
+        if (clipplane2) {
+          if (!trace.plane2) trace.plane2 = new CplaneT();
+          copyPlane(trace.plane2, clipplane2);
+        }
+        trace.surface2 = leadside ? leadside.surface.c : null;
+      }
     }
   }
 }

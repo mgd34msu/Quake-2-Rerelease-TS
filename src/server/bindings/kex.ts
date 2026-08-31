@@ -145,12 +145,12 @@
 //     both sides (verified against kexapi/game.ts's `PmflagsT` bit
 //     positions) and are copied as raw numbers.
 //   - stats: kex widened `MAX_STATS` to 64 (kexapi/game.ts); this port's
-//     `PlayerStateT.stats` is still the vanilla `Int16Array(32)`
-//     (q_shared.ts's `MAX_STATS`). Only the first 32 slots survive the
-//     crossing -- TODO(phase-2b): widen `PlayerStateT.stats` to 64 as part
-//     of the ARCHITECTURE.md "wide core" limit lift, at which point this
-//     truncation goes away. Reported, not silently accepted, per this
-//     unit's brief.
+//     `PlayerStateT.stats` (q_shared.ts) is sized `MAX_STATS_STORAGE=64`
+//     (distinct from `MAX_STATS=32`, which stays the CLASSIC family's wire
+//     bound) precisely to hold all 64 kex slots -- the weapon-wheel/
+//     ammo-info/powerup-info/key-display/coop-respawn/hit-marker/health-bar
+//     stats past index 31 all survive the crossing now (ARCHITECTURE.md
+//     "wide core" limit lift, landed).
 //   - `client.ps` must be a real `new PlayerStateT()` INSTANCE, not merely a
 //     structurally-compatible object: sv_ents.ts's/sv_main.ts's/
 //     sv_ccmds.ts's own `client.ps instanceof PlayerStateT` type guards
@@ -159,7 +159,8 @@
 //     check (`{ ps: PlayerStateT; ping: number }`).
 //
 // ============================================================================
-// A KNOWN, UNFIXED CAPACITY GAP -- reported, not silently absorbed
+// A FORMERLY-KNOWN CAPACITY GAP -- CLOSED (engine-core widening sweep,
+// 2026-08-30)
 // ============================================================================
 // This binding sets `svs.csr = CS_REMAP_RERELEASE` (done in sv_game.ts's
 // dispatch, not here) so the already-family-aware `SV_ModelIndex`/
@@ -168,27 +169,30 @@
 // wide CS_* index layout instead of rejecting it against the narrow legacy
 // one. `sv.configstrings` is already sized for the wide family regardless of
 // which csr is active (server.ts's own comment: "Sized at the widest known
-// family's configstring count"). However, `sv.models` (sv_init.ts/server.ts,
-// `Array(MAX_MODELS)` = 256 slots) and `sv.entities` (server.ts,
-// `Array(MAX_EDICTS)` = 1024 slots, used by SV_LinkEdict's framediv history
-// ring) are STILL SIZED TO THE LEGACY, NARROW CONSTANTS -- they have not
-// been widened as part of the "wide core" phase 2 commitment. A kex map
-// or module that registers more than 256 models, or spawns an edict whose
-// `s.number` reaches 1024, will hit `undefined` array reads this binding
-// does not guard against (JS arrays don't throw on out-of-declared-length
-// access, but `sv.entities[n].history` on an `undefined` slot will). Not
-// fixed here: widening those two arrays is a cross-cutting engine-core
-// change spanning server.ts/sv_init.ts/sv_world.ts, out of this unit's
-// scope (bindings, not engine-core sizing). q2dm1 (the maiden-boot map) has
-// well under 256 models and well under 1024 edicts, so this gap does not
-// manifest on that map; it will on a busier or officially-wide-content map.
+// family's configstring count"). `sv.models`/`sv.baselines`/`sv.entities`
+// (server.ts) USED TO BE sized to the legacy, narrow constants regardless of
+// family; they are now family-dispatched via server.ts's exported
+// `SV_MaxModels()`/`SV_MaxEdicts()` helpers (kex family: kexapi/game.ts's
+// wide MAX_MODELS/MAX_EDICTS = 8192 each; classic family: the narrow
+// shared/q_shared.ts constants), read by `ServerT`'s field defaults and its
+// `clear()` (called every `SV_SpawnServer`, after `svs.csr` is already
+// settled by `SV_InitGameProgs`). This binding's own `kexBoxEdicts`'s scratch
+// buffer (below) uses the same `SV_MaxEdicts()` helper instead of a hardcoded
+// constant, closing the matching gap called out in the "BoxEdicts's filter
+// callback" note below. q2dm1 (the maiden-boot map) has well under 256
+// models and well under 1024 edicts, so this gap never manifested there; it
+// would have on a busier or officially-wide-content kex map/module.
 //
 // ============================================================================
 // OTHER DOCUMENTED, INTENTIONAL GAPS (TODOs cited at their call site too)
 // ============================================================================
-// - `trace`'s `plane2`/`surface2` (the second-best surface hit): the
-//   engine's CM_BoxTrace/CM_TransformedBoxTrace track only one plane/
-//   surface. Null/default. TODO(phase 7).
+// - `trace`'s `plane2`/`surface2` (the second-best surface hit): REAL as of
+//   the 2026-08-30 engine-core widening sweep -- qcommon/cmodel.ts's
+//   `CM_ClipBoxToBrush` now tracks the second-best entering plane/side per
+//   q2repro's own cmodel.c algorithm (including its `surface2`-reuses-the-
+//   primary-surface quirk, reproduced bug-for-bug, not "fixed"); this
+//   binding's trace conversion below copies both fields through instead of
+//   defaulting them. TODO(phase 7) is stale and removed.
 // - `inPVS`/`inPHS`'s `portals` parameter: ignored: the engine's own
 //   PF_inPVS/PF_inPHS (sv_game.ts, reused directly here) never modeled
 //   portal-only visibility either, matching q2repro's own PF_inVIS
@@ -214,11 +218,10 @@
 //   client, each with its own connection, needing no dedup). Ignoring
 //   `dupe_key` IS matching the reference, not a gap relative to it.
 // - `BoxEdicts`'s filter callback: `SV_AreaEdicts` has no filter concept of
-//   its own; applied here in TS after the fact against the engine's own
-//   internal buffer ceiling (`shared/q_shared.ts`'s legacy `MAX_EDICTS`,
-//   1024 -- the same ceiling SV_AreaEdicts's own `Com_Printf("...MAXCOUNT")`
-//   already assumes internally; not re-widened here, same capacity-gap
-//   rationale as above).
+//   its own; applied here in TS after the fact against a scratch buffer
+//   sized by `SV_MaxEdicts()` (server.ts) -- family-sized as of the capacity
+//   fix above, so `SV_AreaEdicts`'s own `Com_Printf("...MAXCOUNT")` ceiling
+//   matches whichever family is active instead of always being the legacy 1024.
 // - `GetPathToGoal`/`Bot_RegisterEdict`/`Bot_UnRegisterEdict`: real A*
 //   pathfinding and edict registration, ported to src/server/nav.ts
 //   (server/nav.c) as of ARCHITECTURE.md phase 7's nav-mesh unit. See
@@ -312,7 +315,6 @@ import {
   Info_SetValueForKey,
   SHORT2ANGLE,
   ANGLE2SHORT,
-  MAX_EDICTS,
 } from "../../shared/q_shared";
 import { Com_Printf } from "../../qcommon/common";
 import { Loc_Localize } from "../../qcommon/loc";
@@ -320,7 +322,7 @@ import { Cvar_Get, Cvar_Set, Cvar_ForceSet } from "../../qcommon/cvar";
 import { Cmd_Argc, Cmd_Argv, Cmd_Args, Cbuf_AddText } from "../../qcommon/cmd";
 import { CM_SetAreaPortalState, CM_AreasConnected } from "../../qcommon/cmodel";
 import { FS_WriteFile, FS_ReadRawFile } from "../../qcommon/files";
-import { sv } from "../server";
+import { sv, SV_MaxEdicts } from "../server";
 import { SV_Multicast, SV_StartSound, SV_BroadcastPrintf } from "../sv_send";
 import { SV_ModelIndex, SV_SoundIndex, SV_ImageIndex } from "../sv_init";
 import { SV_LinkEdict, SV_UnlinkEdict, SV_AreaEdicts, SV_Trace, SV_Clip, SV_PointContents } from "../sv_world";
@@ -585,8 +587,11 @@ function syncPlayerStateKexToEngine(src: KexPlayerStateT, dst: PlayerStateT): vo
   dst.damage_blend.set(src.damage_blend);
   dst.fov = src.fov;
   dst.rdflags = src.rdflags;
-  // MAX_STATS truncation (64 -> 32) -- see file header.
-  dst.stats.set(src.stats.subarray(0, dst.stats.length));
+  // PlayerStateT.stats is MAX_STATS_STORAGE=64-wide (q_shared.ts), matching
+  // kexapi's own KexPlayerStateT.stats (MAX_STATS=64) exactly -- all 64
+  // slots copy through; no truncation (see file header, "stats" section,
+  // for the historical 64->32 gap this closes).
+  dst.stats.set(src.stats);
   dst.team_id = src.team_id;
 }
 
@@ -671,10 +676,12 @@ function toKexTrace(gt: GTraceT): KexTraceT {
     surface: gt.surface ? { name: gt.surface.name, flags: gt.surface.flags, value: gt.surface.value, id: 0, material: "" } : null,
     contents: gt.contents,
     ent: resolveKexFromEngine(gt.ent),
-    // [Paril-KEX] second-best surface hit -- the engine's CM_BoxTrace/
-    // CM_TransformedBoxTrace track only a single plane/surface. TODO(phase 7).
-    plane2: new CplaneT(),
-    surface2: null,
+    // [Paril-KEX] second-best plane/surface hit -- qcommon/cmodel.ts's
+    // CM_ClipBoxToBrush now tracks this for real (q2repro cmodel.c:476-569),
+    // including the reference's own surface2-reuses-leadside[0] quirk. See
+    // that function's comment for the exact citation.
+    plane2: gt.plane2 ?? new CplaneT(),
+    surface2: gt.surface2 ? { name: gt.surface2.name, flags: gt.surface2.flags, value: gt.surface2.value, id: 0, material: "" } : null,
   };
 }
 
@@ -721,8 +728,15 @@ function kexBoxEdicts(
   filter: BoxEdictsFilterT | null,
   filter_data: unknown,
 ): number {
-  const engineList: Edict[] = new Array(MAX_EDICTS);
-  const rawCount = SV_AreaEdicts(mins, maxs, engineList, MAX_EDICTS, areatype);
+  // Family-sized (SV_MaxEdicts), not the legacy shared/q_shared.ts MAX_EDICTS
+  // this scratch buffer used to be pinned to -- see server.ts's SV_MaxEdicts
+  // doc comment and this file's own former "KNOWN, UNFIXED CAPACITY GAP"
+  // header note (now closed; server.ts/sv_init.ts/sv_world.ts's sv.models/
+  // sv.entities are family-sized too, as of the 2026-08-30 engine-core
+  // widening sweep).
+  const maxEdicts = SV_MaxEdicts();
+  const engineList: Edict[] = new Array(maxEdicts);
+  const rawCount = SV_AreaEdicts(mins, maxs, engineList, maxEdicts, areatype);
   let kept = 0;
   for (let i = 0; i < rawCount; i++) {
     const kexEnt = resolveKexFromEngine(engineList[i]);

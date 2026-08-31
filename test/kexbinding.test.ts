@@ -15,8 +15,8 @@ test/kexgame_g_main.test.ts and friends, and is exercised end-to-end for
 real by the maiden-boot smoke test (`bun src/main.ts ... +set game kex
 +map q2dm1`). This suite's job is the ADAPTER's own translation logic:
 apiversion mapping, PreInit/Init/RunFrame ordering, the ClientConnect
-{allowed,userinfo} shape, the effects_t bigint<->number split, MAX_STATS
-truncation, and the edict-index cross-referencing (owner/BoxEdicts/
+{allowed,userinfo} shape, the effects_t bigint<->number split, the full
+64-slot stats copy, and the edict-index cross-referencing (owner/BoxEdicts/
 ClientConnect all resolving through the same engine<->kex edict map).
 
 Scope (14 cases):
@@ -38,9 +38,8 @@ Scope (14 cases):
   - The edict bridge: engine-view array is index-aligned with the fake
     KexGameExports.edicts array; `owner` cross-references resolve to the
     correct engine-view object by identity.
-  - MAX_STATS truncation: a 64-slot kex player-state's stats truncate to the
-    engine's 32-slot PlayerStateT.stats, keeping indices [0,32) and dropping
-    [32,64) -- reported, not silently absorbed.
+  - Stats copy: a 64-slot kex player-state's stats copy onto the engine's
+    now-equally-64-slot PlayerStateT.stats in full, no truncation.
   - client.ps is a real `PlayerStateT` instance (sv_ents.ts's own
     `instanceof PlayerStateT` type guard requirement).
   - num_edicts/max_edicts live-delegate (get and set) to the underlying
@@ -344,8 +343,8 @@ describe("adaptKexGameExports", () => {
     expect(result.userinfo).toBe("\\name\\Player\\rejmsg\\");
   });
 
-  describe("MAX_STATS truncation and client.ps identity", () => {
-    test("truncates a 64-slot kex stats array to the engine's 32-slot PlayerStateT.stats, keeping indices [0,32)", () => {
+  describe("MAX_STATS_STORAGE (64) copy and client.ps identity", () => {
+    test("copies all 64 kex stats slots to the engine's PlayerStateT.stats -- no truncation", () => {
       const log: CallLog = { calls: [] };
       const world = fakeEdict(0);
       const clientEdict = fakeEdict(1);
@@ -364,14 +363,14 @@ describe("adaptKexGameExports", () => {
       expect(engineClient).not.toBeNull();
       if (!engineClient) return;
 
-      expect(engineClient.ps.stats.length).toBe(32);
-      for (let i = 0; i < 32; i++) {
-        expect(engineClient.ps.stats[i]).toBe(i + 1); // kept
+      // q_shared.ts's PlayerStateT.stats is MAX_STATS_STORAGE=64-wide,
+      // matching kexapi's own MAX_STATS=64 exactly -- every slot, including
+      // the weapon-wheel/ammo-info/powerup-info/key-display stats past
+      // index 31, survives the crossing now.
+      expect(engineClient.ps.stats.length).toBe(64);
+      for (let i = 0; i < 64; i++) {
+        expect(engineClient.ps.stats[i]).toBe(i + 1);
       }
-      // Indices [32,64) genuinely have no home on the engine's still-
-      // vanilla-width PlayerStateT.stats -- there is nothing further to
-      // assert here beyond the array's own length (32), which is the
-      // reported truncation itself.
     });
 
     test("client.ps is a real PlayerStateT instance (sv_ents.ts's instanceof guard requirement)", () => {

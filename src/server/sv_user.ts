@@ -7,7 +7,7 @@
 // comment for the rationale) instead of bare reassignable globals.
 
 import { Com_sprintf } from "../shared/q_shared";
-import { UsercmdT, MAX_INFO_STRING, MAX_EDICTS, CS_NAME, Info_SetValueForKey } from "../shared/q_shared";
+import { UsercmdT, MAX_INFO_STRING, CS_NAME, Info_SetValueForKey } from "../shared/q_shared";
 import { ClcBatchMoveError } from "../qcommon/protocol/clc_batch_move";
 import { SysError, ClcOpsT, SvcOpsT, MAX_MSGLEN, ERR_DROP, UPDATE_MASK } from "../qcommon/qcommon";
 import { Com_Printf, Com_DPrintf, Com_Error, COM_BlockSequenceCRCByte, Info_Print } from "../qcommon/common";
@@ -28,6 +28,7 @@ import {
   net_message,
   sv_paused,
   sv_enforcetime,
+  SV_MaxEdicts,
 } from "./server";
 import { geHolder } from "./sv_game";
 import { SV_DropClient, SV_UserinfoChanged, allow_download, allow_download_players, allow_download_models, allow_download_sounds, allow_download_maps } from "./sv_main";
@@ -218,8 +219,13 @@ export function SV_Baselines_f(): void {
 
   let start = atoi(Cmd_Argv(2));
 
+  // Family-sized bound (SV_MaxEdicts): sv.baselines is already allocated to
+  // this same width by server.ts's ServerT.clear() -- see that function's
+  // own comment.
+  const maxEdicts = SV_MaxEdicts();
+
   // write a packet full of data
-  while (cl.netchan.message.cursize < MAX_MSGLEN / 2 && start < MAX_EDICTS) {
+  while (cl.netchan.message.cursize < MAX_MSGLEN / 2 && start < maxEdicts) {
     const base = sv.baselines[start];
     if (base.modelindex || base.sound || base.effects) {
       cl.codec.writeSpawnBaseline(cl.netchan.message, base);
@@ -228,7 +234,7 @@ export function SV_Baselines_f(): void {
   }
 
   // send next command
-  if (start === MAX_EDICTS) {
+  if (start === maxEdicts) {
     MSG_WriteByte(cl.netchan.message, SvcOpsT.svc_stufftext);
     MSG_WriteString(cl.netchan.message, Com_sprintf("precache %i\n", svs.spawncount));
   } else {

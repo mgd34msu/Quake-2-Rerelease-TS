@@ -307,22 +307,56 @@ describe("Q2REPRO_CODEC.writePlayerStateDelta -- golden bytes", () => {
     expect(bytes).toEqual([17, 0, 4, 0, 41, 255, 127, 255]);
   });
 
-  // 64-bit statbits (Q2PROTO_STATS=64, q2repro.c:2184-2190), written as two
-  // u32 words (low then high -- this port's stats array is only 32 slots
-  // wide, so the high word is always 0 on write; see q2repro.ts's "64-slot
-  // stats" gap note). stat[0] and stat[31] both changed:
-  //   statbits low word = BIT(0)|BIT(31) = 0x80000001 -> LE [1,0,0,128]
-  //   high word = 0 -> [0,0,0,0]
+  // 64-bit statbits (Q2PROTO_STATS=64, q2proto_proto_q2repro.c:2183-2190:
+  // one WRITE_CHECKED(..., u64, statbits) -- a single 8-byte little-endian
+  // op, MSG_WriteLong64 here -- then one i16 per set bit, 0..63). stat[0]
+  // and stat[31] both changed, both below bit 32, so this byte vector is
+  // identical to what a naive low/high-32-bit split would also produce:
+  //   statbits = BIT(0)|BIT(31) = 0x0000000080000001n -> LE 8 bytes
+  //     [1,0,0,128,0,0,0,0]
   //   extraflags = EPS_STATS (BIT(5)=32)
   //   per-bit i16 values in ascending index order: stats[0]=100 -> [100,0],
   //   stats[31]=7 -> [7,0]
-  test("64-bit statbits spanning low and bit-31 (high word always 0)", () => {
+  test("64-bit statbits spanning low and bit-31", () => {
     const from = new PlayerStateT();
     const to = new PlayerStateT();
     to.stats[0] = 100;
     to.stats[31] = 7;
     const bytes = bufOf((msg) => Q2REPRO_CODEC.writePlayerStateDelta(msg, from, to));
     expect(bytes).toEqual([17, 0, 0, 32, 1, 0, 0, 128, 0, 0, 0, 0, 100, 0, 7, 0]);
+  });
+
+  // Widened storage (q_shared.ts's MAX_STATS_STORAGE=64, "wide core" limit
+  // lift): stat[32] and stat[63] -- the weapon-wheel/coop-respawn slots past
+  // the classic 32-stat boundary -- now round-trip for real, matching
+  // q2proto_proto_q2repro.c's single-u64-statbits wire shape exactly
+  // (previously the write side hardcoded a second all-zero 32-bit word and
+  // the read side discarded it, so nothing past index 31 ever crossed the
+  // wire). stat[32]=STAT_WEAPONS_OWNED_1's slot, stat[63]=the top slot:
+  //   statbits = BIT(32)|BIT(63) = 0x8000000100000000n -> LE 8 bytes
+  //     [0,0,0,0,1,0,0,128]
+  //   extraflags = EPS_STATS (32); per-bit i16 values in ascending index
+  //   order: stats[32]=1234 -> [210,4], stats[63]=-1 -> [255,255] (i16 -1)
+  test("64-bit statbits: high-index stats (32, 63) past the classic 32-stat boundary write and read back", () => {
+    const from = new PlayerStateT();
+    const to = new PlayerStateT();
+    to.stats[32] = 1234;
+    to.stats[63] = -1;
+    const bytes = bufOf((msg) => Q2REPRO_CODEC.writePlayerStateDelta(msg, from, to));
+    expect(bytes).toEqual([17, 0, 0, 32, 0, 0, 0, 0, 1, 0, 0, 128, 210, 4, 255, 255]);
+
+    const msg = new SizeBuf();
+    SZ_Init(msg, new Uint8Array(64), 64);
+    Q2REPRO_CODEC.writePlayerStateDelta(msg, from, to);
+    MSG_BeginReading(msg);
+    msg.readcount = 1; // consume the svc_playerinfo tag, matching the existing round-trip test's idiom
+    const out = new PlayerStateT();
+    Q2REPRO_CODEC.readPlayerStateDelta(msg, from, out);
+    expect(out.stats[32]).toBe(1234);
+    expect(out.stats[63]).toBe(-1);
+    // every classic-range slot (untouched) reads back as the `from` baseline's 0
+    expect(out.stats[0]).toBe(0);
+    expect(out.stats[31]).toBe(0);
   });
 
   // gunrate (RERELEASE-only field) -> EPS_GUNRATE (BIT(7)=128), one byte.

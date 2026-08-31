@@ -72,12 +72,26 @@ import {
   ItemIdT,
   ModIdT,
   MovetypeT,
+  PowerupT,
 } from "../src/kexgame/g_local";
 import { defaultEdict, gi, globals, game, level, g_edicts, SetGameImports, SetGameExports, SetGEdicts } from "../src/kexgame/g_main_globals";
 import { Gtime_add, Gtime_from_ms, Gtime_subtract } from "../src/kexgame/gtime";
 import { AngleVectors, vec3_dot, vec3_normalized, vec3_sub } from "../src/kexgame/q_vec3";
 import { ClientEndServerFrame, P_DamageFeedback, P_ForceFogTransition, SV_CalcBlend } from "../src/kexgame/p_view";
-import { G_CheckChaseStats, G_GetAmmoStat, G_SetAmmoStat, G_SetSpectatorStats, G_SetStats, NUM_AMMO_STATS, PlayerStatT } from "../src/kexgame/p_hud";
+import {
+  G_CheckChaseStats,
+  G_GetAmmoStat,
+  G_GetPowerupStat,
+  G_SetAmmoStat,
+  G_SetSpectatorStats,
+  G_SetStats,
+  NUM_AMMO_STATS,
+  PlayerStatT,
+  STAT_AMMO_INFO_END,
+  STAT_POWERUP_INFO_START,
+  STAT_POWERUP_INFO_END,
+} from "../src/kexgame/p_hud";
+import { InitItems, SetItemNames, GetItemByIndex, GetItemByAmmo, GetItemByPowerup } from "../src/kexgame/g_items";
 import { net_message } from "../src/qcommon/net_chan";
 import { SZ_Clear, MSG_BeginReading, MSG_WriteByte, MSG_WriteShort, MSG_WriteFloat, MSG_WriteLong, MSG_ReadByte } from "../src/qcommon/sizebuf";
 import { readFog } from "../src/qcommon/protocol/q2repro";
@@ -914,6 +928,106 @@ describe("G_SetStats: health/ammo/armor stat slots (p_hud.cpp:730-1087)", () => 
 
     expect(client.ps.stats[PlayerStatT.STAT_AMMO]).toBe(0);
     expect(client.ps.stats[PlayerStatT.STAT_AMMO_ICON]).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// G_SetStats: weapon-wheel/ammo-wheel/powerup-wheel stats (p_hud.cpp:748-763/
+// 783-789/838-858) -- engine-core widening sweep, 2026-08-30. `InitItems()`/
+// `SetItemNames()` must run first (populates ammolist/poweruplist and each
+// itemlist entry's weapon_wheel_index/ammo_wheel_index/powerup_wheel_index),
+// matching this port's own g_main.ts InitGame ordering and the identical
+// precedent in test/ctf_weapon.test.ts / test/xatrix_core.test.ts /
+// test/g_combat.test.ts.
+// ---------------------------------------------------------------------------
+
+describe("G_SetStats: weapon-wheel/ammo-wheel/powerup-wheel stats", () => {
+  test("STAT_WEAPONS_OWNED_1/2 bitmask reflects held weapons via itemlist.weapon_wheel_index", () => {
+    const { edicts } = setupWorld(1, 8, 8);
+    InitItems();
+    SetItemNames();
+    const ent = makePlayerEdict(edicts, 1);
+    const client = ent.client!;
+
+    const shotgun = GetItemByIndex(ItemIdT.IT_WEAPON_SHOTGUN)!;
+    const railgun = GetItemByIndex(ItemIdT.IT_WEAPON_RAILGUN)!;
+    client.pers.inventory[ItemIdT.IT_WEAPON_SHOTGUN] = 1;
+    client.pers.inventory[ItemIdT.IT_WEAPON_RAILGUN] = 1;
+
+    G_SetStats(ent);
+
+    const expectedBits = ((1 << shotgun.weapon_wheel_index) | (1 << railgun.weapon_wheel_index)) >>> 0;
+    const actualBits = ((client.ps.stats[PlayerStatT.STAT_WEAPONS_OWNED_1] & 0xffff) | ((client.ps.stats[PlayerStatT.STAT_WEAPONS_OWNED_2] & 0xffff) << 16)) >>> 0;
+    expect(actualBits).toBe(expectedBits);
+    // a weapon never held contributes no bit
+    const bfg = GetItemByIndex(ItemIdT.IT_WEAPON_BFG)!;
+    expect((actualBits & (1 << bfg.weapon_wheel_index)) >>> 0).toBe(0);
+  });
+
+  test("STAT_ACTIVE_WHEEL_WEAPON prefers newweapon (mid-switch); STAT_ACTIVE_WEAPON always reads pers.weapon; both -1 when unarmed", () => {
+    const { edicts } = setupWorld(1, 8, 8);
+    InitItems();
+    SetItemNames();
+    const ent = makePlayerEdict(edicts, 1);
+    const client = ent.client!;
+
+    client.pers.weapon = null;
+    G_SetStats(ent);
+    expect(client.ps.stats[PlayerStatT.STAT_ACTIVE_WHEEL_WEAPON]).toBe(-1);
+    expect(client.ps.stats[PlayerStatT.STAT_ACTIVE_WEAPON]).toBe(-1);
+
+    const blaster = GetItemByIndex(ItemIdT.IT_WEAPON_BLASTER)!;
+    client.pers.weapon = blaster;
+    G_SetStats(ent);
+    expect(client.ps.stats[PlayerStatT.STAT_ACTIVE_WHEEL_WEAPON]).toBe(blaster.weapon_wheel_index);
+    expect(client.ps.stats[PlayerStatT.STAT_ACTIVE_WEAPON]).toBe(blaster.weapon_wheel_index);
+
+    const shotgun = GetItemByIndex(ItemIdT.IT_WEAPON_SHOTGUN)!;
+    client.newweapon = shotgun;
+    G_SetStats(ent);
+    expect(client.ps.stats[PlayerStatT.STAT_ACTIVE_WHEEL_WEAPON]).toBe(shotgun.weapon_wheel_index);
+    expect(client.ps.stats[PlayerStatT.STAT_ACTIVE_WEAPON]).toBe(blaster.weapon_wheel_index);
+  });
+
+  test("ammo-info wheel fill: G_GetAmmoStat reads back each held ammo count via itemlist.ammo_wheel_index", () => {
+    const { edicts } = setupWorld(1, 8, 8);
+    InitItems();
+    SetItemNames();
+    const ent = makePlayerEdict(edicts, 1);
+    const client = ent.client!;
+
+    client.pers.inventory[ItemIdT.IT_AMMO_SHELLS] = 12;
+    client.pers.inventory[ItemIdT.IT_AMMO_CELLS] = 50;
+
+    G_SetStats(ent);
+
+    const shells = GetItemByAmmo(AmmoT.AMMO_SHELLS)!;
+    const cells = GetItemByAmmo(AmmoT.AMMO_CELLS)!;
+    expect(G_GetAmmoStat(client.ps.stats, PlayerStatT.STAT_AMMO_INFO_START, shells.ammo_wheel_index)).toBe(12);
+    expect(G_GetAmmoStat(client.ps.stats, PlayerStatT.STAT_AMMO_INFO_START, cells.ammo_wheel_index)).toBe(50);
+    // an untouched ammo type reads back 0
+    const rockets = GetItemByAmmo(AmmoT.AMMO_ROCKETS)!;
+    expect(G_GetAmmoStat(client.ps.stats, PlayerStatT.STAT_AMMO_INFO_START, rockets.ammo_wheel_index)).toBe(0);
+    // the compressed run stays within its declared slot range
+    expect(STAT_AMMO_INFO_END).toBeGreaterThanOrEqual(PlayerStatT.STAT_AMMO_INFO_START);
+  });
+
+  test("owned powerups wheel fill: G_GetPowerupStat reflects held quad count via itemlist.powerup_wheel_index", () => {
+    const { edicts } = setupWorld(1, 8, 8);
+    InitItems();
+    SetItemNames();
+    const ent = makePlayerEdict(edicts, 1);
+    const client = ent.client!;
+
+    // POWERUP_QUAD's default-branch value is simply clamp(inventory[id], 0, 3)
+    // (p_hud.cpp:852-854) -- quad_time is irrelevant to the wheel value itself.
+    client.pers.inventory[ItemIdT.IT_ITEM_QUAD] = 1;
+
+    G_SetStats(ent);
+
+    const quad = GetItemByPowerup(PowerupT.POWERUP_QUAD)!;
+    expect(G_GetPowerupStat(client.ps.stats, STAT_POWERUP_INFO_START, quad.powerup_wheel_index)).toBe(1);
+    expect(STAT_POWERUP_INFO_END).toBeGreaterThanOrEqual(STAT_POWERUP_INFO_START);
   });
 });
 

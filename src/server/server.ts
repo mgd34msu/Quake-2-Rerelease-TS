@@ -13,6 +13,14 @@ import { type CsRemapT, CS_REMAP_OLD, CS_REMAP_RERELEASE } from "../shared/cs_re
 import type { Edict } from "../game/game";
 import type { ProtocolCodec } from "../qcommon/protocol/codec";
 import { VANILLA_CODEC } from "../qcommon/protocol/vanilla";
+// kex/rerelease family widths (kexapi/game.ts's own MAX_MODELS/MAX_EDICTS =
+// 8192, "these are sent over the net as shorts" / "upper limit, due to
+// svc_sound encoding as 15 bits"): the classic family keeps q_shared.ts's
+// narrow MAX_MODELS(256)/MAX_EDICTS(1024) above; ServerT sizes its per-level
+// arrays to whichever family svs.csr selects (see currentModelCapacity/
+// currentEdictCapacity below). No import cycle risk: kexapi/game.ts only
+// imports from shared/q_shared.ts and shared/math.ts, never from this file.
+import { MAX_MODELS as KEX_MAX_MODELS, MAX_EDICTS as KEX_MAX_EDICTS } from "../kexapi/game";
 
 // server_t.name/mapcmd, client_t.name/userinfo are fixed-size C char arrays
 // (MAX_QPATH, MAX_TOKEN_CHARS, 32, MAX_INFO_STRING); ported as plain strings
@@ -65,6 +73,25 @@ export class ServerEntityT {
   history: EntHistorySlotT[] = Array.from({ length: ENT_HISTORY_SIZE }, () => new EntHistorySlotT());
 }
 
+// Family-dispatched capacity for sv.models/sv.baselines/sv.entities, mirroring
+// how svs.csr itself is already family-dispatched (bindings/sv_game.ts's
+// `svs.csr = family === "kex" ? CS_REMAP_RERELEASE : CS_REMAP_OLD;`, set by
+// SV_InitGameProgs -- called from SV_InitGame, which always runs BEFORE
+// SV_SpawnServer, so svs.csr is already settled by the time these are read
+// below). The kex/rerelease family needs kexapi/game.ts's wide MAX_MODELS/
+// MAX_EDICTS (8192 each) to hold a rerelease map/module without truncating;
+// the classic family keeps q_shared.ts's narrow MAX_MODELS(256)/MAX_EDICTS
+// (1024), matching every classic-protocol wire encoding's own narrow index
+// width. Declared as functions (not read at module-eval time) so they always
+// see whatever svs.csr currently holds, the same "read live, don't snapshot"
+// reasoning bindings/kex.ts's own tick_rate/frame_time_s getters use.
+export function SV_MaxModels(): number {
+  return svs.csr === CS_REMAP_RERELEASE ? KEX_MAX_MODELS : MAX_MODELS;
+}
+export function SV_MaxEdicts(): number {
+  return svs.csr === CS_REMAP_RERELEASE ? KEX_MAX_EDICTS : MAX_EDICTS;
+}
+
 export class ServerT {
   state: ServerStateT = ServerStateT.ss_dead; // precache commands are only valid during load
 
@@ -73,17 +100,47 @@ export class ServerT {
 
   // mirrors q2repro's SV_FRAMERATE/SV_FRAMETIME/SV_FRAMEDIV (src/server/server.h
   // in q2repro, ~line 148) becoming per-server variables instead of a fixed
-  // BASE_FRAMERATE constant. Fixed at 10Hz/100ms/1 until the kex tick-rate
-  // binding lands (ARCHITECTURE.md phase 3); nothing derives sv_tick_rate yet.
+  // BASE_FRAMERATE constant. framerate/frametime are re-derived per spawn by
+  // sv_init.ts's SV_ComputeFramerate (kex family: sv_tick_rate, clamped to
+  // 10..60; classic family: pinned to 10) -- the "wide core" tick-rate
+  // binding has already landed; only this field's own comment was stale.
   framerate = 10; // logic ticks per second
   frametime = 100; // msec per logic tick (1000 / framerate)
-  framediv = 1; // send-rate divisor relative to framerate; framediv > 1 unimplemented
+  // send-rate divisor relative to framerate. Pinned at 1 (send a full frame
+  // to every client on every logic tick) -- INTENTIONALLY, not a gap.
+  // q2repro's `framediv` is actually TWO distinct divisors: (1)
+  // sv.frametime.div, purely how much faster than classic 10Hz the server's
+  // OWN tick loop runs (already handled above, via SV_ComputeFramerate --
+  // q2repro's Com_ComputeFrametime, inc/common/utils.h:124-128); (2)
+  // client_t.framediv (q2repro server.h:305), a PER-CLIENT, CLIENT-OPT-IN
+  // downsample set only via the CLS_FPS client-setting renegotiation
+  // (q2repro user.c:1360-1373's set_client_fps) -- every client starts at
+  // client->framediv=1 (main.c:1066) and SV_SendClientMessages (send.c:
+  // 859-888) only skips a client's frame when that per-client value is != 1.
+  // This port has no CLS_FPS consumer (ClientT.settings's own doc comment
+  // above already records this: "no further consumer yet"), so every client
+  // here is permanently in the exact state a fresh, non-renegotiating
+  // q2repro client is in by default: framediv == 1, sent every tick. A fixed
+  // 1:1 send is therefore not an approximation of q2repro's behavior at any
+  // sv_tick_rate in 10..60 -- it IS q2repro's own behavior for every client
+  // this port can produce. (The one place framediv>1 changes q2repro's
+  // client-visible output -- an edict's `s.event` surviving a skipped
+  // sub-tick via the per-edict origin/frame history ring, entities.c:456-494
+  // -- cannot arise here either: sv_main.ts calls SV_SendClientMessages
+  // before SV_PrepWorldFrame clears `s.event` each tick, so every event is
+  // already delivered before it would ever need replaying. The history ring
+  // this port already records at SV_LinkEdict, server.ts's own
+  // ServerEntityT/ENT_HISTORY_SIZE above, is therefore correctly left
+  // unread.) Implementing framediv for real would only become meaningful if
+  // a future unit adds CLS_FPS consumption -- tracked there, not here.
+  framediv = 1;
 
   time = 0; // always sv.framenum * sv.frametime msec
   framenum = 0;
 
   name = ""; // map name, or cinematic name
-  models: Array<CmodelT | null> = new Array(MAX_MODELS).fill(null);
+  // Family-sized -- see SV_MaxModels's own comment above.
+  models: Array<CmodelT | null> = new Array(SV_MaxModels()).fill(null);
 
   // Sized at the widest known family's configstring count (CS_REMAP_RERELEASE.end,
   // cs_remap.ts), not svs.csr.end: this mirrors q2repro's own `configstring_t
@@ -95,12 +152,13 @@ export class ServerT {
   // enough for whichever family svs.csr selects, and svs.csr is CS_REMAP_OLD
   // until family selection arrives with the kex binding.
   configstrings: string[] = new Array(CS_REMAP_RERELEASE.end).fill("");
-  baselines: EntityStateT[] = Array.from({ length: MAX_EDICTS }, () => new EntityStateT());
+  // Family-sized -- see SV_MaxEdicts's own comment above.
+  baselines: EntityStateT[] = Array.from({ length: SV_MaxEdicts() }, () => new EntityStateT());
 
   // per-edict framediv history ring; see ServerEntityT above. Sized to
-  // MAX_EDICTS like `baselines`, indexed the same way (ent.s.number, this
+  // SV_MaxEdicts() like `baselines`, indexed the same way (ent.s.number, this
   // port's NUM_FOR_EDICT substitute -- see the comment below).
-  entities: ServerEntityT[] = Array.from({ length: MAX_EDICTS }, () => new ServerEntityT());
+  entities: ServerEntityT[] = Array.from({ length: SV_MaxEdicts() }, () => new ServerEntityT());
 
   // the multicast buffer is used to send a message to a set of clients
   // it is only used to marshall data until SV_Multicast is called
@@ -127,10 +185,13 @@ export class ServerT {
     this.time = 0;
     this.framenum = 0;
     this.name = "";
-    this.models = new Array(MAX_MODELS).fill(null);
+    // Family-sized -- svs.csr is already settled by the time SV_SpawnServer
+    // calls this (SV_InitGame -> SV_InitGameProgs sets it before
+    // SV_SpawnServer ever runs); see SV_MaxModels/SV_MaxEdicts above.
+    this.models = new Array(SV_MaxModels()).fill(null);
     this.configstrings = new Array(CS_REMAP_RERELEASE.end).fill("");
-    this.baselines = Array.from({ length: MAX_EDICTS }, () => new EntityStateT());
-    this.entities = Array.from({ length: MAX_EDICTS }, () => new ServerEntityT());
+    this.baselines = Array.from({ length: SV_MaxEdicts() }, () => new EntityStateT());
+    this.entities = Array.from({ length: SV_MaxEdicts() }, () => new ServerEntityT());
     this.multicast = new SizeBuf();
     this.multicast_buf = new Uint8Array(MAX_MSGLEN);
     this.demofile = null;

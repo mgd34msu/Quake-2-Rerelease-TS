@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { sv, svs, ServerStateT, ClientStateT, ClientT, maxclients, sv_paused } from "../src/server/server";
+import { sv, svs, ServerStateT, ClientStateT, ClientT, maxclients, sv_paused, SV_MaxModels, SV_MaxEdicts } from "../src/server/server";
 import { SV_Init, SV_StatusString, SV_ConnectionlessPacket, SV_UserinfoChanged, SV_CalcPings, SV_GiveMsec } from "../src/server/sv_main";
 import { SV_Multicast } from "../src/server/sv_send";
 import { geHolder } from "../src/server/sv_game";
@@ -9,9 +9,11 @@ import { NET_ClearLoopback, NET_SendPacket, NET_GetPacket } from "../src/platfor
 import { SZ_Init, MSG_BeginReading, MSG_ReadLong } from "../src/qcommon/sizebuf";
 import { Cvar_FullSet, Cvar_VariableString } from "../src/qcommon/cvar";
 import { CVAR_LATCH, CVAR_SERVERINFO } from "../src/shared/q_shared";
-import { MulticastT, EntityStateT, PlayerStateT } from "../src/shared/q_shared";
+import { MulticastT, EntityStateT, PlayerStateT, MAX_MODELS as CLASSIC_MAX_MODELS, MAX_EDICTS as CLASSIC_MAX_EDICTS } from "../src/shared/q_shared";
 import { vec3 } from "../src/shared/math";
 import { LinkT, SolidT, MAX_ENT_CLUSTERS, type Edict, type GameExports } from "../src/game/game";
+import { CS_REMAP_OLD, CS_REMAP_RERELEASE } from "../src/shared/cs_remap";
+import { MAX_MODELS as KEX_MAX_MODELS, MAX_EDICTS as KEX_MAX_EDICTS } from "../src/kexapi/game";
 
 // ---- test fixtures ------------------------------------------------------
 
@@ -120,6 +122,52 @@ describe("SV_Init", () => {
     // otherwise untouched.
     expect(sv.state).toBe(ServerStateT.ss_dead);
     expect(svs.initialized).toBe(false);
+  });
+});
+
+// ---- Family-dispatched sv.models/sv.baselines/sv.entities sizing ----------
+// (engine-core widening sweep, 2026-08-30: server.ts's SV_MaxModels/
+// SV_MaxEdicts, mirroring how svs.csr itself is already family-dispatched.)
+
+describe("SV_MaxModels / SV_MaxEdicts / ServerT.clear() family-dispatched sizing", () => {
+  test("SV_MaxModels/SV_MaxEdicts return the classic narrow constants when svs.csr is CS_REMAP_OLD", () => {
+    svs.csr = CS_REMAP_OLD;
+    expect(SV_MaxModels()).toBe(CLASSIC_MAX_MODELS);
+    expect(SV_MaxEdicts()).toBe(CLASSIC_MAX_EDICTS);
+  });
+
+  test("SV_MaxModels/SV_MaxEdicts return kexapi's wide constants when svs.csr is CS_REMAP_RERELEASE", () => {
+    svs.csr = CS_REMAP_RERELEASE;
+    expect(SV_MaxModels()).toBe(KEX_MAX_MODELS);
+    expect(SV_MaxEdicts()).toBe(KEX_MAX_EDICTS);
+    expect(KEX_MAX_MODELS).toBeGreaterThan(CLASSIC_MAX_MODELS);
+    expect(KEX_MAX_EDICTS).toBeGreaterThan(CLASSIC_MAX_EDICTS);
+    svs.csr = CS_REMAP_OLD; // restore -- svs is a shared module singleton
+  });
+
+  test("ServerT.clear() sizes sv.models/sv.baselines/sv.entities to the classic narrow bound when svs.csr is CS_REMAP_OLD", () => {
+    svs.csr = CS_REMAP_OLD;
+    sv.clear();
+    expect(sv.models.length).toBe(CLASSIC_MAX_MODELS);
+    expect(sv.baselines.length).toBe(CLASSIC_MAX_EDICTS);
+    expect(sv.entities.length).toBe(CLASSIC_MAX_EDICTS);
+  });
+
+  test("ServerT.clear() sizes sv.models/sv.baselines/sv.entities to kexapi's wide bound when svs.csr is CS_REMAP_RERELEASE (a rerelease map's model/edict count past the classic bound no longer hits an undefined slot)", () => {
+    svs.csr = CS_REMAP_RERELEASE;
+    sv.clear();
+    expect(sv.models.length).toBe(KEX_MAX_MODELS);
+    expect(sv.baselines.length).toBe(KEX_MAX_EDICTS);
+    expect(sv.entities.length).toBe(KEX_MAX_EDICTS);
+    // an index past the classic 1024/256 bound, within the kex 8192 bound,
+    // is a real, defined slot -- not `undefined`
+    expect(sv.models[4000]).not.toBeUndefined();
+    expect(sv.entities[4000]).not.toBeUndefined();
+    expect(sv.entities[4000]!.history.length).toBeGreaterThan(0);
+
+    // restore the classic default for every other test in this file/suite
+    svs.csr = CS_REMAP_OLD;
+    sv.clear();
   });
 });
 

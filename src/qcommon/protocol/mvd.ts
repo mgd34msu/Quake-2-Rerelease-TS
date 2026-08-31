@@ -466,13 +466,13 @@ export function MSG_ReadDeltaMvdPlayerstateBody(msg: SizeBuf, from: PlayerStateT
 // this MVD unit does not port) -- not emitted here either, matching the
 // actual reference rather than the brief's summary of it.
 //
-// STATS TRUNCATION GAP: PlayerStateT.stats (shared/q_shared.ts) is still
-// sized MAX_STATS=32, a pre-existing, already-tracked gap (bindings/kex.ts's
-// "TODO(phase-2b): widen PlayerStateT.stats to 64" note) outside this file's
-// allowed scope. This codec still declares the CORRECT 64-entry/64-bit wire
-// shape (so a real rerelease MVD reader parses our output correctly), but
-// stat indices 32-63 always read back as 0 until that widening lands --
-// `ps.stats[i] ?? 0` below documents exactly where.
+// STATS WIDTH: PlayerStateT.stats (shared/q_shared.ts) is sized
+// MAX_STATS_STORAGE=64 -- the "wide core" limit lift landed (see q_shared.ts's
+// own MAX_STATS/MAX_STATS_STORAGE comment and bindings/kex.ts's file header),
+// so all 64 slots this codec's 64-bit statbits mask addresses now have a real
+// backing element; the `?? 0` guards below are stale defensive leftovers from
+// when the array was still 32-wide and are kept only because they are
+// harmless (every index this loop reaches is < MAX_STATS_NEW === stats.length).
 //
 // ENTITY DELTA GAP: only the player-state codec is ported here. Entity
 // deltas in a kex/rerelease recording still go through VANILLA_CODEC (the

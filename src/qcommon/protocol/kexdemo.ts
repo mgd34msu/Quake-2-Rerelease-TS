@@ -606,10 +606,10 @@ function readKexPlayerStateFields(from: PlayerStateT, to: PlayerStateT, flags: n
 
   // kex.c:738-751: TWO u32 statbit masks read UNCONDITIONALLY on every
   // playerstate (unlike q2repro's single EPS_STATS-gated mask), covering 64
-  // total stat slots. This port's PlayerStateT.stats is 32 slots wide
-  // (shared/q_shared.ts's MAX_STATS) -- bits >= 32 (the second mask's own
-  // slots) are read (to stay byte-aligned) but cannot be stored, matching
-  // q2repro.ts's own already-cited "32-slot stats array width" gap exactly.
+  // total stat slots. PlayerStateT.stats is MAX_STATS_STORAGE=64 slots wide
+  // (shared/q_shared.ts), so both masks' slots now have a real backing
+  // element; the `idx < to.stats.length` guards below are kept as a
+  // harmless, always-true bounds check rather than removed.
   const statbits1 = MSG_ReadLong(net_message) >>> 0;
   for (let i = 0; i < 32; i++) {
     if (statbits1 & (1 << i)) {

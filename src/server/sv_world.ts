@@ -5,7 +5,7 @@
 
 import { type Vec3, vec3, vec3_origin, VectorAdd, VectorSubtract, VectorCopy } from "../shared/math";
 import { type Edict, type GTraceT, LinkT, SolidT, SVF_DEADMONSTER, SVF_MONSTER, MAX_ENT_CLUSTERS } from "../game/game";
-import { TraceT, MAX_EDICTS, CONTENTS_DEADMONSTER, AREA_SOLID } from "../shared/q_shared";
+import { TraceT, CONTENTS_DEADMONSTER, AREA_SOLID } from "../shared/q_shared";
 import {
   CM_BoxLeafnums,
   CM_LeafCluster,
@@ -16,7 +16,7 @@ import {
   CM_BoxTrace,
   CM_TransformedBoxTrace,
 } from "../qcommon/cmodel";
-import { sv, ServerStateT, ENT_HISTORY_MASK } from "./server";
+import { sv, ServerStateT, ENT_HISTORY_MASK, SV_MaxEdicts } from "./server";
 import { geHolder } from "./sv_game";
 import { Com_DPrintf, Com_Printf, Com_Error } from "../qcommon/common";
 import { ERR_FATAL } from "../qcommon/qcommon";
@@ -433,9 +433,12 @@ export function SV_PointContents(p: Vec3): number {
   // get base contents from world
   let contents = CM_PointContents(p, worldModel.headnode);
 
-  // or in contents from all the other entities
-  const touch: Edict[] = new Array(MAX_EDICTS);
-  const num = SV_AreaEdicts(p, p, touch, MAX_EDICTS, AREA_SOLID);
+  // or in contents from all the other entities. Family-sized (SV_MaxEdicts):
+  // a kex map/module can legitimately register edicts past the classic 1024
+  // bound (see server.ts's SV_MaxEdicts doc comment).
+  const maxEdicts = SV_MaxEdicts();
+  const touch: Edict[] = new Array(maxEdicts);
+  const num = SV_AreaEdicts(p, p, touch, maxEdicts, AREA_SOLID);
 
   for (let i = 0; i < num; i++) {
     const hit = touch[i];
@@ -549,8 +552,10 @@ SV_ClipMoveToEntities
 ====================
 */
 function SV_ClipMoveToEntities(clip: MoveClipT): void {
-  const touchlist: Edict[] = new Array(MAX_EDICTS);
-  const num = SV_AreaEdicts(clip.boxmins, clip.boxmaxs, touchlist, MAX_EDICTS, AREA_SOLID);
+  // Family-sized (SV_MaxEdicts) -- see SV_PointContents's identical comment above.
+  const maxEdicts = SV_MaxEdicts();
+  const touchlist: Edict[] = new Array(maxEdicts);
+  const num = SV_AreaEdicts(clip.boxmins, clip.boxmaxs, touchlist, maxEdicts, AREA_SOLID);
 
   // be careful, it is possible to have an entity in this
   // list removed before we get to it (killtriggered)
@@ -622,6 +627,8 @@ function toGTrace(t: TraceT, ent: Edict | null): GTraceT {
     surface: t.surface,
     contents: t.contents,
     ent,
+    plane2: t.plane2,
+    surface2: t.surface2,
   };
 }
 

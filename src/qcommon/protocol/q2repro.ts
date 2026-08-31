@@ -163,8 +163,8 @@
 // port's pmove precision budget, not a new precision loss introduced here.
 
 import type { SizeBuf } from "../sizebuf";
-import { MSG_WriteByte, MSG_WriteShort, MSG_WriteLong, MSG_WriteFloat, MSG_WriteString, MSG_WriteDeltaUsercmd, SZ_Write } from "../sizebuf";
-import { MSG_ReadByte, MSG_ReadShort, MSG_ReadLong, MSG_ReadFloat, MSG_ReadString, MSG_ReadDeltaUsercmd, MSG_ReadData } from "../sizebuf";
+import { MSG_WriteByte, MSG_WriteShort, MSG_WriteLong, MSG_WriteLong64, MSG_WriteFloat, MSG_WriteString, MSG_WriteDeltaUsercmd, SZ_Write } from "../sizebuf";
+import { MSG_ReadByte, MSG_ReadShort, MSG_ReadLong, MSG_ReadLong64, MSG_ReadFloat, MSG_ReadString, MSG_ReadDeltaUsercmd, MSG_ReadData } from "../sizebuf";
 import {
   U_ORIGIN1,
   U_ORIGIN2,
@@ -766,9 +766,15 @@ function encodePlayerStateDelta(from: PlayerStateT, to: PlayerStateT): PlayerSta
   ];
   if (toGunangles[0] !== fromGunangles[0] || toGunangles[1] !== fromGunangles[1] || toGunangles[2] !== fromGunangles[2]) extraflags |= EPS_GUNANGLES;
 
-  let statbits = 0;
-  for (let i = 0; i < to.stats.length; i++) if (to.stats[i] !== from.stats[i]) statbits |= 1 << i;
-  if (statbits !== 0) extraflags |= EPS_STATS;
+  // 64-wide statbits mask (bigint, not number: bit 31 would otherwise force
+  // `1 << i` into JS's 32-bit signed bitwise-op domain and go negative at
+  // i=31, corrupting every higher bit). Matches q2proto_proto_q2repro.c's
+  // wire format exactly: one delta pass over Q2PROTO_STATS (64) slots
+  // setting BIT_ULL(i) per changed stat (q2proto_proto_q2repro.c:1624-1629),
+  // one u64 statbits field, then one i16 per set bit -- see writeBody below.
+  let statbits = 0n;
+  for (let i = 0; i < to.stats.length; i++) if (to.stats[i] !== from.stats[i]) statbits |= 1n << BigInt(i);
+  if (statbits !== 0n) extraflags |= EPS_STATS;
 
   const gunrateChanged = to.gunrate !== from.gunrate;
   if (gunrateChanged) extraflags |= EPS_GUNRATE;
@@ -845,9 +851,12 @@ function encodePlayerStateDelta(from: PlayerStateT, to: PlayerStateT): PlayerSta
       if (flags & PS_RDFLAGS) MSG_WriteByte(msg, to.rdflags);
 
       if (extraflags & EPS_STATS) {
-        MSG_WriteLong(msg, statbits); // low 32 bits (this port's 32-slot stats array)
-        MSG_WriteLong(msg, 0); // high 32 bits: always 0 -- see file header's 64-slot-stats gap note
-        for (let i = 0; i < to.stats.length; i++) if (statbits & (1 << i)) MSG_WriteShort(msg, to.stats[i]);
+        // q2proto_proto_q2repro.c:2183-2190: one WRITE_CHECKED(..., u64, statbits)
+        // (a single 8-byte op, not two 32-bit halves), then one i16 per set bit,
+        // 0..63. MSG_WriteLong64 is the same wire shape mvd.ts's own 64-wide
+        // stats codec already uses (see that file for the precedent).
+        MSG_WriteLong64(msg, statbits);
+        for (let i = 0; i < to.stats.length; i++) if (statbits & (1n << BigInt(i))) MSG_WriteShort(msg, to.stats[i]);
       }
 
       if (extraflags & EPS_GUNRATE) MSG_WriteByte(msg, to.gunrate);
@@ -1275,14 +1284,12 @@ function readPlayerStateFields(msg: SizeBuf, from: PlayerStateT, to: PlayerState
   if (flags & PS_RDFLAGS) to.rdflags = MSG_ReadByte(msg);
 
   if (extraflags & EPS_STATS) {
-    const statbitsLow = MSG_ReadLong(msg) >>> 0;
-    MSG_ReadLong(msg); // high 32 bits: ignored -- see file header's 64-slot-stats gap note
-    for (let i = 0; i < to.stats.length; i++) if (statbitsLow & (1 << i)) to.stats[i] = MSG_ReadShort(msg);
-    // Any set bit >= this port's 32-slot stats array width is silently
-    // skipped (cannot be read positionally without it -- but since our own
-    // write side never sets high-word statbits, this only matters when
-    // interoperating with a real external q2repro peer, which the "frame
-    // envelope" gap above already rules out for this task).
+    // q2proto_proto_q2repro.c:721-728: one READ_CHECKED(..., u64, statbits)
+    // (a single 8-byte op), then one i16 per set bit, 0..63 -- mirrors the
+    // write side above exactly. PlayerStateT.stats is MAX_STATS_STORAGE=64-
+    // wide (q_shared.ts), so all 64 bits now have a real slot to land in.
+    const statbits = MSG_ReadLong64(msg);
+    for (let i = 0; i < to.stats.length; i++) if (statbits & (1n << BigInt(i))) to.stats[i] = MSG_ReadShort(msg);
   }
 
   if (extraflags & EPS_GUNRATE) to.gunrate = MSG_ReadByte(msg);

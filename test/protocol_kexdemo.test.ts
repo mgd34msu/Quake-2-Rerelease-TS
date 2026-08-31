@@ -364,21 +364,22 @@ describe("KEX_DEMO_CODEC.readFramePlayerstate", () => {
     expect(to.team_id).toBe(3);
   });
 
-  test("stats: two u32 masks read unconditionally; only the first 32 slots (this port's MAX_STATS) are stored", () => {
+  test("stats: two u32 masks read unconditionally, covering the full 64-slot PlayerStateT.stats (MAX_STATS_STORAGE)", () => {
     MSG_WriteByte(net_message, SvcOpsT.svc_playerinfo);
     MSG_WriteShort(net_message, 0); // flags: nothing else set
     MSG_WriteLong(net_message, 0x21); // statbits1: bit0 + bit5
     MSG_WriteShort(net_message, 111); // stats[0]
     MSG_WriteShort(net_message, 222); // stats[5]
-    MSG_WriteLong(net_message, 0x1); // statbits2: bit0 -> overall slot 32 (out of range)
-    MSG_WriteShort(net_message, 333); // consumed, not stored (idx 32 >= 32-slot array)
+    MSG_WriteLong(net_message, 0x1); // statbits2: bit0 -> overall slot 32
+    MSG_WriteShort(net_message, 333); // stats[32]
     MSG_BeginReading(net_message);
 
     const to = new PlayerStateT();
     expect(() => KEX_DEMO_CODEC.readFramePlayerstate(new PlayerStateT(), to)).not.toThrow();
     expect(to.stats[0]).toBe(111);
     expect(to.stats[5]).toBe(222);
-    expect(to.stats.length).toBe(32);
+    expect(to.stats[32]).toBe(333);
+    expect(to.stats.length).toBe(64);
   });
 });
 

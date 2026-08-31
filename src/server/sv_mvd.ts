@@ -54,9 +54,9 @@
 //      player-state fields only; rerelease entity-delta extensions --
 //      MSG_ES_LONGSOLID/SHORTANGLES/EXTENSIONS -- are a separate, larger,
 //      not-requested unit). See qcommon/protocol/mvd.ts's header for the
-//      exact field-by-field citations and the stats-widening truncation gap
-//      (PlayerStateT.stats is still MAX_STATS=32, a pre-existing tracked gap
-//      outside this file's scope).
+//      exact field-by-field citations. PlayerStateT.stats is
+//      MAX_STATS_STORAGE=64-wide (q_shared.ts, "wide core" limit lift landed)
+//      so this codec's 64-bit statbits mask round-trips every slot.
 
 import { SizeBuf, SZ_Init, SZ_Clear, SZ_Write, MSG_WriteByte, MSG_WriteShort, MSG_WriteLong, MSG_WriteString } from "../qcommon/sizebuf";
 import { FS_CreatePath, FS_FOpenFileWrite, FS_Write, FS_FCloseFile } from "../qcommon/files";
