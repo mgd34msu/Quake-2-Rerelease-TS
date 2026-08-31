@@ -874,6 +874,21 @@ function Edict_UpdateState(edict: EdictT): void {
   }
 
   edict.sv.ent_flags = ent_flags;
+
+  // bot_utils.cpp:355-360 -- the one-time sv identity sync every
+  // *_UpdateState sibling carries (see Player/Monster/Item variants above).
+  // This general-edict variant alone had DROPPED it in the port, so
+  // map-spawned doors/triggers never exposed sv.classname to the engine and
+  // nav.ts's Nav_SetupEntities (which gates on it, like q2repro
+  // nav.c:1436-1437) skipped every candidate: all four of base1's baked nav
+  // edicts reported "appears to be missing" and door-aware bot pathing was
+  // silently dead (found live on Mike's RC pass).
+  if (!edict.sv.init) {
+    edict.sv.init = true;
+    edict.sv.classname = edict.classname;
+    edict.sv.targetname = edict.targetname;
+    edict.sv.spawnflags = edict.spawnflags;
+  }
 }
 
 /** bots/bot_utils.cpp:368-380: `void Entity_UpdateState(edict_t *edict)`. */
