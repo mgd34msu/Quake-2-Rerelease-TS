@@ -162,7 +162,7 @@ export function SV_CheckForSavegame(): void {
   const previousState = sv.state;
   sv.state = ServerStateT.ss_loading;
   const ge = requireGe();
-  for (let i = 0; i < frames; i++) ge.RunFrame();
+  for (let i = 0; i < frames; i++) ge.RunFrame(false); // savegame catch-up, same mainLoop=false as q2repro
   sv.state = previousState;
 }
 
@@ -297,9 +297,12 @@ export function SV_SpawnServer(server: string, spawnpoint: string, serverstate: 
   const ge = requireGe();
   ge.SpawnEntities(sv.name, CM_EntityString(), spawnpoint);
 
-  // run two frames to allow everything to settle
-  ge.RunFrame();
-  ge.RunFrame();
+  // run two frames to allow everything to settle -- mainLoop=false per
+  // q2repro init.c's explicit ge->RunFrame(false) here, bypassing the kex
+  // game's no-player-spawned early-out (see game.ts RunFrame's doc comment;
+  // hardcoded true in the binding meant these frames settled nothing).
+  ge.RunFrame(false);
+  ge.RunFrame(false);
 
   // all precaches are complete
   sv.state = serverstate;

@@ -268,7 +268,13 @@ export interface GameExports {
   ClientCommand(ent: Edict): void;
   ClientThink(ent: Edict, cmd: UsercmdT): void;
 
-  RunFrame(): void;
+  // mainLoop mirrors the kex API's RunFrame(bool main_loop): q2repro's
+  // engine passes FALSE for SV_SpawnServer's two post-spawn settle frames
+  // and SV_CheckForSavegame's catch-up frames (init.c ge->RunFrame(false)),
+  // which bypasses G_RunFrame's no-player-spawned early-out. Optional and
+  // defaulted true so every legacy game implementation (which has no such
+  // concept and ignores the parameter) is untouched.
+  RunFrame(mainLoop?: boolean): void;
 
   // ServerCommand will be called when an "sv <command>" command is issued on the
   // server console.

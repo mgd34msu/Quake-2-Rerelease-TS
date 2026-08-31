@@ -1138,8 +1138,13 @@ export function adaptKexGameExports(kexGe: KexGameExports): GameExports {
     ClientCommand: (ent) => kexGe.ClientCommand(kexEdictForEngine(ent, "ClientCommand")),
     ClientThink: (ent, cmd) => kexGe.ClientThink(kexEdictForEngine(ent, "ClientThink"), toKexUsercmd(cmd)),
 
-    RunFrame: () => {
-      kexGe.RunFrame(true);
+    RunFrame: (mainLoop?: boolean) => {
+      // Forwarding the caller's flag instead of hardcoding true: sv_init's
+      // settle/catch-up frames pass false, matching q2repro's explicit
+      // ge->RunFrame(false) at those sites -- hardcoded true meant those
+      // frames hit G_RunFrame's no-player early-out and never settled
+      // anything (found by the nav-timing unit).
+      kexGe.RunFrame(mainLoop ?? true);
       kexGe.PrepFrame();
       syncAllEdictsFields(kexGe);
     },
