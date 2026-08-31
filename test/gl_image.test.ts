@@ -31,7 +31,7 @@ import type { RefImports } from "../src/client/ref";
 import { CvarT } from "../src/shared/q_shared";
 import { QGLRecording } from "../src/ref_gl/qgl";
 import { SetQGL, GL_Bind, GL_FindImage, GL_Upload8, Scrap_AllocBlock, LoadTGA, LoadPNG, LoadJPG, GL_InitImages, ResetScrapState, GL_TEXTURE_2D, GL_QUADS, GL_RGBA, GL_UNSIGNED_BYTE } from "../src/ref_gl/gl_image";
-import { Draw_InitLocal, Draw_Char, Draw_FindPic, Draw_StretchPicRegion } from "../src/ref_gl/gl_draw";
+import { Draw_InitLocal, Draw_Char, Draw_FindPic, Draw_StretchPicRegion, Draw_Pic, SetGifBeatSeconds } from "../src/ref_gl/gl_draw";
 import { buildBaselineJpeg } from "./support/jpeg_builder";
 
 let files: Map<string, Uint8Array>;
@@ -712,5 +712,178 @@ describe("GL_InitImages -- pics/16to8.dat gating (yellow-items unit finding)", (
     expect(gl_state.d_16to8table).not.toBeNull();
     const table: Uint8Array = gl_state.d_16to8table ?? new Uint8Array();
     expect(Array.from(table)).toEqual([1, 2, 3, 4]);
+  });
+});
+
+/*
+Animated GIF draw-path suite: registration (GL_FindImage -> GL_LoadByExt's
+"gif" case, gl_image.ts) and frame selection at draw time (Draw_Pic's
+pickGifFrame, gl_draw.ts), per gif.ts/gl_draw.ts's own design ruling. Rule
+13: SetGifBeatSeconds is reset in this describe block's own beforeEach so
+no earlier test's beat setting leaks in (gl_draw.ts's gifBeatSeconds is a
+module-private singleton with no other reset hook).
+
+TWO_FRAME_GIF: a 2x2, 2-frame GIF -- frame0 solid red (200,0,0), frame1
+solid green (0,200,0), disposal=1 (do not dispose) on both (irrelevant here
+since both frames fully cover the 2x2 canvas). Built the same way as
+test/gif.test.ts's own animated fixtures (a real Pillow-driven LZW encoder
+via GifImagePlugin.getdata), generated with:
+
+  python3 gen_draw_anim.py > out.txt
+
+using this exact script (kept in scratch, not checked into the repo):
+
+  import struct
+  from PIL import Image, GifImagePlugin
+
+  PALETTE = [0,0,0, 200,0,0, 0,200,0] + [0,0,0] * (256-3)
+
+  def mkimg(w, h, pixels):
+      im = Image.new("P", (w, h))
+      im.putpalette(PALETTE)
+      for i, v in enumerate(pixels):
+          im.putpixel((i % w, i // w), v)
+      return im
+
+  def gce(disposal, transparent_index):
+      packed = (disposal << 2) | (1 if transparent_index is not None else 0)
+      ti = transparent_index if transparent_index is not None else 0
+      return bytes([0x21, 0xF9, 0x04, packed, 0, 0, ti, 0x00])
+
+  def build_gif(logical_w, logical_h, frames):
+      out = bytearray()
+      out += b"GIF89a"
+      packed = 0x80 | 0x70 | 0x01  # global color table, 4 entries
+      out += struct.pack("<HHB", logical_w, logical_h, packed)
+      out += bytes([0, 0])
+      out += bytes(PALETTE[:4*3])
+      for im, (x, y), disposal, ti in frames:
+          out += gce(disposal, ti)
+          for b in GifImagePlugin.getdata(im, offset=(x, y)):
+              out += b
+      out += bytes([0x3B])
+      return bytes(out)
+
+  f0 = mkimg(2, 2, [1]*4)  # red
+  f1 = mkimg(2, 2, [2]*4)  # green
+  TWO_FRAME_GIF = build_gif(2, 2, [(f0, (0,0), 1, None), (f1, (0,0), 1, None)])
+
+Cross-checked once against this project's own decodeGIF (not just Pillow)
+before hardcoding: frame0 decodes to solid (200,0,0,255), frame1 to solid
+(0,200,0,255).
+*/
+const TWO_FRAME_GIF = new Uint8Array([
+  71, 73, 70, 56, 57, 97, 2, 0, 2, 0, 241, 0, 0, 0, 0, 0, 200, 0, 0, 0, 200, 0, 0, 0, 0, 33, 249, 4, 4, 0, 0, 0, 0, 44, 0, 0, 0, 0, 2, 0, 2, 0, 0, 8, 6, 0, 3, 8, 12, 16, 16, 0, 33, 249, 4, 4, 0, 0, 0, 0,
+  44, 0, 0, 0, 0, 2, 0, 2, 0, 0, 8, 6, 0, 5, 8, 20, 16, 16, 0, 59,
+]);
+
+describe("animated GIF draw path (registration + frame selection at draw time)", () => {
+  beforeEach(() => {
+    SetGifBeatSeconds(0);
+  });
+
+  test("GL_FindImage registers every composited frame as its own texture, under it_pic", () => {
+    files.set("pics/anim.gif", TWO_FRAME_GIF);
+
+    const image = GL_FindImage("pics/anim.gif", ImagetypeT.it_pic);
+
+    expect(image).not.toBeNull();
+    if (!image) return;
+    expect(image.gifFrames).not.toBeNull();
+    expect(image.gifFrames?.length).toBe(2);
+    // frame 0 IS the base image (same registration, not a duplicate).
+    expect(image.gifFrames?.[0]).toBe(image);
+    // each frame got its own distinct GL texture.
+    const texnums = (image.gifFrames ?? []).map((f) => f.texnum);
+    expect(new Set(texnums).size).toBe(2);
+  });
+
+  test("a GIF loaded for a 3D use (it_skin) stays first-frame-only: no gifFrames attached", () => {
+    files.set("players/anim.gif", TWO_FRAME_GIF);
+
+    const image = GL_FindImage("players/anim.gif", ImagetypeT.it_skin);
+
+    expect(image).not.toBeNull();
+    if (!image) return;
+    expect(image.gifFrames).toBeNull();
+  });
+
+  // GL_Bind only records a qglBindTexture call on an actual texture-number
+  // CHANGE (this suite's own header comment / "GL_Bind" describe block
+  // above: redundant-bind tracking via gl_state.currenttextures). Since
+  // GL_LoadPic itself binds each frame's texture as it uploads it during
+  // registration, the "currently bound" texture right after GL_FindImage
+  // returns is whichever frame was uploaded LAST -- not a fixed, known
+  // value this suite should depend on. Every test below forces a genuine
+  // state change (GL_Bind(0) -- texnum 0 is never a real image's texnum,
+  // every real one is >= TEXNUM_IMAGES) immediately before clearing the
+  // call log and drawing, so the recorded bind is always the one Draw_Pic
+  // itself issued, regardless of registration's own internal bind order.
+  function forceRebindThenClearLog(): void {
+    GL_Bind(0);
+    qgl.calls.length = 0;
+  }
+
+  test("Draw_Pic binds frame 0's texture before the first 1/10s beat tick", () => {
+    files.set("pics/anim.gif", TWO_FRAME_GIF);
+    const image = GL_FindImage("pics/anim.gif", ImagetypeT.it_pic);
+    expect(image?.gifFrames?.length).toBe(2);
+    const frame0Texnum = image?.gifFrames?.[0]?.texnum;
+    const frame1Texnum = image?.gifFrames?.[1]?.texnum;
+
+    SetGifBeatSeconds(0.05); // floor(0.05 * 10) % 2 = 0 -> frame 0
+    forceRebindThenClearLog();
+    Draw_Pic(0, 0, "/pics/anim.gif"); // leading slash: exact registered name, no .pcx default extension
+
+    const binds = qgl.calls.filter((c) => c.name === "qglBindTexture");
+    expect(binds).toHaveLength(1);
+    expect(binds[0]?.args).toEqual([GL_TEXTURE_2D, frame0Texnum]);
+    expect(frame0Texnum).not.toBe(frame1Texnum);
+  });
+
+  test("Draw_Pic binds frame 1's texture once the beat crosses into the next 1/10s tick", () => {
+    files.set("pics/anim.gif", TWO_FRAME_GIF);
+    const image = GL_FindImage("pics/anim.gif", ImagetypeT.it_pic);
+    const frame1Texnum = image?.gifFrames?.[1]?.texnum;
+
+    SetGifBeatSeconds(0.1); // floor(0.1 * 10) % 2 = 1 -> frame 1
+    forceRebindThenClearLog();
+    Draw_Pic(0, 0, "/pics/anim.gif");
+
+    const binds = qgl.calls.filter((c) => c.name === "qglBindTexture");
+    expect(binds).toHaveLength(1);
+    expect(binds[0]?.args).toEqual([GL_TEXTURE_2D, frame1Texnum]);
+  });
+
+  test("Draw_Pic loops back to frame 0 after a full cycle (0.2s = 2 ticks at the fixed 10Hz cadence)", () => {
+    files.set("pics/anim.gif", TWO_FRAME_GIF);
+    const image = GL_FindImage("pics/anim.gif", ImagetypeT.it_pic);
+    const frame0Texnum = image?.gifFrames?.[0]?.texnum;
+
+    SetGifBeatSeconds(0.2); // floor(0.2 * 10) % 2 = 0 -> frame 0 again
+    forceRebindThenClearLog();
+    Draw_Pic(0, 0, "/pics/anim.gif");
+
+    const binds = qgl.calls.filter((c) => c.name === "qglBindTexture");
+    expect(binds).toHaveLength(1);
+    expect(binds[0]?.args).toEqual([GL_TEXTURE_2D, frame0Texnum]);
+  });
+
+  test("a non-animated (single-frame) pic draw is unaffected: still binds its one texture regardless of beat", () => {
+    // Single Image Descriptor -- same one-pixel fixture shape as
+    // test/img_resolve_new_formats.test.ts's ONE_PIXEL_GIF.
+    const ONE_PIXEL_GIF = new Uint8Array([71, 73, 70, 56, 55, 97, 1, 0, 1, 0, 129, 0, 0, 5, 150, 250, 0, 0, 0, 0, 0, 0, 0, 0, 0, 44, 0, 0, 0, 0, 1, 0, 1, 0, 0, 8, 4, 0, 1, 4, 4, 0, 59]);
+    files.set("pics/static.gif", ONE_PIXEL_GIF);
+    const image = GL_FindImage("pics/static.gif", ImagetypeT.it_pic);
+    expect(image?.gifFrames).toBeNull();
+
+    for (const beat of [0, 0.15, 3.7]) {
+      SetGifBeatSeconds(beat);
+      forceRebindThenClearLog();
+      Draw_Pic(0, 0, "/pics/static.gif");
+      const binds = qgl.calls.filter((c) => c.name === "qglBindTexture");
+      expect(binds).toHaveLength(1);
+      expect(binds[0]?.args).toEqual([GL_TEXTURE_2D, image?.texnum]);
+    }
   });
 });

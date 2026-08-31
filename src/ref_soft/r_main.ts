@@ -1138,6 +1138,13 @@ export function GetRefAPI(imp: RefImports): RefExports {
     DrawStretchRaw: (x: number, y: number, w: number, h: number, cols: number, rows: number, data: Uint8Array) => Draw_StretchRaw(x, y, w, h, cols, rows, data),
 
     CinematicSetPalette: (palette: Uint8Array | null) => R_CinematicSetPalette(palette),
+    // Documented no-op: animated-GIF frame selection is GL-only by ruling
+    // (see qcommon/gif.ts's own header comment and ref.ts's
+    // RefExports.SetGifBeatSeconds doc comment). This renderer's own GIF
+    // loader (r_image.ts's LoadGIFQuantized) only ever decodes and
+    // quantizes the FIRST composited frame -- there is no second frame for
+    // this renderer to ever pick, so there is nothing for this call to do.
+    SetGifBeatSeconds: () => {},
     BeginFrame: (camera_separation: number) => R_BeginFrame(camera_separation),
     EndFrame: () => SWimp_EndFrame(),
 

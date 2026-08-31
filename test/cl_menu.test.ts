@@ -263,6 +263,7 @@ describe("M_Draw's backdrop is drawn before the menu's own content", () => {
       },
       DrawStretchRaw: () => {},
       CinematicSetPalette: () => {},
+      SetGifBeatSeconds: () => {},
       BeginFrame: () => {},
       EndFrame: () => {},
       AppActivate: () => {},

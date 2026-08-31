@@ -58,6 +58,7 @@ function makeFakeRe(): RefExports {
     DrawFadeScreen: () => undefined,
     DrawStretchRaw: () => undefined,
     CinematicSetPalette: () => undefined,
+    SetGifBeatSeconds: () => undefined,
     BeginFrame: () => undefined,
     EndFrame: () => undefined,
     AppActivate: () => undefined,

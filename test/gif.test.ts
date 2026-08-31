@@ -173,4 +173,259 @@ describe("decodeGIF", () => {
     if (result.ok) return;
     expect(result.reason).toContain("no image data");
   });
+
+  test("a single-image file's frames array has exactly one entry, identical to .image", () => {
+    // Every fixture above (SIMPLE/TRANSPARENT/INTERLACED/ANIMATED_GIF_FRAME0_ONLY)
+    // has exactly one Image Descriptor -- gif.ts's header comment documents
+    // this as the exact pre-animation behavior, byte-for-byte.
+    for (const gif of [SIMPLE_GIF, TRANSPARENT_GIF, INTERLACED_GIF, ANIMATED_GIF_FRAME0_ONLY]) {
+      const result = decodeGIF(gif);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.frames.length).toBe(1);
+      expect(result.frames[0]).toBe(result.image);
+    }
+  });
+});
+
+/*
+ANIMATED COMPOSITING FIXTURES -- 4x4-canvas, 2-3 frame GIFs exercising each
+of the three disposal-method groups (none/keep, restore-to-background,
+restore-to-previous) plus transparency inside a partial-rect frame. Built
+the same way as the fixtures above (a real Pillow-driven LZW encoder, not a
+hand-rolled one) but via Pillow's lower-level GifImagePlugin.getdata(im,
+offset) so each frame's rectangle, position, and Graphic Control Extension
+(disposal method, transparent index) are exactly controlled rather than
+left to Pillow's own frame-diff optimizer. Generated with:
+
+  python3 gen_anim_gif.py > gen_gif_js.txt
+
+using this exact script (kept in scratch, not checked into the repo):
+
+  import struct
+  from PIL import Image, GifImagePlugin
+
+  PALETTE = [
+      0,0,0,      # 0 black (background index; see gif.ts's header comment
+                  # on why disposal-to-background clears to TRANSPARENT
+                  # instead, so this color is never actually painted)
+      200,0,0,    # 1 red
+      0,200,0,    # 2 green
+      0,0,200,    # 3 blue
+      123,123,123 # 4 transparent placeholder color (never actually shown)
+  ] + [0,0,0] * (256-5)
+
+  def mkimg(w, h, pixels):
+      im = Image.new("P", (w, h))
+      im.putpalette(PALETTE)
+      for i, v in enumerate(pixels):
+          im.putpixel((i % w, i // w), v)
+      return im
+
+  def gce(disposal, transparent_index):
+      packed = (disposal << 2) | (1 if transparent_index is not None else 0)
+      ti = transparent_index if transparent_index is not None else 0
+      return bytes([0x21, 0xF9, 0x04, packed, 0, 0, ti, 0x00])
+
+  def build_gif(logical_w, logical_h, frames):
+      # frames: list of (image, (x,y), disposal, transparent_index)
+      out = bytearray()
+      out += b"GIF89a"
+      packed = 0x80 | 0x70 | 0x02  # global color table, 8 entries
+      out += struct.pack("<HHB", logical_w, logical_h, packed)
+      out += bytes([0, 0])  # bg color index, pixel aspect ratio
+      out += bytes(PALETTE[:8*3])
+      for im, (x, y), disposal, ti in frames:
+          out += gce(disposal, ti)
+          for b in GifImagePlugin.getdata(im, offset=(x, y)):
+              out += b
+      out += bytes([0x3B])
+      return bytes(out)
+
+  # DISPOSAL_KEEP_GIF: frame0 = full 4x4 red, disposal=1 (do not dispose);
+  # frame1 = 2x2 green at (1,1), disposal=1.
+  f0 = mkimg(4, 4, [1]*16)
+  f1 = mkimg(2, 2, [2]*4)
+  DISPOSAL_KEEP_GIF = build_gif(4, 4, [(f0, (0,0), 1, None), (f1, (1,1), 1, None)])
+
+  # DISPOSAL_BACKGROUND_GIF: frame0 = full 4x4 red, disposal=2 (restore to
+  # background); frame1 = 2x2 green at (1,1), disposal=1.
+  f0b = mkimg(4, 4, [1]*16)
+  f1b = mkimg(2, 2, [2]*4)
+  DISPOSAL_BACKGROUND_GIF = build_gif(4, 4, [(f0b, (0,0), 2, None), (f1b, (1,1), 1, None)])
+
+  # DISPOSAL_PREVIOUS_GIF: frame0 = full 4x4 red, disposal=1; frame1 = 2x2
+  # green at (1,1), disposal=3 (restore to previous); frame2 = 1x1 blue at
+  # (0,0), disposal=1.
+  f0c = mkimg(4, 4, [1]*16)
+  f1c = mkimg(2, 2, [2]*4)
+  f2c = mkimg(1, 1, [3])
+  DISPOSAL_PREVIOUS_GIF = build_gif(4, 4, [(f0c, (0,0), 1, None), (f1c, (1,1), 3, None), (f2c, (0,0), 1, None)])
+
+  # DISPOSAL_TRANSPARENT_PARTIAL_GIF: frame0 = full 4x4 red, disposal=1;
+  # frame1 = 2x2 at (1,1) with local pixel (0,0) transparent (index 4) and
+  # the other three local pixels green, disposal=1.
+  f0d = mkimg(4, 4, [1]*16)
+  f1d = mkimg(2, 2, [4,2,2,2])
+  DISPOSAL_TRANSPARENT_PARTIAL_GIF = build_gif(4, 4, [(f0d, (0,0), 1, None), (f1d, (1,1), 1, 4)])
+
+Every expected pixel grid below was independently cross-checked by opening
+each fixture with Pillow's OWN reference GIF reader (Image.open(...).seek(i)
+.convert("RGBA")) and printing every frame's pixel grid -- with one
+DELIBERATE documented divergence: Pillow's reader paints disposal-to-
+background as the literal declared background color (opaque black, from
+this fixture's palette index 0), while this decoder treats it as fully
+transparent (alpha 0) -- see gif.ts's own header comment for why. Every
+other disposal/transparency case (keep, restore-to-previous, transparent
+partial-rect) matched Pillow's reference decode exactly.
+*/
+const RED = [200, 0, 0, 255];
+const GREEN = [0, 200, 0, 255];
+const BLUE = [0, 0, 200, 255];
+const CLEAR = [0, 0, 0, 0];
+
+const DISPOSAL_KEEP_GIF = new Uint8Array([
+  71, 73, 70, 56, 57, 97, 4, 0, 4, 0, 242, 0, 0, 0, 0, 0, 200, 0, 0, 0, 200, 0, 0, 0, 200, 123, 123, 123, 0, 0, 0, 0, 0, 0, 0, 0, 0, 33, 249, 4, 4, 0, 0, 0, 0, 44, 0, 0, 0, 0, 4, 0, 4, 0, 0, 8, 9, 0, 3,
+  8, 28, 72, 176, 96, 128, 128, 0, 33, 249, 4, 4, 0, 0, 0, 0, 44, 1, 0, 1, 0, 2, 0, 2, 0, 0, 8, 6, 0, 5, 8, 20, 16, 16, 0, 59,
+]);
+const DISPOSAL_BACKGROUND_GIF = new Uint8Array([
+  71, 73, 70, 56, 57, 97, 4, 0, 4, 0, 242, 0, 0, 0, 0, 0, 200, 0, 0, 0, 200, 0, 0, 0, 200, 123, 123, 123, 0, 0, 0, 0, 0, 0, 0, 0, 0, 33, 249, 4, 8, 0, 0, 0, 0, 44, 0, 0, 0, 0, 4, 0, 4, 0, 0, 8, 9, 0, 3,
+  8, 28, 72, 176, 96, 128, 128, 0, 33, 249, 4, 4, 0, 0, 0, 0, 44, 1, 0, 1, 0, 2, 0, 2, 0, 0, 8, 6, 0, 5, 8, 20, 16, 16, 0, 59,
+]);
+const DISPOSAL_PREVIOUS_GIF = new Uint8Array([
+  71, 73, 70, 56, 57, 97, 4, 0, 4, 0, 242, 0, 0, 0, 0, 0, 200, 0, 0, 0, 200, 0, 0, 0, 200, 123, 123, 123, 0, 0, 0, 0, 0, 0, 0, 0, 0, 33, 249, 4, 4, 0, 0, 0, 0, 44, 0, 0, 0, 0, 4, 0, 4, 0, 0, 8, 9, 0, 3,
+  8, 28, 72, 176, 96, 128, 128, 0, 33, 249, 4, 12, 0, 0, 0, 0, 44, 1, 0, 1, 0, 2, 0, 2, 0, 0, 8, 6, 0, 5, 8, 20, 16, 16, 0, 33, 249, 4, 4, 0, 0, 0, 0, 44, 0, 0, 0, 0, 1, 0, 1, 0, 0, 8, 4, 0, 7, 4, 4, 0,
+  59,
+]);
+const DISPOSAL_TRANSPARENT_PARTIAL_GIF = new Uint8Array([
+  71, 73, 70, 56, 57, 97, 4, 0, 4, 0, 242, 0, 0, 0, 0, 0, 200, 0, 0, 0, 200, 0, 0, 0, 200, 123, 123, 123, 0, 0, 0, 0, 0, 0, 0, 0, 0, 33, 249, 4, 4, 0, 0, 0, 0, 44, 0, 0, 0, 0, 4, 0, 4, 0, 0, 8, 9, 0, 3,
+  8, 28, 72, 176, 96, 128, 128, 0, 33, 249, 4, 5, 0, 0, 4, 0, 44, 1, 0, 1, 0, 2, 0, 2, 0, 0, 8, 6, 0, 9, 8, 24, 24, 16, 0, 59,
+]);
+
+describe("decodeGIF -- animated frame compositing", () => {
+  test("multi-frame files produce one composited frame per Image Descriptor, sized to the logical screen", () => {
+    const result = decodeGIF(DISPOSAL_KEEP_GIF);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.frames.length).toBe(2);
+    for (const f of result.frames) {
+      expect(f.width).toBe(4);
+      expect(f.height).toBe(4);
+    }
+    expect(result.image).toBe(result.frames[0]);
+  });
+
+  test("disposal 'none/keep' (0/1): a later partial-rect frame draws over the previous frame's result, which persists everywhere else", () => {
+    const result = decodeGIF(DISPOSAL_KEEP_GIF);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(Array.from(result.frames[0].pixels)).toEqual([...RED, ...RED, ...RED, ...RED, ...RED, ...RED, ...RED, ...RED, ...RED, ...RED, ...RED, ...RED, ...RED, ...RED, ...RED, ...RED]);
+    // frame1: red border, green 2x2 center at (1,1)-(2,2).
+    expect(Array.from(result.frames[1].pixels)).toEqual([
+      ...RED,
+      ...RED,
+      ...RED,
+      ...RED,
+      ...RED,
+      ...GREEN,
+      ...GREEN,
+      ...RED,
+      ...RED,
+      ...GREEN,
+      ...GREEN,
+      ...RED,
+      ...RED,
+      ...RED,
+      ...RED,
+      ...RED,
+    ]);
+  });
+
+  test("disposal 'restore to background' (2): the disposed frame's own rectangle clears to transparent before the next frame draws", () => {
+    const result = decodeGIF(DISPOSAL_BACKGROUND_GIF);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(Array.from(result.frames[0].pixels)).toEqual([...RED, ...RED, ...RED, ...RED, ...RED, ...RED, ...RED, ...RED, ...RED, ...RED, ...RED, ...RED, ...RED, ...RED, ...RED, ...RED]);
+    // frame0's disposal (2) fires before frame1 draws: the whole canvas
+    // (frame0 covered all of it) clears to transparent, THEN frame1's 2x2
+    // green draws on top of that blank canvas -- everywhere outside its
+    // rect stays transparent, not frame0's red.
+    expect(Array.from(result.frames[1].pixels)).toEqual([
+      ...CLEAR,
+      ...CLEAR,
+      ...CLEAR,
+      ...CLEAR,
+      ...CLEAR,
+      ...GREEN,
+      ...GREEN,
+      ...CLEAR,
+      ...CLEAR,
+      ...GREEN,
+      ...GREEN,
+      ...CLEAR,
+      ...CLEAR,
+      ...CLEAR,
+      ...CLEAR,
+      ...CLEAR,
+    ]);
+  });
+
+  test("disposal 'restore to previous' (3): the canvas rolls back to its pre-frame state once that frame is superseded", () => {
+    const result = decodeGIF(DISPOSAL_PREVIOUS_GIF);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.frames.length).toBe(3);
+    // frame0: solid red.
+    expect(Array.from(result.frames[0].pixels)).toEqual(new Array(16).fill(RED).flat());
+    // frame1: red border, green 2x2 center (same shape as the keep case).
+    expect(Array.from(result.frames[1].pixels)).toEqual([
+      ...RED,
+      ...RED,
+      ...RED,
+      ...RED,
+      ...RED,
+      ...GREEN,
+      ...GREEN,
+      ...RED,
+      ...RED,
+      ...GREEN,
+      ...GREEN,
+      ...RED,
+      ...RED,
+      ...RED,
+      ...RED,
+      ...RED,
+    ]);
+    // frame2: frame1's disposal (3) restores the canvas to frame0's own
+    // pre-frame1 state (solid red) before frame2's 1x1 blue draws at (0,0)
+    // -- the green square from frame1 must NOT still be visible here.
+    expect(Array.from(result.frames[2].pixels)).toEqual([...BLUE, ...RED, ...RED, ...RED, ...RED, ...RED, ...RED, ...RED, ...RED, ...RED, ...RED, ...RED, ...RED, ...RED, ...RED, ...RED]);
+  });
+
+  test("a transparent pixel inside a partial-rect frame reveals the canvas content beneath it instead of overwriting it", () => {
+    const result = decodeGIF(DISPOSAL_TRANSPARENT_PARTIAL_GIF);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // frame1's local (0,0) (canvas (1,1)) is the transparent index -- red
+    // shows through from frame0; the other three local pixels are opaque
+    // green.
+    expect(Array.from(result.frames[1].pixels)).toEqual([
+      ...RED,
+      ...RED,
+      ...RED,
+      ...RED,
+      ...RED,
+      ...RED,
+      ...GREEN,
+      ...RED,
+      ...RED,
+      ...GREEN,
+      ...GREEN,
+      ...RED,
+      ...RED,
+      ...RED,
+      ...RED,
+      ...RED,
+    ]);
+  });
 });

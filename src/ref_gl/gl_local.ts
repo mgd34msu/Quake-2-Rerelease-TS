@@ -75,6 +75,17 @@ export class ImageT {
   scrap = false;
   has_alpha = false;
   paletted = false;
+
+  // Animated-GIF support (no classic-engine precedent -- see qcommon/
+  // gif.ts's own header comment for the design). Null for every ordinary
+  // image and for a GIF with only one frame. When non-null, this IS the
+  // frame-0 ImageT (gifFrames[0] === this object) and gifFrames[1..] are
+  // additional ImageT records for the rest of the composited frames, each
+  // separately registered/uploaded as its own GL texture under a derived
+  // name (see gl_image.ts's GL_LoadByExt "gif" case). Only ever populated
+  // for `ImagetypeT.it_pic` loads -- 3D uses (skins/walls) stay first-
+  // frame-only by ruling, so this field is simply never set for them.
+  gifFrames: ImageT[] | null = null;
 }
 
 export const TEXNUM_LIGHTMAPS = 1024;

@@ -291,6 +291,16 @@ export function LoadBMPQuantized(name: string): { pic: Uint8Array | null; width:
 // decoded RGBA through the shared pipeline (rather than trying to remap
 // index-to-index) keeps this loader identical in shape to every other
 // truecolor-in/palette-out loader in this file.
+//
+// STAYS FIRST-FRAME-ONLY even now that qcommon/gif.ts decodes and
+// composites every frame of an animated GIF (see that file's own header
+// comment for the animation design). This is a deliberate ruling, not a
+// gap: animated-GIF frame SELECTION is wired for the GL renderer's 2D pic
+// path only (src/ref_gl/gl_draw.ts's pickGifFrame, driven by
+// qcommon/gif_beat.ts's fixed 10Hz cadence) -- `decoded.image` below is
+// always `decoded.frames[0]`, exactly as it was before animation support
+// existed, so this loader needs no changes at all to keep behaving
+// identically.
 export function LoadGIFQuantized(name: string): { pic: Uint8Array | null; width: number; height: number } {
   const result: { pic: Uint8Array | null; width: number; height: number } = { pic: null, width: 0, height: 0 };
 

@@ -18,9 +18,23 @@ GL_RENDERER_RENDITION)` alpha-test workaround condition appears four times
 in the original, verbatim each time; factored into one local helper here
 since PORTING.md's "no new project-wide pattern" concern doesn't cover a
 same-file, behavior-preserving extraction of a literal repeated expression.
+
+ANIMATED GIF FRAME SELECTION (no classic-engine precedent -- see
+qcommon/gif.ts's own header comment for the full design): `pickGifFrame`
+is the one seam every pic-drawing function below (Draw_Pic, Draw_StretchPic,
+Draw_ColorPic, Draw_StretchPicRegion, Draw_TileClear) routes its resolved
+ImageT through before binding a texture or reading texcoords. It is a
+no-op for anything that isn't a multi-frame animated GIF (ImageT.gifFrames
+null or length < 2 -- gl_local.ts's ImageT.gifFrames doc comment). Which
+frame is "now" comes from `gifBeatSeconds`, set by SetGifBeatSeconds
+(ref.ts's RefExports member of the same name) -- cl_scrn.ts's
+SCR_UpdateScreen calls it once per draw-context switch (cl.time-derived
+seconds for in-game HUD/2D draws, cls.realtime-derived seconds for menu/
+console draws), not once per individual Draw_* call.
 */
 
 import { ERR_FATAL, PRINT_ALL, Com_sprintf } from "../shared/q_shared";
+import { gifBeatFrame } from "../qcommon/gif_beat";
 import type { ImageT } from "./gl_local";
 import { d_8to24table, gl_config, gl_tex_solid_format, glCvars, GL_RENDERER_MCD, GL_RENDERER_RENDITION, ri, vid } from "./gl_local";
 import {
@@ -49,6 +63,28 @@ export let draw_chars: ImageT | null = null;
 export let r_rawpalette: Uint32Array = new Uint32Array(256);
 export function SetRawPalette(palette: Uint32Array): void {
   r_rawpalette.set(palette);
+}
+
+// Animated-GIF frame selection -- see ref.ts's RefExports.SetGifBeatSeconds
+// doc comment for the full design and who calls this (cl_scrn.ts's
+// SCR_UpdateScreen, once per draw-context switch, not per draw call).
+let gifBeatSeconds = 0;
+export function SetGifBeatSeconds(seconds: number): void {
+  gifBeatSeconds = seconds;
+}
+
+// Every Draw_* pic function below resolves its ImageT through this instead
+// of using the looked-up image directly: an animated GIF's `gl.gifFrames`
+// (set only for `ImagetypeT.it_pic` loads, see gl_local.ts's ImageT.gifFrames
+// doc comment and gl_image.ts's GL_LoadByExt "gif" case) picks which
+// composited frame's own texture is bound this draw, at the fixed 10Hz
+// TIME-derived cadence qcommon/gif_beat.ts's gifBeatFrame implements. An
+// ordinary (non-GIF, or single-frame GIF) image's gifFrames is null, so
+// this is a no-op indirection for every non-animated pic.
+function pickGifFrame(gl: ImageT): ImageT {
+  if (!gl.gifFrames || gl.gifFrames.length < 2) return gl;
+  const index = gifBeatFrame(gifBeatSeconds, gl.gifFrames.length);
+  return gl.gifFrames[index];
 }
 
 function mcdOrRenditionAlphaTestQuirk(): boolean {
@@ -152,21 +188,22 @@ export function Draw_StretchPic(x: number, y: number, w: number, h: number, pic:
     ri.Con_Printf(PRINT_ALL, `Can't find pic: ${pic}\n`);
     return;
   }
+  const frame = pickGifFrame(gl);
 
   if (scrap_dirty) Scrap_Upload();
 
-  const disableAlphaTest = mcdOrRenditionAlphaTestQuirk() && !gl.has_alpha;
+  const disableAlphaTest = mcdOrRenditionAlphaTestQuirk() && !frame.has_alpha;
   if (disableAlphaTest) qgl.qglDisable(GL_ALPHA_TEST);
 
-  GL_Bind(gl.texnum);
+  GL_Bind(frame.texnum);
   qgl.qglBegin(GL_QUADS);
-  qgl.qglTexCoord2f(gl.sl, gl.tl);
+  qgl.qglTexCoord2f(frame.sl, frame.tl);
   qgl.qglVertex2f(x, y);
-  qgl.qglTexCoord2f(gl.sh, gl.tl);
+  qgl.qglTexCoord2f(frame.sh, frame.tl);
   qgl.qglVertex2f(x + w, y);
-  qgl.qglTexCoord2f(gl.sh, gl.th);
+  qgl.qglTexCoord2f(frame.sh, frame.th);
   qgl.qglVertex2f(x + w, y + h);
-  qgl.qglTexCoord2f(gl.sl, gl.th);
+  qgl.qglTexCoord2f(frame.sl, frame.th);
   qgl.qglVertex2f(x, y + h);
   qgl.qglEnd();
 
@@ -200,10 +237,11 @@ export function Draw_ColorPic(x: number, y: number, w: number, h: number, pic: s
     ri.Con_Printf(PRINT_ALL, `Can't find pic: ${pic}\n`);
     return;
   }
+  const frame = pickGifFrame(gl);
 
   if (scrap_dirty) Scrap_Upload();
 
-  const disableAlphaTest = mcdOrRenditionAlphaTestQuirk() && !gl.has_alpha;
+  const disableAlphaTest = mcdOrRenditionAlphaTestQuirk() && !frame.has_alpha;
   if (disableAlphaTest) qgl.qglDisable(GL_ALPHA_TEST);
 
   const translucent = color.a < 255;
@@ -211,15 +249,15 @@ export function Draw_ColorPic(x: number, y: number, w: number, h: number, pic: s
 
   qgl.qglColor4f(color.r / 255, color.g / 255, color.b / 255, color.a / 255);
 
-  GL_Bind(gl.texnum);
+  GL_Bind(frame.texnum);
   qgl.qglBegin(GL_QUADS);
-  qgl.qglTexCoord2f(gl.sl, gl.tl);
+  qgl.qglTexCoord2f(frame.sl, frame.tl);
   qgl.qglVertex2f(x, y);
-  qgl.qglTexCoord2f(gl.sh, gl.tl);
+  qgl.qglTexCoord2f(frame.sh, frame.tl);
   qgl.qglVertex2f(x + w, y);
-  qgl.qglTexCoord2f(gl.sh, gl.th);
+  qgl.qglTexCoord2f(frame.sh, frame.th);
   qgl.qglVertex2f(x + w, y + h);
-  qgl.qglTexCoord2f(gl.sl, gl.th);
+  qgl.qglTexCoord2f(frame.sl, frame.th);
   qgl.qglVertex2f(x, y + h);
   qgl.qglEnd();
 
@@ -268,10 +306,11 @@ export function Draw_StretchPicRegion(
     ri.Con_Printf(PRINT_ALL, `Can't find pic: ${pic}\n`);
     return;
   }
+  const frame = pickGifFrame(gl);
 
   if (scrap_dirty) Scrap_Upload();
 
-  const disableAlphaTest = mcdOrRenditionAlphaTestQuirk() && !gl.has_alpha;
+  const disableAlphaTest = mcdOrRenditionAlphaTestQuirk() && !frame.has_alpha;
   if (disableAlphaTest) qgl.qglDisable(GL_ALPHA_TEST);
 
   const translucent = color.a < 255;
@@ -279,14 +318,14 @@ export function Draw_StretchPicRegion(
 
   qgl.qglColor4f(color.r / 255, color.g / 255, color.b / 255, color.a / 255);
 
-  const uSpan = gl.sh - gl.sl;
-  const vSpan = gl.th - gl.tl;
-  const s0 = gl.sl + (srcX / gl.width) * uSpan;
-  const s1 = gl.sl + ((srcX + srcW) / gl.width) * uSpan;
-  const t0 = gl.tl + (srcY / gl.height) * vSpan;
-  const t1 = gl.tl + ((srcY + srcH) / gl.height) * vSpan;
+  const uSpan = frame.sh - frame.sl;
+  const vSpan = frame.th - frame.tl;
+  const s0 = frame.sl + (srcX / frame.width) * uSpan;
+  const s1 = frame.sl + ((srcX + srcW) / frame.width) * uSpan;
+  const t0 = frame.tl + (srcY / frame.height) * vSpan;
+  const t1 = frame.tl + ((srcY + srcH) / frame.height) * vSpan;
 
-  GL_Bind(gl.texnum);
+  GL_Bind(frame.texnum);
   qgl.qglBegin(GL_QUADS);
   qgl.qglTexCoord2f(s0, t0);
   qgl.qglVertex2f(x, y);
@@ -319,21 +358,22 @@ export function Draw_Pic(x: number, y: number, pic: string): void {
     ri.Con_Printf(PRINT_ALL, `Can't find pic: ${pic}\n`);
     return;
   }
+  const frame = pickGifFrame(gl);
 
   if (scrap_dirty) Scrap_Upload();
 
-  const disableAlphaTest = mcdOrRenditionAlphaTestQuirk() && !gl.has_alpha;
+  const disableAlphaTest = mcdOrRenditionAlphaTestQuirk() && !frame.has_alpha;
   if (disableAlphaTest) qgl.qglDisable(GL_ALPHA_TEST);
 
-  GL_Bind(gl.texnum);
+  GL_Bind(frame.texnum);
   qgl.qglBegin(GL_QUADS);
-  qgl.qglTexCoord2f(gl.sl, gl.tl);
+  qgl.qglTexCoord2f(frame.sl, frame.tl);
   qgl.qglVertex2f(x, y);
-  qgl.qglTexCoord2f(gl.sh, gl.tl);
+  qgl.qglTexCoord2f(frame.sh, frame.tl);
   qgl.qglVertex2f(x + gl.width, y);
-  qgl.qglTexCoord2f(gl.sh, gl.th);
+  qgl.qglTexCoord2f(frame.sh, frame.th);
   qgl.qglVertex2f(x + gl.width, y + gl.height);
-  qgl.qglTexCoord2f(gl.sl, gl.th);
+  qgl.qglTexCoord2f(frame.sl, frame.th);
   qgl.qglVertex2f(x, y + gl.height);
   qgl.qglEnd();
 
@@ -360,11 +400,12 @@ export function Draw_TileClear(x: number, y: number, w: number, h: number, pic: 
     ri.Con_Printf(PRINT_ALL, `Can't find pic: ${pic}\n`);
     return;
   }
+  const frame = pickGifFrame(image);
 
-  const disableAlphaTest = mcdOrRenditionAlphaTestQuirk() && !image.has_alpha;
+  const disableAlphaTest = mcdOrRenditionAlphaTestQuirk() && !frame.has_alpha;
   if (disableAlphaTest) qgl.qglDisable(GL_ALPHA_TEST);
 
-  GL_Bind(image.texnum);
+  GL_Bind(frame.texnum);
   qgl.qglBegin(GL_QUADS);
   qgl.qglTexCoord2f(x / 64.0, y / 64.0);
   qgl.qglVertex2f(x, y);

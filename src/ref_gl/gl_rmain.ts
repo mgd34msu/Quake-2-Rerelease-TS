@@ -149,7 +149,7 @@ import {
   GL_LoadPic,
 } from "./gl_image";
 import { loadQGLFromSystem, QGL_Shutdown, type GLGetProcAddressFn } from "./qgl";
-import { Draw_Char, Draw_ColorPic, Draw_Fill, Draw_FadeScreen, Draw_FindPic, Draw_GetPicSize, Draw_InitLocal, Draw_Pic, Draw_StretchPic, Draw_StretchPicRegion, Draw_StretchRaw, Draw_TileClear, SetRawPalette } from "./gl_draw";
+import { Draw_Char, Draw_ColorPic, Draw_Fill, Draw_FadeScreen, Draw_FindPic, Draw_GetPicSize, Draw_InitLocal, Draw_Pic, Draw_StretchPic, Draw_StretchPicRegion, Draw_StretchRaw, Draw_TileClear, SetGifBeatSeconds, SetRawPalette } from "./gl_draw";
 import { R_ScaleTurbsinForRInit, R_SetSky } from "./gl_warp";
 import { R_DrawWorld, R_DrawAlphaSurfaces, R_MarkLeaves, R_DrawBrushModel } from "./gl_rsurf";
 import { R_LightPoint, R_PushDlights, R_RenderDlights } from "./gl_light";
@@ -1685,6 +1685,7 @@ export function GetRefAPI(imp: RefImports): RefExports {
     DrawStretchRaw: (x: number, y: number, w: number, h: number, cols: number, rows: number, data: Uint8Array) => Draw_StretchRaw(x, y, w, h, cols, rows, data),
 
     CinematicSetPalette: (palette) => R_SetPalette(palette),
+    SetGifBeatSeconds: (seconds: number) => SetGifBeatSeconds(seconds),
     BeginFrame: (camera_separation) => R_BeginFrame(camera_separation),
     EndFrame: () => glimp.EndFrame(),
 

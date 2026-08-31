@@ -1577,6 +1577,13 @@ export function SCR_UpdateScreen(): void {
     if (!re) continue;
 
     re.BeginFrame(separation[i]);
+    // Animated-GIF frame selection default: menu/console context
+    // (cls.realtime-derived seconds). The in-game 3D-refresh branch below
+    // switches this to cl.time-derived seconds right before its own HUD/2D
+    // draws, then switches back before SCR_DrawConsole/M_Draw -- see
+    // ref.ts's RefExports.SetGifBeatSeconds doc comment for the full
+    // design (Mike's ruling, qcommon/gif_beat.ts).
+    re.SetGifBeatSeconds(cls.realtime / 1000);
 
     if (scr_draw_loading === 2) {
       // loading plaque over black screen
@@ -1616,6 +1623,11 @@ export function SCR_UpdateScreen(): void {
 
       V_RenderView(separation[i]);
 
+      // In-game 2D draws (HUD/carousel/wheel/net/center-string/pause) use
+      // cl.time-derived seconds -- see this function's own BeginFrame-side
+      // comment above.
+      re.SetGifBeatSeconds(cl.time / 1000);
+
       // Routed through the cgame host (src/client/cgame/host.ts) rather
       // than calling SCR_DrawStats/SCR_DrawLayout/CL_DrawInventory directly
       // -- the active cgame's DrawHUD (classic.ts + classic_hud.ts, today)
@@ -1640,6 +1652,11 @@ export function SCR_UpdateScreen(): void {
         SCR_DrawDebugGraph();
 
       SCR_DrawPause();
+
+      // Back to menu/console context (cls.realtime-derived seconds) for
+      // the console/menu draws below -- same rationale as the BeginFrame-
+      // side comment above.
+      re.SetGifBeatSeconds(cls.realtime / 1000);
 
       SCR_DrawConsole();
 

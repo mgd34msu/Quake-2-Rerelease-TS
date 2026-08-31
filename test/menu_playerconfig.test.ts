@@ -133,6 +133,7 @@ function fakeRe(calls: string[], renderedRefdefs: Parameters<RefExports["RenderF
     DrawFadeScreen: () => {},
     DrawStretchRaw: () => {},
     CinematicSetPalette: () => {},
+    SetGifBeatSeconds: () => {},
     BeginFrame: () => {},
     EndFrame: () => {},
     AppActivate: () => {},

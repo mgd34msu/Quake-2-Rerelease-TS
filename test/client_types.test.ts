@@ -178,6 +178,7 @@ describe("ref.ts / vid.ts / screen.ts default structs", () => {
       DrawFadeScreen: () => undefined,
       DrawStretchRaw: () => undefined,
       CinematicSetPalette: () => undefined,
+      SetGifBeatSeconds: () => undefined,
       BeginFrame: () => undefined,
       EndFrame: () => undefined,
       AppActivate: () => undefined,

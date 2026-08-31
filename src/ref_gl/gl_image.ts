@@ -842,22 +842,25 @@ GIF LOADING
 
 No classic-engine precedent -- see qcommon/gif.ts's own header comment
 (same Mike ruling as LoadBMP above; zero .gif files exist in the real
-retail data either). Static, first-frame only. Same {pic, width, height}
-shape and top-down RGBA8 orientation as the other truecolor loaders above.
-GIF has no "recognized but unsupported variant" class the way PNG/JPG/BMP
-do (every GIF87a/89a still image this decoder recognizes, it fully
-decodes) -- every failure reason is a "not a GIF at all"/corrupt-data
-case, so this loader never calls Sys_Error, only the Con_Printf +
-null-pic convention.
+retail data either). Same {pic, width, height} shape and top-down RGBA8
+orientation as the other truecolor loaders above. GIF has no "recognized
+but unsupported variant" class the way PNG/JPG/BMP do (every GIF87a/89a
+still image this decoder recognizes, it fully decodes) -- every failure
+reason is a "not a GIF at all"/corrupt-data case, so these loaders never
+call Sys_Error, only the Con_Printf + null-pic/null convention.
+
+LoadGIF (below) is first-frame-only, kept for whatever still calls it
+directly by name; GL_LoadByExt's own "gif" case (this file's extension
+dispatch table) calls LoadGIFFrames instead, so a multi-frame animated GIF
+only decodes once per registration, not once for LoadGIF's own first-frame
+read plus a second full decode for the remaining frames.
 =========================================================
 */
-export function LoadGIF(name: string): { pic: Uint8Array | null; width: number; height: number } {
-  const result: { pic: Uint8Array | null; width: number; height: number } = { pic: null, width: 0, height: 0 };
-
+export function LoadGIFFrames(name: string): { frames: { pic: Uint8Array; width: number; height: number }[] } | null {
   const { data: buffer } = ri.FS_LoadFile(name);
   if (!buffer) {
     ri.Con_Printf(PRINT_DEVELOPER, `Bad gif file ${name}\n`);
-    return result;
+    return null;
   }
 
   const decoded = decodeGIF(buffer);
@@ -865,13 +868,17 @@ export function LoadGIF(name: string): { pic: Uint8Array | null; width: number; 
 
   if (!decoded.ok) {
     ri.Con_Printf(PRINT_ALL, `Bad gif file ${name}: ${decoded.reason}\n`);
-    return result;
+    return null;
   }
 
-  result.pic = decoded.image.pixels;
-  result.width = decoded.image.width;
-  result.height = decoded.image.height;
-  return result;
+  return { frames: decoded.frames.map((f) => ({ pic: f.pixels, width: f.width, height: f.height })) };
+}
+
+export function LoadGIF(name: string): { pic: Uint8Array | null; width: number; height: number } {
+  const framesResult = LoadGIFFrames(name);
+  if (!framesResult || framesResult.frames.length === 0) return { pic: null, width: 0, height: 0 };
+  const first = framesResult.frames[0];
+  return { pic: first.pic, width: first.width, height: first.height };
 }
 
 /*
@@ -1439,9 +1446,36 @@ function GL_LoadByExt(name: string, ext: ImgExtT, type: ImagetypeT): ImageT | nu
       return GL_LoadPic(name, pic, width, height, type, 32);
     }
     case "gif": {
-      const { pic, width, height } = LoadGIF(name);
-      if (!pic) return null;
-      return GL_LoadPic(name, pic, width, height, type, 32);
+      // Multi-frame registration -- see gl_local.ts's ImageT.gifFrames doc
+      // comment and qcommon/gif.ts's own header comment for the design.
+      // Every composited frame becomes its OWN GL texture (frame 0 under
+      // `name` itself, exactly as a single-frame GIF always has been;
+      // frames 1+ under a derived name), so GL_LoadPic's existing
+      // scrap/upload logic needs no changes at all -- this just calls it
+      // once per frame. Restricted to `ImagetypeT.it_pic`: 3D uses (wall
+      // textures, skins) stay first-frame-only by ruling, so this whole
+      // extra-frames branch is simply skipped for them.
+      const framesResult = LoadGIFFrames(name);
+      if (!framesResult || framesResult.frames.length === 0) return null;
+      const first = framesResult.frames[0];
+      const image = GL_LoadPic(name, first.pic, first.width, first.height, type, 32);
+      if (type === ImagetypeT.it_pic && framesResult.frames.length > 1) {
+        // Guard against MAX_QPATH overflow on the derived per-frame name
+        // (GL_LoadPic Sys_Error's on a too-long name) -- if even the
+        // largest frame index wouldn't fit, skip multi-frame registration
+        // entirely rather than wiring a partial/inconsistent frame set;
+        // the caller still gets frame 0, exactly like every other GIF.
+        const suffixBudget = `#gifframe${framesResult.frames.length}`.length;
+        if (name.length + suffixBudget < MAX_QPATH) {
+          const gifFrames: ImageT[] = [image];
+          for (let i = 1; i < framesResult.frames.length; i++) {
+            const f = framesResult.frames[i];
+            gifFrames.push(GL_LoadPic(`${name}#gifframe${i}`, f.pic, f.width, f.height, type, 32));
+          }
+          image.gifFrames = gifFrames;
+        }
+      }
+      return image;
     }
   }
 }

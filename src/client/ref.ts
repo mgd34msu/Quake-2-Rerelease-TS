@@ -212,6 +212,23 @@ export interface RefExports {
   DrawStretchRaw(x: number, y: number, w: number, h: number, cols: number, rows: number, data: Uint8Array): void;
 
   CinematicSetPalette(palette: Uint8Array | null): void; // null = game palette
+
+  // Animated-GIF frame selection for the 2D/UI Draw* calls below -- no
+  // classic-engine precedent (same as DrawColorPic above). Set once per
+  // draw-context switch, not per draw call: the caller (cl_scrn.ts's
+  // SCR_UpdateScreen) calls this with cl.time-derived seconds right before
+  // in-game HUD/2D draws and with cls.realtime-derived seconds right
+  // before menu/console draws, matching Mike's design ruling in
+  // qcommon/gif_beat.ts's own header comment (fixed 10Hz cadence off of
+  // TIME, not tick count, so it's identical under a classic 10Hz server
+  // and a KEX 40Hz one, and still works with no server connected at all).
+  // GL: gl_draw.ts's Draw_Pic/Draw_StretchPic/Draw_ColorPic/
+  // Draw_StretchPicRegion read this to pick which composited GIF frame's
+  // texture to bind. Software: ref_soft/r_main.ts's implementation is a
+  // documented no-op -- that renderer's Draw_Pic only ever has a single,
+  // first-composited-frame texture to draw (see r_image.ts's own header
+  // note on why animation isn't wired there).
+  SetGifBeatSeconds(seconds: number): void;
   BeginFrame(camera_separation: number): void;
   EndFrame(): void;
 
