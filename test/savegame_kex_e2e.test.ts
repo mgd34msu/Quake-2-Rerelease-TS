@@ -166,12 +166,14 @@ describe("kex family save/load -- end-to-end (boot, save, mutate, load, verify)"
     // sv_init.ts's SV_CheckForSavegame now makes save.c's LOAD_NORMAL
     // (frames=2) vs LOAD_LEVEL_START (frames=10*framerate) distinction
     // (2026-08-30 cleanup sweep); a `load` command sets sv.loadgame=true,
-    // so this reload runs the 2-frame LOAD_NORMAL branch. Per this file's
-    // header FINDING, no frame advances level.time either way without a
-    // spawned player (G_RunFrame's main_loop early-return), so the
-    // restored value should still match the saved snapshot exactly, not
-    // just "less than the mutated value".
-    expect(timeAfter).toBe(timeBefore);
+    // so this reload runs the 2-frame LOAD_NORMAL branch. Those catch-up
+    // frames now REALLY run (f5b976f threads mainLoop=false per q2repro
+    // init.c/save.c:626-654, bypassing G_RunFrame's no-player early-out --
+    // this file's older FINDING described the pre-fix no-op behavior), so
+    // the restored time advances by exactly two game frames past the
+    // saved snapshot.
+    const catchUpMs = 2 * sv.frametime; // the game's live per-frame ms (gi.frame_time_ms mirrors sv.frametime)
+    expect(timeAfter).toBe(timeBefore + catchUpMs);
     expect(entityCountAfter).toBe(entityCountBefore);
   });
 });

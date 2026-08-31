@@ -157,10 +157,20 @@ describe.skipIf(!haveRetail)("kex family save/load -- real retail base1 e2e (own
     expect(Gtime_milliseconds(level.time)).toBeGreaterThan(timeBefore);
 
     Cbuf_AddText("load retailtest\n");
-    const reloaded = await pollUntil(() => sv.state === ServerStateT.ss_game && Gtime_milliseconds(level.time) === timeBefore);
+    // The LOAD_NORMAL catch-up frames advance level.time by exactly two
+    // game frames past the saved value (f5b976f: mainLoop=false really
+    // runs them, per q2repro save.c:626-654) -- poll for the restored-and-
+    // advanced value, then pin it exactly.
+    const catchUpMs = 2 * sv.frametime; // the game's live per-frame ms (gi.frame_time_ms mirrors sv.frametime)
+    const reloaded = await pollUntil(() => sv.state === ServerStateT.ss_game && Gtime_milliseconds(level.time) === timeBefore + catchUpMs);
     expect(reloaded).toBe(true);
 
     expect(sv.name).toBe("base1");
-    expect(inuseEntityCount()).toBe(entityCountBefore);
+    // The two LOAD_NORMAL catch-up frames are REAL game frames now
+    // (f5b976f) and legitimately spawn a handful of entities on base1
+    // (timed thinks); the restore itself is exact -- assert restored-plus-
+    // bounded-evolution rather than frozen equality.
+    expect(inuseEntityCount()).toBeGreaterThanOrEqual(entityCountBefore);
+    expect(inuseEntityCount()).toBeLessThanOrEqual(entityCountBefore + 16);
   });
 });
