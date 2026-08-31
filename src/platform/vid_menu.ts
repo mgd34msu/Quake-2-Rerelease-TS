@@ -91,28 +91,31 @@ MENU INTERACTION
 
 ====================================================================
 */
-const SOFTWARE_MENU = 0;
-const OPENGL_MENU = 1;
+// Exported (was module-private): test/vid_menu.test.ts drives VID_MenuInit
+// with various cvar states and inspects these widgets' curvalue/buffer
+// fields directly, the same way test/cl_menu.test.ts pokes qmenu widgets.
+export const SOFTWARE_MENU = 0;
+export const OPENGL_MENU = 1;
 
 const s_software_menu = new MenuframeworkS();
 const s_opengl_menu = new MenuframeworkS();
 let s_current_menu: MenuframeworkS = s_software_menu;
 let s_current_menu_index = 0;
 
-const s_mode_list: MenulistS[] = [new MenulistS(), new MenulistS()];
+export const s_mode_list: MenulistS[] = [new MenulistS(), new MenulistS()];
 const s_ref_list: MenulistS[] = [new MenulistS(), new MenulistS()];
 const s_tq_slider = new MenusliderS();
-const s_screensize_slider: MenusliderS[] = [new MenusliderS(), new MenusliderS()];
-const s_brightness_slider: MenusliderS[] = [new MenusliderS(), new MenusliderS()];
-const s_fs_box: MenulistS[] = [new MenulistS(), new MenulistS()];
+export const s_screensize_slider: MenusliderS[] = [new MenusliderS(), new MenusliderS()];
+export const s_brightness_slider: MenusliderS[] = [new MenusliderS(), new MenusliderS()];
+export const s_fs_box: MenulistS[] = [new MenulistS(), new MenulistS()];
 const s_stipple_box = new MenulistS();
 const s_paletted_texture_box = new MenulistS();
 const s_windowed_mouse = new MenulistS();
 // v1.0.0 RC: custom resolution (mode -1) + render-resolution scale -- see
 // this file's header comment and vid.ts's VID_GetModeInfo/VID_GetScale.
-const s_customwidth_field: MenufieldS[] = [new MenufieldS(), new MenufieldS()];
-const s_customheight_field: MenufieldS[] = [new MenufieldS(), new MenufieldS()];
-const s_scale_slider: MenusliderS[] = [new MenusliderS(), new MenusliderS()];
+export const s_customwidth_field: MenufieldS[] = [new MenufieldS(), new MenufieldS()];
+export const s_customheight_field: MenufieldS[] = [new MenufieldS(), new MenufieldS()];
+export const s_scale_slider: MenusliderS[] = [new MenusliderS(), new MenusliderS()];
 const s_apply_action: MenuactionS[] = [new MenuactionS(), new MenuactionS()];
 const s_defaults_action: MenuactionS[] = [new MenuactionS(), new MenuactionS()];
 
@@ -176,7 +179,7 @@ const resolutions = [
   "[3840 2160]",
   "[Custom   ]",
 ];
-const CUSTOM_MODE_INDEX = resolutions.length - 1;
+export const CUSTOM_MODE_INDEX = resolutions.length - 1;
 
 function ResetDefaults(): void {
   VID_MenuInit();
@@ -324,28 +327,42 @@ export function VID_MenuInit(): void {
     s_mode_list[i].generic.y = 10;
     s_mode_list[i].itemnames = resolutions;
 
+    // Row spacing: menu.ts's own field rows (e.g. M_Menu_StartServer_f's
+    // s_timelimit_field/s_fraglimit_field/s_maxclients_field/s_hostname_field,
+    // menu.ts:2163/2173/2183/2193) space consecutive MTYPE_FIELD rows 18
+    // units apart, not the plain 10-unit rhythm used between two
+    // MTYPE_SLIDER/MTYPE_SPINCONTROL rows -- a field draws a bordered input
+    // box (Field_Draw, qmenu_impl.ts, corners at generic.y +/-4) on top of
+    // its label line, so it needs more clearance than a single text row.
+    // These two fields (and the slider right after them) were previously
+    // packed at the plain 10-unit spacing (20/30/40), cramming them against
+    // each other; switching to the established 18-unit field rhythm here
+    // and resuming a flat, gap-free 10-unit rhythm for every row after (no
+    // more of the old 70->90 and 100->120 double-gaps) is what "make the
+    // whole menu's vertical rhythm uniform" means below -- purely this
+    // port's own layout call, not C or q2repro fidelity (see file header).
     s_customwidth_field[i].generic.type = MTYPE_FIELD;
     s_customwidth_field[i].generic.name = "custom width";
     s_customwidth_field[i].generic.x = 0;
-    s_customwidth_field[i].generic.y = 20;
+    s_customwidth_field[i].generic.y = 28;
     s_customwidth_field[i].generic.flags = QMF_NUMBERSONLY;
 
     s_customheight_field[i].generic.type = MTYPE_FIELD;
     s_customheight_field[i].generic.name = "custom height";
     s_customheight_field[i].generic.x = 0;
-    s_customheight_field[i].generic.y = 30;
+    s_customheight_field[i].generic.y = 46;
     s_customheight_field[i].generic.flags = QMF_NUMBERSONLY;
 
     s_scale_slider[i].generic.type = MTYPE_SLIDER;
     s_scale_slider[i].generic.x = 0;
-    s_scale_slider[i].generic.y = 40;
+    s_scale_slider[i].generic.y = 64;
     s_scale_slider[i].generic.name = "resolution scale";
     s_scale_slider[i].minvalue = 1; // VID_SCALE_MIN (0.1) * 10
     s_scale_slider[i].maxvalue = 10; // VID_SCALE_MAX (1.0) * 10
 
     s_screensize_slider[i].generic.type = MTYPE_SLIDER;
     s_screensize_slider[i].generic.x = 0;
-    s_screensize_slider[i].generic.y = 50;
+    s_screensize_slider[i].generic.y = 74;
     s_screensize_slider[i].generic.name = "screen size";
     s_screensize_slider[i].minvalue = 3;
     s_screensize_slider[i].maxvalue = 12;
@@ -353,7 +370,7 @@ export function VID_MenuInit(): void {
 
     s_brightness_slider[i].generic.type = MTYPE_SLIDER;
     s_brightness_slider[i].generic.x = 0;
-    s_brightness_slider[i].generic.y = 60;
+    s_brightness_slider[i].generic.y = 84;
     s_brightness_slider[i].generic.name = "brightness";
     s_brightness_slider[i].generic.callback = BrightnessCallback;
     s_brightness_slider[i].minvalue = 5;
@@ -362,7 +379,7 @@ export function VID_MenuInit(): void {
 
     s_fs_box[i].generic.type = MTYPE_SPINCONTROL;
     s_fs_box[i].generic.x = 0;
-    s_fs_box[i].generic.y = 70;
+    s_fs_box[i].generic.y = 94;
     s_fs_box[i].generic.name = "fullscreen";
     s_fs_box[i].itemnames = yesno_names;
     s_fs_box[i].curvalue = vidFullscreenC.value | 0;
@@ -370,33 +387,36 @@ export function VID_MenuInit(): void {
     s_defaults_action[i].generic.type = MTYPE_ACTION;
     s_defaults_action[i].generic.name = "reset to default";
     s_defaults_action[i].generic.x = 0;
-    s_defaults_action[i].generic.y = 120;
+    s_defaults_action[i].generic.y = 124;
     s_defaults_action[i].generic.callback = ResetDefaults;
 
     s_apply_action[i].generic.type = MTYPE_ACTION;
     s_apply_action[i].generic.name = "apply";
     s_apply_action[i].generic.x = 0;
-    s_apply_action[i].generic.y = 130;
+    s_apply_action[i].generic.y = 134;
     s_apply_action[i].generic.callback = ApplyChanges;
   }
 
+  // Continuing the flat 10-unit rhythm from s_fs_box (y=94) above -- these
+  // used to jump 90/100 then 120 (a 20-unit double-gap either side), the
+  // same non-uniform pattern this pass is removing.
   s_stipple_box.generic.type = MTYPE_SPINCONTROL;
   s_stipple_box.generic.x = 0;
-  s_stipple_box.generic.y = 90;
+  s_stipple_box.generic.y = 104;
   s_stipple_box.generic.name = "stipple alpha";
   s_stipple_box.curvalue = stippleC.value | 0;
   s_stipple_box.itemnames = yesno_names;
 
   s_windowed_mouse.generic.type = MTYPE_SPINCONTROL;
   s_windowed_mouse.generic.x = 0;
-  s_windowed_mouse.generic.y = 100;
+  s_windowed_mouse.generic.y = 114;
   s_windowed_mouse.generic.name = "windowed mouse";
   s_windowed_mouse.curvalue = winMouseC.value | 0;
   s_windowed_mouse.itemnames = yesno_names;
 
   s_tq_slider.generic.type = MTYPE_SLIDER;
   s_tq_slider.generic.x = 0;
-  s_tq_slider.generic.y = 90;
+  s_tq_slider.generic.y = 104;
   s_tq_slider.generic.name = "texture quality";
   s_tq_slider.minvalue = 0;
   s_tq_slider.maxvalue = 3;
@@ -404,7 +424,7 @@ export function VID_MenuInit(): void {
 
   s_paletted_texture_box.generic.type = MTYPE_SPINCONTROL;
   s_paletted_texture_box.generic.x = 0;
-  s_paletted_texture_box.generic.y = 100;
+  s_paletted_texture_box.generic.y = 114;
   s_paletted_texture_box.generic.name = "8-bit textures";
   s_paletted_texture_box.itemnames = yesno_names;
   s_paletted_texture_box.curvalue = glPalC.value | 0;

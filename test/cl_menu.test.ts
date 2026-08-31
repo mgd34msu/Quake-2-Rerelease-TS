@@ -18,10 +18,11 @@ Covers:
 */
 
 import { describe, test, expect, beforeEach } from "bun:test";
-import { cls, KeydestT } from "../src/client/client";
+import { cls, cl, KeydestT, setRe } from "../src/client/client";
 import { M_PushMenu, M_PopMenu, M_ForceMenuOff, M_Draw, M_Keydown, M_Menu_Main_f } from "../src/client/menu";
 import { MenuframeworkS, MenuactionS, MenuseparatorS, MenusliderS, MTYPE_ACTION, MTYPE_SEPARATOR, MTYPE_SLIDER } from "../src/client/qmenu";
 import { Menu_AddItem, Menu_AdjustCursor, Menu_SlideItem, Menu_ItemAtCursor } from "../src/client/qmenu_impl";
+import { API_VERSION, type RefExports } from "../src/client/ref";
 
 beforeEach(() => {
   M_ForceMenuOff();
@@ -217,5 +218,103 @@ describe("Slider DoSlide clamping (via Menu_SlideItem)", () => {
 
     expect(slider.curvalue).toBe(5);
     expect(seenRec.v).toBe(5);
+  });
+});
+
+// M_Draw's backdrop: q2repro (src/client/ui/menu.c Menu_Draw, ~line 2312)
+// always draws a full-menu-rect background -- either menu->image or an
+// opaque R_DrawFill32(menu->color) -- before any of the menu's own items,
+// and q2pro.menu's "background black" (src/client/ui/q2pro.menu:59) is the
+// default color every menu without its own background inherits (so the
+// live console dump behind the menu never bleeds through: it's drawn under
+// an opaque fill first). menu.ts:3098-3104's M_Draw is this port's
+// equivalent -- it calls re.DrawFadeScreen() (a translucent black quad;
+// re.DrawFill(...,0) during a cinematic) before m_drawfunc(), same
+// before-content ordering. No prior test exercised this (re is never set in
+// cl_menu.test.ts's other cases, so the `if (re)` branch was a no-op); these
+// pin the ordering with a fake RefExports that records call order.
+describe("M_Draw's backdrop is drawn before the menu's own content", () => {
+  function fakeRe(calls: string[]): RefExports {
+    return {
+      api_version: API_VERSION,
+      Init: () => true,
+      Shutdown: () => {},
+      BeginRegistration: () => {},
+      RegisterModel: () => null,
+      RegisterSkin: () => null,
+      RegisterPic: () => null,
+      SetSky: () => {},
+      EndRegistration: () => {},
+      RenderFrame: () => {},
+      SupportsPerPixelLighting: () => false,
+      DrawGetPicSize: () => ({ w: 0, h: 0 }),
+      DrawPic: () => {},
+      DrawStretchPic: () => {},
+      DrawColorPic: () => {},
+      DrawStretchPicRegion: () => {},
+      DrawChar: () => {},
+      DrawTileClear: () => {},
+      DrawFill: () => {
+        calls.push("DrawFill");
+      },
+      DrawFadeScreen: () => {
+        calls.push("DrawFadeScreen");
+      },
+      DrawStretchRaw: () => {},
+      CinematicSetPalette: () => {},
+      BeginFrame: () => {},
+      EndFrame: () => {},
+      AppActivate: () => {},
+    };
+  }
+
+  // Each test resets `re` to null and pops the menu stack in a `finally`,
+  // so a thrown assertion can't leak state into later tests in this file.
+
+  test("normal case: DrawFadeScreen fires before the pushed menu's draw function", () => {
+    const calls: string[] = [];
+    setRe(fakeRe(calls));
+    cl.cinematictime = 0;
+    try {
+      M_PushMenu(
+        () => calls.push("menu-draw"),
+        () => null,
+      );
+      M_Draw();
+      expect(calls).toEqual(["DrawFadeScreen", "menu-draw"]);
+    } finally {
+      setRe(null);
+      M_ForceMenuOff();
+    }
+  });
+
+  test("during a cinematic: an opaque DrawFill(...,0) replaces DrawFadeScreen, still before the menu's draw function", () => {
+    const calls: string[] = [];
+    setRe(fakeRe(calls));
+    cl.cinematictime = 1234;
+    try {
+      M_PushMenu(
+        () => calls.push("menu-draw"),
+        () => null,
+      );
+      M_Draw();
+      expect(calls).toEqual(["DrawFill", "menu-draw"]);
+    } finally {
+      setRe(null);
+      cl.cinematictime = 0;
+      M_ForceMenuOff();
+    }
+  });
+
+  test("no menu active: M_Draw is a no-op and never touches the backdrop", () => {
+    const calls: string[] = [];
+    setRe(fakeRe(calls));
+    M_ForceMenuOff(); // key_dest -> key_game
+    try {
+      M_Draw();
+      expect(calls).toEqual([]);
+    } finally {
+      setRe(null);
+    }
   });
 });

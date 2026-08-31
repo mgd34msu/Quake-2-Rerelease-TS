@@ -6,6 +6,8 @@ r_nocull cvar, QGL recording).
 */
 
 import { describe, test, expect, beforeEach } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { vec3 } from "../src/shared/math";
 import { CvarT } from "../src/shared/q_shared";
 import { PLANE_X } from "../src/qcommon/qfiles";
@@ -105,5 +107,36 @@ describe("gl_rmain.ts -- R_RotateForEntity", () => {
     expect(rec.calls[1]?.args).toEqual([20, 0, 0, 1]); // qglRotatef(angles[YAW], 0,0,1)
     expect(rec.calls[2]?.args).toEqual([-10, 0, 1, 0]); // qglRotatef(-angles[PITCH], 0,1,0)
     expect(rec.calls[3]?.args).toEqual([-30, 1, 0, 0]); // qglRotatef(-angles[ROLL], 1,0,0)
+  });
+});
+
+describe("gl_rmain.ts -- R_Init's GL string dump matches q2repro's verbosity", () => {
+  // R_Init's GL-string block can't be driven end to end headlessly: it sits
+  // behind glimp.Init/QGL_Init/R_SetMode, none of which have a real OpenGL
+  // context to bind to in this test environment (see ref_frame.test.ts's
+  // header note that the software renderer's R_Init is the only one that
+  // runs headless -- ref_gl's needs a real GL context). This reads the
+  // source directly instead, pinning the print-level regression: q2repro
+  // (src/refresh/qgl.c QGL_Init, ~lines 492-500 and 585) prints
+  // GL_VENDOR/GL_RENDERER/GL_VERSION via Com_DPrintf (developer-only) and
+  // never prints the raw GL_EXTENSIONS string at normal verbosity at all
+  // (that's gated behind the "strings" console command, src/refresh/main.c's
+  // GL_Strings_f, and even there only with an explicit argument). This
+  // port's R_Init keeps vendor/renderer/version at normal (PRINT_ALL, unlike
+  // q2repro's Com_DPrintf) since those are short, single-line, and useful
+  // without -developer, but the multi-hundred-token GL_EXTENSIONS dump must
+  // not flood the console at normal verbosity -- PRINT_DEVELOPER matches
+  // q2repro's "never at normal verbosity" behavior for that one line.
+  const src = readFileSync(join(import.meta.dir, "..", "src", "ref_gl", "gl_rmain.ts"), "utf8");
+
+  test("GL_VENDOR/GL_RENDERER/GL_VERSION stay at PRINT_ALL", () => {
+    expect(src).toMatch(/ri\.Con_Printf\(PRINT_ALL, `GL_VENDOR: \$\{gl_config\.vendor_string\}\\n`\);/);
+    expect(src).toMatch(/ri\.Con_Printf\(PRINT_ALL, `GL_RENDERER: \$\{gl_config\.renderer_string\}\\n`\);/);
+    expect(src).toMatch(/ri\.Con_Printf\(PRINT_ALL, `GL_VERSION: \$\{gl_config\.version_string\}\\n`\);/);
+  });
+
+  test("GL_EXTENSIONS is printed at PRINT_DEVELOPER, not PRINT_ALL", () => {
+    expect(src).toMatch(/ri\.Con_Printf\(PRINT_DEVELOPER, `GL_EXTENSIONS: \$\{gl_config\.extensions_string\}\\n`\);/);
+    expect(src).not.toMatch(/ri\.Con_Printf\(PRINT_ALL, `GL_EXTENSIONS:/);
   });
 });
