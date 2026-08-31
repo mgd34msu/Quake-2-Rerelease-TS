@@ -603,7 +603,9 @@ export function R_DrawAliasModel(e: EntityT): void {
 
   const bbox: Vec3[] = Array.from({ length: 8 }, () => vec3());
 
-  if (!(e.flags & RF_WEAPONMODEL)) {
+  // q2repro src/refresh/mesh.c:501: `if (gl_cull_models->integer) { ... }` --
+  // culling is skipped entirely (always drawn) when the cvar is off.
+  if (!(e.flags & RF_WEAPONMODEL) && (!glCvars.gl_cull_models || glCvars.gl_cull_models.value)) {
     if (R_CullAliasModel(bbox, e)) return;
   }
 

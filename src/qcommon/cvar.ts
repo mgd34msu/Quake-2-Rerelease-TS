@@ -85,6 +85,7 @@ export function Cvar_Get(var_name: string, var_value: string | null, flags: numb
   const v = new CvarT();
   v.name = CopyString(var_name);
   v.string = CopyString(var_value);
+  v.default_string = v.string; // q2repro cvar.c:299 -- set once, at creation only
   v.modified = true;
   v.value = atof(v.string);
   v.flags = flags;

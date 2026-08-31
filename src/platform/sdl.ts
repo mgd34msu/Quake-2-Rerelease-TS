@@ -32,6 +32,7 @@ import { Com_DPrintf, Com_Printf } from "../qcommon/common";
 import type { CvarT, UsercmdT } from "../shared/q_shared";
 import { CVAR_ARCHIVE, PITCH, YAW } from "../shared/q_shared";
 import { cl, cls, in_strafe, KeydestT } from "../client/client";
+import { CL_Wheel_Input, CL_Wheel_Update } from "../client/cl_wheel";
 import {
   K_BACKSPACE,
   K_DEL,
@@ -487,7 +488,7 @@ export function SDLVID_SetWindowTitle(title: string): void {
 
 let glContext: Pointer | bigint | null = null;
 
-export function SDLGL_CreateWindow(width: number, height: number, fullscreen: boolean): boolean {
+export function SDLGL_CreateWindow(width: number, height: number, fullscreen: boolean, depthBits: number = 24): boolean {
   const l = lib();
   if (!l) return false;
   if (!initSubsystem(l, SDL_INIT_VIDEO)) return false;
@@ -499,11 +500,19 @@ export function SDLGL_CreateWindow(width: number, height: number, fullscreen: bo
   SDLVID_Shutdown(); // destroy any previous window (software or GL) first, like GLimp_SetMode's GLimp_Shutdown() call in the C original
 
   l.symbols.SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-  // 24, not the win32 PFD's 32 -- no per-OS branch here (PORTING.md's
-  // portable-path rule), and 24-bit depth is what every GL driver this port
-  // actually runs against offers; SDL_GL_SetAttribute is a request, not a
-  // guarantee, so this only steers picking a close-enough visual/config.
-  l.symbols.SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+  // q2repro src/refresh/main.c:1490/1491 (R_GetGLConfig) + src/unix/video/sdl.c's
+  // set_gl_attributes(): `SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, cfg.depthbits)`,
+  // where cfg.depthbits comes from the gl_depthbits cvar (0 default falls back
+  // to 24, matching that function's own colorbits>16?24:16 cascade collapsing
+  // to 24 here since this port never wires a configurable colorbits). Caller
+  // (glimp.ts's GLimp_SetMode) reads gl_depthbits and passes it in; this
+  // parameter's own default (24) is only hit when called without one.
+  // Previously this was an unconditional hardcoded "24" with no cvar behind
+  // it at all -- gl_colorbits/gl_stencilbits/gl_multisamples/gl_debug/
+  // gl_profile remain registered-only (no SDL_GL_SetAttribute call for any
+  // of those exists in this port at all, so there is no hardcoded constant
+  // to wire them into -- see glimp.ts's GLimp_SetMode comment).
+  l.symbols.SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, depthBits || 24);
 
   const flags = SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | (fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
   window = l.symbols.SDL_CreateWindow(cstr("Quake 2"), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, width, height, flags);
@@ -648,6 +657,9 @@ let m_pitch: CvarT | null = null;
 let m_yaw: CvarT | null = null;
 let m_forward: CvarT | null = null;
 let m_side: CvarT | null = null;
+// q2repro src/client/input.c:187,199 -- cvar-parity audit additions
+let in_enable: CvarT | null = null;
+let in_grab: CvarT | null = null;
 
 function IN_MLookDown(): void {
   mlooking = true;
@@ -665,15 +677,32 @@ export function IN_Init(): void {
   m_filter = Cvar_Get("m_filter", "0", 0);
   sensitivity = Cvar_Get("sensitivity", "3", 0);
   lookstrafe = Cvar_Get("lookstrafe", "0", 0);
-  freelook = Cvar_Get("freelook", "0", 0);
+  // q2repro src/client/input.c:775 defaults freelook to "1" (cvar-parity
+  // fix -- was diverging from both this file and cl_main.ts's registration).
+  freelook = Cvar_Get("freelook", "1", 0);
   lookspring = Cvar_Get("lookspring", "0", 0);
   m_pitch = Cvar_Get("m_pitch", "0.022", 0);
   m_yaw = Cvar_Get("m_yaw", "0.022", 0);
   m_forward = Cvar_Get("m_forward", "1", 0);
-  m_side = Cvar_Get("m_side", "0.8", 0);
+  // q2repro src/client/input.c:783 defaults m_side to "1", not "0.8"
+  // (cvar-parity fix).
+  m_side = Cvar_Get("m_side", "1", 0);
 
   Cmd_AddCommand("+mlook", IN_MLookDown);
   Cmd_AddCommand("-mlook", IN_MLookUp);
+
+  // q2repro src/client/input.c:187-203 (IN_Init): in_enable gates whether
+  // mouse hardware is initialized at all; in_grab controls whether the
+  // pointer is captured once active. This port's CvarT has no `changed`
+  // callback mechanism (in_changed_hard/in_changed_soft are not ported), so
+  // both are read live at each call site below instead of via a callback.
+  in_enable = Cvar_Get("in_enable", "1", 0);
+  if (!(in_enable && in_enable.value)) {
+    Com_Printf("Mouse input disabled.\n");
+    mouse_avail = false;
+    return;
+  }
+  in_grab = Cvar_Get("in_grab", "1", 0);
 
   const l = lib();
   mouse_avail = l !== null && initSubsystem(l, SDL_INIT_VIDEO);
@@ -691,7 +720,9 @@ export function IN_Shutdown(): void {
 function IN_ActivateMouse(): void {
   const l = lib();
   if (!l || !mouse_avail || mouse_active) return;
-  l.symbols.SDL_SetRelativeMouseMode(1);
+  // q2repro src/client/input.c:199-203 (IN_Activate/in_grab): only capture
+  // the pointer if in_grab is set.
+  if (!in_grab || in_grab.value) l.symbols.SDL_SetRelativeMouseMode(1);
   // drain whatever relative motion piled up while the mouse was released
   l.symbols.SDL_GetRelativeMouseState(relX, relY);
   mx = 0;
@@ -738,6 +769,27 @@ export function IN_Move(cmd: UsercmdT): void {
   if (!l || !mouse_active) return;
 
   l.symbols.SDL_GetRelativeMouseState(relX, relY);
+
+  // wheel.c's CL_MouseMove: "always send input to wheel even if we didn't
+  // move" -- fed the RAW per-frame relative motion (q2repro's own dx/dy,
+  // read once per frame from vid->get_mouse_motion before m_filter/
+  // sensitivity scaling below), not the filtered mouse_x/mouse_y this
+  // function computes for cmd/viewangles. This is the one place in this
+  // port's input backend that still has undivided access to that raw
+  // per-frame delta -- see cl_wheel.ts's own CL_Wheel_Input doc comment.
+  // CL_Wheel_Input's own top-of-function check (mirroring wheel.c's) is
+  // what gates on wheel.state, not this call site -- called unconditionally
+  // here so the WHEEL_CLOSING "keep holster held" branch still runs.
+  CL_Wheel_Input(cmd, relX[0], relY[0]);
+
+  // main.c:3391's CL_Wheel_Update() call: no dedicated per-frame client-tick
+  // hook exists in this port's territory for this unit (cl_main.ts/
+  // cl_view.ts, the closest counterparts, are both under concurrent edit by
+  // another unit per this task's brief) -- called from here instead, the
+  // one place in this port that already runs unconditionally once per
+  // client frame while the mouse backend is live. Reported deviation.
+  CL_Wheel_Update();
+
   mx += relX[0];
   my += relY[0];
 

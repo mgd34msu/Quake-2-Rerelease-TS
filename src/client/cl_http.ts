@@ -261,6 +261,21 @@ export function HTTP_Init(): void {
   cl_http_max_connections = Cvar_Get("cl_http_max_connections", "2", 0);
   cl_http_range_streams = Cvar_Get("cl_http_range_streams", "4", 0);
   cl_http_range_threshold = Cvar_Get("cl_http_range_threshold", "1048576", 0);
+
+  // --- cvar-parity audit: remaining src/client/http.c cvars ---
+  // Registered, consumer unported: this port has no HTTP proxy support, no
+  // fallback default-URL when the server omits one, no insecure/plaintext
+  // opt-in check, and no verbose HTTP-debug logging switch. Its per-request
+  // abort timeout (30000ms, this function's own AbortSignal.timeout call
+  // below) is a fixed constant, not driven by cl_http_blocking_timeout,
+  // whose C semantics (blocking-mode connect timeout, seconds not ms) don't
+  // map onto that constant without changing its behavior/units -- left as a
+  // registration-only judgment call rather than silently repurposing it.
+  Cvar_Get("cl_http_proxy", "", 0); // http.c:440
+  Cvar_Get("cl_http_default_url", "", 0); // http.c:441
+  Cvar_Get("cl_http_insecure", "0", 0); // http.c:442
+  Cvar_Get("cl_http_debug", "0", 0); // http.c:445
+  Cvar_Get("cl_http_blocking_timeout", "15", 0); // http.c:449
 }
 
 function clampInt(v: number, lo: number, hi: number): number {

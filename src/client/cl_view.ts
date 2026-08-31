@@ -2,7 +2,7 @@
 
 import { CDAudio_Play } from "../platform/cd_ogg";
 import { type Vec3, vec3, VectorAdd, VectorClear, VectorScale } from "../shared/math";
-import { CS_CDTRACK, CVAR_ARCHIVE, Com_sprintf, CS_SKY, CS_SKYAXIS, CS_SKYROTATE, type CvarT, MAX_CLIENTS, YAW } from "../shared/q_shared";
+import { CS_CDTRACK, CVAR_ARCHIVE, CVAR_CHEAT, Com_sprintf, CS_SKY, CS_SKYAXIS, CS_SKYROTATE, type CvarT, MAX_CLIENTS, YAW } from "../shared/q_shared";
 import { Cmd_AddCommand, Cmd_Argc, Cmd_Argv } from "../qcommon/cmd";
 import { Cvar_Get } from "../qcommon/cvar";
 import { Com_Error, Com_Printf } from "../qcommon/common";
@@ -618,12 +618,19 @@ export function V_Init(): void {
 
   Cmd_AddCommand("viewpos", V_Viewpos_f);
 
-  setCrosshair(Cvar_Get("crosshair", "0", CVAR_ARCHIVE));
+  // q2repro src/client/screen.c:1452 defaults crosshair to "3" (cvar-parity fix).
+  setCrosshair(Cvar_Get("crosshair", "3", CVAR_ARCHIVE));
 
   cl_testblend = Cvar_Get("cl_testblend", "0", 0);
   cl_testparticles = Cvar_Get("cl_testparticles", "0", 0);
   cl_testentities = Cvar_Get("cl_testentities", "0", 0);
-  cl_testlights = Cvar_Get("cl_testlights", "0", 0);
+  // q2repro src/client/view.c:711 flags cl_testlights CVAR_CHEAT (cvar-parity fix).
+  cl_testlights = Cvar_Get("cl_testlights", "0", CVAR_CHEAT);
 
   cl_stats = Cvar_Get("cl_stats", "0", 0);
+
+  // q2repro src/client/view.c:722. Registered, consumer unported: this
+  // port's FOV handling (fov cvar, cl_main.ts) has no automatic
+  // widescreen/aspect adjustment pass.
+  Cvar_Get("cl_adjustfov", "1", 0);
 }

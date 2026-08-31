@@ -79,6 +79,7 @@
 
 import { FS_LoadFile } from "./files";
 import { Com_Printf } from "./common";
+import { Cvar_Get } from "./cvar";
 
 export interface MapdbEpisode {
   id: string;
@@ -179,6 +180,15 @@ uses re-reading maps.lst on every open.
 ===============
 */
 export function MapDB_Init(): void {
+  // q2repro src/client/ui/mapdb.c:105-107 -- the new-game episode/level
+  // browser menu's selection state. Registered, consumer unported: this
+  // port's mapdb.ts is the data loader only (this file's own header
+  // comment); the menu UI that reads/writes these three as the player
+  // browses episodes (client/ui/mapdb.c, client/ui/ui.c) is not ported.
+  Cvar_Get("_mapdb_episode", "-1", 0);
+  Cvar_Get("_mapdb_level", "-1", 0);
+  Cvar_Get("_mapdb_type", "episode", 0);
+
   const raw = FS_LoadFile("mapdb.json");
   if (!raw) {
     MapDB_Shutdown();

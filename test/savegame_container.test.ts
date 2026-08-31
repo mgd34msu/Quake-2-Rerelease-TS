@@ -74,7 +74,7 @@ import { SV_RecordDemoMessage } from "../src/server/sv_ents";
 import { VANILLA_CODEC } from "../src/qcommon/protocol/vanilla";
 import { Q2REPRO_CODEC } from "../src/qcommon/protocol/q2repro";
 import type { ProtocolCodec } from "../src/qcommon/protocol/codec";
-import { CM_WritePortalState } from "../src/qcommon/cmodel";
+import { CM_WritePortalState, CM_WritePortalBits } from "../src/qcommon/cmodel";
 import { CS_REMAP_OLD, CS_REMAP_RERELEASE } from "../src/shared/cs_remap";
 import { SizeBuf, SZ_Init, SZ_Clear, SZ_Write, MSG_BeginReading, MSG_ReadByte, MSG_ReadShort, MSG_ReadLong, MSG_ReadLong64, MSG_ReadString, MSG_WriteShort, MSG_WriteLong, MSG_WriteString } from "../src/qcommon/sizebuf";
 import { net_message } from "../src/qcommon/net_chan";
@@ -301,13 +301,69 @@ describe("SSV2/SAV2 container -- kex family header layout (save.c)", () => {
     expect(seen.get(7)).toBe("world");
     expect(seen.size).toBe(2);
 
-    // Portal-bits section: a length byte followed by that many bytes. No map
-    // is loaded in this unit-scope fixture (cmodel.ts's numareaportals stays
-    // 0 without a real CM_LoadMap), so the encoded length is legitimately 0
-    // here -- the E2E boot exercises a real map's non-empty portal set.
+    // Portal-bits section: a length byte followed by that many bytes.
+    // cmodel.ts's numareaportals/portalopen are process-wide globals (no
+    // per-test reset hook), so this compares against CM_WritePortalBits()'s
+    // OWN current length rather than a hard-coded 0 -- this fixture loads no
+    // map of its own (0 in an unpolluted process), but bun:test runs every
+    // file in one process, and a real-map-booting E2E test elsewhere in the
+    // suite (e.g. test/savegame_retail_roundtrip.test.ts) legitimately
+    // leaves a nonzero global portal count behind it if it happens to run
+    // first. Byte-for-byte content still gets checked, just against
+    // whatever the shared global actually holds right now instead of an
+    // assumption about test execution order.
+    const expectedPortalBits = CM_WritePortalBits();
     const portalLen = MSG_ReadByte(buf);
-    expect(portalLen).toBe(0);
+    expect(portalLen).toBe(expectedPortalBits.length);
+    const gotPortalBits = new Uint8Array(portalLen);
+    for (let i = 0; i < portalLen; i++) gotPortalBits[i] = MSG_ReadByte(buf);
+    expect(bytesEqual(gotPortalBits, expectedPortalBits)).toBe(true);
     expect(buf.readcount).toBe(buf.cursize);
+  });
+
+  test("SV_WriteServerFile: CVAR_LATCH/SERVERINFO cvars are written in strcmp-sorted order, matching q2repro's cvar_vars list", () => {
+    // save.c's write_server_file walks the REAL engine's `cvar_vars` linked
+    // list (`for (var = cvar_vars; var; var = var->next)`), which q2repro's
+    // Cvar_Get keeps sorted by name at insertion time (src/common/cvar.c:
+    // 308-315's "sort the variable in": `if (strcmp(var->name, c->name) < 0)
+    // break;`). This port's cvar_vars is a plain insertion-order Map, so
+    // SV_WriteServerFileKex sorts its own snapshot before writing --
+    // confirmed necessary by a live cross-load byte diff against a real
+    // q2reproded-produced server.ssv during this unit's verification (this
+    // port's dump used to start "game,coop,deathmatch,gamedir,hostname,..";
+    // q2repro's starts alphabetically "capturelimit,cheats,competition,
+    // coop,.."). Registration order here is deliberately NOT alphabetical
+    // (z before a), so this only passes if the writer actually sorts.
+    Cvar_Get("zzz_late_latch", "1", CVAR_LATCH);
+    Cvar_Get("aaa_early_latch", "1", CVAR_LATCH);
+    Cvar_Get("mmm_mid_info", "1", CVAR_SERVERINFO);
+
+    sv.configstrings[CS_NAME] = "sorttest";
+    svs.mapcmd = "sorttest$0";
+    SV_WriteServerFile(false);
+
+    const raw = must(FS_ReadRawFile(`${FS_Gamedir()}/save/current/server.ssv`), "server.ssv");
+    const buf = readerFor(raw);
+    MSG_ReadLong(buf); // magic
+    MSG_ReadLong(buf); // version
+    MSG_ReadLong64(buf); // timestamp
+    MSG_ReadByte(buf); // savetype
+    MSG_ReadString(buf); // CS_NAME comment
+    MSG_ReadString(buf); // mapcmd
+
+    const order: string[] = [];
+    for (;;) {
+      const name = MSG_ReadString(buf);
+      if (!name.length) break;
+      MSG_ReadString(buf); // value
+      order.push(name);
+    }
+
+    const ourThreeInOrder = order.filter((n) => n === "zzz_late_latch" || n === "aaa_early_latch" || n === "mmm_mid_info");
+    expect(ourThreeInOrder).toEqual(["aaa_early_latch", "mmm_mid_info", "zzz_late_latch"]);
+
+    const sortedCopy = [...order].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    expect(order).toEqual(sortedCopy);
   });
 
   test("SV_WriteServerFile: WriteGameJson receives the autosave flag and its return value lands verbatim in game.ssv", () => {

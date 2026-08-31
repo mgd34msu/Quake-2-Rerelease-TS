@@ -86,7 +86,7 @@ import {
   MSG_WriteMvdPlayersEnd,
   MSG_WriteMvdCmd,
 } from "../qcommon/protocol/mvd";
-import { EntityStateT, PlayerStateT, PmTypeT, PMF_NO_PREDICTION, MAX_EDICTS, MAX_CLIENTS, MulticastT, CHAN_NO_PHS_ADD, CHAN_RELIABLE, UsercmdT } from "../shared/q_shared";
+import { EntityStateT, PlayerStateT, PmTypeT, PMF_NO_PREDICTION, MAX_EDICTS, MAX_CLIENTS, MulticastT, CHAN_NO_PHS_ADD, CHAN_RELIABLE, UsercmdT, CVAR_LATCH, CVAR_PRIVATE } from "../shared/q_shared";
 import { clonePlayerState, cloneEntityStateInto } from "../shared/state_copy";
 import { sv, svs, maxclients, ClientT, ClientStateT, ServerStateT } from "./server";
 import { geHolder, currentGameFamily } from "./sv_game";
@@ -182,12 +182,14 @@ function svMvdSpawnDummyCvar(): number {
 // on the number of simultaneously connected GTV clients. See
 // handleGtvHello/SV_MvdRunGtv below for where these are consulted.
 function svMvdPasswordCvar(): string {
-  const v = Cvar_Get("sv_mvd_password", "", 0);
+  // mvd.c:2437 -- CVAR_PRIVATE was missing.
+  const v = Cvar_Get("sv_mvd_password", "", CVAR_PRIVATE);
   return v ? v.string : "";
 }
 
 function svMvdMaxClientsCvar(): number {
-  const v = Cvar_Get("sv_mvd_maxclients", "8", 0);
+  // mvd.c:2435 -- CVAR_LATCH was missing.
+  const v = Cvar_Get("sv_mvd_maxclients", "8", CVAR_LATCH);
   const n = v ? v.value : 8;
   return Math.max(1, Math.min(MAX_CLIENTS, Math.trunc(n) || 8));
 }
@@ -1042,7 +1044,8 @@ function payloadStartsWithPlay(payload: Uint8Array): boolean {
 }
 
 function svMvdNomsgsCvar(): boolean {
-  const v = Cvar_Get("sv_mvd_nomsgs", "1", 0);
+  // mvd.c:2447 -- CVAR_LATCH was missing.
+  const v = Cvar_Get("sv_mvd_nomsgs", "1", CVAR_LATCH);
   return v ? v.value !== 0 : true;
 }
 
@@ -1199,6 +1202,69 @@ export function SV_MvdRegister(): void {
     void SV_MvdGtvListen_f();
   });
   Cmd_AddCommand("gtv_stop", SV_MvdGtvStop_f);
+
+  // mvd.c:2432-2461 (SV_MvdRegister) -- remaining sv_mvd_* cvars this port
+  // had never registered at all (sv_mvd_spawn_dummy/sv_mvd_password/
+  // sv_mvd_maxclients/sv_mvd_nomsgs are registered lazily by their own
+  // accessor functions above/below instead, since those four are actually
+  // read somewhere in this file). None of the ones below have a wired
+  // consumer in this unit (the `changed` clamp callbacks q2repro attaches to
+  // sv_mvd_maxsize/sv_mvd_maxtime/sv_mvd_disconnect_time/sv_mvd_suspend_time
+  // are not mirrored either -- registering here only stops these from
+  // failing as "unknown command" at the console). sv_mvd_capture_flags is
+  // called out specifically at playerIsActive's own comment above
+  // (mvd.c:284-288 in this file): its gate is documented there as
+  // intentionally not implemented.
+  Cvar_Get("sv_mvd_enable", "0", CVAR_LATCH); // mvd.c:2434
+  Cvar_Get("sv_mvd_bufsize", "2", CVAR_LATCH); // mvd.c:2436
+  Cvar_Get("sv_mvd_maxsize", "0", 0); // mvd.c:2438
+  Cvar_Get("sv_mvd_maxtime", "0", 0); // mvd.c:2441
+  Cvar_Get("sv_mvd_maxmaps", "1", 0); // mvd.c:2444
+  Cvar_Get("sv_mvd_noblend", "0", CVAR_LATCH); // mvd.c:2445
+  Cvar_Get("sv_mvd_nogun", "0", CVAR_LATCH); // mvd.c:2446
+  Cvar_Get("sv_mvd_begincmd", "wait 50; putaway; wait 10; help;", 0); // mvd.c:2448-2449
+  Cvar_Get("sv_mvd_scorecmd", "putaway; wait 10; help;", 0); // mvd.c:2450-2451
+  Cvar_Get("sv_mvd_autorecord", "0", CVAR_LATCH); // mvd.c:2452
+  Cvar_Get("sv_mvd_capture_flags", "5", 0); // mvd.c:2453
+  Cvar_Get("sv_mvd_disconnect_time", "15", 0); // mvd.c:2454
+  Cvar_Get("sv_mvd_suspend_time", "5", 0); // mvd.c:2457
+  Cvar_Get("sv_mvd_allow_stufftext", "0", CVAR_LATCH); // mvd.c:2460
+
+  // server/mvd/client.c:2708-2729 (MVD_Register) and server/mvd/game.c:1751-
+  // 1766 (inside MVD_GameInit) -- cvars belonging to the MVD "dummy
+  // spectator client" feature set. client.ts's and game.ts's own header
+  // comments document that this port implements neither the GTV downstream-
+  // forwarding client, delay/jitter buffering, flood control, admin
+  // password enforcement, chase-cam prefix logic, nor stats/freeze hacks
+  // (confirmed by grepping client.ts, game.ts, gtv_client.ts, and parse.ts
+  // for any consumer of these names -- none exists). Registered, consumer
+  // unported for all of the below.
+  //
+  // Note: `mvd_suspend_time` (client.c:2716) and `sv_mvd_suspend_time`
+  // (mvd.c:2457, registered above) are two genuinely distinct cvar names in
+  // q2repro -- verified against both C sites, not a paraphrase collision --
+  // so both are registered separately here.
+  Cvar_Get("mvd_shownet", "0", 0); // client.c:2711 (USE_DEBUG-gated upstream)
+  Cvar_Get("mvd_timeout", "90", 0); // client.c:2713
+  Cvar_Get("mvd_suspend_time", "5", 0); // client.c:2716
+  Cvar_Get("mvd_wait_delay", "20", 0); // client.c:2719
+  Cvar_Get("mvd_wait_percent", "50", 0); // client.c:2722
+  Cvar_Get("mvd_buffer_size", "8", 0); // client.c:2723
+  Cvar_Get("mvd_username", "unnamed", 0); // client.c:2724
+  Cvar_Get("mvd_password", "", CVAR_PRIVATE); // client.c:2725
+  Cvar_Get("mvd_snaps", "10", 0); // client.c:2726
+  Cvar_Get("mvd_admin_password", "", CVAR_PRIVATE); // game.c:1751
+  Cvar_Get("mvd_part_filter", "0", 0); // game.c:1752
+  Cvar_Get("flood_msgs", "4", 0); // game.c:1753
+  Cvar_Get("flood_persecond", "4", 0); // game.c:1754
+  Cvar_Get("flood_waitdelay", "10", 0); // game.c:1757
+  Cvar_Get("flood_mute", "0", 0); // game.c:1760
+  Cvar_Get("mvd_filter_version", "0", 0); // game.c:1761
+  Cvar_Get("mvd_default_map", "q2dm1", CVAR_LATCH); // game.c:1762
+  Cvar_Get("mvd_stats_score", "0", 0); // game.c:1763
+  Cvar_Get("mvd_stats_hack", "0", 0); // game.c:1764
+  Cvar_Get("mvd_freeze_hack", "1", 0); // game.c:1765
+  Cvar_Get("mvd_chase_prefix", "xv 0 yb -64", 0); // game.c:1766
 }
 
 // Test-only reset: clears all module-level recorder/GTV state between test

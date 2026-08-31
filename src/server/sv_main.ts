@@ -42,6 +42,9 @@ import {
   CVAR_LATCH,
   CVAR_SERVERINFO,
   CVAR_NOSET,
+  CVAR_PRIVATE,
+  CVAR_ROM,
+  CVAR_CHEAT,
   DF_INSTANT_ITEMS,
   type CvarT,
 } from "../shared/q_shared";
@@ -535,7 +538,12 @@ export function SVC_DirectConnect(): void {
     Netchan_OutOfBandPrint(NetsrcT.NS_SERVER, adr, "client_connect");
   }
 
-  Netchan_Setup(NetsrcT.NS_SERVER, newcl.netchan, adr, qport, chanType);
+  // `version` (the negotiated major protocol) is load-bearing, not
+  // decorative: it is what selects the qport field's WIDTH for NETCHAN_OLD
+  // connections, and R1Q2/35 is NETCHAN_OLD with a one-byte qport -- see
+  // net_chan.ts's NETCHAN_NEW doc comment for the live capture that proved
+  // it, and why protocol 35 never spawned before this was threaded through.
+  Netchan_Setup(NetsrcT.NS_SERVER, newcl.netchan, adr, qport, chanType, version);
   // svc_zpacket eligibility for this connection (qcommon/protocol/
   // zpacket.ts) -- set after Netchan_Setup since that call replaces
   // newcl.netchan wholesale via Netchan_Setup's own chan mutation (not a
@@ -708,14 +716,19 @@ export function SV_ReadPackets(): void {
     }
 
     // RULE-17 FINDING (phase-8 q2repro interop): the qport field's WIDTH
-    // depends on the matched client's own netchan type (NETCHAN_NEW's is a
-    // single conditional byte; NETCHAN_OLD's is an unconditional 16-bit
-    // short -- see net_chan.ts's NETCHAN_NEW doc comment), so it cannot be
-    // read generically before knowing which client a packet belongs to.
-    // This now matches by BASE ADDRESS first and peeks the qport bytes
-    // per-candidate, mirroring q2repro's own real dispatcher exactly
-    // (src/server/main.c's SV_PacketEvent, lines 1467-1487: address match,
-    // then `if (netchan->qport) { qport = msg_read.data[8]; ... }`).
+    // depends on the matched client's own connection (a single conditional
+    // byte under NETCHAN_NEW, and under NETCHAN_OLD from R1Q2/35 up; an
+    // unconditional 16-bit short only below R1Q2 -- see net_chan.ts's
+    // NETCHAN_NEW doc comment), so it cannot be read generically before
+    // knowing which client a packet belongs to. This matches by BASE ADDRESS
+    // first and peeks the qport bytes per-candidate, mirroring q2repro's own
+    // real dispatcher (src/server/main.c's SV_PacketEvent, lines 1467-1487:
+    // address match, then `if (netchan->qport) { qport = msg_read.data[8];
+    // ... }`). q2repro can peek a bare data[8] there because its own server
+    // accepts protocol 1038 and nothing else (main.c's parse_basic_params
+    // rejects every other version outright), so the one-byte form is the
+    // only one it can ever see; this server really does serve 34/35/36/1038
+    // side by side, so the width has to be derived per client.
     const d2 = net_message.data;
 
     // check for packets from connected clients
@@ -725,9 +738,10 @@ export function SV_ReadPackets(): void {
       if (!NET_CompareBaseAdr(net_from, cl.netchan.remote_address)) continue;
 
       if (cl.netchan.qport) {
-        const qportSize = cl.netchan.type === NETCHAN_NEW ? 1 : 2;
+        const oneByteQport = cl.netchan.type === NETCHAN_NEW || cl.netchan.protocol >= PROTOCOL_VERSION_R1Q2;
+        const qportSize = oneByteQport ? 1 : 2;
         if (net_message.cursize < 8 + qportSize) continue;
-        const qport = cl.netchan.type === NETCHAN_NEW ? d2[8] : d2[8] | (d2[9] << 8);
+        const qport = oneByteQport ? d2[8] : d2[8] | (d2[9] << 8);
         if (cl.netchan.qport !== qport) continue;
       } else if (cl.netchan.remote_address.port !== net_from.port) {
         continue;
@@ -1016,16 +1030,26 @@ export function SV_Init(): void {
   SV_InitOperatorCommands();
   SV_MvdRegister();
 
-  rcon_password = Cvar_Get("rcon_password", "", 0);
-  Cvar_Get("skill", "1", 0);
-  Cvar_Get("deathmatch", "0", CVAR_LATCH);
+  // common.c:956 -- CVAR_PRIVATE (this fixes the sv-side registration only;
+  // client-side rcon_password in cl_main.ts is handled by a different unit).
+  rcon_password = Cvar_Get("rcon_password", "", CVAR_PRIVATE);
+  // q2repro src/server/main.c:2108 flags skill CVAR_LATCH (cvar-parity fix).
+  Cvar_Get("skill", "1", CVAR_LATCH);
+  // q2repro src/server/main.c:2109 flags deathmatch CVAR_SERVERINFO too
+  // (cvar-parity fix).
+  Cvar_Get("deathmatch", "0", CVAR_LATCH | CVAR_SERVERINFO);
   Cvar_Get("coop", "0", CVAR_LATCH);
   Cvar_Get("dmflags", `${DF_INSTANT_ITEMS}`, CVAR_SERVERINFO);
   Cvar_Get("fraglimit", "0", CVAR_SERVERINFO);
   Cvar_Get("timelimit", "0", CVAR_SERVERINFO);
   Cvar_Get("cheats", "0", CVAR_SERVERINFO | CVAR_LATCH);
-  Cvar_Get("protocol", `${PROTOCOL_VERSION}`, CVAR_SERVERINFO | CVAR_NOSET);
-  setMaxclients(Cvar_Get("maxclients", "1", CVAR_SERVERINFO | CVAR_LATCH));
+  // main.c:2106 -- CVAR_ROM (was CVAR_NOSET; ROM now exists in q_shared.ts).
+  Cvar_Get("protocol", `${PROTOCOL_VERSION}`, CVAR_SERVERINFO | CVAR_ROM);
+  // main.c:2116 -- C default is "8", not "1".
+  setMaxclients(Cvar_Get("maxclients", "8", CVAR_SERVERINFO | CVAR_LATCH));
+
+  // main.c:2117
+  Cvar_Get("sv_reserved_slots", "0", CVAR_LATCH);
 
   // mirrors q2repro's sv_tick_rate (src/server/main.c ~line 2211, default
   // "40", CVAR_LATCH). Family dispatch (sv_init.ts's SV_SpawnServer, via
@@ -1037,17 +1061,125 @@ export function SV_Init(): void {
   setSvTickRate(Cvar_Get("sv_tick_rate", "40", CVAR_LATCH));
 
   hostname = Cvar_Get("hostname", "noname", CVAR_SERVERINFO | CVAR_ARCHIVE);
-  timeout = Cvar_Get("timeout", "125", 0);
+  // main.c:2122 -- C default is "90", not "125".
+  timeout = Cvar_Get("timeout", "90", 0);
   zombietime = Cvar_Get("zombietime", "2", 0);
+  // main.c:2128
+  Cvar_Get("sv_ghostime", "6", 0);
+  // main.c:2131
+  Cvar_Get("sv_idlekick", "0", 0);
   sv_showclamp = Cvar_Get("showclamp", "0", 0);
   setSvPaused(Cvar_Get("paused", "0", 0));
-  sv_timedemo = Cvar_Get("timedemo", "0", 0);
-  setSvEnforcetime(Cvar_Get("sv_enforcetime", "0", 0));
+  // q2repro src/common/common.c:933 flags timedemo CVAR_CHEAT (cvar-parity
+  // fix; cl_main.ts's own "timedemo" registration is fixed alongside this).
+  sv_timedemo = Cvar_Get("timedemo", "0", CVAR_CHEAT);
+  // main.c:2134 -- C default is "1", not "0".
+  setSvEnforcetime(Cvar_Get("sv_enforcetime", "1", 0));
+  // main.c:2135, :2138, :2139, :2140
+  Cvar_Get("sv_timescale_time", "16", 0);
+  Cvar_Get("sv_timescale_warn", "0", 0);
+  Cvar_Get("sv_timescale_kick", "0", 0);
+  Cvar_Get("sv_allow_nodelta", "1", 0);
+  // main.c:2141, :2142, :2143
+  Cvar_Get("sv_fps", "40", CVAR_LATCH);
+  Cvar_Get("sv_force_reconnect", "", CVAR_LATCH);
+  Cvar_Get("sv_show_name_changes", "0", 0);
+  // main.c:2146
+  Cvar_Get("sv_qwmod", "0", CVAR_LATCH);
   allow_download = Cvar_Get("allow_download", "1", CVAR_ARCHIVE);
-  allow_download_players = Cvar_Get("allow_download_players", "0", CVAR_ARCHIVE);
+  // common.c:948 -- C default is "1", not "0".
+  allow_download_players = Cvar_Get("allow_download_players", "1", CVAR_ARCHIVE);
   allow_download_models = Cvar_Get("allow_download_models", "1", CVAR_ARCHIVE);
   allow_download_sounds = Cvar_Get("allow_download_sounds", "1", CVAR_ARCHIVE);
   allow_download_maps = Cvar_Get("allow_download_maps", "1", CVAR_ARCHIVE);
+  // main.c:2148, :2149, :2150, :2151
+  Cvar_Get("sv_password", "", CVAR_PRIVATE);
+  Cvar_Get("sv_reserved_password", "", CVAR_PRIVATE);
+  Cvar_Get("sv_locked", "0", 0);
+  Cvar_Get("sv_novis", "0", 0);
+  // main.c:2153
+  Cvar_Get("sv_redirect_address", "", 0);
+  // main.c:2156, :2157 -- USE_DEBUG-gated upstream; registered unconditionally
+  // here (this port has no separate debug/release build split for cvars).
+  Cvar_Get("sv_debug", "0", 0);
+  Cvar_Get("sv_pad_packets", "0", 0);
+  // main.c:2159, :2160, :2161
+  Cvar_Get("sv_lan_force_rate", "0", CVAR_LATCH);
+  Cvar_Get("sv_min_rate", "15000", CVAR_LATCH);
+  Cvar_Get("sv_max_rate", "60000", CVAR_LATCH);
+  // main.c:2164, :2165, :2166, :2167, :2168, :2169
+  Cvar_Get("sv_calcpings_method", "2", 0);
+  Cvar_Get("sv_changemapcmd", "", 0);
+  Cvar_Get("sv_max_download_size", "8388608", 0);
+  Cvar_Get("sv_max_packet_entities", "0", 0);
+  Cvar_Get("sv_trunc_packet_entities", "1", 0);
+  Cvar_Get("sv_prioritize_entities", "0", 0);
+  // main.c:2171, :2172
+  Cvar_Get("sv_strafejump_hack", "1", CVAR_LATCH);
+  Cvar_Get("sv_waterjump_hack", "1", CVAR_LATCH);
+  // main.c:2175 -- USE_PACKETDUP-gated upstream; registered unconditionally.
+  Cvar_Get("sv_packetdup_hack", "0", 0);
+  // main.c:2178 -- C default is `COM_DEDICATED ? "0" : "1"`, and
+  // COM_DEDICATED itself is `dedicated->integer != 0` on this port's
+  // USE_CLIENT build (inc/common/common.h:116-120 -- the non-DEDICATED_ONLY
+  // branch, which is the branch this port takes per main.ts's header
+  // comment). Mirrored as a runtime read of the same `dedicated` cvar rather
+  // than a hardcoded default.
+  Cvar_Get("sv_allow_map", dedicated && dedicated.value !== 0 ? "0" : "1", 0);
+  // main.c:2179
+  Cvar_Get("sv_cinematics", "1", 0);
+  // main.c:2182 -- USE_SERVER-gated upstream; registered unconditionally.
+  Cvar_Get("sv_recycle", "0", 0);
+  // main.c:2185, :2187, :2189, :2191, :2194
+  Cvar_Get("sv_enhanced_setplayer", "0", 0);
+  Cvar_Get("sv_iplimit", "3", 0);
+  Cvar_Get("sv_status_show", "2", 0);
+  Cvar_Get("sv_status_limit", "15", 0);
+  Cvar_Get("sv_uptime", "0", 0);
+  // main.c:2196, :2199, :2202, :2205, :2207
+  Cvar_Get("sv_auth_limit", "1", 0);
+  Cvar_Get("sv_rcon_limit", "1", 0);
+  Cvar_Get("sv_namechange_limit", "5/min", 0);
+  Cvar_Get("sv_allow_unconnected_cmds", "0", 0);
+  Cvar_Get("lrcon_password", "", CVAR_PRIVATE);
+  // main.c:2209 -- SV_FEATURES (server.h:93-97) is a compile-time bitmask of
+  // GMF_CLIENTNUM|GMF_PROPERINUSE|GMF_MVDSPEC|GMF_WANT_ALL_DISCONNECTS|
+  // GMF_ENHANCED_SAVEGAMES|SV_GMF_VARIABLE_FPS|GMF_EXTRA_USERINFO|
+  // GMF_IPV6_ADDRESS_AWARE|GMF_ALLOW_INDEX_OVERFLOW|GMF_PROTOCOL_EXTENSIONS --
+  // each bit asserts a specific engine-side contract (e.g. "edict_s.inuse is
+  // maintained correctly", "PF_FindIndex overflow returns 0") that this port
+  // has not audited bit-by-bit. Registered, consumer unported: default "0"
+  // rather than guessing a bitmask this port hasn't verified it actually
+  // satisfies.
+  Cvar_Get("sv_features", "0", CVAR_ROM);
+  // main.c:2213 -- mirrors whichever game module is loaded reporting its own
+  // supported-features bitmask (mvd/game.c:1767's `Cvar_Set("g_features",
+  // va("%d", MVD_FEATURES))` is one real q2repro caller). This port's gi/ge
+  // interface (kexapi/game.ts, server/bindings/kex.ts and legacy.ts) has no
+  // feature-flags negotiation surface to read from -- searched for GMF_/
+  // feature-flag handling and found none. Registered, consumer unported.
+  Cvar_Get("g_features", "0", CVAR_ROM);
+
+  // ac.c:1721-1737 (AC_Register) -- the r1ch.net anti-cheat client-
+  // verification subsystem (external anticheat-server queries, client binary
+  // validation, kick/ban on violations) is entirely unported in this port
+  // (no src/server/ac.ts exists). All 10 cvars below are registered only, so
+  // setting them at the console does not fail as "unknown command"; none of
+  // them have a consumer.
+  Cvar_Get("sv_anticheat_required", "0", CVAR_LATCH); // ac.c:1723
+  Cvar_Get("sv_anticheat_server_address", "anticheat.r1ch.net", CVAR_LATCH); // ac.c:1724
+  Cvar_Get("sv_anticheat_error_action", "0", 0); // ac.c:1725
+  Cvar_Get(
+    "sv_anticheat_message",
+    "This server requires the r1ch.net anticheat module. Please see http://antiche.at/ for more details.",
+    0,
+  ); // ac.c:1726-1728
+  Cvar_Get("sv_anticheat_badfile_action", "0", 0); // ac.c:1729
+  Cvar_Get("sv_anticheat_badfile_message", "", 0); // ac.c:1730
+  Cvar_Get("sv_anticheat_badfile_max", "0", 0); // ac.c:1731
+  Cvar_Get("sv_anticheat_show_violation_reason", "0", 0); // ac.c:1732
+  Cvar_Get("sv_anticheat_client_disconnect_action", "0", 0); // ac.c:1733
+  Cvar_Get("sv_anticheat_disable_play", "0", 0); // ac.c:1734
 
   setSvNoreload(Cvar_Get("sv_noreload", "0", 0));
 
@@ -1060,7 +1192,8 @@ export function SV_Init(): void {
 
   setSvAiraccelerate(Cvar_Get("sv_airaccelerate", "0", CVAR_LATCH));
 
-  public_server = Cvar_Get("public", "0", 0);
+  // main.c:2147 -- CVAR_LATCH was missing.
+  public_server = Cvar_Get("public", "0", CVAR_LATCH);
 
   sv_reconnect_limit = Cvar_Get("sv_reconnect_limit", "3", CVAR_ARCHIVE);
   sv_downloadserver = Cvar_Get("sv_downloadserver", "", 0);

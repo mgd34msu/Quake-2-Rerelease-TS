@@ -501,6 +501,10 @@ R_DrawSkyBox
 const skytexorder: readonly number[] = fixedLength("skytexorder", 6, [0, 2, 1, 3, 4, 5]);
 
 export function R_DrawSkyBox(): void {
+  // q2repro src/refresh/main.c:1136 (`gl_drawsky`, consumed at sky.c:451/
+  // state.c:78/tess.c:763): this renderer's real skybox-drawing entry point.
+  if (glCvars.gl_drawsky && !glCvars.gl_drawsky.value) return;
+
   if (skyrotate) {
     // check for no sky at all
     let i = 0;

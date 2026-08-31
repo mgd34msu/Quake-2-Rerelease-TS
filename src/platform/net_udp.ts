@@ -289,7 +289,30 @@ export async function NET_Config(multiplayer: boolean): Promise<void> {
 //=============================================================================
 
 export function NET_Init(): void {
-  // no-op, matching the original (kept for interface parity)
+  // --- cvar-parity audit: src/common/net/net.c cvars ---
+  // q2repro replaced vanilla's single "ip"/"port" bind (still this port's
+  // NET_OpenIP model above) with a dual IPv4/IPv6-capable net_ip/net_ip6/
+  // net_port/net_clientport/net_enable_ipv6 set. Registered, consumer
+  // unported: this port's socket layer (NET_OpenIP above) only ever binds
+  // one address family via "ip"/"port", never these names.
+  Cvar_Get("net_ip", "", 0); // net.c:1829
+  Cvar_Get("net_ip6", "", 0); // net.c:1831
+  Cvar_Get("net_port", String(PORT_SERVER), 0); // net.c:1833
+  Cvar_Get("net_clientport", String(PORT_ANY), 0); // net.c:1837
+  // net_dropsim (net.c:1839) would simulate packet loss on send/receive;
+  // no such simulation exists anywhere in this port's socket layer.
+  Cvar_Get("net_dropsim", "0", 0);
+  // net_log_* (net.c:1843-1847) gate q2repro's raw packet logging to a file;
+  // not ported.
+  Cvar_Get("net_log_enable", "0", 0);
+  Cvar_Get("net_log_name", "network", 0);
+  Cvar_Get("net_log_flush", "0", 0);
+  // net_enable_ipv6's C default is a runtime probe (NET_EnableIP6(): tries
+  // to open an AF_INET6 socket). This port never attempts an IPv6 socket
+  // anywhere, so there is nothing to probe -- default conservatively to "0"
+  // rather than guessing OS capability.
+  Cvar_Get("net_enable_ipv6", "0", 0); // net.c:1851
+  Cvar_Get("net_ignore_icmp", "0", 0); // net.c:1855
 }
 
 // C's `void NET_Shutdown(void)` just calls `NET_Config(false)`; that call is

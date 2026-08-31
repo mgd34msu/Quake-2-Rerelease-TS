@@ -16,7 +16,7 @@
 // blocking reason `save`/`load` cannot complete end-to-end yet, not a
 // file-I/O gap.
 
-import { Com_sprintf, MAX_OSPATH, MAX_TOKEN_CHARS, MAX_QPATH, CS_NAME, STAT_HEALTH, STAT_FRAGS, PRINT_HIGH, PRINT_CHAT, CVAR_LATCH, CVAR_SERVERINFO, PlayerStateT, BigShort, MAX_CONFIGSTRINGS } from "../shared/q_shared";
+import { Com_sprintf, MAX_OSPATH, MAX_TOKEN_CHARS, MAX_QPATH, CS_NAME, STAT_HEALTH, STAT_FRAGS, PRINT_HIGH, PRINT_CHAT, CVAR_LATCH, CVAR_SERVERINFO, CVAR_PRIVATE, PlayerStateT, BigShort, MAX_CONFIGSTRINGS } from "../shared/q_shared";
 import { SysError, NetadrT, NetsrcT, PORT_MASTER, SvcOpsT, PROTOCOL_VERSION, ERR_DROP } from "../qcommon/qcommon";
 import { Com_Printf, Com_DPrintf, Com_Error, Info_Print, dedicated } from "../qcommon/common";
 import { Cvar_Set, Cvar_VariableValue, Cvar_VariableString, Cvar_ForceSet, Cvar_Serverinfo, cvar_vars } from "../qcommon/cvar";
@@ -402,14 +402,28 @@ function SV_WriteServerFileKex(autosave: boolean): void {
 
   // write all CVAR_LATCH cvars -- these will be things like coop, skill,
   // deathmatch, etc -- also write all CVAR_SERVERINFO vars -- they mainly
-  // serve to provide some troubleshooting info. save.c also excludes
-  // CVAR_PRIVATE cvars here; this port's cvar flag set (q_shared.ts) has no
-  // CVAR_PRIVATE bit at all (never ported -- see report), so no cvar stored
-  // in cvar_vars can ever carry it and that exclusion would be unreachable
-  // dead code if written out.
+  // serve to provide some troubleshooting info. save.c (src/server/save.c:65-70)
+  // also excludes CVAR_PRIVATE cvars even when they carry LATCH/SERVERINFO too
+  // (defensive: no current cvar combines CVAR_PRIVATE with either flag, but a
+  // config-set custom cvar could). CVAR_PRIVATE was added to q_shared.ts by
+  // the cvar-parity audit (see report), so this exclusion is now reachable.
+  //
+  // Iteration order: save.c's loop walks the REAL engine's `cvar_vars`
+  // linked list, which q2repro's Cvar_Get keeps sorted by `strcmp(name)` at
+  // insertion time (src/common/cvar.c:308-315's "sort the variable in").
+  // this port's `cvar_vars` is a plain insertion-order Map, so iterating it
+  // directly writes cvars in REGISTRATION order instead -- confirmed by a
+  // live byte-for-byte diff against a real q2reproded-produced server.ssv
+  // (this port's dump started "game,coop,deathmatch,gamedir,hostname,..";
+  // q2repro's started alphabetically "capturelimit,cheats,competition,
+  // coop,..") during this unit's cross-load verification (see report).
+  // Harmless to LOAD correctness either way (SV_ReadServerFileKex's read
+  // loop looks cvars up by name, order-independent), but sorted here to
+  // match the reference byte layout save.c actually produces.
   let latchedCount = 0;
-  for (const v of cvar_vars.values()) {
-    if (!(v.flags & (CVAR_LATCH | CVAR_SERVERINFO))) continue;
+  const latchedCvars = Array.from(cvar_vars.values()).filter((v) => v.flags & (CVAR_LATCH | CVAR_SERVERINFO) && !(v.flags & CVAR_PRIVATE));
+  latchedCvars.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  for (const v of latchedCvars) {
     MSG_WriteString(buf, v.name);
     MSG_WriteString(buf, v.string);
     latchedCount++;

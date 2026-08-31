@@ -54,7 +54,8 @@
 //   as the C originals' fopen(name, "wb")/fopen(src, "rb") do.
 
 import { openSync, closeSync, readSync, writeSync, writeFileSync, unlinkSync, fstatSync, existsSync, readdirSync, mkdirSync } from "node:fs";
-import { type CvarT, CVAR_NOSET, CVAR_LATCH, CVAR_SERVERINFO, Q_strcasecmp } from "../shared/q_shared";
+import { homedir } from "node:os";
+import { type CvarT, CVAR_NOSET, CVAR_LATCH, CVAR_SERVERINFO, CVAR_NOARCHIVE, Q_strcasecmp } from "../shared/q_shared";
 import { Com_Error, Com_Printf, Com_DPrintf, dedicated } from "./common";
 import { ERR_FATAL, BASEDIRNAME } from "./qcommon";
 import type * as CvarModule from "./cvar";
@@ -843,7 +844,9 @@ export function FS_SetGamedir(dir: string): void {
 
   if (dir === BASEDIRNAME || dir.length === 0) {
     cvarMod().Cvar_FullSet("gamedir", "", CVAR_SERVERINFO | CVAR_NOSET);
-    cvarMod().Cvar_FullSet("game", "", CVAR_LATCH | CVAR_SERVERINFO);
+    // q2repro src/common/files.c:4034 flags "game" CVAR_NOARCHIVE too
+    // (cvar-parity fix).
+    cvarMod().Cvar_FullSet("game", "", CVAR_LATCH | CVAR_SERVERINFO | CVAR_NOARCHIVE);
   } else {
     cvarMod().Cvar_FullSet("gamedir", dir, CVAR_SERVERINFO | CVAR_NOSET);
     if (fs_cddir && fs_cddir.string.length) {
@@ -1021,6 +1024,34 @@ export function FS_InitFilesystem(): void {
   cmd.Cmd_AddCommand("link", FS_Link_f);
   cmd.Cmd_AddCommand("dir", FS_Dir_f);
 
+  // --- cvar-parity audit: src/common/files.c cvars ---
+  // fs_autoexec (files.c:4022, read at files.c:3862) gates whether
+  // autoexec.cfg auto-execs on (re)start. Registered, consumer unported:
+  // FS_ExecAutoexec below runs unconditionally.
+  cvar.Cvar_Get("fs_autoexec", "1", 0);
+  // fs_debug (files.c:4025) gates the FS_DPrintf verbose-logging macro
+  // (files.c:98). Registered, consumer unported.
+  cvar.Cvar_Get("fs_debug", "0", 0);
+  // fs_fuzz_factor/fs_fuzz_filter (files.c:4029-4030) gate q2repro's
+  // approximate/fuzzy pak-entry name matching (files.c:1882-1886, used when
+  // an exact file lookup misses). Registered, consumer unported: this
+  // port's file lookups are exact-match only.
+  cvar.Cvar_Get("fs_fuzz_factor", "0", 0);
+  cvar.Cvar_Get("fs_fuzz_filter", "*", 0);
+
+  // q2repro src/unix/system.c:210-211 (Sys_Init). "homedir" is the C
+  // engine's per-user config/save directory (getpwuid-derived, distinct
+  // from "basedir" below); this port has no separate per-user data
+  // directory concept (everything lives under basedir), so registered,
+  // consumer unported, defaulting to the actual OS home directory rather
+  // than a placeholder. "libdir" is a fixed install-prefix path baked in at
+  // compile time by q2repro's meson build (LIBDIR); this port has no
+  // install prefix (it always runs from the repo checkout via bun), so
+  // there is no real value to assign -- registered empty, consumer
+  // unported.
+  cvar.Cvar_Get("homedir", homedir(), CVAR_NOSET);
+  cvar.Cvar_Get("libdir", "", CVAR_NOSET);
+
   // basedir <path>
   // allows the game to run from outside the data tree
   fs_basedir = cvar.Cvar_Get("basedir", ".", CVAR_NOSET);
@@ -1081,7 +1112,10 @@ export function FS_InitFilesystem(): void {
   fs_base_searchpaths = fs_searchpaths;
 
   // check for game override
-  fs_gamedirvar = cvar.Cvar_Get("game", "", CVAR_LATCH | CVAR_SERVERINFO);
+  // q2repro src/common/files.c:4034 flags "game" CVAR_NOARCHIVE too
+  // (cvar-parity fix; DEFGAME is a meson build option, empty by default,
+  // which this port's "" default already matches).
+  fs_gamedirvar = cvar.Cvar_Get("game", "", CVAR_LATCH | CVAR_SERVERINFO | CVAR_NOARCHIVE);
   if (fs_gamedirvar && fs_gamedirvar.string.length) {
     FS_SetGamedir(fs_gamedirvar.string);
   }

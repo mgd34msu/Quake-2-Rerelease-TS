@@ -20,7 +20,7 @@ import { Cmd_AddCommand, Cmd_Argc, Cmd_Argv, Cmd_RemoveCommand } from "../qcommo
 import { Cvar_Get } from "../qcommon/cvar";
 import { FS_FCloseFile, FS_FOpenFile } from "../qcommon/files";
 import { type Vec3, vec3, DotProduct, VectorCopy, VectorNormalize, VectorSubtract } from "../shared/math";
-import { ATTN_STATIC, CVAR_ARCHIVE, Com_PageInMemory, Com_sprintf, ERR_DROP, ERR_FATAL, type EntityStateT } from "../shared/q_shared";
+import { ATTN_STATIC, CVAR_ARCHIVE, CVAR_SOUND, Com_PageInMemory, Com_sprintf, ERR_DROP, ERR_FATAL, type EntityStateT } from "../shared/q_shared";
 import { cl, cl_entities, cl_parse_entities, clCvars, cls, ConnstateT, MAX_PARSE_ENTITIES } from "./client";
 import { CL_GetEntitySoundOrigin } from "./cl_ents";
 import {
@@ -112,12 +112,44 @@ export function S_Init(): void {
     Com_Printf("not initializing.\n");
   } else {
     sndCvars.s_volume = Cvar_Get("s_volume", "0.7", CVAR_ARCHIVE);
-    sndCvars.s_khz = Cvar_Get("s_khz", "11", CVAR_ARCHIVE);
+    // q2repro src/client/sound/dma.c:560 defaults s_khz to "44", not "11"
+    // (cvar-parity fix); src/platform/snd.ts's rate-selection logic already
+    // handles 44/22/other correctly.
+    sndCvars.s_khz = Cvar_Get("s_khz", "44", CVAR_ARCHIVE | CVAR_SOUND); // dma.c:560 also flags CVAR_SOUND
     sndCvars.s_loadas8bit = Cvar_Get("s_loadas8bit", "1", CVAR_ARCHIVE);
-    sndCvars.s_mixahead = Cvar_Get("s_mixahead", "0.2", CVAR_ARCHIVE);
+    // q2repro src/client/sound/dma.c:561 defaults s_mixahead to "0.1", not
+    // "0.2" (cvar-parity fix).
+    sndCvars.s_mixahead = Cvar_Get("s_mixahead", "0.1", CVAR_ARCHIVE);
     sndCvars.s_show = Cvar_Get("s_show", "0", 0);
     sndCvars.s_testsound = Cvar_Get("s_testsound", "0", 0);
     sndCvars.s_primary = Cvar_Get("s_primary", "0", CVAR_ARCHIVE); // win32 specific
+    // q2repro src/client/sound/dma.c:563-564. Registered, consumer
+    // unported: this port's mixer has no stereo-channel-swap or named
+    // output-driver-selection path.
+    Cvar_Get("s_swapstereo", "0", 0);
+    Cvar_Get("s_driver", "", CVAR_SOUND);
+    // q2repro src/client/sound/main.c:141-157 (S_Init, the OpenAL-preferring
+    // frontend that owns s_enable/s_ambient/s_auto_focus/s_underwater*/
+    // s_num_channels). This port's S_Init above is q2pro/vanilla's DMA-only
+    // model with no OpenAL backend and no per-channel pool sizing knob, so
+    // all five are registered, consumer unported.
+    Cvar_Get("s_enable", "2", CVAR_SOUND);
+    Cvar_Get("s_ambient", "1", 0);
+    Cvar_Get("s_auto_focus", "2", 0);
+    Cvar_Get("s_underwater", "1", 0);
+    Cvar_Get("s_underwater_gain_hf", "0.25", 0);
+    Cvar_Get("s_num_channels", "64", CVAR_SOUND);
+    // q2repro src/client/sound/qal.c:199-200 and al.c:640-679 -- the OpenAL
+    // backend itself (device selection, HRTF, reverb, looping-sound
+    // merging, playback timescale). This port has no OpenAL backend at all
+    // (bun:ffi binds SDL2 audio only, see src/platform/snd.ts) -- all six
+    // registered, consumer unported.
+    Cvar_Get("al_device", "", 0);
+    Cvar_Get("al_hrtf", "0", 0);
+    Cvar_Get("al_merge_looping", "1", 0);
+    Cvar_Get("al_reverb", "1", 0);
+    Cvar_Get("al_reverb_lerp_time", "3.0", 0);
+    Cvar_Get("al_timescale", "1", 0);
 
     Cmd_AddCommand("play", S_Play);
     Cmd_AddCommand("stopsound", S_StopAllSounds);

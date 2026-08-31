@@ -72,7 +72,7 @@ import { CString } from "bun:ffi";
 import type { RefExports, RefImports, EntityT, RefdefT, ParticleT, DrawColorT } from "../client/ref";
 import { API_VERSION } from "../client/ref";
 import { type Vec3, vec3, DotProduct, VectorCopy, VectorScale, VectorMA, VectorNormalize, AngleVectors, RotatePointAroundVector, PerpendicularVector, BOX_ON_PLANE_SIDE } from "../shared/math";
-import { CplaneT, CONTENTS_SOLID, RDF_NOWORLDMODEL, RF_BEAM, RF_FULLBRIGHT, RF_TRANSLUCENT, ERR_DROP, PRINT_ALL, CVAR_ARCHIVE, CVAR_USERINFO, Q_stricmp, Q_ftol } from "../shared/q_shared";
+import { CplaneT, CONTENTS_SOLID, RDF_NOWORLDMODEL, RF_BEAM, RF_FULLBRIGHT, RF_TRANSLUCENT, ERR_DROP, PRINT_ALL, PRINT_DEVELOPER, CVAR_ARCHIVE, CVAR_USERINFO, CVAR_CHEAT, CVAR_FILES, Q_stricmp, Q_ftol } from "../shared/q_shared";
 import { PLANE_ANYZ } from "../qcommon/qfiles";
 import {
   ri,
@@ -428,6 +428,9 @@ R_DrawEntitiesOnList
 */
 function R_DrawEntitiesOnList(): void {
   if (!(glCvars.r_drawentities && glCvars.r_drawentities.value)) return;
+  // q2repro src/refresh/main.c:1135: `gl_drawentities` (CVAR_CHEAT) is
+  // q2repro's rename of this same toggle; gate on both so either hides entities.
+  if (glCvars.gl_drawentities && !glCvars.gl_drawentities.value) return;
 
   // draw non-transparent first
   for (let i = 0; i < r_newrefdef.num_entities; i++) {
@@ -693,7 +696,10 @@ function R_SetupGL(): void {
   const screenaspect = r_newrefdef.width / r_newrefdef.height;
   qgl.qglMatrixMode(GL_PROJECTION);
   qgl.qglLoadIdentity();
-  MYgluPerspective(r_newrefdef.fov_y, screenaspect, 4, 4096);
+  // q2repro src/refresh/state.c:232: `float znear = gl_znear->value` --
+  // replaces this port's prior hardcoded "4" near-plane constant.
+  const znear = glCvars.gl_znear ? glCvars.gl_znear.value : 4;
+  MYgluPerspective(r_newrefdef.fov_y, screenaspect, znear, 4096);
 
   qgl.qglCullFace(GL_FRONT);
 
@@ -880,10 +886,14 @@ export function R_RenderFrame(fd: RefdefT): void {
   R_SetGL2D();
 }
 
-function R_Register(): void {
+// Exported (was module-private) so test/cvar_parity.test.ts can register
+// this renderer's cvars without needing a real GL context (R_Init also
+// calls Draw_GetPalette()/loadQGLFromSystem(), neither reachable headless).
+export function R_Register(): void {
   glCvars.r_lefthand = ri.Cvar_Get("hand", "0", CVAR_USERINFO | CVAR_ARCHIVE);
   glCvars.r_norefresh = ri.Cvar_Get("r_norefresh", "0", 0);
-  glCvars.r_fullbright = ri.Cvar_Get("r_fullbright", "0", 0);
+  // q2repro src/refresh/main.c:1161 flags this CVAR_CHEAT (cvar-parity fix).
+  glCvars.r_fullbright = ri.Cvar_Get("r_fullbright", "0", CVAR_CHEAT);
   glCvars.r_drawentities = ri.Cvar_Get("r_drawentities", "1", 0);
   glCvars.r_drawworld = ri.Cvar_Get("r_drawworld", "1", 0);
   glCvars.r_novis = ri.Cvar_Get("r_novis", "0", 0);
@@ -896,7 +906,8 @@ function R_Register(): void {
   // task #25 (v1.1.0): q2repro src/refresh/main.c/shader.c's
   // gl_shaders/gl_per_pixel_lighting, same names and same "1" default as
   // q2repro's own GLSL backend (see gl_shader.ts's GL_InitShaderPath).
-  glCvars.gl_shaders = ri.Cvar_Get("gl_shaders", "1", 0);
+  // q2repro flags this CVAR_FILES (src/refresh/main.c:1119, cvar-parity fix).
+  glCvars.gl_shaders = ri.Cvar_Get("gl_shaders", "1", CVAR_FILES);
   glCvars.gl_per_pixel_lighting = ri.Cvar_Get("gl_per_pixel_lighting", "1", 0);
 
   glCvars.gl_nosubimage = ri.Cvar_Get("gl_nosubimage", "0", 0);
@@ -913,20 +924,36 @@ function R_Register(): void {
   glCvars.gl_particle_att_b = ri.Cvar_Get("gl_particle_att_b", "0.0", CVAR_ARCHIVE);
   glCvars.gl_particle_att_c = ri.Cvar_Get("gl_particle_att_c", "0.01", CVAR_ARCHIVE);
 
-  glCvars.gl_modulate = ri.Cvar_Get("gl_modulate", "1", CVAR_ARCHIVE);
+  // q2repro src/refresh/main.c:1101: `gl_modulate = Cvar_Get("gl_modulate", "2", CVAR_ARCHIVE);`
+  // -- default fixed from this port's prior "1" to q2repro's "2".
+  glCvars.gl_modulate = ri.Cvar_Get("gl_modulate", "2", CVAR_ARCHIVE);
   glCvars.gl_log = ri.Cvar_Get("gl_log", "0", 0);
   glCvars.gl_bitdepth = ri.Cvar_Get("gl_bitdepth", "0", 0);
   glCvars.gl_mode = ri.Cvar_Get("gl_mode", "3", CVAR_ARCHIVE);
-  glCvars.gl_lightmap = ri.Cvar_Get("gl_lightmap", "0", 0);
-  glCvars.gl_shadows = ri.Cvar_Get("gl_shadows", "0", CVAR_ARCHIVE);
+  // q2repro src/refresh/main.c:1160 flags this CVAR_CHEAT (cvar-parity fix).
+  glCvars.gl_lightmap = ri.Cvar_Get("gl_lightmap", "0", CVAR_CHEAT);
+  // q2repro src/refresh/main.c:1100: `gl_shadows = Cvar_Get("gl_shadows", "2", CVAR_ARCHIVE);`
+  // -- default fixed from this port's prior "0" to q2repro's "2"; flags
+  // already matched (CVAR_ARCHIVE), left unchanged.
+  glCvars.gl_shadows = ri.Cvar_Get("gl_shadows", "2", CVAR_ARCHIVE);
   glCvars.gl_dynamic = ri.Cvar_Get("gl_dynamic", "1", 0);
-  glCvars.gl_nobind = ri.Cvar_Get("gl_nobind", "0", 0);
-  glCvars.gl_round_down = ri.Cvar_Get("gl_round_down", "1", 0);
-  glCvars.gl_picmip = ri.Cvar_Get("gl_picmip", "0", 0);
+  // q2repro src/refresh/main.c:1145 flags this CVAR_CHEAT (cvar-parity fix).
+  glCvars.gl_nobind = ri.Cvar_Get("gl_nobind", "0", CVAR_CHEAT);
+  // q2repro src/refresh/texture.c:1260: `gl_round_down = Cvar_Get("gl_round_down", "0", CVAR_FILES);`
+  // -- default fixed from this port's prior "1" to q2repro's "0", flags
+  // fixed from 0 to CVAR_FILES.
+  glCvars.gl_round_down = ri.Cvar_Get("gl_round_down", "0", CVAR_FILES);
+  // q2repro src/refresh/texture.c:1261: `gl_picmip = Cvar_Get("gl_picmip", "0", CVAR_FILES);`
+  // -- flags fixed from 0 to CVAR_FILES (see also vid_menu.ts's own
+  // gl_picmip registration, fixed the same way).
+  glCvars.gl_picmip = ri.Cvar_Get("gl_picmip", "0", CVAR_FILES);
   glCvars.gl_skymip = ri.Cvar_Get("gl_skymip", "0", 0);
-  glCvars.gl_showtris = ri.Cvar_Get("gl_showtris", "0", 0);
+  // q2repro src/refresh/main.c:1139 flags this CVAR_CHEAT (cvar-parity fix).
+  glCvars.gl_showtris = ri.Cvar_Get("gl_showtris", "0", CVAR_CHEAT);
   glCvars.gl_ztrick = ri.Cvar_Get("gl_ztrick", "0", 0);
-  glCvars.gl_finish = ri.Cvar_Get("gl_finish", "0", CVAR_ARCHIVE);
+  // q2repro src/refresh/main.c:1156: `gl_finish = Cvar_Get("gl_finish", "0", 0);`
+  // -- flags fixed from this port's prior CVAR_ARCHIVE to q2repro's 0.
+  glCvars.gl_finish = ri.Cvar_Get("gl_finish", "0", 0);
   glCvars.gl_clear = ri.Cvar_Get("gl_clear", "0", 0);
   glCvars.gl_cull = ri.Cvar_Get("gl_cull", "1", 0);
   glCvars.gl_polyblend = ri.Cvar_Get("gl_polyblend", "1", 0);
@@ -934,10 +961,21 @@ function R_Register(): void {
   glCvars.gl_playermip = ri.Cvar_Get("gl_playermip", "0", 0);
   glCvars.gl_monolightmap = ri.Cvar_Get("gl_monolightmap", "0", 0);
   glCvars.gl_driver = ri.Cvar_Get("gl_driver", "opengl32", CVAR_ARCHIVE);
-  glCvars.gl_texturemode = ri.Cvar_Get("gl_texturemode", "GL_LINEAR_MIPMAP_NEAREST", CVAR_ARCHIVE);
+  // q2repro src/refresh/texture.c:1253: `gl_texturemode = Cvar_Get("gl_texturemode",
+  // "GL_LINEAR_MIPMAP_LINEAR", CVAR_ARCHIVE);` -- default fixed from this
+  // port's prior "GL_LINEAR_MIPMAP_NEAREST". Checked for a documented
+  // technical reason to keep NEAREST filtering (e.g. a hardcoded assumption
+  // elsewhere): none found -- gl_image.ts:175's SetGlFilterMinMax(..., ...)
+  // call and gl_rmisc.ts's GL_TextureMode fallback string are both just
+  // defensive pre-init/null-cvar defaults, immediately superseded by
+  // GL_TextureMode(glCvars.gl_texturemode.string) once the cvar exists (see
+  // gl_rmain.ts's own R_Register-adjacent GL_TextureMode call and
+  // gl_rmisc.ts's GL_SetDefaultState), so this default fix is applied plain.
+  glCvars.gl_texturemode = ri.Cvar_Get("gl_texturemode", "GL_LINEAR_MIPMAP_LINEAR", CVAR_ARCHIVE);
   glCvars.gl_texturealphamode = ri.Cvar_Get("gl_texturealphamode", "default", CVAR_ARCHIVE);
   glCvars.gl_texturesolidmode = ri.Cvar_Get("gl_texturesolidmode", "default", CVAR_ARCHIVE);
-  glCvars.gl_lockpvs = ri.Cvar_Get("gl_lockpvs", "0", 0);
+  // q2repro src/refresh/main.c:1159 flags this CVAR_CHEAT (cvar-parity fix).
+  glCvars.gl_lockpvs = ri.Cvar_Get("gl_lockpvs", "0", CVAR_CHEAT);
   // q2repro src/refresh/main.c: gl_lightgrid = Cvar_Get("gl_lightgrid", "1", 0);
   glCvars.gl_lightgrid = ri.Cvar_Get("gl_lightgrid", "1", 0);
 
@@ -963,6 +1001,175 @@ function R_Register(): void {
   // registered here purely for its console-visibility side effect, matching
   // the original's own local (non-stored) `cvar_t *vid_ref` use.
   ri.Cvar_Get("vid_ref", "soft", CVAR_ARCHIVE);
+
+  // ==========================================================================
+  // Engine-cvar parity audit, ref_gl cluster: cvars whose q2repro registration
+  // site is in src/refresh/*.c but that this vanilla-shaped renderer never
+  // registered at all (console "unknown command" today). Checked every one of
+  // these against this renderer's actual logic (grepped gl_*.ts for the
+  // feature each gates) before deciding disposition; most gate q2repro-only
+  // features (bloom, fog, water warp, cel-shading, MD5 models, cubemaps,
+  // HQ2X upscaling, glowmaps, damage-blend overlay, GL debug-line/text
+  // overlay, a newer alpha-sort/GPU-lerp/VBO pipeline) that this renderer
+  // never ported, so those are registered here so the console command stops
+  // failing but have no consumer to wire in ("registered, consumer
+  // unported" in this unit's report). A handful gate logic that DOES already
+  // exist here under a differently-named vanilla cvar or a real function this
+  // renderer already runs; those are wired in below at their consumer site
+  // and just registered here.
+
+  // q2repro src/refresh/main.c:1133: `gl_znear = Cvar_Get("gl_znear", "2", CVAR_CHEAT);`
+  // -- wired into R_SetupGL below, replacing MYgluPerspective's hardcoded "4"
+  // near-plane constant (state.c:232's `gl_znear->value` is the same
+  // near-plane use).
+  glCvars.gl_znear = ri.Cvar_Get("gl_znear", "2", CVAR_CHEAT);
+  // q2repro src/refresh/main.c:1134/1135: q2repro renamed vanilla's
+  // r_drawworld/r_drawentities (which this port still carries above, with
+  // live consumers at gl_rsurf.ts's R_DrawWorld and this file's
+  // R_DrawEntitiesOnList) to gl_drawworld/gl_drawentities with CVAR_CHEAT.
+  // Registered under the new name too and wired in as an additional AND-gate
+  // at both existing consumer sites, so either cvar can hide world/entities.
+  glCvars.gl_drawworld = ri.Cvar_Get("gl_drawworld", "1", CVAR_CHEAT);
+  glCvars.gl_drawentities = ri.Cvar_Get("gl_drawentities", "1", CVAR_CHEAT);
+  // q2repro src/refresh/main.c:1136: `gl_drawsky = Cvar_Get("gl_drawsky", "1", 0);`
+  // (consumed at sky.c:451/state.c:78/tess.c:763) -- wired into gl_warp.ts's
+  // R_DrawSkyBox, this renderer's real (and only) skybox-drawing entry point.
+  glCvars.gl_drawsky = ri.Cvar_Get("gl_drawsky", "1", 0);
+  // q2repro src/refresh/main.c:1138: `gl_draworder = Cvar_Get("gl_draworder", "1", 0);`
+  // -- gates an alpha-threshold translucent-entity sort/depth-write decision
+  // in q2repro's main.c:563 (`ent->alpha <= gl_draworder->value`) that has no
+  // equivalent in this renderer's simple solid-then-translucent draw order
+  // (R_DrawEntitiesOnList); registered only, no consumer to wire in.
+  ri.Cvar_Get("gl_draworder", "1", 0);
+  // q2repro src/refresh/main.c:1140/1141/1142: development/debug toggles with
+  // no matching debug-overlay logic in this renderer (no showorigins/
+  // showtearing/showbloom counterpart exists) -- registered only.
+  ri.Cvar_Get("gl_showorigins", "0", CVAR_CHEAT);
+  ri.Cvar_Get("gl_showtearing", "0", CVAR_CHEAT);
+  ri.Cvar_Get("gl_showbloom", "0", CVAR_CHEAT);
+  // q2repro src/refresh/main.c:1144/1146/1147: gl_showscrap (scrap-atlas
+  // debug view), gl_novbo (this renderer has no VBO path to disable -- only
+  // gl_vertex_arrays, a distinct older client-vertex-array toggle), gl_test
+  // (a free-form developer scratch cvar with no fixed behavior even in
+  // q2repro itself) -- registered only.
+  ri.Cvar_Get("gl_showscrap", "0", 0);
+  ri.Cvar_Get("gl_novbo", "0", CVAR_FILES);
+  ri.Cvar_Get("gl_test", "0", 0);
+  // q2repro src/refresh/main.c:1149/1150: gate real, existing culling calls
+  // in this renderer -- gl_cull_nodes wired into gl_rsurf.ts's
+  // R_RecursiveWorldNode (world.c:593's node-tree cull-flag use, this port's
+  // closest equivalent is the per-node R_CullBox check), gl_cull_models
+  // wired into gl_mesh.ts's R_DrawAliasModel (mesh.c:501's identical gate on
+  // its own R_CullAliasModel call).
+  glCvars.gl_cull_nodes = ri.Cvar_Get("gl_cull_nodes", "1", 0);
+  glCvars.gl_cull_models = ri.Cvar_Get("gl_cull_models", "1", 0);
+  // q2repro src/refresh/main.c:1151: debug overlay counting culled objects; no such counter exists here.
+  ri.Cvar_Get("gl_showcull", "0", CVAR_CHEAT);
+  // q2repro src/refresh/main.c:1153: `gl_clearcolor = Cvar_Get("gl_clearcolor", "black", 0);`
+  // -- this renderer's clear color is hardcoded at each qglClearColor call
+  // site (gl_rmain.ts/gl_rmisc.ts), never cvar-driven; registered only.
+  ri.Cvar_Get("gl_clearcolor", "black", 0);
+  // q2repro src/refresh/main.c:1157: q2repro renamed vanilla's r_novis (still
+  // carried above, live consumer at gl_rsurf.ts's R_MarkLeaves) to gl_novis.
+  // Registered under the new name and wired in as an additional OR-gate at
+  // both of R_MarkLeaves' r_novis checks.
+  glCvars.gl_novis = ri.Cvar_Get("gl_novis", "0", 0);
+  // q2repro src/refresh/main.c:1163: `gl_vertexlight = Cvar_Get("gl_vertexlight", "0", 0);`
+  // -- gates a per-vertex-lighting path (vs. lightmaps) this renderer never
+  // ported; registered only.
+  ri.Cvar_Get("gl_vertexlight", "0", 0);
+  // q2repro src/refresh/main.c:1167: `gl_showerrors = Cvar_Get("gl_showerrors", "1", 0);`
+  // -- gates extra glGetError() diagnostic logging this renderer's qgl.ts
+  // layer doesn't implement; registered only.
+  ri.Cvar_Get("gl_showerrors", "1", 0);
+
+  // q2repro src/refresh/main.c:1095-1099: particle/beam rendering-style
+  // toggles for a shape/style system this renderer's particle drawing
+  // (gl_rmain.ts's R_DrawParticles-equivalent) never implemented --
+  // registered only.
+  ri.Cvar_Get("gl_partscale", "2", 0);
+  ri.Cvar_Get("gl_partstyle", "0", 0);
+  ri.Cvar_Get("gl_beamstyle", "0", 0);
+  ri.Cvar_Get("gl_celshading", "0", 0);
+  // gl_dotshading: q2repro's mesh.c:62 setup_dotshading() is a distinct GPU-
+  // shader-path effect (interacts with gl_static.use_shaders/
+  // gl_per_pixel_lighting) layered on top of vanilla's own always-on,
+  // non-cvar-gated shadedots computation in gl_mesh.ts -- not the same
+  // feature, no consumer to wire in.
+  ri.Cvar_Get("gl_dotshading", "0", 0);
+  // q2repro src/refresh/main.c:1103/1105/1107/1109: lightmap-pipeline
+  // variations (world-texture modulation toggle, colored lightmaps, forced
+  // lightmap bit depth, brightness curve) this renderer's fixed vanilla
+  // lightmap build (gl_light.ts) never implemented -- registered only.
+  ri.Cvar_Get("gl_modulate_world", "1", 0);
+  ri.Cvar_Get("gl_coloredlightmaps", "1", 0);
+  ri.Cvar_Get("gl_lightmap_bits", "0", 0);
+  ri.Cvar_Get("gl_brightness", "0", 0);
+  // q2repro src/refresh/main.c:1113/1114: alternate dynamic-light falloff
+  // curve and a separate entity-modulation toggle; this renderer's dlight
+  // accumulation (gl_light.ts) has no such curve selector, and entity
+  // modulation is unconditional -- registered only.
+  ri.Cvar_Get("gl_dlight_falloff", "1", 0);
+  ri.Cvar_Get("gl_modulate_entities", "1", 0);
+  // q2repro src/refresh/main.c:1116/1117/1118: glowmap intensity (this
+  // renderer has no glowmap texture pass), lens-flare animation speed (no
+  // flare effect exists here), and font drop-shadow (gl_draw.ts's Draw_Char
+  // has no shadow pass) -- registered only.
+  ri.Cvar_Get("gl_glowmap_intensity", "1", 0);
+  ri.Cvar_Get("gl_flarespeed", "8", 0);
+  ri.Cvar_Get("gl_fontshadow", "0", 0);
+  // q2repro src/refresh/main.c:1121-1123 (`#if USE_MD5`): MD5 skeletal-model
+  // loading/LOD-distance cvars; this renderer only loads MD2 (gl_model.ts's
+  // ParsedMd2T), no MD5 loader exists -- registered only.
+  ri.Cvar_Get("gl_md5_load", "1", CVAR_FILES);
+  ri.Cvar_Get("gl_md5_use", "1", 0);
+  ri.Cvar_Get("gl_md5_distance", "2048", 0);
+  // q2repro src/refresh/main.c:1125 (also :1168, same Cvar_Get call, cited
+  // once here): damage-blend screen-overlay fraction; this renderer has no
+  // damage-blend overlay pass -- registered only.
+  ri.Cvar_Get("gl_damageblend_frac", "0.2", 0);
+  // q2repro src/refresh/main.c:1126/1127/1128: water-warp distortion, fog,
+  // and bloom post-processing -- none of these post-effects exist in this
+  // renderer (gl_warp.ts's WaterWarpPolyVerts is `#if 0`'d out per that
+  // file's own header comment; no fog or bloom pass anywhere) -- registered
+  // only.
+  ri.Cvar_Get("gl_waterwarp", "1", 0);
+  ri.Cvar_Get("gl_fog", "1", 0);
+  ri.Cvar_Get("gl_bloom", "1", 0);
+
+  // q2repro src/refresh/models.c:1691: `gl_gpulerp = Cvar_Get("gl_gpulerp", "1", 0);`
+  // -- gates uploading skeletal-lerp work to a vertex shader instead of the
+  // CPU; this renderer's alias-model lerping (gl_mesh.ts) is always CPU-side
+  // fixed-function, no GPU-lerp path exists -- registered only.
+  ri.Cvar_Get("gl_gpulerp", "1", 0);
+  // q2repro src/refresh/shader.c:1199: `gl_bloom_sigma = Cvar_Get("gl_bloom_sigma", "8", 0);`
+  // -- Gaussian-blur sigma for the bloom pass gl_shader.ts never ported (see
+  // gl_bloom above) -- registered only.
+  ri.Cvar_Get("gl_bloom_sigma", "8", 0);
+
+  // q2repro src/refresh/debug.c:703/704/706 (GL_InitDebugDraw) and
+  // src/refresh/debug_text.c:193 (GL_InitDebugTextLines): client-side
+  // rendering of the server's debug-primitive stream (R_AddDebugLine etc.).
+  // This port's debug-draw machinery (src/server/sv_debugdraw.ts,
+  // src/server/bindings/kex.ts) only builds and forwards that primitive list
+  // server-side -- no ref_gl consumer renders it (grepped: no
+  // AddDebugLine/ClearDebugLines/GL_InitDebugDraw counterpart anywhere in
+  // src/ref_gl). Registered only, so the console commands stop failing.
+  // gl_debug_font's C default is `debug_fonts[0].name` (debug_text.c's
+  // debug_fonts[] array, first entry `DEBUG_FONT(futural)` -- confirmed by
+  // reading that array in q2repro's tree): "futural".
+  ri.Cvar_Get("gl_debug_linewidth", "2", 0);
+  ri.Cvar_Get("gl_debug_distfrac", "0.004", 0);
+  ri.Cvar_Get("gl_debug_text_style", "lines", 0);
+  ri.Cvar_Get("gl_debug_font", "futural", 0);
+
+  // q2repro src/refresh/hq2x.c:460-462 (HQ2x_Init): HQ2X texture-upscaling
+  // filter thresholds; this renderer has no HQ2X (or any) texture-upscaling
+  // pass -- registered only.
+  ri.Cvar_Get("hqx_y", "48", CVAR_FILES);
+  ri.Cvar_Get("hqx_cb", "7", CVAR_FILES);
+  ri.Cvar_Get("hqx_cr", "6", CVAR_FILES);
+  // ==========================================================================
 
   ri.Cmd_AddCommand("imagelist", GL_ImageList_f);
   ri.Cmd_AddCommand("screenshot", GL_ScreenShot_f);
@@ -1078,8 +1285,14 @@ export function R_Init(hInstance: unknown, wndProc: unknown): boolean {
   ri.Con_Printf(PRINT_ALL, `GL_RENDERER: ${gl_config.renderer_string}\n`);
   gl_config.version_string = qglGetStringSafe(GL_VERSION);
   ri.Con_Printf(PRINT_ALL, `GL_VERSION: ${gl_config.version_string}\n`);
+  // q2repro (src/refresh/qgl.c QGL_Init, ~line 585) never prints the raw
+  // GL_EXTENSIONS string at normal verbosity: vendor/renderer/version/
+  // extension-loaded lines are all Com_DPrintf (developer-only), and the
+  // full extension list is only shown on request via the "strings" console
+  // command. Match that: keep vendor/renderer/version at PRINT_ALL above,
+  // but drop the extension dump to PRINT_DEVELOPER.
   gl_config.extensions_string = qglGetStringSafe(GL_EXTENSIONS);
-  ri.Con_Printf(PRINT_ALL, `GL_EXTENSIONS: ${gl_config.extensions_string}\n`);
+  ri.Con_Printf(PRINT_DEVELOPER, `GL_EXTENSIONS: ${gl_config.extensions_string}\n`);
 
   const rendererLower = gl_config.renderer_string.toLowerCase();
   const vendorLower = gl_config.vendor_string.toLowerCase();

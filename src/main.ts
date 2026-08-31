@@ -25,7 +25,7 @@
 //   __DATE__ in the version string -- a C preprocessor compile-time constant
 //     with no bun equivalent.
 
-import { CVAR_NOSET, CVAR_SERVERINFO, Com_sprintf } from "./shared/q_shared";
+import { CVAR_NOSET, CVAR_SERVERINFO, CVAR_ROM, CVAR_CHEAT, CVAR_ARCHIVE, CVAR_PRIVATE, Com_sprintf } from "./shared/q_shared";
 import { ComError, ERR_FATAL, VERSION, CPUSTRING, BUILDSTRING } from "./qcommon/qcommon";
 import { SetErrorHandlers, SetLoadingPlaqueHandler,
   COM_InitArgv,
@@ -125,17 +125,72 @@ export function Qcommon_Init(argv: string[]): void {
     setHostSpeeds(Cvar_Get("host_speeds", "0", 0));
     setLogStats(Cvar_Get("log_stats", "0", 0));
     setDeveloper(Cvar_Get("developer", "0", 0));
-    setTimescale(Cvar_Get("timescale", "1", 0));
-    setFixedtime(Cvar_Get("fixedtime", "0", 0));
+    // q2repro src/common/common.c:915-916 flags timescale/fixedtime
+    // CVAR_CHEAT (cvar-parity fix).
+    setTimescale(Cvar_Get("timescale", "1", CVAR_CHEAT));
+    setFixedtime(Cvar_Get("fixedtime", "0", CVAR_CHEAT));
     setLogfileActive(Cvar_Get("logfile", "0", 0));
     setShowtrace(Cvar_Get("showtrace", "0", 0));
     setDedicated(Cvar_Get("dedicated", "0", CVAR_NOSET));
+
+    // --- cvar-parity audit: remaining src/common/common.c cvars ---
+    // z_perturb (common.c:907) is gated behind `#if USE_TESTS` in q2repro --
+    // only exists in the C engine's own built-in unit-test harness builds
+    // (src/common/tests.c), which this port does not replicate. Excluded.
+    Cvar_Get("logfile_flush", "0", 0); // common.c:918
+    Cvar_Get("logfile_name", "console", 0); // common.c:919
+    Cvar_Get("logfile_prefix", "[%Y-%m-%d %H:%M] ", 0); // common.c:920
+    // console_prefix/sys_history are gated `#if USE_SYSCON` in q2repro (a
+    // curses/Windows system-console window) -- this port has no system
+    // console (src/platform has no tty/curses backend), so both are
+    // registered, consumer unported.
+    Cvar_Get("console_prefix", "", 0); // common.c:922
+    // q2repro src/unix/tty.c:507 -- toggles the curses-style stdin system
+    // console this port has no equivalent of (it always reads/writes stdin
+    // directly, see PORTING.md). Registered, consumer unported.
+    Cvar_Get("sys_console", "0", CVAR_NOSET);
+    // q2repro registers cl_running/cl_paused only on the USE_CLIENT branch
+    // (common.c:924-928); this port is client-capable, so that's the
+    // matching branch. These are CVAR_ROM status flags the C engine sets
+    // programmatically to reflect live state -- distinct from this port's
+    // pre-existing user-settable "paused" cvar (src/client/cl_main.ts,
+    // vanilla q2 3.21 naming/semantics, left untouched by this audit).
+    // Registered, consumer unported: nothing in this port currently flips
+    // cl_running/cl_paused/sv_running/sv_paused to reflect live state.
+    Cvar_Get("cl_running", "0", CVAR_ROM); // common.c:926
+    Cvar_Get("cl_paused", "0", CVAR_ROM); // common.c:927
+    Cvar_Get("sv_running", "0", CVAR_ROM); // common.c:931
+    Cvar_Get("sv_paused", "0", CVAR_ROM); // common.c:932
+    Cvar_Get("com_date_format", "%Y-%m-%d", 0); // common.c:934
+    // q2repro branches on #ifdef _WIN32 here; this port targets non-Windows
+    // (bun/Linux), so the else branch ("%H:%M") is the C-correct match.
+    Cvar_Get("com_time_format", "%H:%M", 0); // common.c:938
+    Cvar_Get("com_debug_break", "0", 0); // common.c:941 (USE_DEBUG-gated in q2repro; harmless to always register here)
+    Cvar_Get("com_fatal_error", "0", 0); // common.c:943
+    // RERELEASE_MODE_YES == 1 (inc/system/system.h:70); this port only ever
+    // runs the re-release game, so "1" is the C-correct default here too.
+    Cvar_Get("com_rerelease", "1", CVAR_ARCHIVE); // common.c:944
+    Cvar_Get("allow_download_textures", "1", CVAR_ARCHIVE); // common.c:952
+    Cvar_Get("allow_download_pics", "1", CVAR_ARCHIVE); // common.c:953
+    Cvar_Get("allow_download_others", "0", 0); // common.c:954
+    Cvar_Get("sys_forcegamelib", "", CVAR_NOSET); // common.c:958
+    Cvar_Get("sys_allow_unsafe_savegames", "0", CVAR_NOSET); // common.c:961
+    Cvar_Get("sys_history", "128", 0); // common.c:965 -- STRINGIFY(HISTORY_SIZE); q2repro's inc/common/common.h defines HISTORY_SIZE as 128
 
     // arm the windowing/input/audio backend before CL_Init reaches VID_Init
     if (dedicated && !dedicated.value) SDL_SetBackendEnabled(true);
 
     const s = Com_sprintf("%4.2f %s %s", VERSION, CPUSTRING, BUILDSTRING);
-    Cvar_Get("version", s, CVAR_SERVERINFO | CVAR_NOSET);
+    // q2repro src/common/common.c:945 flags "version" CVAR_ROM, not
+    // CVAR_NOSET (cvar-parity fix).
+    Cvar_Get("version", s, CVAR_SERVERINFO | CVAR_ROM);
+
+    // q2repro src/common/common.c:956 flags rcon_password CVAR_PRIVATE;
+    // this port's client (cl_main.ts) and server (sv_main.ts) each already
+    // register their own "rcon_password" cvar with that flag -- this early
+    // Cvar_Get in Qcommon_Init would otherwise leave a window where the
+    // cvar exists without CVAR_PRIVATE if nothing has registered it yet.
+    Cvar_Get("rcon_password", "", CVAR_PRIVATE);
 
     if (dedicated && dedicated.value) Cmd_AddCommand("quit", Com_Quit);
 

@@ -272,6 +272,22 @@ export const glCvars: {
   vid_scale: CvarT | null;
 
   intensity: CvarT | null;
+
+  // q2repro src/refresh/main.c's GL_Register(): these are q2repro's
+  // replacement names for several vanilla cvars this port already carries
+  // above (r_drawworld/r_drawentities/r_novis) plus one genuinely new
+  // near-clip-plane cvar (gl_znear) and two toggles gating real, existing
+  // culling logic (gl_cull_nodes/gl_cull_models). Where a vanilla cvar of
+  // the same meaning already has a live consumer, R_Register wires both in
+  // as an additional AND/OR gate rather than replacing the vanilla one --
+  // see the call sites cited next to each field below.
+  gl_znear: CvarT | null;
+  gl_drawworld: CvarT | null;
+  gl_drawentities: CvarT | null;
+  gl_drawsky: CvarT | null;
+  gl_cull_nodes: CvarT | null;
+  gl_cull_models: CvarT | null;
+  gl_novis: CvarT | null;
 } = {
   r_norefresh: null,
   r_lefthand: null,
@@ -343,6 +359,14 @@ export const glCvars: {
   vid_scale: null,
 
   intensity: null,
+
+  gl_znear: null,
+  gl_drawworld: null,
+  gl_drawentities: null,
+  gl_drawsky: null,
+  gl_cull_nodes: null,
+  gl_cull_models: null,
+  gl_novis: null,
 };
 
 export let gl_lightmap_format = 0;

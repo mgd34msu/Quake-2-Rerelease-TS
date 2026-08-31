@@ -108,6 +108,7 @@ Ported from server/nav.c and server/nav.h (GNU GPL v2 or later).
 import { type Vec3, vec3, VectorAdd, VectorSubtract, VectorCopy, VectorSet, VectorMA, DotProduct, CrossProduct, VectorScale } from "../shared/math";
 import { MASK_SOLID, MASK_WATER, CONTENTS_SLIME, CONTENTS_LAVA, CONTENTS_PLAYERCLIP, CONTENTS_MONSTERCLIP } from "../shared/q_shared";
 import { Com_Printf, Com_DPrintf } from "../qcommon/common";
+import { Cvar_Get } from "../qcommon/cvar";
 import { FS_LoadFile } from "../qcommon/files";
 import { SV_Trace, SV_PointContents } from "./sv_world";
 import { sv_tick_rate } from "./server";
@@ -1221,11 +1222,17 @@ export function Nav_Frame(): void {
   for (const node of nav_data.conditional_nodes) Nav_UpdateConditionalNode(node);
 }
 
-// nav.c:1468-1474 -- cvar registration dropped (USE_REF-gated upstream,
-// meaningless without a renderer; see header "SCOPE CUT"). Kept as an
-// exported no-op purely so SV_Init's call site documents the mirrored
-// lifecycle position rather than silently never calling it.
-export function Nav_Init(): void {}
+// nav.c:1468-1474. The debug-draw consumer these cvars gate (`Nav_Debug()`,
+// nav.c:1261-1315) is USE_REF-gated and not ported here at all (see this
+// file's header "SCOPE CUT" -- there is no renderer on this headless port,
+// and no Nav_Debug/Nav_RenderLink* equivalent exists anywhere in this file).
+// Registered, consumer unported: this only makes `nav_debug`/
+// `nav_debug_range` settable at the console instead of failing as "unknown
+// command"; neither cvar is read anywhere in this module.
+export function Nav_Init(): void {
+  Cvar_Get("nav_debug", "0", 0); // nav.c:1471
+  Cvar_Get("nav_debug_range", "512", 0); // nav.c:1472
+}
 
 // nav.c:1476-1479. Note: q2repro itself never calls this from anywhere in
 // its own runtime (confirmed by grepping the full q2repro tree for

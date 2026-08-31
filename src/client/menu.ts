@@ -3053,6 +3053,23 @@ function M_Menu_Quit_f(): void {
 /* Menu Subsystem */
 
 export function M_Init(): void {
+  // --- cvar-parity audit: src/client/ui/*.c cvars ---
+  // q2repro's client/ui/ tree is a substantially newer native menu system
+  // (server-browser sorting/coloring, demo-browser sorting, its own
+  // scale/debug knobs) layered over the same vanilla ui_* naming this file
+  // (the vanilla QMenu system) never used. None of these have a consumer
+  // here -- confirmed by grepping this file/menu_content.ts/qmenu*.ts for
+  // sort/color/pingrate logic and finding none. Registered, consumer
+  // unported.
+  Cvar_Get("ui_sortdemos", "1", 0); // client/ui/demos.c:647
+  Cvar_Get("ui_listalldemos", "0", 0); // client/ui/demos.c:650
+  Cvar_Get("ui_sortservers", "0", 0); // client/ui/servers.c:1081
+  Cvar_Get("ui_colorservers", "0", 0); // client/ui/servers.c:1083
+  Cvar_Get("ui_pingrate", "0", 0); // client/ui/servers.c:1085
+  Cvar_Get("ui_scale", "0", 0); // client/ui/ui.c:583
+  Cvar_Get("ui_debug", "0", 0); // client/ui/ui.c:610
+  Cvar_Get("ui_open", "0", 0); // client/ui/ui.c:611
+
   Cmd_AddCommand("menu_main", M_Menu_Main_f);
   Cmd_AddCommand("menu_game", M_Menu_Game_f);
   Cmd_AddCommand("menu_content", M_Menu_Content_f);

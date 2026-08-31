@@ -47,6 +47,18 @@ import { FS_LoadFile } from "../qcommon/files";
 import { cls, ConnstateT } from "./client";
 import { CL_ParseServerMessage } from "./cl_parse";
 
+// q2repro src/client/demo.c:1577-1581 (CL_InitDemos, called from
+// CL_InitLocal) registers this module's cvars. Registered instead in
+// cl_main.ts's CL_InitLocal (see that file) rather than here, to avoid
+// introducing a cl_main.ts -> cl_demo.ts -> cl_parse.ts -> cl_main.ts
+// import cycle (cl_parse.ts already imports from cl_main.ts). This port
+// never ported CL_InitDemos' actual behavior -- see the cvar-parity audit
+// report: this module's demo playback has no recording-side snapshot
+// cadence, no receive message-length cap, no networked-demo-wait/
+// suspend-toggle keys, and no kex-vs-legacy protocol auto-detection knob
+// (protocol selection here is driven by the recorded stream's own header,
+// not a cvar).
+
 const DEMO_EOF_SENTINEL = 0xffffffff;
 
 export interface DemoReaderT {

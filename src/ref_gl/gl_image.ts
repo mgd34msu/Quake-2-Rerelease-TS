@@ -87,7 +87,7 @@ deterministically `return false`; reported deviation since a literal
 "undefined value" isn't expressible under TS's strict typing.
 */
 
-import { ERR_DROP, ERR_FATAL, PRINT_ALL, PRINT_DEVELOPER, MAX_QPATH, LittleShort, LittleLong, Q_stricmp, Com_sprintf } from "../shared/q_shared";
+import { ERR_DROP, ERR_FATAL, PRINT_ALL, PRINT_DEVELOPER, MAX_QPATH, LittleShort, LittleLong, Q_stricmp, Com_sprintf, CVAR_FILES } from "../shared/q_shared";
 import { decodePNG } from "../qcommon/png";
 import type { QGL } from "./qgl";
 import {
@@ -1310,8 +1310,15 @@ GL_InitImages
 export function GL_InitImages(): void {
   SetRegistrationSequence(1);
 
+  // q2repro src/refresh/texture.c:1266: `gl_intensity = Cvar_Get("intensity",
+  // "1", 0);` -- default fixed from this port's prior "2" to q2repro's "1"
+  // (the immediately-following `<= 1` clamp below is vanilla's own, kept
+  // as-is: it forces the runtime value up to "1" whenever a lower default
+  // or explicit console value would leave it there, so the default fix
+  // still matters for what gets *displayed*/saved even though the clamp
+  // already floors the effective value at 1).
   // init intensity conversions
-  glCvars.intensity = ri.Cvar_Get("intensity", "2", 0);
+  glCvars.intensity = ri.Cvar_Get("intensity", "1", 0);
 
   if (glCvars.intensity && glCvars.intensity.value <= 1) {
     ri.Cvar_Set("intensity", "1");
@@ -1354,6 +1361,63 @@ export function GL_InitImages(): void {
     if (j > 255) j = 255;
     intensitytable[i] = j | 0;
   }
+
+  // ==========================================================================
+  // Engine-cvar parity audit, ref_gl cluster: q2repro's src/refresh/texture.c
+  // GL_InitImages and src/refresh/images.c IMG_Init both register a texture-
+  // pipeline feature set (per-image-type bilinear filtering toggles, runtime
+  // texture-format/override search, texture-bit-depth override, anisotropic
+  // filtering, scrap-atlas disable, skin downsampling, gamma-scaled pics,
+  // upscaled PCX loading, saturation/invert post-processing, particle-shape
+  // selection, cubemap loading, glowmaps, and screenshot format/async/
+  // quality/compression/template) that this port's own GL_InitImages (ported
+  // from vanilla's gl_rmisc.c-equivalent intensity/gamma-table init above,
+  // not from q2repro's) never implemented. GL_FindImage above only ever
+  // loads .pcx/.wal/.tga/.png by hardcoded extension dispatch -- no format-
+  // priority search, no bilerp/anisotropy/saturation/invert pass, no
+  // scrap-disable, no cubemap loading exists anywhere in this file (grepped).
+  // GL_ScreenShot_f (gl_rmisc.ts) only ever writes an uncompressed vanilla
+  // .tga buffer -- it does not branch on a format cvar, and there is no PNG
+  // or JPEG *encoder* anywhere in this repo (src/qcommon/png.ts is a
+  // decoder only, `decodePNG`, used for loading .png texture/pic assets, not
+  // for writing screenshots) -- correcting the assumption that this port
+  // already has a working PNG screenshot encoder to wire the format cvar
+  // into: it doesn't, so gl_screenshot_format/async/quality/compression/
+  // template are all registered-only below, same as the texture-pipeline
+  // cvars above them.
+  //
+  // src/refresh/images.c:2258's `R_TEXTURE_FORMATS` macro expands (per
+  // q2repro's build/config.h:38, generated from meson.build:710's
+  // `texture_formats` option) to "png jpg tga" in this reference build.
+  ri.Cvar_Get("r_override_textures", "1", CVAR_FILES); // images.c:2257
+  ri.Cvar_Get("r_texture_formats", "png jpg tga", 0); // images.c:2258
+  ri.Cvar_Get("r_texture_overrides", "-1", CVAR_FILES); // images.c:2261
+  ri.Cvar_Get("gl_screenshot_format", "png", 0); // images.c:2264-2267 (USE_PNG branch; see note above -- registered only, GL_ScreenShot_f doesn't branch on this)
+  ri.Cvar_Get("gl_screenshot_async", "1", 0); // images.c:2269
+  ri.Cvar_Get("gl_screenshot_quality", "90", 0); // images.c:2272 (JPEG-only; no JPEG encoder exists in this repo)
+  ri.Cvar_Get("gl_screenshot_compression", "6", 0); // images.c:2275 (PNG-only; no PNG encoder exists in this repo)
+  ri.Cvar_Get("gl_screenshot_template", "quakeXXX", 0); // images.c:2277
+  ri.Cvar_Get("r_glowmaps", "1", CVAR_FILES); // images.c:2280
+
+  ri.Cvar_Get("gl_bilerp_chars", "0", 0); // texture.c:1247
+  ri.Cvar_Get("gl_bilerp_pics", "0", 0); // texture.c:1249
+  ri.Cvar_Get("gl_bilerp_skies", "1", 0); // texture.c:1251
+  ri.Cvar_Get("gl_texturebits", "0", CVAR_FILES); // texture.c:1256
+  // texture.c:1257's C default is dynamic: `va("%g", gl_config.max_anisotropy)`
+  // (the GL implementation's queried max anisotropy). This port's GlconfigT
+  // (gl_local.ts) tracks no such limit -- nothing here queries
+  // GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT -- so "1" (anisotropy off/1x, the safe
+  // no-op value) is used instead of fabricating a queried limit.
+  ri.Cvar_Get("gl_anisotropy", "1", 0); // texture.c:1257
+  ri.Cvar_Get("gl_noscrap", "0", CVAR_FILES); // texture.c:1259
+  ri.Cvar_Get("gl_downsample_skins", "1", CVAR_FILES); // texture.c:1262
+  ri.Cvar_Get("gl_gamma_scale_pics", "0", CVAR_FILES); // texture.c:1263
+  ri.Cvar_Get("gl_upscale_pcx", "0", CVAR_FILES); // texture.c:1264
+  ri.Cvar_Get("gl_saturation", "1", CVAR_FILES); // texture.c:1265
+  ri.Cvar_Get("gl_invert", "0", CVAR_FILES); // texture.c:1267
+  ri.Cvar_Get("gl_partshape", "0", 0); // texture.c:1269
+  ri.Cvar_Get("gl_cubemaps", "1", CVAR_FILES); // texture.c:1271
+  // ==========================================================================
 }
 
 /*

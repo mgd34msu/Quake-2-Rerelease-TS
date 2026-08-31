@@ -20,7 +20,7 @@ import { Cvar_Get } from "../qcommon/cvar";
 import { FS_Gamedir } from "../qcommon/files";
 import { S_RawSamples } from "../client/snd_dma";
 import { dma, paintedtime, s_rawend } from "../client/snd_loc";
-import type { CvarT } from "../shared/q_shared";
+import { CVAR_ARCHIVE, type CvarT } from "../shared/q_shared";
 
 const vorbisSymbols = {
   ov_fopen: { args: ["cstring", "ptr"], returns: "i32" },
@@ -91,11 +91,37 @@ function closeTrack(): void {
   currentTrack = 0;
 }
 
+// cvar-parity audit fix: previously inlined into CDAudio_Play only, after
+// its `if (!l) return` library-availability check -- so on a host without
+// libvorbisfile even "cd_nocd" itself would report "unknown command"
+// instead of just being inert, and CDAudio_Init (below) sets cd_nocd
+// directly, which meant CDAudio_Play's own `if (!cd_nocd)` guard never even
+// ran when Init had already been called (the normal boot order). Pulled out
+// into its own function, called from both entry points, unconditional.
+function registerCdCvars(): void {
+  if (cd_nocd) return;
+  cd_nocd = Cvar_Get("cd_nocd", "0", 0);
+  // q2repro src/client/sound/ogg.c:810-817 replaced this CD-audio-over-OGG
+  // model (cd_nocd, this file's own header comment) with a dedicated music
+  // jukebox (ogg_enable/ogg_volume/ogg_shuffle/ogg_menu_track/
+  // ogg_remap_tracks) with its own playlist/shuffle/remap logic layered on
+  // the sound engine. This port never adopted that jukebox -- registered
+  // here, consumer unported, so setting them no longer reports "unknown
+  // command" but they don't affect this file's simpler CD-audio replacement
+  // (which cd_nocd alone still gates, unchanged).
+  Cvar_Get("ogg_enable", "1", CVAR_ARCHIVE);
+  Cvar_Get("ogg_volume", "1", CVAR_ARCHIVE);
+  Cvar_Get("ogg_shuffle", "0", CVAR_ARCHIVE);
+  Cvar_Get("ogg_menu_track", "77", CVAR_ARCHIVE);
+  Cvar_Get("ogg_remap_tracks", "1", CVAR_ARCHIVE);
+}
+
 export function CDAudio_Play(track: number, loop: boolean): void {
+  registerCdCvars();
+  if (cd_nocd && cd_nocd.value) return;
+
   const l = lib();
   if (!l) return;
-  if (!cd_nocd) cd_nocd = Cvar_Get("cd_nocd", "0", 0);
-  if (cd_nocd && cd_nocd.value) return;
 
   if (currentTrack === track && vf) {
     looping = loop;
@@ -189,7 +215,7 @@ export function CDAudio_Update(): void {
 }
 
 export function CDAudio_Init(): number {
-  cd_nocd = Cvar_Get("cd_nocd", "0", 0);
+  registerCdCvars();
   return lib() ? 0 : -1; // C: 0 = ok; init failure leaves the null behaviour
 }
 

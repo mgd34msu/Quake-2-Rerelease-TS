@@ -76,7 +76,7 @@ import {
 import { cl, cls, ConnstateT, KeydestT } from "./client";
 import { con } from "./console";
 import { Cbuf_AddText, Cmd_Argc, Cmd_Argv, Cmd_AddCommand, Cmd_CompleteCommand } from "../qcommon/cmd";
-import { Cvar_CompleteVariable } from "../qcommon/cvar";
+import { Cvar_CompleteVariable, Cvar_Get } from "../qcommon/cvar";
 import { Com_Printf, Com_Error } from "../qcommon/common";
 import { Com_sprintf, Q_stricmp, STAT_LAYOUTS } from "../shared/q_shared";
 import { ERR_FATAL } from "../qcommon/qcommon";
@@ -606,6 +606,15 @@ Key_Init
 ===================
 */
 export function Key_Init(): void {
+  // q2repro src/common/prompt.c:588-589 (Prompt_Init): com_completion_mode
+  // selects between q2repro's exact/fuzzy/substring Prompt completion
+  // modes, com_completion_treshold tunes the fuzzy-match score cutoff.
+  // Registered, consumer unported: CompleteCommand() below is this port's
+  // simple exact-prefix Cmd_CompleteCommand/Cvar_CompleteVariable lookup,
+  // not q2repro's Prompt_AddMatch fuzzy-scoring engine.
+  Cvar_Get("com_completion_mode", "1", 0);
+  Cvar_Get("com_completion_treshold", "50", 0);
+
   for (let i = 0; i < 32; i++) {
     key_lines[i] = "]";
   }

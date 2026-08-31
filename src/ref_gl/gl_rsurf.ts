@@ -818,7 +818,11 @@ R_RecursiveWorldNode
 export function R_RecursiveWorldNode(node: MnodeOrLeaf): void {
   if (node.contents === CONTENTS_SOLID) return; // solid
   if (node.visframe !== r_visframecount) return;
-  if (R_CullBox(vec3(node.minmaxs[0], node.minmaxs[1], node.minmaxs[2]), vec3(node.minmaxs[3], node.minmaxs[4], node.minmaxs[5]))) return;
+  // q2repro src/refresh/world.c:593: `gl_cull_nodes->integer ? NODE_CLIPPED :
+  // NODE_UNCLIPPED` -- q2repro's BSP traversal skips the per-node frustum
+  // clip test entirely when the cvar is off; this renderer's closest
+  // equivalent is this per-node R_CullBox check, gated the same way.
+  if ((!glCvars.gl_cull_nodes || glCvars.gl_cull_nodes.value) && R_CullBox(vec3(node.minmaxs[0], node.minmaxs[1], node.minmaxs[2]), vec3(node.minmaxs[3], node.minmaxs[4], node.minmaxs[5]))) return;
 
   // if a leaf node, draw stuff
   if (isMleaf(node)) {
@@ -915,6 +919,9 @@ R_DrawWorld
 */
 export function R_DrawWorld(): void {
   if (!glCvars.r_drawworld || !glCvars.r_drawworld.value) return;
+  // q2repro src/refresh/main.c:1134: `gl_drawworld` (CVAR_CHEAT) is q2repro's
+  // rename of this same toggle; gate on both so either hides the world.
+  if (glCvars.gl_drawworld && !glCvars.gl_drawworld.value) return;
   if (r_newrefdef.rdflags & RDF_NOWORLDMODEL) return;
   if (!r_worldmodel) return;
 
@@ -972,7 +979,12 @@ cluster
 ===============
 */
 export function R_MarkLeaves(): void {
-  if (r_oldviewcluster === r_viewcluster && r_oldviewcluster2 === r_viewcluster2 && !(glCvars.r_novis && glCvars.r_novis.value) && r_viewcluster !== -1) {
+  // q2repro src/refresh/main.c:1157: `gl_novis` is q2repro's rename of
+  // vanilla's r_novis (still carried above); either cvar forces "mark
+  // everything" below.
+  const novis = (glCvars.r_novis && glCvars.r_novis.value) || (glCvars.gl_novis && glCvars.gl_novis.value);
+
+  if (r_oldviewcluster === r_viewcluster && r_oldviewcluster2 === r_viewcluster2 && !novis && r_viewcluster !== -1) {
     return;
   }
 
@@ -984,7 +996,7 @@ export function R_MarkLeaves(): void {
 
   if (!r_worldmodel) return;
 
-  if ((glCvars.r_novis && glCvars.r_novis.value) || r_viewcluster === -1 || !r_worldmodel.vis) {
+  if (novis || r_viewcluster === -1 || !r_worldmodel.vis) {
     // mark everything
     for (let i = 0; i < r_worldmodel.numleafs; i++) r_worldmodel.leafs[i].visframe = r_visframecount;
     for (let i = 0; i < r_worldmodel.numnodes; i++) r_worldmodel.nodes[i].visframe = r_visframecount;

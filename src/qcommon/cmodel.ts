@@ -540,6 +540,14 @@ let last_checksum = 0;
 
 export function CM_LoadMap(name: string, clientload: boolean): { model: CmodelT; checksum: number } {
   map_noareas = Cvar_Get("map_noareas", "0", 0);
+  // q2repro src/common/cmodel.c:1170 (CM_Init). Registered, consumer
+  // unported: this port's map loading (below) always resolves paths through
+  // FS_LoadFile's normal search path, with no override-directory redirect.
+  Cvar_Get("map_override_path", "", 0);
+  // q2repro src/common/bsp.c:1226 (BSP_Init). Registered, consumer
+  // unported: this port has no separate bsp.ts visibility-data patching --
+  // PVS data is used as-loaded, never regenerated/patched.
+  Cvar_Get("map_visibility_patch", "1", 0);
 
   if (map_name === name && (clientload || !Cvar_VariableValue("flushmap"))) {
     const checksum = last_checksum;

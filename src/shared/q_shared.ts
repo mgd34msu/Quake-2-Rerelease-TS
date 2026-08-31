@@ -891,11 +891,40 @@ export const CVAR_SERVERINFO = 4; // added to serverinfo when changed
 export const CVAR_NOSET = 8; // don't allow change from console at all, but can be set from the command line
 export const CVAR_LATCH = 16; // save changes until server restart
 
+// q2repro's extended cvar flags (inc/common/cvar.h BIT(5)..BIT(15)). Never
+// ported before this cvar-parity pass; several C-side registrations require
+// them (CVAR_CHEAT, CVAR_PRIVATE, CVAR_ROM in particular). Enforcement of
+// each flag's *behavior* (e.g. CVAR_CHEAT blocking changes while connected,
+// CVAR_ROM blocking all changes) is q2repro's more advanced Cvar_Set/Cvar_Get
+// than what src/qcommon/cvar.ts currently ports (that file is still the
+// vanilla q2 3.21 cvar.c) -- see test/cvar_parity.test.ts and the audit
+// report for which flags are enforced today vs. carried as inert metadata.
+export const CVAR_CHEAT = 32; // BIT(5) -- can't be changed when connected
+export const CVAR_PRIVATE = 64; // BIT(6) -- never macro expanded or saved to config
+export const CVAR_ROM = 128; // BIT(7) -- can't be changed even from cmdline
+export const CVAR_MODIFIED = 256; // BIT(8) -- modified by user (set internally by Cvar_Set, never passed to Cvar_Get)
+export const CVAR_CUSTOM = 512; // BIT(9) -- created by user
+export const CVAR_WEAK = 1024; // BIT(10) -- doesn't have value
+export const CVAR_GAME = 2048; // BIT(11) -- created by game library
+export const CVAR_NOARCHIVE = 4096; // BIT(12) -- never saved to config
+export const CVAR_FILES = 8192; // BIT(13) -- r_reload when changed
+export const CVAR_REFRESH = 16384; // BIT(14) -- vid_restart when changed
+export const CVAR_SOUND = 32768; // BIT(15) -- snd_restart when changed
+
 // nothing outside the Cvar_*() functions should modify these fields!
 // Cvar_Get/Cvar_Set/etc. themselves belong to src/qcommon/cvar.ts (a future unit).
 export class CvarT {
   name = "";
   string = "";
+  // q2repro inc/common/cvar.h/src/common/cvar.c's `default_string` -- the
+  // value the cvar was first Cvar_Get'd with, kept separately from `string`
+  // (the live, settable value) for the whole cvar's lifetime. q2repro uses
+  // it for \cvar_restart, `cvarlist`'s "modified from default" marker, and
+  // config-writing's "skip unmodified cvars" pass; this port had never
+  // ported it (still vanilla q2 3.21 cvar.c shape) until the cvar-parity
+  // audit added it here, set once in Cvar_Get (src/qcommon/cvar.ts), never
+  // written again by Cvar_Set/Cvar_ForceSet/Cvar_FullSet.
+  default_string = "";
   latched_string: string | null = null; // for CVAR_LATCH vars
   flags = 0;
   modified = false; // set each time the cvar is changed

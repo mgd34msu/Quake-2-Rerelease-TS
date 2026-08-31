@@ -61,6 +61,8 @@ import { cl, cls, ConnstateT, cl_entities, cl_parse_entities, MAX_PARSE_ENTITIES
 import { net_message } from "../qcommon/net_chan";
 import { UPDATE_MASK, ERR_DROP, U_REMOVE } from "../qcommon/qcommon";
 import { Com_Error, Com_Printf, Com_ServerState } from "../qcommon/common";
+import { Cvar_Get } from "../qcommon/cvar";
+import { Cbuf_AddText } from "../qcommon/cmd";
 import { sv, ServerStateT } from "../server/server";
 import {
   CL_RocketTrail,
@@ -485,6 +487,17 @@ export function CL_ParseFrame(): void {
       VectorCopy(cl.frame.playerstate.viewangles, cl.predicted_angles);
       if (cls.disable_servercount !== cl.servercount && cl.refresh_prepped) {
         SCR_EndLoadingPlaque(); // get rid of loading plaque
+      }
+      // q2repro src/client/entities.c:337-339 -- EXEC_TRIGGER(cl_beginmapcmd)
+      // fires once the first valid frame after connecting arrives (this
+      // port's closest analog to that same "entering the level" moment);
+      // "#cl_enterlevel"-style trigger aliases are not ported, only the cvar.
+      if (!cls.demoplayback) {
+        const beginmapcmd = Cvar_Get("cl_beginmapcmd", "", 0);
+        if (beginmapcmd && beginmapcmd.string) {
+          Cbuf_AddText(beginmapcmd.string);
+          Cbuf_AddText("\n");
+        }
       }
     }
     cl.sound_prepped = true; // can start mixing ambient sounds

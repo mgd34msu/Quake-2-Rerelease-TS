@@ -55,7 +55,7 @@ downscale-and-present feature anywhere in its refresh or GL backend), so this
 is this port's own design -- see this unit's report.
 */
 
-import { PRINT_ALL } from "../shared/q_shared";
+import { PRINT_ALL, CVAR_REFRESH } from "../shared/q_shared";
 import type { GLimp } from "../ref_gl/gl_rmain";
 import { ri, RserrT } from "../ref_gl/gl_local";
 import { qgl } from "../ref_gl/gl_image";
@@ -183,7 +183,30 @@ export function GLimp_SetMode(width: number, height: number, mode: number, fulls
 
   GLScale_Shutdown(); // drop the previous mode's render-scale target, if any
 
-  if (!SDLGL_CreateWindow(info.width, info.height, fullscreen)) {
+  // q2repro src/refresh/main.c:1487-1510 (R_GetGLConfig, called from this
+  // exact per-platform video-init call site in every one of q2repro's own
+  // backends -- src/unix/video/sdl.c:62, wayland.c:784, x11.c:299,
+  // src/windows/{egl,wgl}.c). Only gl_depthbits has a matching hardcoded
+  // constant in this port's context creation (sdl.ts's SDL_GL_DEPTH_SIZE
+  // attribute, previously a fixed "24") to wire in below. The other five
+  // have no equivalent SDL_GL_SetAttribute call anywhere in this port at
+  // all (no SDL_GL_{RED,GREEN,BLUE,STENCIL}_SIZE, no
+  // SDL_GL_MULTISAMPLE{BUFFERS,SAMPLES}, no SDL_GL_CONTEXT_FLAGS, no
+  // SDL_GL_CONTEXT_PROFILE_MASK/{MAJOR,MINOR}_VERSION -- confirmed by
+  // grepping sdl.ts) -- adding those would mean implementing new
+  // context-configurability features, not gating existing ones, so they are
+  // registered only (console command stops failing) rather than wired in.
+  // gl_profile's C default macro DEFGLPROFILE is build-configured
+  // (meson.build:727-731: "gl3.2" for a GL3 core build, "es1" for GLES, ""
+  // otherwise); q2repro's own checked-in build/config.h:20 has it as "".
+  ri.Cvar_Get("gl_colorbits", "0", CVAR_REFRESH);
+  const depthBitsCvar = ri.Cvar_Get("gl_depthbits", "0", CVAR_REFRESH);
+  ri.Cvar_Get("gl_stencilbits", "8", CVAR_REFRESH);
+  ri.Cvar_Get("gl_multisamples", "0", CVAR_REFRESH);
+  ri.Cvar_Get("gl_debug", "0", CVAR_REFRESH);
+  ri.Cvar_Get("gl_profile", "", CVAR_REFRESH);
+
+  if (!SDLGL_CreateWindow(info.width, info.height, fullscreen, depthBitsCvar ? depthBitsCvar.value : 0)) {
     return { rserr: RserrT.rserr_unknown, width: render.width, height: render.height };
   }
 

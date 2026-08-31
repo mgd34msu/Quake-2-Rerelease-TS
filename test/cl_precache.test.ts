@@ -466,6 +466,12 @@ describe("cl_main.ts -- CL_RequestNextDownload precache walk", () => {
   });
 
   test("player-skin walk: q2repro sexed-sound download requested after skin_i completes", () => {
+    // Pin every allow_download* this walk consults (rule 13): the cvar
+    // parity audit moved several defaults to q2repro's values, and this
+    // test previously leaned on registration defaults instead of setting
+    // its own.
+    Cvar_ForceSet("allow_download", "1");
+    Cvar_ForceSet("allow_download_sounds", "1");
     Cvar_ForceSet("allow_download_players", "1");
     cl.configstrings[cls.csr.playerskins + 0] = "TestBot\\grunt/distress";
     cl.configstrings[cls.csr.sounds + 7] = "*pain100_1.wav";
@@ -477,6 +483,15 @@ describe("cl_main.ts -- CL_RequestNextDownload precache walk", () => {
     provideFile("players/grunt/distress_i.pcx");
 
     begin();
+    // The walk now interposes q2repro's dogtag download between skin_i and
+    // the sexed sounds (download.c:575-576; the skinstring has no dogtag
+    // field, so it resolves to "default") -- added with the skin_i/dogtag
+    // resume latches that fixed the infinite re-request loop self-play
+    // cell f exposed. Serve it, then the sexed sound follows.
+    expect(cls.downloadname).toBe("tags/default.pcx");
+    provideFile("tags/default.pcx");
+
+    CL_RequestNextDownload();
     expect(cls.downloadname).toBe("players/grunt/pain100_1.wav");
   });
 

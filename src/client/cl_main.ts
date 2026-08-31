@@ -97,6 +97,8 @@ import {
   CVAR_ARCHIVE,
   CVAR_NOSET,
   CVAR_USERINFO,
+  CVAR_CHEAT,
+  CVAR_PRIVATE,
   MAX_CLIENTS,
   MAX_EDICTS,
   CS_NAME,
@@ -179,6 +181,9 @@ let rcon_address: CvarT | null = null;
 
 let cl_timeout: CvarT | null = null;
 let cl_maxfps: CvarT | null = null;
+// cvar-parity audit additions -- see CL_InitLocal, CL_Disconnect, CL_Changing_f
+let cl_disconnectcmd: CvarT | null = null;
+let cl_changemapcmd: CvarT | null = null;
 
 //======================================================================
 
@@ -484,7 +489,28 @@ export function CL_SendConnectPacket(): void {
     tail = ` ${packetLength} 1`;
   }
 
-  Netchan_OutOfBandPrint(NetsrcT.NS_CLIENT, adr, `connect ${protocol} ${port} ${cls.challenge} "${Cvar_Userinfo()}"${tail}\n`);
+  // q2proto masks the advertised qport to 8 bits for every protocol whose
+  // netchan writes it as a single byte -- q2proto_proto_r1q2.c:49,
+  // q2proto_proto_q2pro.c:71 and q2proto_proto_q2repro.c:47 all run
+  // `connect->qport &= 0xff;` inside q2proto_complete_connect, and q2repro's
+  // client then keeps THAT value as cls.quakePort (src/client/main.c:478).
+  // Without the mask this client told the server a 16-bit qport while its
+  // netchan transmitted only the low byte, so the server's per-client qport
+  // comparison rejected every post-connect packet and the session died at
+  // "client_connect" -- caught by the self-play interop cells, which stalled
+  // there for every random qport >= 256 and completed the full handshake the
+  // moment `+set qport 100` forced an 8-bit-safe value.
+  const advertisedPort = protocol >= PROTOCOL_VERSION_R1Q2 ? port & 0xff : port;
+  cls.quakePort = advertisedPort;
+  // cls.serverProtocol was previously never assigned anywhere in this port
+  // (see client.ts's doc comment on the field). q2repro sets it during the
+  // challenge/connect exchange and then branches real wire behavior on it --
+  // CL_ParsePlayerSkin's dogtag field is gated on `cls.serverProtocol ==
+  // PROTOCOL_VERSION_RERELEASE` (src/client/download.c:549) -- so record what
+  // this connect string actually requested.
+  cls.serverProtocol = protocol;
+
+  Netchan_OutOfBandPrint(NetsrcT.NS_CLIENT, adr, `connect ${protocol} ${advertisedPort} ${cls.challenge} "${Cvar_Userinfo()}"${tail}\n`);
 }
 
 /*
@@ -630,6 +656,14 @@ This is also called on Com_Error, so it shouldn't cause any errors
 export function CL_Disconnect(): void {
   if (cls.state === ConnstateT.ca_disconnected) return;
 
+  // q2repro src/client/main.c:731 -- EXEC_TRIGGER(cl_disconnectcmd), gated
+  // on cls.state > ca_disconnected (guaranteed by the guard above) and
+  // !cls.demo.playback.
+  if (!cls.demoplayback && cl_disconnectcmd && cl_disconnectcmd.string) {
+    Cbuf_AddText(cl_disconnectcmd.string);
+    Cbuf_AddText("\n");
+  }
+
   if (clCvars.cl_timedemo && clCvars.cl_timedemo.value) {
     const time = Sys_Milliseconds() - cl.timedemo_start;
     if (time > 0) {
@@ -745,6 +779,13 @@ export function CL_Changing_f(): void {
   SCR_BeginLoadingPlaque();
   cls.state = ConnstateT.ca_connected; // not active anymore, but not disconnected
   Com_Printf("\nChanging map...\n");
+
+  // q2repro src/client/main.c:1017-1019 -- EXEC_TRIGGER(cl_changemapcmd);
+  // "#cl_enterlevel"-style trigger aliases are not ported, only the cvar.
+  if (!cls.demoplayback && cl_changemapcmd && cl_changemapcmd.string) {
+    Cbuf_AddText(cl_changemapcmd.string);
+    Cbuf_AddText("\n");
+  }
 }
 
 /*
@@ -907,7 +948,11 @@ export function CL_ConnectionlessPacket(): void {
     // negotiated.
     const connectProtocol = clCvars.cl_protocol ? clCvars.cl_protocol.value : PROTOCOL_VERSION;
     const chanType = connectProtocol === PROTOCOL_VERSION_RERELEASE || connectProtocol === PROTOCOL_VERSION_Q2PRO ? NETCHAN_NEW : NETCHAN_OLD;
-    Netchan_Setup(NetsrcT.NS_CLIENT, cls.netchan, net_from, cls.quakePort, chanType);
+    // connectProtocol is load-bearing beyond chanType: under NETCHAN_OLD the
+    // qport field is a 16-bit short below R1Q2 and a single byte from R1Q2 up
+    // (net_chan.ts's NETCHAN_NEW doc comment), so protocol 35 needs it to pick
+    // the right width.
+    Netchan_Setup(NetsrcT.NS_CLIENT, cls.netchan, net_from, cls.quakePort, chanType, connectProtocol);
     MSG_WriteChar(cls.netchan.message, ClcOpsT.clc_stringcmd);
     MSG_WriteString(cls.netchan.message, "new");
     cls.state = ConnstateT.ca_connected;
@@ -1093,6 +1138,13 @@ let precache_model_skin = 0;
 let precache_sexed_sounds: number[] = [];
 let precache_sexed_check = 0;
 
+// Per-player-slot latches for the two CS_PLAYERSKINS sub-steps that share the
+// `base + 4` resume index with the sexed-sound loop (skin_i and the
+// rerelease dogtag). Without them a file the server does not have is
+// re-requested forever -- see the skin_i block in CL_RequestNextDownload.
+let precache_player_skin_i_done = false;
+let precache_player_dogtag_done = false;
+
 // TEXTURE_CNT+1-phase resume index (vanilla cl_main.c's precache_tex).
 let precache_tex = 0;
 
@@ -1112,28 +1164,56 @@ function textureCnt(): number {
 
 const env_suf = ["rt", "bk", "lf", "ft", "up", "dn"];
 
-// Isolates model/skin from a CS_PLAYERSKINS configstring ("name\model/skin"),
-// vanilla cl_main.c's own inline parse inside CL_RequestNextDownload's
-// player-skin loop (strchr('\\') for name, then strchr('/') or strchr('\\')
-// for model/skin). This is a second, independent copy of the same algorithm
-// cl_parse.ts's CL_LoadClientinfo already implements -- vanilla itself keeps
-// two separate copies (cl_main.c and cl_parse.c never shared this logic),
-// so this follows the original's own duplication rather than introducing a
-// new cross-file dependency for it.
-function parsePlayerSkinConfigstring(s: string): { model: string; skin: string } {
+// Isolates model/skin/dogtag from a CS_PLAYERSKINS configstring, ported from
+// q2repro's CL_ParsePlayerSkin (src/client/precache.c:70-135), which its own
+// check_player (src/client/download.c:544-551) calls with `parse_dogtag =
+// cls.serverProtocol == PROTOCOL_VERSION_RERELEASE`.
+//
+// The classic configstring is "name\model/skin"; the rerelease game appends a
+// THIRD backslash-separated field, the dogtag -- kexgame/p_client.ts:2783
+// writes `${netname}\\${skin}\\${dogtag}` verbatim. Parsing that with the
+// two-field rule leaves the dogtag glued to the skin, so a default kex
+// loadout ("unnamed\male/grunt\default") asked the server for
+// `players/male/grunt\default_i.pcx` -- a path with a literal backslash in
+// it that can never exist. Caught by the self-play matrix cells (cell f):
+// the client wedged in precache, re-requesting that one file forever.
+//
+// The C's `if (!t && !parse_dogtag) t = strchr(model, '\\')` fallback reads
+// the OUTPUT buffer `model` rather than `model_str`, which at that point
+// holds whatever the caller's stack had. This port searches the string that
+// was actually being parsed (RULE-17: an uninitialized read cannot be
+// reproduced faithfully here, so match the evidently intended behavior --
+// which is also what the surrounding comment in precache.c describes).
+function parsePlayerSkinConfigstring(s: string, parseDogtag: boolean): { model: string; skin: string; dogtag: string } {
   let rest = s;
   const bs = rest.indexOf("\\");
   if (bs !== -1) rest = rest.slice(bs + 1);
 
   let model = rest;
-  let skin = "";
+  let skin: string | null = null;
   let slash = model.indexOf("/");
-  if (slash === -1) slash = model.indexOf("\\");
+  if (slash === -1 && !parseDogtag) slash = model.indexOf("\\");
   if (slash !== -1) {
     skin = model.slice(slash + 1);
     model = model.slice(0, slash);
   }
-  return { model, skin };
+
+  // isolate the dogtag name (precache.c:111-119)
+  let dogtag = "";
+  if (parseDogtag) {
+    const search = skin !== null ? skin : model;
+    const t = search.indexOf("\\");
+    if (t !== -1) {
+      dogtag = search.slice(t + 1);
+      if (skin !== null) skin = search.slice(0, t);
+      else model = search.slice(0, t);
+    }
+  }
+
+  // fix empty model to male (precache.c:126-129)
+  if (!model.length) model = "male";
+  if (!dogtag.length) dogtag = "default";
+  return { model, skin: skin ?? "", dogtag };
 }
 
 export function CL_RequestNextDownload(): void {
@@ -1236,10 +1316,15 @@ export function CL_RequestNextDownload(): void {
         const csEntry = cl.configstrings[cls.csr.playerskins + i];
         if (!csEntry[0]) {
           precache_check = cls.csr.playerskins + (i + 1) * PLAYER_MULT;
+          precache_player_skin_i_done = false;
+          precache_player_dogtag_done = false;
+          precache_sexed_check = 0;
           continue;
         }
 
-        const { model, skin } = parsePlayerSkinConfigstring(csEntry);
+        // parse_dogtag mirrors q2repro download.c:549 -- the rerelease
+        // protocol is the only one whose CS_PLAYERSKINS carries a dogtag.
+        const { model, skin, dogtag } = parsePlayerSkinConfigstring(csEntry, cls.serverProtocol === PROTOCOL_VERSION_RERELEASE);
         const base = cls.csr.playerskins + i * PLAYER_MULT;
 
         if (n === 0) {
@@ -1280,10 +1365,33 @@ export function CL_RequestNextDownload(): void {
         // pass through this phase is idempotent (configstrings don't
         // change mid-precache) and keeps this block self-contained rather
         // than needing its own separate "have I scanned yet" state.
-        if (!CL_CheckOrDownloadFile(`players/${model}/${skin}_i.pcx`, "skin")) {
-          precache_check = base + 4;
-          return; // started a download
+        // Vanilla resumes at `CS_PLAYERSKINS + i * PLAYER_MULT + 5` here --
+        // PLAYER_MULT is 5, so that is the NEXT PLAYER, and a skin_i the
+        // server does not have is therefore never asked for twice. This port
+        // interposes q2repro's sexed-sound and dogtag downloads at the same
+        // base + 4 resume index, so it cannot use base + 5, and resuming at
+        // base + 4 alone re-derived n === 4 and re-queued the identical file
+        // on every pass -- an unbreakable precache loop (self-play cell f
+        // sat on one `_i.pcx` for the entire session and never spawned).
+        // Latches instead, cleared when this player slot is finished.
+        if (!precache_player_skin_i_done) {
+          precache_player_skin_i_done = true;
+          if (!CL_CheckOrDownloadFile(`players/${model}/${skin}_i.pcx`, "skin")) {
+            precache_check = base + 4;
+            return; // started a download
+          }
         }
+
+        // dogtag (q2repro download.c:575-576's `Q_concat(fn, ..., "tags/",
+        // dogtag, ".pcx")`), same latching reason as skin_i above.
+        if (!precache_player_dogtag_done) {
+          precache_player_dogtag_done = true;
+          if (!CL_CheckOrDownloadFile(`tags/${dogtag}.pcx`, "skin")) {
+            precache_check = base + 4;
+            return; // started a download
+          }
+        }
+
         precache_sexed_sounds = [];
         for (let s = 1; s < cls.csr.max_sounds; s++) {
           if (cl.configstrings[cls.csr.sounds + s][0] === "*") precache_sexed_sounds.push(s);
@@ -1297,6 +1405,8 @@ export function CL_RequestNextDownload(): void {
           precache_sexed_check++;
         }
         precache_sexed_check = 0;
+        precache_player_skin_i_done = false;
+        precache_player_dogtag_done = false;
         precache_check = base + PLAYER_MULT;
       }
     }
@@ -1378,6 +1488,14 @@ export function CL_Precache_f(): void {
   precache_model_skinnames = null;
   precache_model_skin = 0;
   precache_sexed_check = 0;
+  // The per-player skin_i/dogtag resume latches must reset with the rest of
+  // the walk cursor state: a reconnect (or the next server) starting a fresh
+  // precache sequence otherwise inherits latches from the previous session's
+  // interrupted walk and silently skips those downloads.
+  precache_player_skin_i_done = false;
+  precache_player_dogtag_done = false;
+  precache_player_skin_i_done = false;
+  precache_player_dogtag_done = false;
 
   CL_RequestNextDownload();
 }
@@ -1392,6 +1510,38 @@ export function CL_InitLocal(): void {
   cls.realtime = Sys_Milliseconds();
 
   CL_InitInput();
+
+  // q2repro src/client/main.c:2724 (CL_InitLocal) calls CL_InitDemos() here
+  // (src/client/demo.c:1577-1581); registered inline instead of importing
+  // from cl_demo.ts to avoid an import cycle (see that file's header
+  // comment). Registered, consumer unported -- see audit report.
+  Cvar_Get("cl_demosnaps", "10", 0);
+  Cvar_Get("cl_demomsglen", "1390", 0); // MAX_PACKETLEN_WRITABLE_DEFAULT (inc/common/net/net.h:31-34)
+  Cvar_Get("cl_demowait", "0", 0);
+  Cvar_Get("cl_demosuspendtoggle", "1", 0);
+  Cvar_Get("cl_demo_protocol_kex", "1", 0);
+
+  // q2repro's CL_InitTEnts (src/client/tent.c:1735-1750) and CL_InitEffects
+  // (src/client/effects.c:1905-1908) are also called from CL_InitLocal in
+  // the C original; neither exists as a function in this port's cl_tent.ts/
+  // cl_fx.ts (nothing there currently needs init besides these cvars), so
+  // they're registered here instead. cl_shadowlights (effects.c:1908) is
+  // already registered above. CL_RailTrail (cl_fx.ts) is this port's
+  // existing vanilla particle-spiral rail effect -- q2repro's
+  // type/color/width-configurable polygon-beam rail renderer these cvars
+  // drive is a different rendering model entirely, not a drop-in parameter
+  // substitution, so all of the below are registered, consumer unported.
+  Cvar_Get("cl_muzzleflashes", "1", 0); // tent.c:1735
+  Cvar_Get("cl_railtrail_type", "0", 0); // tent.c:1736
+  Cvar_Get("cl_railtrail_time", "1.0", 0); // tent.c:1737
+  Cvar_Get("cl_railcore_color", "red", 0); // tent.c:1740
+  Cvar_Get("cl_railcore_width", "2", 0); // tent.c:1744
+  Cvar_Get("cl_railspiral_color", "blue", 0); // tent.c:1745
+  Cvar_Get("cl_railspiral_radius", "3", 0); // tent.c:1749
+  Cvar_Get("cl_compass_time", "10", 0); // tent.c:1750
+  Cvar_Get("cl_lerp_lightstyles", "1", 0); // effects.c:1905
+  Cvar_Get("cl_rerelease_effects", "1", 0); // effects.c:1906
+  Cvar_Get("cl_muzzlelight_time", "100", 0); // effects.c:1907
 
   // task #24: HTTP downloads (cl_http.ts). Callbacks wire the HTTP queue
   // back to this file's existing UDP download state machine: a per-file
@@ -1431,17 +1581,24 @@ export function CL_InitLocal(): void {
   clCvars.cl_noskins = Cvar_Get("cl_noskins", "0", 0);
   clCvars.cl_autoskins = Cvar_Get("cl_autoskins", "0", 0);
   clCvars.cl_predict = Cvar_Get("cl_predict", "1", 0);
-  cl_maxfps = Cvar_Get("cl_maxfps", "90", 0);
+  // q2repro src/client/main.c:2756 defaults cl_maxfps to "62", not "90" --
+  // cvar-parity audit fix (was a divergence from this port's engine spec).
+  cl_maxfps = Cvar_Get("cl_maxfps", "62", 0);
 
   clCvars.cl_upspeed = Cvar_Get("cl_upspeed", "200", 0);
   clCvars.cl_forwardspeed = Cvar_Get("cl_forwardspeed", "200", 0);
   clCvars.cl_sidespeed = Cvar_Get("cl_sidespeed", "200", 0);
   clCvars.cl_yawspeed = Cvar_Get("cl_yawspeed", "140", 0);
-  clCvars.cl_pitchspeed = Cvar_Get("cl_pitchspeed", "150", 0);
-  clCvars.cl_anglespeedkey = Cvar_Get("cl_anglespeedkey", "1.5", 0);
+  // q2repro src/client/input.c:771 flags cl_pitchspeed CVAR_CHEAT.
+  clCvars.cl_pitchspeed = Cvar_Get("cl_pitchspeed", "150", CVAR_CHEAT);
+  // q2repro src/client/input.c:772 flags cl_anglespeedkey CVAR_CHEAT.
+  clCvars.cl_anglespeedkey = Cvar_Get("cl_anglespeedkey", "1.5", CVAR_CHEAT);
 
-  clCvars.cl_run = Cvar_Get("cl_run", "0", CVAR_ARCHIVE);
-  clCvars.freelook = Cvar_Get("freelook", "0", CVAR_ARCHIVE);
+  // q2repro src/client/input.c:773 defaults cl_run to "1" (cvar-parity fix).
+  clCvars.cl_run = Cvar_Get("cl_run", "1", CVAR_ARCHIVE);
+  // q2repro src/client/input.c:775 defaults freelook to "1" (cvar-parity
+  // fix; src/platform/sdl.ts also registers this name and is fixed to match).
+  clCvars.freelook = Cvar_Get("freelook", "1", CVAR_ARCHIVE);
   clCvars.lookspring = Cvar_Get("lookspring", "0", CVAR_ARCHIVE);
   clCvars.lookstrafe = Cvar_Get("lookstrafe", "0", CVAR_ARCHIVE);
   clCvars.sensitivity = Cvar_Get("sensitivity", "3", CVAR_ARCHIVE);
@@ -1457,10 +1614,13 @@ export function CL_InitLocal(): void {
   clCvars.cl_showclamp = Cvar_Get("showclamp", "0", 0);
   cl_timeout = Cvar_Get("cl_timeout", "120", 0);
   clCvars.cl_paused = Cvar_Get("paused", "0", 0);
-  clCvars.cl_timedemo = Cvar_Get("timedemo", "0", 0);
+  // q2repro src/common/common.c:933 flags timedemo CVAR_CHEAT (cvar-parity fix).
+  clCvars.cl_timedemo = Cvar_Get("timedemo", "0", CVAR_CHEAT);
 
-  rcon_client_password = Cvar_Get("rcon_password", "", 0);
-  rcon_address = Cvar_Get("rcon_address", "", 0);
+  // q2repro src/common/common.c:956 and src/client/main.c:2784 flag both
+  // rcon_password and rcon_address CVAR_PRIVATE (cvar-parity fix).
+  rcon_client_password = Cvar_Get("rcon_password", "", CVAR_PRIVATE);
+  rcon_address = Cvar_Get("rcon_address", "", CVAR_PRIVATE);
 
   clCvars.cl_lightlevel = Cvar_Get("r_lightlevel", "0", 0);
 
@@ -1471,19 +1631,83 @@ export function CL_InitLocal(): void {
   info_spectator = Cvar_Get("spectator", "0", CVAR_USERINFO);
   name = Cvar_Get("name", "unnamed", CVAR_USERINFO | CVAR_ARCHIVE);
   skin = Cvar_Get("skin", "male/grunt", CVAR_USERINFO | CVAR_ARCHIVE);
-  rate = Cvar_Get("rate", "25000", CVAR_USERINFO | CVAR_ARCHIVE); // FIXME
+  // q2repro src/client/main.c:2839 defaults rate to "15000" (cvar-parity
+  // fix -- resolves the FIXME this line used to carry).
+  rate = Cvar_Get("rate", "15000", CVAR_USERINFO | CVAR_ARCHIVE);
   msg = Cvar_Get("msg", "1", CVAR_USERINFO | CVAR_ARCHIVE);
   hand = Cvar_Get("hand", "0", CVAR_USERINFO | CVAR_ARCHIVE);
   fov = Cvar_Get("fov", "90", CVAR_USERINFO | CVAR_ARCHIVE);
   gender = Cvar_Get("gender", "male", CVAR_USERINFO | CVAR_ARCHIVE);
   gender_auto = Cvar_Get("gender_auto", "1", CVAR_ARCHIVE);
   if (gender) gender.modified = false; // clear this so we know when user sets it manually
-  // name/info_password/info_spectator/rate/msg/hand/fov/adr0-8 are, exactly
-  // as in the C original, registered here and never read directly again --
-  // their values reach the network purely through Cvar_Userinfo()/the
-  // console, which scan the whole CVAR_USERINFO-flagged cvar set generically.
+  // q2repro src/client/main.c:2837/2846 -- dogtag/uf join the same generic
+  // userinfo scan as name/skin/rate/etc above (cvar-parity audit addition).
+  Cvar_Get("dogtag", "default", CVAR_USERINFO | CVAR_ARCHIVE);
+  Cvar_Get("uf", "", CVAR_USERINFO);
+  // name/info_password/info_spectator/rate/msg/hand/fov/adr0-8/dogtag/uf are,
+  // exactly as in the C original, registered here and never read directly
+  // again -- their values reach the network purely through Cvar_Userinfo()/
+  // the console, which scan the whole CVAR_USERINFO-flagged cvar set
+  // generically.
 
   clCvars.cl_vwep = Cvar_Get("cl_vwep", "1", CVAR_ARCHIVE);
+
+  // --- cvar-parity audit: client/main.c cvars with no consumer ported yet ---
+  // Each is registered so the console no longer reports "unknown command";
+  // see the audit report for the "registered, consumer unported" list this
+  // batch feeds. Gun-offset/thirdperson/gib/flare-style visual features
+  // below have no existing implementation anywhere in src/client/*.ts (this
+  // port's renderer path is still vanilla q2 shaped) -- confirmed by
+  // grepping for their C consumer's behavior, not just the cvar name.
+  Cvar_Get("cl_gunalpha", "1", 0); // src/client/main.c:2743
+  Cvar_Get("cl_gunfov", "90", 0); // src/client/main.c:2744, consumer src/client/tent.c
+  Cvar_Get("cl_gun_x", "0", 0); // src/client/main.c:2745, consumer src/client/entities.c
+  Cvar_Get("cl_gun_y", "0", 0); // src/client/main.c:2746, consumer src/client/entities.c
+  Cvar_Get("cl_gun_z", "0", 0); // src/client/main.c:2747, consumer src/client/entities.c
+  Cvar_Get("cl_kickangles", "1", CVAR_CHEAT); // src/client/main.c:2754, consumer src/client/entities.c
+  Cvar_Get("cl_warn_on_fps_rounding", "1", 0); // src/client/main.c:2755
+  Cvar_Get("cl_async", "1", 0); // src/client/main.c:2758 -- q2repro's async input/render decoupling (cl_sync_changed) is not ported; this port's CL_Frame always ties both to cl_maxfps
+  Cvar_Get("r_maxfps", "0", 0); // src/client/main.c:2760 -- same async-render-cap feature as cl_async, not ported
+  Cvar_Get("cl_autopause", "1", 0); // src/client/main.c:2762
+  Cvar_Get("cl_rollhack", "1", 0); // src/client/main.c:2763, consumer src/client/entities.c
+  Cvar_Get("cl_noglow", "0", 0); // src/client/main.c:2764, consumer src/client/entities.c
+  Cvar_Get("cl_nobob", "0", 0); // src/client/main.c:2765, consumer src/client/entities.c
+  Cvar_Get("cl_nolerp", "0", 0); // src/client/main.c:2766, consumer src/client/entities.c
+  Cvar_Get("cl_hit_markers", "2", 0); // src/client/main.c:2767
+  Cvar_Get("cl_thirdperson", "0", CVAR_CHEAT); // src/client/main.c:2787, consumer src/client/entities.c (no chase-cam view in this port)
+  Cvar_Get("cl_thirdperson_angle", "0", 0); // src/client/main.c:2788
+  Cvar_Get("cl_thirdperson_range", "60", 0); // src/client/main.c:2789
+  Cvar_Get("cl_disable_particles", "0", 0); // src/client/main.c:2791, consumer src/client/tent.c + entities.c
+  Cvar_Get("cl_disable_explosions", "0", 0); // src/client/main.c:2792, consumer src/client/tent.c
+  Cvar_Get("cl_dlight_hacks", "0", 0); // src/client/main.c:2793, consumer src/client/tent.c + entities.c + effects.c
+  Cvar_Get("cl_smooth_explosions", "1", 0); // src/client/main.c:2794, consumer src/client/tent.c + entities.c
+  Cvar_Get("cl_gibs", "1", 0); // src/client/main.c:2796, consumer src/client/entities.c
+  Cvar_Get("cl_flares", "1", 0); // src/client/main.c:2799, consumer src/client/entities.c
+  Cvar_Get("cl_updaterate", "0", 0); // src/client/main.c:2803
+  Cvar_Get("cl_cgame_notify", "1", 0); // src/client/main.c:2807, consumer src/client/parse.c (cl_parse.ts is off-limits this pass)
+  Cvar_Get("cl_chat_notify", "1", 0); // src/client/main.c:2808, consumer src/client/parse.c (cl_parse.ts is off-limits this pass)
+  Cvar_Get("cl_chat_sound", "1", 0); // src/client/main.c:2809, consumer src/client/parse.c (cl_parse.ts is off-limits this pass)
+  Cvar_Get("cl_chat_filter", "0", 0); // src/client/main.c:2812, consumer src/client/parse.c (cl_parse.ts is off-limits this pass)
+  // cl_disconnectcmd/cl_changemapcmd are wired below (CL_Disconnect/
+  // CL_Changing_f); cl_beginmapcmd's consumer is src/client/entities.c, wired
+  // in cl_ents.ts instead (see that file).
+  cl_disconnectcmd = Cvar_Get("cl_disconnectcmd", "", 0); // src/client/main.c:2814, wired below in CL_Disconnect
+  cl_changemapcmd = Cvar_Get("cl_changemapcmd", "", 0); // src/client/main.c:2815, wired below in CL_Changing_f
+  Cvar_Get("cl_beginmapcmd", "", 0); // src/client/main.c:2816, wired in src/client/cl_ents.ts
+  // cl_ignore_stufftext's filter (allow_stufftext()) lives in q2repro's
+  // src/client/main.c but is called from the svc_stufftext handler in
+  // src/client/parse.c -- cl_parse.ts is off-limits this pass, so only the
+  // registration lands here; wiring the filter into cl_parse.ts's
+  // svc_stufftext case is a PLACE AFTER MERGE follow-up (see audit report).
+  Cvar_Get("cl_ignore_stufftext", "0", 0); // src/client/main.c:2818
+  // cl_allow_vid_restart's consumer in q2repro (CL_RestartRefresh_f, src/
+  // client/main.c:2504-2523) warns and ignores manual `vid_restart` unless
+  // this is set, because q2repro auto-applies most video-setting changes
+  // without a restart. This port's VID_Restart_f (src/platform/vid.ts) does
+  // NOT auto-apply settings the same way, so copying that guard verbatim
+  // would break the existing manual vid_restart workflow -- judgment call:
+  // registered only, consumer intentionally left unported (see audit report).
+  Cvar_Get("cl_allow_vid_restart", "0", 0); // src/client/main.c:2819
 
   //
   // register our commands
