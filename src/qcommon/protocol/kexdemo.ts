@@ -239,8 +239,8 @@ const U_MODEL16 = 1 << 28;
 const U_KEX_EFFECTS64 = 1 << 29;
 const U_ALPHA = 1 << 30; // q2proto_internal_protocol.h:154
 const HI_KEX_INSTANCE = HI_MOREFX16; // bit 33 -- same slot as U_MOREFX16
-const HI_KEX_OWNER = 4; // bit 34 (hi-word bit index 2)
-const HI_KEX_OLDFRAME = 8; // bit 35 (hi-word bit index 3)
+export const HI_KEX_OWNER = 4; // bit 34 (hi-word bit index 2)
+export const HI_KEX_OLDFRAME = 8; // bit 35 (hi-word bit index 3)
 
 // q2proto_internal_protocol.h:263-267.
 const PS_MOREBITS = 1 << 15;
@@ -254,7 +254,7 @@ const GUNBIT_OFFSET_Z = 1 << 2;
 const GUNBIT_ANGLES_X = 1 << 3;
 const GUNBIT_ANGLES_Y = 1 << 4;
 const GUNBIT_ANGLES_Z = 1 << 5;
-const GUNBIT_GUNRATE = 1 << 6;
+export const GUNBIT_GUNRATE = 1 << 6;
 
 // q2proto_internal_protocol.h:109-115 -- svc_sound's flags byte.
 const SND_VOLUME = 1 << 0;
@@ -286,6 +286,10 @@ function readServerData(): ServerDataReadResultT {
   const attractloop = MSG_ReadByte(net_message) !== 0;
   MSG_ReadByte(net_message); // server_fps -- no home on ServerDataReadResultT (matches VANILLA_CODEC's own "protocol-specific field, nowhere to go" precedent); discarded.
   const gamedir = MSG_ReadString(net_message);
+  // clientnum is genuinely SIGNED (q2proto_proto_kex.c:55's
+  // `READ_CHECKED(..., serverdata->clientnum, i16)`) -- confirmed by the -2
+  // split-screen sentinel check right below, which only works on a signed
+  // read.
   const clientnum = MSG_ReadShort(net_message);
   if (clientnum === -2) {
     // kex.c:56-58: split-screen sentinel. This port has no split-screen client.
@@ -421,6 +425,9 @@ function readDeltaEntity(from: EntityStateT, to: EntityStateT, number: number, b
       to.old_origin[2] = MSG_ReadFloat(net_message);
     }
   } else {
+    // Low-precision origin/old_origin: SIGNED (q2proto_internal_io.h:157-170's
+    // READ_CHECKED_VAR_COORDS_COMP_16/read_var_coords_short -> i16) -- world
+    // coordinates are legitimately negative, matching MSG_ReadShort exactly.
     if (bits & U_ORIGIN1) to.origin[0] = MSG_ReadShort(net_message) * COORD_SHORT_SCALE;
     if (bits & U_ORIGIN2) to.origin[1] = MSG_ReadShort(net_message) * COORD_SHORT_SCALE;
     if (bits & U_ORIGIN3) to.origin[2] = MSG_ReadShort(net_message) * COORD_SHORT_SCALE;
@@ -438,7 +445,13 @@ function readDeltaEntity(from: EntityStateT, to: EntityStateT, number: number, b
   if (bits & U_ANGLE3) to.angles[2] = MSG_ReadFloat(net_message);
 
   if (bits & U_SOUND) {
-    const soundWord = MSG_ReadShort(net_message);
+    // Unsigned (q2proto_proto_kex.c:492-493's `uint16_t sound_word;
+    // READ_CHECKED(..., u16)`) -- harmless under a signed read here
+    // (SOUND_FLAG_VOLUME/ATTENUATION are bits 14/15, `to.sound`'s mask only
+    // touches bits 0-13, both below the sign-extension boundary), but
+    // MSG_ReadWord is used anyway to match the wire type exactly, same as
+    // q2repro.ts's identical U_SOUND branch.
+    const soundWord = MSG_ReadWord(net_message);
     to.sound = soundWord & 0x3fff;
     if (soundWord & SOUND_FLAG_VOLUME) to.loop_volume = decodeLoopVolume(MSG_ReadByte(net_message));
     if (soundWord & SOUND_FLAG_ATTENUATION) to.loop_attenuation = decodeLoopAttenuation(MSG_ReadByte(net_message));
@@ -451,8 +464,14 @@ function readDeltaEntity(from: EntityStateT, to: EntityStateT, number: number, b
   if (bitsHasHi(bits, HI_SCALE)) to.scale = decodeScale(MSG_ReadByte(net_message));
 
   if (bitsHasHi(bits, HI_KEX_INSTANCE)) to.instance_bits = MSG_ReadByte(net_message);
-  if (bitsHasHi(bits, HI_KEX_OWNER)) to.owner = MSG_ReadShort(net_message);
-  if (bitsHasHi(bits, HI_KEX_OLDFRAME)) to.old_frame = MSG_ReadShort(net_message);
+  // owner/old_frame: UNSIGNED (q2proto_proto_kex.c:538/544's
+  // `READ_CHECKED(..., owner, u16)` / `..., oldframe, u16)`) -- owner is an
+  // entity-index magnitude and old_frame an animation-frame magnitude, same
+  // bug class as q2repro.ts's entnum/gunframe fixes above. Practically
+  // unreachable at today's entity/frame counts, but fixed to match the wire
+  // type exactly rather than left as a second "harmless for now" case.
+  if (bitsHasHi(bits, HI_KEX_OWNER)) to.owner = MSG_ReadWord(net_message);
+  if (bitsHasHi(bits, HI_KEX_OLDFRAME)) to.old_frame = MSG_ReadWord(net_message);
 }
 
 // ---------------------------------------------------------------------------
@@ -465,20 +484,23 @@ function readDeltaEntity(from: EntityStateT, to: EntityStateT, number: number, b
 // identically on both).
 // ---------------------------------------------------------------------------
 function readKexFlags(): number {
-  // MSG_ReadShort returns a SIGNED 16-bit value (matching the C `(short)`
-  // cast) -- for a real wire value with bit 15 set (i.e. any value with
-  // PS_MOREBITS itself, or any other high bit, on), that comes back
-  // NEGATIVE. Masking to 0xffff BEFORE combining with the high word is
-  // required: `flags |= moreFlags << 16` on a still-negative (sign-extended
-  // to all 1s in bits 16-31) `flags` would OR moreFlags's bits into a field
-  // that's already all 1s, silently setting every PS_KEX_* bit beyond
-  // whatever moreFlags actually carried (found via a real retail demo file
-  // -- see this unit's own task report: PS_KEX_TEAM_ID spuriously appeared
-  // set on every playerstate whose low flags word had bit 15 set, corrupting
-  // downstream byte alignment for the rest of the frame).
-  let flags = MSG_ReadShort(net_message) & 0xffff;
+  // Both words are UNSIGNED (q2proto_proto_kex.c:628-629/631-632's
+  // `uint16_t flags; READ_CHECKED(..., u16)` / `uint16_t more_flags;
+  // READ_CHECKED(..., u16)`) -- this is load-bearing, not cosmetic:
+  // `flags |= moreFlags << 16` combines the two words into one wider value,
+  // so a signed MSG_ReadShort (sign-extended to all 1s in bits 16-31 for any
+  // wire value with bit 15 set, i.e. PS_MOREBITS itself or any other high
+  // bit) would OR moreFlags's bits into a field that's already all 1s,
+  // silently setting every PS_KEX_* bit beyond whatever moreFlags actually
+  // carried (found via a real retail demo file -- see this unit's own task
+  // report: PS_KEX_TEAM_ID spuriously appeared set on every playerstate
+  // whose low flags word had bit 15 set, corrupting downstream byte
+  // alignment for the rest of the frame). Previously fixed here with an
+  // explicit `& 0xffff` mask after MSG_ReadShort; now reads unsigned
+  // directly via MSG_ReadWord, matching the wire type exactly.
+  let flags = MSG_ReadWord(net_message);
   if (flags & PS_MOREBITS) {
-    const moreFlags = MSG_ReadShort(net_message) & 0xffff;
+    const moreFlags = MSG_ReadWord(net_message);
     flags |= moreFlags << 16;
   }
   return flags >>> 0;
@@ -548,8 +570,17 @@ function readKexPlayerStateFields(from: PlayerStateT, to: PlayerStateT, flags: n
     to.pmove.velocity[2] = pmFloatToShort(z);
   }
 
-  if (flags & PS_M_TIME) to.pmove.pm_time = MSG_ReadShort(net_message);
-  if (flags & PS_M_FLAGS) to.pmove.pm_flags = MSG_ReadShort(net_message);
+  // pm_time/pm_flags: UNSIGNED (q2proto_proto_kex.c:661/664's
+  // `READ_CHECKED(..., playerstate->pm_time, u16)` /
+  // `..., playerstate->pm_flags, u16)`) -- same real pm_time-magnitude bug
+  // and harmless-but-fixed pm_flags bitmask case as q2repro.ts's identical
+  // fields (see that file's readPlayerStateFields comment for the full
+  // reasoning).
+  if (flags & PS_M_TIME) to.pmove.pm_time = MSG_ReadWord(net_message);
+  if (flags & PS_M_FLAGS) to.pmove.pm_flags = MSG_ReadWord(net_message);
+  // gravity: genuinely SIGNED (q2proto_proto_kex.c:667's
+  // `READ_CHECKED(..., playerstate->pm_gravity, i16)`) -- negative/zero
+  // gravity settings are real, matching q2repro.ts's identical field.
   if (flags & PS_M_GRAVITY) to.pmove.gravity = MSG_ReadShort(net_message);
   if (flags & PS_M_DELTA_ANGLES) {
     // read_var_angles_float: plain float degrees; this port's
@@ -591,7 +622,16 @@ function readKexPlayerStateFields(from: PlayerStateT, to: PlayerStateT, flags: n
   }
 
   if (flags & PS_WEAPONINDEX) {
-    const gunIndexAndSkin = MSG_ReadShort(net_message);
+    // Unsigned (q2proto_proto_kex.c:695's `uint16_t gun_index_and_skin;
+    // READ_CHECKED(..., u16)`). This WAS a live bug: `>>> Q2PRO_GUNINDEX_BITS`
+    // (13) pulls bits 13-31 into gunskin, and a signed MSG_ReadShort
+    // sign-extends bit 15 across bits 16-31 first -- any gunskin value with
+    // its own top bit set (skin index 4-7 of the 3-bit field) produced a
+    // gunskin in the hundreds of thousands instead of 4-7. gunindex itself
+    // (`& Q2PRO_GUNINDEX_MASK`, bits 0-12) was never affected, since sign
+    // extension never touches bits 0-15. Same bug/fix as q2repro.ts's
+    // identical PS_WEAPONINDEX branch.
+    const gunIndexAndSkin = MSG_ReadWord(net_message);
     to.gunindex = gunIndexAndSkin & Q2PRO_GUNINDEX_MASK;
     to.gunskin = gunIndexAndSkin >>> Q2PRO_GUNINDEX_BITS;
   }
@@ -602,7 +642,22 @@ function readKexPlayerStateFields(from: PlayerStateT, to: PlayerStateT, flags: n
     // PS_WEAPONFRAME+EPS_GUNOFFSET/EPS_GUNANGLES/EPS_GUNRATE scheme.
     // gunoffset/gunangles are plain unscaled floats here (no GUNOFFSET_SCALE/
     // GUNANGLE_SCALE division -- those only apply to q2repro's short encoding).
-    let gunbits = MSG_ReadShort(net_message);
+    //
+    // gunbits is UNSIGNED (q2proto_proto_kex.c:704's `READ_CHECKED(...,
+    // gunbits, u16)`). Checked this one carefully because `gunbits >>>= 9`
+    // looks structurally identical to gun_index_and_skin's real bug above --
+    // but it is harmless under a signed read, not a second instance of it:
+    // GUNBIT_OFFSET_*/ANGLES_*/GUNRATE only test bits 0-6 of the
+    // post-shift value, which come from the wire value's bits 9-15 (the
+    // actual 7-bit sub-flag field) -- untouched by sign extension either
+    // way, since sign extension only ever fills bits 16-31. Those bits land
+    // in post-shift bits 7-22, which nothing here reads via `&` or
+    // otherwise. Unlike gunskin (assigned as a raw magnitude, so the
+    // polluted high bits become part of the stored value), every use of
+    // `gunbits` after the shift is a small bitwise `&` test, so this is the
+    // same "harmless but fixed for exactness" case as sound_word/pm_flags/
+    // the playerstate flags word.
+    let gunbits = MSG_ReadWord(net_message);
     to.gunframe = gunbits & 0x1ff;
     gunbits >>>= 9;
     if (gunbits & GUNBIT_OFFSET_X) to.gunoffset[0] = MSG_ReadFloat(net_message);
@@ -631,7 +686,10 @@ function readKexPlayerStateFields(from: PlayerStateT, to: PlayerStateT, flags: n
   // total stat slots. PlayerStateT.stats is MAX_STATS_STORAGE=64 slots wide
   // (shared/q_shared.ts), so both masks' slots now have a real backing
   // element; the `idx < to.stats.length` guards below are kept as a
-  // harmless, always-true bounds check rather than removed.
+  // harmless, always-true bounds check rather than removed. Each stat value
+  // is genuinely SIGNED (q2proto_proto_kex.c:746/750's
+  // `READ_CHECKED(..., playerstate->stats[i], i16)`), matching MSG_ReadShort
+  // exactly -- stats can display negative (e.g. ammo/health UI tricks).
   const statbits1 = MSG_ReadLong(net_message) >>> 0;
   for (let i = 0; i < 32; i++) {
     if (statbits1 & (1 << i)) {
@@ -822,12 +880,17 @@ export interface KexPoiT {
 }
 
 // q2proto_q2repro_client_read_poi, q2repro.c:885-895 -- reused verbatim by
-// kex.c:270 (`case svc_rr_poi`).
+// kex.c:270 (`case svc_rr_poi`). key/time/image are all UNSIGNED
+// (q2proto_proto_q2repro.c:887/888/890's `READ_CHECKED(..., poi->key, u16)`
+// / `..., poi->time, u16)` / `..., poi->image, u16)`) -- key/image are index
+// magnitudes and time is a millisecond duration, same bug class as
+// pm_time/gunframe/fog.time elsewhere in this audit: a signed read would go
+// negative for any value >= 0x8000.
 export function readPoiKex(): KexPoiT {
-  const key = MSG_ReadShort(net_message);
-  const time = MSG_ReadShort(net_message);
+  const key = MSG_ReadWord(net_message);
+  const time = MSG_ReadWord(net_message);
   const pos = new Float32Array([MSG_ReadFloat(net_message), MSG_ReadFloat(net_message), MSG_ReadFloat(net_message)]);
-  const image = MSG_ReadShort(net_message);
+  const image = MSG_ReadWord(net_message);
   const color = MSG_ReadByte(net_message);
   const flags = MSG_ReadByte(net_message);
   return { key, time, pos, image, color, flags };
@@ -855,10 +918,13 @@ export interface KexMuzzleflash3T {
 }
 
 // q2proto_q2repro_client_read_muzzleflash3, q2repro.c:744-749 -- reused
-// verbatim by kex.c:272 (`case svc_rr_muzzleflash3`).
+// verbatim by kex.c:272 (`case svc_rr_muzzleflash3`). entity is genuinely
+// SIGNED (q2repro.c:746's `READ_CHECKED(..., muzzleflash->entity, i16)`);
+// weapon is UNSIGNED (q2repro.c:747's `..., muzzleflash->weapon, u16)`) --
+// previously read via MSG_ReadShort + `& 0xffff`, now MSG_ReadWord directly.
 export function readMuzzleflash3Kex(): KexMuzzleflash3T {
   const entity = MSG_ReadShort(net_message);
-  const weapon = MSG_ReadShort(net_message) & 0xffff;
+  const weapon = MSG_ReadWord(net_message);
   return { entity, weapon };
 }
 
@@ -925,7 +991,10 @@ export interface KexSoundT {
 // silently misdecoding if ever reached.
 export function readSoundKex(): KexSoundT {
   const flags = MSG_ReadByte(net_message);
-  const index = MSG_ReadShort(net_message);
+  // Unsigned (q2proto_proto_kex.c:570's `READ_CHECKED(..., sound->index,
+  // u16)`) -- a sound-asset index magnitude, same bug class as
+  // pm_time/gunframe/poi.key above.
+  const index = MSG_ReadWord(net_message);
 
   const volume = flags & SND_VOLUME ? MSG_ReadByte(net_message) / 255 : SOUND_DEFAULT_VOLUME;
   const attenuation = flags & SND_ATTENUATION ? MSG_ReadByte(net_message) / 64 : SOUND_DEFAULT_ATTENUATION;
@@ -934,7 +1003,13 @@ export function readSoundKex(): KexSoundT {
   let entity = 0;
   let channel = 0;
   if (flags & SND_ENT) {
-    const entchan = flags & SND_KEX_LARGE_ENT ? MSG_ReadLong(net_message) >>> 0 : MSG_ReadShort(net_message) & 0xffff;
+    // entchan: u32 when SND_KEX_LARGE_ENT (q2proto_proto_kex.c:589's
+    // `READ_CHECKED(..., entchan, u32)`), else UNSIGNED u16
+    // (q2proto_proto_kex.c:591's `..., entchan, u16)`) -- `entchan >>> 3`
+    // below pulls bits 3-31 into `entity`, so this needs the full unsigned
+    // range, not just a bitwise-safe low mask; MSG_ReadWord used directly
+    // (previously an equivalent `MSG_ReadShort(...) & 0xffff`).
+    const entchan = flags & SND_KEX_LARGE_ENT ? MSG_ReadLong(net_message) >>> 0 : MSG_ReadWord(net_message);
     entity = entchan >>> 3;
     channel = entchan & 7;
   }
@@ -944,6 +1019,8 @@ export function readSoundKex(): KexSoundT {
     if (!isKexDemoProtocol()) {
       throw new ComError(ERR_DROP, "kexdemo: svc_sound SND_POS in float form (protocol 2023) is not implemented -- see kexdemo.ts file header SCOPE CUTS");
     }
+    // SIGNED short coords, same read_var_coords_short (i16) citation as
+    // readDeltaEntity's low-precision origin branch above.
     pos = new Float32Array([
       MSG_ReadShort(net_message) * COORD_SHORT_SCALE,
       MSG_ReadShort(net_message) * COORD_SHORT_SCALE,
@@ -1002,15 +1079,31 @@ export interface KexConfigstringRecordT {
 // state-machine shape (context->client_read swap) -- this port's dispatch
 // loop calls one function per opcode and gets a complete result back,
 // matching every other multi-field message reader in this file.
+// compressed_len is UNSIGNED (q2proto_proto_kex.c:876's `READ_CHECKED(...,
+// compressed_len, u16)`) and this was a live, serious bug: the value feeds
+// `new Uint8Array(compressedLen)` (inflateInternal, below) as a byte count.
+// A signed MSG_ReadShort turns any compressed block >= 32768 bytes (very
+// plausible for a configstring blast bundling many strings) into a negative
+// length, and `new Uint8Array(-N)` throws RangeError -- so a large enough
+// configblast message would have crashed the demo/network parser outright,
+// not just misdecoded a value. uncompressed_len is read next and discarded
+// either way (kex.c:882's own "(void)uncompressed_len"), so its sign never
+// mattered, but it is switched to MSG_ReadWord too for consistency with the
+// fix immediately above it.
 export function readConfigblastKex(): KexConfigstringRecordT[] {
-  const compressedLen = MSG_ReadShort(net_message);
-  MSG_ReadShort(net_message); // uncompressed_len -- discarded (kex.c:882, "(void)uncompressed_len")
+  const compressedLen = MSG_ReadWord(net_message);
+  MSG_ReadWord(net_message); // uncompressed_len -- discarded (kex.c:882, "(void)uncompressed_len")
   const inflated = inflateInternal(compressedLen);
   const buf = makeReadBuf(inflated);
 
   const records: KexConfigstringRecordT[] = [];
   while (buf.readcount < buf.cursize) {
-    const index = MSG_ReadShort(buf);
+    // index: UNSIGNED (q2proto_proto_kex.c:864's `READ_CHECKED(...,
+    // svc_message->configstring.index, u16)`) -- a configstring-table
+    // magnitude, same bug class as poi.key/sound.index above. Not currently
+    // wired to live game state (see readConfigblastKex's own caller-side
+    // comment in cl_parse.ts), but fixed to match the wire type exactly.
+    const index = MSG_ReadWord(buf);
     const value = MSG_ReadString(buf);
     records.push({ index, value });
   }
@@ -1028,8 +1121,13 @@ export function readConfigblastKex(): KexConfigstringRecordT[] {
 // dispatch loop resumes reading the raw (still-compressed-container)
 // message exactly where it left off, none the wiser.
 export function readSpawnbaselineblastKex(): Array<{ entnum: number; state: EntityStateT }> {
-  const compressedLen = MSG_ReadShort(net_message);
-  MSG_ReadShort(net_message); // uncompressed_len -- discarded
+  // compressed_len/uncompressed_len: same u16-unsigned citation and
+  // buffer-size-crash risk as readConfigblastKex's identical header above
+  // (q2proto_proto_kex.c:832/833's `READ_CHECKED(..., compressed_len, u16)` /
+  // `..., uncompressed_len, u16)` -- this message has its own, structurally
+  // identical compressed-block header).
+  const compressedLen = MSG_ReadWord(net_message);
+  MSG_ReadWord(net_message); // uncompressed_len -- discarded
   const inflated = inflateInternal(compressedLen);
 
   const saved = { data: net_message.data, view: net_message.view, cursize: net_message.cursize, readcount: net_message.readcount, maxsize: net_message.maxsize };

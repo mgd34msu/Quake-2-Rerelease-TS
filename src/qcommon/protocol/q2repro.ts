@@ -442,8 +442,15 @@ export function readEntityBitsWide(): { number: number; bits: number } {
   let hi = 0;
   if (lo & U_MOREBITS4) hi = MSG_ReadByte(net_message);
 
+  // entnum is unsigned (q2proto_internal_common.c:88-89's
+  // `READ_CHECKED(client_read, io_arg, *entnum, u16)`), shared by every
+  // q2repro/kex-family codec's entity-bits header -- MSG_ReadWord, not
+  // MSG_ReadShort. Practically unreachable today (MAX_EDICTS is nowhere near
+  // 0x8000), so this was never a live bug, but a signed read would silently
+  // misindex `cl_entities`/`cl.baselines` the day an entity count grows past
+  // 32767, so it is matched exactly rather than left "harmless for now".
   let number: number;
-  if (lo & U_NUMBER16) number = MSG_ReadShort(net_message);
+  if (lo & U_NUMBER16) number = MSG_ReadWord(net_message);
   else number = MSG_ReadByte(net_message);
 
   return { number, bits: combineBits(lo, hi) };
@@ -1043,7 +1050,9 @@ function readUserinfoDelta(msg: SizeBuf): ClcUserinfoDeltaT {
 // q2repro_server_read_setting, q2proto_proto_q2repro.c:2711-2716 (phase-8
 // interop finding -- see codec.ts's ClcClientSettingT doc comment: a real
 // q2repro client sends clc_r1q2_setting immediately after entering the game,
-// before any movement packet).
+// before any movement packet). Both fields are genuinely SIGNED
+// (q2proto_proto_q2repro.c:2712-2713's `READ_CHECKED(..., setting->index,
+// i16)` / `..., setting->value, i16)`), matching MSG_ReadShort exactly.
 function readClientSetting(msg: SizeBuf): ClcClientSettingT {
   const index = MSG_ReadShort(msg);
   const value = MSG_ReadShort(msg);
@@ -1076,6 +1085,14 @@ function readClientSetting(msg: SizeBuf): ClcClientSettingT {
 // ARCHITECTURE.md phase 3's tick-rate binding lands -- server.ts's own
 // framerate/frametime doc comment documents the same pre-existing gap on the
 // write side -- so it is read to stay byte-aligned and then discarded).
+//
+// Signed/unsigned audit (.orch/followups.md's signed/unsigned follow-up):
+// clientnum is read via MSG_ReadShort (SIGNED), matching its cited i16 type
+// exactly (q2repro_client_read_serverdata's serverdata->clientnum). The two
+// discarded u16 reads (protocol_version, q2repro_flags below) are left on
+// MSG_ReadShort rather than MSG_ReadWord -- the value is thrown away
+// unread, so sign has no observable effect either way; converting them
+// would be a no-op change made only for its own sake.
 function readServerData(): ServerDataReadResultT {
   const servercount = MSG_ReadLong(net_message);
   const attractloop = MSG_ReadByte(net_message) !== 0;
@@ -1160,6 +1177,10 @@ function readDeltaEntity(from: EntityStateT, to: EntityStateT, number: number, b
   // U_ANGLE16 is always set alongside any angle bit on this protocol's write
   // side (see writeDeltaEntity); read supports the 8-bit branch too since a
   // real peer's bit stream is authoritative, not just this codec's own.
+  // SIGNED by design (q2proto_internal_io.h:213-218's
+  // READ_CHECKED_VAR_ANGLES_COMP_16 -- `int16_t a; READ_CHECKED(..., a, i16)`),
+  // matching MSG_ReadShort exactly: SHORT2ANGLE's own -32768..32767 domain
+  // needs the negative half to represent angles past 180 degrees.
   if (bits & U_ANGLE16) {
     if (bits & U_ANGLE1) to.angles[0] = SHORT2ANGLE(MSG_ReadShort(net_message));
     if (bits & U_ANGLE2) to.angles[1] = SHORT2ANGLE(MSG_ReadShort(net_message));
@@ -1177,7 +1198,13 @@ function readDeltaEntity(from: EntityStateT, to: EntityStateT, number: number, b
   }
 
   if (bits & U_SOUND) {
-    const soundWord = MSG_ReadShort(net_message);
+    // Unsigned (q2proto_proto_q2repro.c:546-547's `uint16_t sound_word;
+    // READ_CHECKED(..., u16)`). A signed read happened to be harmless here
+    // (SOUND_FLAG_VOLUME/ATTENUATION are bits 14/15 and `to.sound`'s own
+    // 0x3fff mask only ever touches bits 0-13, all below the sign-extension
+    // boundary), but MSG_ReadWord is used anyway to match the wire type
+    // exactly rather than rely on that coincidence.
+    const soundWord = MSG_ReadWord(net_message);
     to.sound = soundWord & 0x3fff;
     if (soundWord & SOUND_FLAG_VOLUME) to.loop_volume = decodeLoopVolume(MSG_ReadByte(net_message));
     if (soundWord & SOUND_FLAG_ATTENUATION) to.loop_attenuation = decodeLoopAttenuation(MSG_ReadByte(net_message));
@@ -1273,39 +1300,79 @@ function readPlayerStateFields(msg: SizeBuf, from: PlayerStateT, to: PlayerState
     to.pmove.velocity[2] = pmFloatToShort(velZ);
   }
 
-  if (flags & PS_M_TIME) to.pmove.pm_time = MSG_ReadShort(msg);
-  if (flags & PS_M_FLAGS) to.pmove.pm_flags = MSG_ReadShort(msg);
+  // pm_time/pm_flags: UNSIGNED (q2proto_proto_q2repro.c:656/659's
+  // `READ_CHECKED(..., playerstate->pm_time, u16)` /
+  // `READ_CHECKED(..., playerstate->pm_flags, u16)`). This was a real
+  // mismatch: pm_time is stored and used as a millisecond magnitude
+  // (pmove.ts's countdown/expiry checks), so a signed read would go negative
+  // -- and stay wrong -- for any value >= 0x8000 instead of wrapping the way
+  // the C `uint16_t` field does. pm_flags is bitwise-only downstream today,
+  // so the earlier signed read never actually corrupted a flag test (no
+  // PMF_* bit this port sets is >= bit 16), but MSG_ReadWord is used anyway
+  // to match the wire type exactly.
+  if (flags & PS_M_TIME) to.pmove.pm_time = MSG_ReadWord(msg);
+  if (flags & PS_M_FLAGS) to.pmove.pm_flags = MSG_ReadWord(msg);
+  // gravity: genuinely SIGNED (q2proto_proto_q2repro.c:662's
+  // `READ_CHECKED(..., playerstate->pm_gravity, i16)`) -- kex/q2repro support
+  // negative and zero gravity (low-gravity/moon/reverse-gravity settings), so
+  // this is intentionally left as MSG_ReadShort, not a missed case.
   if (flags & PS_M_GRAVITY) to.pmove.gravity = MSG_ReadShort(msg);
+  // delta_angles: SIGNED (q2proto_internal_io.h:228-234's read_var_angles16,
+  // itself READ_CHECKED_VAR_ANGLES_COMP_16 -> i16) -- angle deltas are
+  // legitimately negative, matching MSG_ReadShort exactly.
   if (flags & PS_M_DELTA_ANGLES) {
     to.pmove.delta_angles[0] = MSG_ReadShort(msg);
     to.pmove.delta_angles[1] = MSG_ReadShort(msg);
     to.pmove.delta_angles[2] = MSG_ReadShort(msg);
   }
 
+  // viewoffset: SIGNED (q2proto_internal_io.h:269-274's
+  // READ_CHECKED_VIEWOFFSET_COMP_Q2REPRO -> i16) -- a crouching/dead player's
+  // eye offset goes negative.
   if (flags & PS_VIEWOFFSET) {
     to.viewoffset[0] = MSG_ReadShort(msg) / VIEWOFFSET_SCALE;
     to.viewoffset[1] = MSG_ReadShort(msg) / VIEWOFFSET_SCALE;
     to.viewoffset[2] = MSG_ReadShort(msg) / VIEWOFFSET_SCALE;
   }
 
+  // viewangles: SIGNED (q2proto_internal_io.h:213-218's
+  // READ_CHECKED_VAR_ANGLES_COMP_16 -> i16), same SHORT2ANGLE domain as the
+  // entity-delta angle16 case above.
   if (flags & PS_VIEWANGLES) {
     to.viewangles[0] = SHORT2ANGLE(MSG_ReadShort(msg));
     to.viewangles[1] = SHORT2ANGLE(MSG_ReadShort(msg));
   }
   if (extraflags & EPS_VIEWANGLE2) to.viewangles[2] = SHORT2ANGLE(MSG_ReadShort(msg));
 
+  // kick_angles: SIGNED (q2proto_internal_io.h:317-322's
+  // READ_CHECKED_KICK_ANGLES_COMP_Q2REPRO -> i16) -- kick angles oscillate
+  // around zero.
   if (flags & PS_KICKANGLES) {
     to.kick_angles[0] = MSG_ReadShort(msg) / KICK_ANGLE_SCALE;
     to.kick_angles[1] = MSG_ReadShort(msg) / KICK_ANGLE_SCALE;
     to.kick_angles[2] = MSG_ReadShort(msg) / KICK_ANGLE_SCALE;
   }
 
+  // gun_index_and_skin: UNSIGNED (q2proto_proto_q2repro.c:688-689's
+  // `uint16_t gun_index_and_skin; READ_CHECKED(..., u16)`). This one WAS a
+  // live bug, not just a type nit: `>>> Q2PRO_GUNINDEX_BITS` (13) pulls bits
+  // 13-31 into gunskin, and a signed MSG_ReadShort sign-extends bit 15 across
+  // bits 16-31 before the shift -- any gunskin value with its own top bit set
+  // (skin index 4-7 of the 3-bit field) produced a gunskin in the hundreds of
+  // thousands instead of 4-7. gunindex itself (`& Q2PRO_GUNINDEX_MASK`, bits
+  // 0-12) was never affected, since sign extension never touches bits 0-15.
   if (flags & PS_WEAPONINDEX) {
-    const gunIndexAndSkin = MSG_ReadShort(msg);
+    const gunIndexAndSkin = MSG_ReadWord(msg);
     to.gunindex = gunIndexAndSkin & Q2PRO_GUNINDEX_MASK;
     to.gunskin = gunIndexAndSkin >>> Q2PRO_GUNINDEX_BITS;
   }
-  if (flags & PS_WEAPONFRAME) to.gunframe = MSG_ReadShort(msg);
+  // gunframe: UNSIGNED (q2proto_proto_q2repro.c:697's
+  // `READ_CHECKED(..., playerstate->gunframe, u16)`) -- an animation-frame
+  // magnitude, same class of bug as pm_time above.
+  if (flags & PS_WEAPONFRAME) to.gunframe = MSG_ReadWord(msg);
+  // gunoffset/gunangles: SIGNED (q2proto_proto_q2repro.c:61-89's
+  // read_short_gunoffset/read_short_gunangles -> i16 each) -- offsets/angles
+  // oscillate around zero during weapon bob/kick.
   if (extraflags & EPS_GUNOFFSET) {
     to.gunoffset[0] = MSG_ReadShort(msg) / GUNOFFSET_SCALE;
     to.gunoffset[1] = MSG_ReadShort(msg) / GUNOFFSET_SCALE;
@@ -1343,9 +1410,13 @@ function readPlayerStateFields(msg: SizeBuf, from: PlayerStateT, to: PlayerState
 }
 
 // Public op (unchanged wire format): reads flags(u16)+extraflags(u8) from
-// `msg` itself, then delegates to the shared field-reading body.
+// `msg` itself, then delegates to the shared field-reading body. flags is
+// UNSIGNED (q2proto_proto_q2repro.c:617-618's `uint16_t flags;
+// READ_CHECKED(..., u16)`) -- bitwise-only downstream (delta_bits_check
+// against PS_* constants, all < bit 16), so a signed read was never
+// exploitable here, but MSG_ReadWord matches the wire type exactly.
 function readPlayerStateDelta(msg: SizeBuf, from: PlayerStateT, to: PlayerStateT): void {
-  const flags = MSG_ReadShort(msg);
+  const flags = MSG_ReadWord(msg);
   const extraflags = MSG_ReadByte(msg);
   readPlayerStateFields(msg, from, to, flags, extraflags);
 }
@@ -1459,9 +1530,11 @@ function readFrameHeader(areabits: Uint8Array, _readSuppressByte: boolean): Fram
 }
 
 // q2repro_client_read_frame's playerstate call (q2repro.c:780), using the
-// extraflags byte readFrameHeader already consumed.
+// extraflags byte readFrameHeader already consumed. flags is UNSIGNED, same
+// citation/reasoning as readPlayerStateDelta's own flags read above
+// (q2proto_proto_q2repro.c:617-618).
 function readFramePlayerstate(from: PlayerStateT, to: PlayerStateT): void {
-  const flags = MSG_ReadShort(net_message);
+  const flags = MSG_ReadWord(net_message);
   readPlayerStateFields(net_message, from, to, flags, pendingFrameExtraflags);
 }
 
@@ -1529,7 +1602,12 @@ export function readFog(): SvcFogDataT {
   if (bits & SvcFogDataBitsT.BIT_R) fog.red = MSG_ReadByte(net_message);
   if (bits & SvcFogDataBitsT.BIT_G) fog.green = MSG_ReadByte(net_message);
   if (bits & SvcFogDataBitsT.BIT_B) fog.blue = MSG_ReadByte(net_message);
-  if (bits & SvcFogDataBitsT.BIT_TIME) fog.time = MSG_ReadShort(net_message);
+  // Unsigned (q2proto_proto_q2repro.c:845's `READ_CHECKED(...,
+  // fog->global.time, u16)`) -- a transition-duration magnitude in
+  // milliseconds, same class of bug as pm_time/gunframe above: a signed read
+  // would go negative for any transition >= 32768ms (~32.7s), corrupting the
+  // fade timer.
+  if (bits & SvcFogDataBitsT.BIT_TIME) fog.time = MSG_ReadWord(net_message);
 
   if (bits & SvcFogDataBitsT.BIT_HEIGHTFOG_FALLOFF) fog.hf_falloff = MSG_ReadFloat(net_message);
   if (bits & SvcFogDataBitsT.BIT_HEIGHTFOG_DENSITY) fog.hf_density = MSG_ReadFloat(net_message);
