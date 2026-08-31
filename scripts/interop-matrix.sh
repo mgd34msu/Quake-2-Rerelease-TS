@@ -638,6 +638,74 @@ cell_h() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Cell (i)/(j): SINGLE-PROCESS LISTEN SERVER -- headless local-client boot
+# ---------------------------------------------------------------------------
+# `+set dedicated 0` under SDL_VIDEODRIVER=dummy is the campaign path: ONE
+# process runs the server and the integrated local client together, unlike
+# cells f/g's two separate processes. Regression coverage for the listen-
+# server headless hang (found live: the local client connected and then
+# never completed ClientBegin, 60s+ idle in precache negotiation): root
+# cause was bindings/kex.ts's RunFrame binding always forwarding
+# mainLoop=true, so SV_SpawnServer's two post-spawn settle frames
+# (ge.RunFrame(false)) hit the kex game's no-player early-out and never
+# actually settled state the client's connect/precache negotiation depended
+# on -- fixed by threading the mainLoop flag through (see git log "server:
+# thread RunFrame's mainLoop flag (settle frames were no-ops)"). This cell
+# polls for the bounded-time spawn instead of waiting out a full timeout so
+# a regression fails fast rather than after $bound_s seconds.
+run_listen_cell() {
+  local label="$1" real_base="$2" gamedir="$3" gameargs="$4" mapname="$5" bound_s="$6"
+  local log="$LOGDIR/$label-listen.log"
+  rm -f "$log"
+  cleanup_selfplay
+
+  if [ ! -d "$real_base/$gamedir" ]; then
+    note_skip "cell $label: game data not present at $real_base/$gamedir"
+    return
+  fi
+  if ! build_our_binary; then
+    note_fail "cell $label: could not compile our engine (see $LOGDIR/build.log)"
+    return
+  fi
+
+  local base
+  base="$(make_play_basedir "$real_base" "$gamedir" "$SELFPLAY_CFG")"
+
+  ( SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy timeout $((bound_s + 15)) "$OUR_BIN" \
+      +set dedicated 0 +set basedir "$base" $gameargs +set deathmatch 1 +set developer 1 \
+      +set s_initsound 0 +map "$mapname" > "$log" 2>&1 & )
+
+  local waited=0
+  while [ "$waited" -lt "$bound_s" ]; do
+    if grep -aq "entered the game" "$log" 2>/dev/null; then
+      note_pass "cell $label: single-process listen server -- local client reached ClientBegin + spawn in ${waited}s (bound ${bound_s}s) -- see $log"
+      cleanup_selfplay
+      return
+    fi
+    if grep -aq "unknown command char\|badread\|Failed command checksum" "$log" 2>/dev/null; then
+      note_fail "cell $label: local client desynchronized -- see $log"
+      cleanup_selfplay
+      return
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  note_fail "cell $label: local client never reached ClientBegin within ${bound_s}s (listen-server headless hang regression) -- see $log"
+  cleanup_selfplay
+}
+
+cell_i() {
+  echo "--- cell (i): single-process listen server, kex family (protocol 1038) ---"
+  run_listen_cell i "${Q2RETS_BASEDIR:-$HOME/q2rets/rerelease}" baseq2 "+set game kex" base1 20
+}
+
+cell_j() {
+  echo "--- cell (j): single-process listen server, legacy family (protocol 34) ---"
+  run_listen_cell j "$Q2TS_BASEDIR" baseq2 "" q2dm1 20
+}
+
 echo "=== phase-8 q2repro interop matrix ==="
 echo "Q2REPRO_BUILD=$Q2REPRO_BUILD"
 echo "Q2TS_BASEDIR=$Q2TS_BASEDIR"
@@ -661,6 +729,8 @@ else
   cell_f
   cell_g
   cell_h
+  cell_i
+  cell_j
 fi
 
 echo
