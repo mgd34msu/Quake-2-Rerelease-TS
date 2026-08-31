@@ -426,7 +426,7 @@ export function CL_PrepRefresh(): void {
 CalcFov
 ====================
 */
-function CalcFov(fov_x: number, width: number, height: number): number {
+export function CalcFov(fov_x: number, width: number, height: number): number {
   if (fov_x < 1 || fov_x > 179) Com_Error(ERR_DROP, "Bad fov: %f", fov_x);
 
   const x = width / Math.tan((fov_x / 360) * Math.PI);

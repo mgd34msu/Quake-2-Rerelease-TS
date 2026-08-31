@@ -11,9 +11,12 @@
 // this unit's test brief -- every real C caller of M_PushMenu/M_PopMenu is
 // itself inside menu.c, so this only widens the module's export list, it
 // does not change behavior. Same rationale, 2026-08-30: M_Menu_Game_f,
-// M_Menu_Content_f, and BeginContentFunc (the new Content & Rules screen,
-// see its own section below and menu_content.ts's header) are additionally
-// exported so menu_content.test.ts can drive the real screen end to end
+// M_Menu_Content_f, and BeginContentFunc (the new "New Game" content/
+// ruleset selector -- exported symbol names kept as "Content" internally
+// to avoid churning this file's private singletons and menu_content.test.ts
+// alongside a display-only rename; see its own section below and
+// menu_content.ts's header) are additionally exported so menu_content.test.ts
+// can drive the real screen end to end
 // (push -> default widget state -> "begin" callback -> resulting cvars)
 // without needing to reach into this file's private MenuframeworkS
 // singletons.
@@ -115,8 +118,12 @@ import {
   DF_NO_NUKES,
   DF_NO_STACK_DOUBLE,
   DF_NO_SPHERES,
+  RF_FULLBRIGHT,
+  RDF_NOWORLDMODEL,
 } from "../shared/q_shared";
-import { COM_Parse, type ComParseState } from "../shared/math";
+import { COM_Parse, type ComParseState, VectorCopy } from "../shared/math";
+import { CalcFov } from "./cl_view";
+import { RefdefT, EntityT } from "./ref";
 import { FS_Gamedir, FS_LoadFile, FS_FreeFile, FS_ListFiles, FS_ListPakFiles, FS_NextPath, FS_ReadRawFile, Developer_searchpath } from "../qcommon/files";
 import {
   MenuframeworkS,
@@ -136,7 +143,7 @@ import {
   QMF_NUMBERSONLY,
   type MenuItemU,
 } from "./qmenu";
-import { Field_Key, isField, Menu_AddItem, Menu_AdjustCursor, Menu_Center, Menu_Draw, Menu_ItemAtCursor, Menu_SelectItem, Menu_SetStatusBar, Menu_SlideItem } from "./qmenu_impl";
+import { Field_Key, isField, Menu_AddItem, Menu_AdjustCursor, Menu_Center, Menu_Draw, Menu_DrawString, Menu_ItemAtCursor, Menu_SelectItem, Menu_SetStatusBar, Menu_SlideItem } from "./qmenu_impl";
 import { fixedLength } from "../shared/fixed";
 import { MapDB_Init, type MapdbUnitEntry } from "../qcommon/mapdb";
 import {
@@ -1444,42 +1451,11 @@ GAME MENU
 =============================================================================
 */
 const s_game_menu = new MenuframeworkS();
-const s_easy_game_action = new MenuactionS();
-const s_medium_game_action = new MenuactionS();
-const s_hard_game_action = new MenuactionS();
+const s_new_game_action = new MenuactionS();
 const s_load_game_action = new MenuactionS();
 const s_save_game_action = new MenuactionS();
-const s_content_menu_action = new MenuactionS();
 const s_credits_action = new MenuactionS();
 const s_blankline = new MenuseparatorS();
-
-function StartGame(): void {
-  // disable updates and start the cinematic going
-  cl.servercount = -1;
-  M_ForceMenuOff();
-  Cvar_SetValue("deathmatch", 0);
-  Cvar_SetValue("coop", 0);
-
-  Cvar_SetValue("gamerules", 0);
-
-  Cbuf_AddText("loading ; killserver ; wait ; newgame\n");
-  cls.key_dest = KeydestT.key_game;
-}
-
-function EasyGameFunc(): void {
-  Cvar_ForceSet("skill", "0");
-  StartGame();
-}
-
-function MediumGameFunc(): void {
-  Cvar_ForceSet("skill", "1");
-  StartGame();
-}
-
-function HardGameFunc(): void {
-  Cvar_ForceSet("skill", "2");
-  StartGame();
-}
 
 function LoadGameFunc(): void {
   M_Menu_LoadGame_f();
@@ -1493,7 +1469,7 @@ function CreditsFunc(): void {
   M_Menu_Credits_f();
 }
 
-function ContentMenuFunc(): void {
+function NewGameMenuFunc(): void {
   M_Menu_Content_f();
 }
 
@@ -1501,72 +1477,55 @@ function Game_MenuInit(): void {
   s_game_menu.x = viddef.width * 0.5;
   s_game_menu.nitems = 0;
 
-  s_easy_game_action.generic.type = MTYPE_ACTION;
-  s_easy_game_action.generic.flags = QMF_LEFT_JUSTIFY;
-  s_easy_game_action.generic.x = 0;
-  s_easy_game_action.generic.y = 0;
-  s_easy_game_action.generic.name = "easy";
-  s_easy_game_action.generic.callback = EasyGameFunc;
-
-  s_medium_game_action.generic.type = MTYPE_ACTION;
-  s_medium_game_action.generic.flags = QMF_LEFT_JUSTIFY;
-  s_medium_game_action.generic.x = 0;
-  s_medium_game_action.generic.y = 10;
-  s_medium_game_action.generic.name = "medium";
-  s_medium_game_action.generic.callback = MediumGameFunc;
-
-  s_hard_game_action.generic.type = MTYPE_ACTION;
-  s_hard_game_action.generic.flags = QMF_LEFT_JUSTIFY;
-  s_hard_game_action.generic.x = 0;
-  s_hard_game_action.generic.y = 20;
-  s_hard_game_action.generic.name = "hard";
-  s_hard_game_action.generic.callback = HardGameFunc;
+  // DEVIATION from menu.c's Game_MenuInit, owner ruling (2026-08-30 task
+  // brief -- "make it the DEFAULT New Game flow"): vanilla's three
+  // top-level "easy"/"medium"/"hard" actions (StartGame(): force `skill`
+  // then Cbuf "loading ; killserver ; wait ; newgame", hardcoded to
+  // whichever classic gamedir happens to be loaded) are replaced by one
+  // "new game" entry that opens the content/ruleset/skill selector below
+  // (menu_content.ts's model, formerly labeled "Content & Rules" on this
+  // row -- owner asked for that name gone) FIRST. That screen's own skill
+  // spincontrol + "begin" action (BeginContentFunc) is the classic
+  // difficulty/start step's replacement, now reached after picking WHAT
+  // to play instead of before. This is the one, default entry point for
+  // starting a game from here on both basedirs -- there is no separate
+  // rerelease menu tree in this port, so no second wiring site exists.
+  s_new_game_action.generic.type = MTYPE_ACTION;
+  s_new_game_action.generic.flags = QMF_LEFT_JUSTIFY;
+  s_new_game_action.generic.x = 0;
+  s_new_game_action.generic.y = 0;
+  s_new_game_action.generic.name = "new game";
+  s_new_game_action.generic.callback = NewGameMenuFunc;
 
   s_blankline.generic.type = MTYPE_SEPARATOR;
 
   s_load_game_action.generic.type = MTYPE_ACTION;
   s_load_game_action.generic.flags = QMF_LEFT_JUSTIFY;
   s_load_game_action.generic.x = 0;
-  s_load_game_action.generic.y = 40;
+  s_load_game_action.generic.y = 20;
   s_load_game_action.generic.name = "load game";
   s_load_game_action.generic.callback = LoadGameFunc;
 
   s_save_game_action.generic.type = MTYPE_ACTION;
   s_save_game_action.generic.flags = QMF_LEFT_JUSTIFY;
   s_save_game_action.generic.x = 0;
-  s_save_game_action.generic.y = 50;
+  s_save_game_action.generic.y = 30;
   s_save_game_action.generic.name = "save game";
   s_save_game_action.generic.callback = SaveGameFunc;
 
   s_credits_action.generic.type = MTYPE_ACTION;
   s_credits_action.generic.flags = QMF_LEFT_JUSTIFY;
   s_credits_action.generic.x = 0;
-  s_credits_action.generic.y = 60;
+  s_credits_action.generic.y = 50;
   s_credits_action.generic.name = "credits";
   s_credits_action.generic.callback = CreditsFunc;
 
-  // NEW (Mike's v1.0.0 requirement, 2026-08-30): "content & rules" is the
-  // menu's answer to "the menu is the content selector" -- see
-  // menu_content.ts's header. Appended after the existing rows rather
-  // than interleaved so every original item keeps its exact x/y (nothing
-  // above this line changed).
-  s_content_menu_action.generic.type = MTYPE_ACTION;
-  s_content_menu_action.generic.flags = QMF_LEFT_JUSTIFY;
-  s_content_menu_action.generic.x = 0;
-  s_content_menu_action.generic.y = 80;
-  s_content_menu_action.generic.name = "content & rules";
-  s_content_menu_action.generic.callback = ContentMenuFunc;
-
-  Menu_AddItem(s_game_menu, s_easy_game_action);
-  Menu_AddItem(s_game_menu, s_medium_game_action);
-  Menu_AddItem(s_game_menu, s_hard_game_action);
+  Menu_AddItem(s_game_menu, s_new_game_action);
   Menu_AddItem(s_game_menu, s_blankline);
   Menu_AddItem(s_game_menu, s_load_game_action);
   Menu_AddItem(s_game_menu, s_save_game_action);
   Menu_AddItem(s_game_menu, s_blankline);
   Menu_AddItem(s_game_menu, s_credits_action);
-  Menu_AddItem(s_game_menu, s_blankline);
-  Menu_AddItem(s_game_menu, s_content_menu_action);
 
   Menu_Center(s_game_menu);
 }
@@ -1588,7 +1547,11 @@ export function M_Menu_Game_f(): void {
 
 /*
 =============================================================================
-CONTENT & RULES MENU
+NEW GAME MENU (formerly titled "Content & Rules" -- renamed per owner
+ruling, 2026-08-30 audit: exported symbols/identifiers below keep their
+original "Content" names to avoid an unrelated rename sweep across this
+file and menu_content.test.ts; only the on-screen banner and this section's
+own title changed)
 
 Mike's design (2026-08-30 task brief), not a port -- see menu_content.ts's
 header for the full mapping table and rationale. This screen is this
@@ -1600,7 +1563,11 @@ unit browser, when mapdb.json is loaded and the content has campaign
 units) and skill (when the content needs one), then "begin" -- same
 widget shapes and the same cvar-then-Cbuf launch idiom as
 StartServer_MenuInit/StartServer_ActionFunc above, reusing
-menu_content.ts's PerformLaunch for the actual sequencing.
+menu_content.ts's PerformLaunch for the actual sequencing. It is now the
+DEFAULT way to start a game at all: the Game menu's "new game" row (see
+Game_MenuInit above) opens this screen first instead of vanilla's bare
+easy/medium/hard trio; this screen's own skill spincontrol + "begin"
+action is where that classic difficulty/start step now lives.
 =============================================================================
 */
 const s_content_menu = new MenuframeworkS();
@@ -1634,7 +1601,21 @@ function RebuildRulesets(): void {
   s_content_ruleset_list.itemnames = content_rulesets.map((id) => RULESETS.find((r) => r.id === id)?.name ?? id);
   if (s_content_ruleset_list.curvalue >= content_rulesets.length) s_content_ruleset_list.curvalue = 0;
 
-  s_content_skill_list.generic.flags = def.needsSkillSelect ? QMF_LEFT_JUSTIFY : QMF_LEFT_JUSTIFY | QMF_GRAYED;
+  // FIX (2026-08-30 audit): this used to OR in QMF_LEFT_JUSTIFY on both
+  // branches. QMF_LEFT_JUSTIFY has no rendering effect on a MTYPE_SPINCONTROL
+  // (SpinControl_Draw never reads generic.flags -- only Action_Draw does),
+  // but qmenu_impl.ts's Menu_Draw cursor-draw branch DOES read it for every
+  // widget type: `menu.x + item.x - 24 + cursor_offset` when set, vs. plain
+  // `menu.x + cursor_offset` when not. Since every sibling spincontrol here
+  // (content/ruleset/start) and the begin action (x=24, so its -24 cancels)
+  // all resolve to cursor x == menu.x, setting LEFT_JUSTIFY only on this one
+  // row shifted its blinking cursor 24px left of every other row's cursor
+  // whenever the player tabbed onto "skill". QMF_GRAYED alone is also a
+  // no-op on a spincontrol's own draw (same as vanilla: qmenu.c's
+  // SpinControl_Draw ignores QMF_GRAYED too, it's an MTYPE_ACTION-only
+  // flag) -- kept anyway as a harmless, honest "this row doesn't apply"
+  // marker, matching the pre-existing intent without the side effect.
+  s_content_skill_list.generic.flags = def.needsSkillSelect ? 0 : QMF_GRAYED;
 
   RebuildStartPoints();
 }
@@ -1730,6 +1711,20 @@ function Content_MenuInit(): void {
 
 function Content_MenuDraw(): void {
   M_Banner("m_banner_game");
+
+  // Owner ruling (2026-08-30 audit): retitle "Content & Rules" -> "New
+  // Game". Neither classic nor rerelease data ships a dedicated banner pic
+  // for this screen (it isn't a real menu.c menu, so no such asset was
+  // ever authored) -- "m_banner_game" above stays as the closest real
+  // asset, already shared with the parent Game menu, and this drawn text
+  // line is the actual visible retitle, same "no banner pic, draw the
+  // label instead" idiom M_Credits_MenuDraw already uses for its own
+  // fully custom screen.
+  if (re) {
+    const title = "New Game";
+    Menu_DrawString(viddef.width / 2 - (title.length * 8) / 2, viddef.height / 2 - 80, title);
+  }
+
   Menu_AdjustCursor(s_content_menu, 1);
   Menu_Draw(s_content_menu);
 }
@@ -2702,17 +2697,21 @@ function M_Menu_AddressBook_f(): void {
 PLAYER CONFIG MENU
 =============================================================================
 */
-const s_player_config_menu = new MenuframeworkS();
-const s_player_name_field = new MenufieldS();
-const s_player_model_box = new MenulistS();
-const s_player_skin_box = new MenulistS();
-const s_player_handedness_box = new MenulistS();
-const s_player_rate_box = new MenulistS();
-const s_player_skin_title = new MenuseparatorS();
-const s_player_model_title = new MenuseparatorS();
-const s_player_hand_title = new MenuseparatorS();
-const s_player_rate_title = new MenuseparatorS();
-const s_player_download_action = new MenuactionS();
+// Exported per this file's own vid_menu.ts-precedent (widget singletons
+// exported directly for layout-coordinate assertions -- see
+// test/vid_menu.test.ts) for menu_playerconfig.test.ts's 2026-08-30 audit
+// coverage.
+export const s_player_config_menu = new MenuframeworkS();
+export const s_player_name_field = new MenufieldS();
+export const s_player_model_box = new MenulistS();
+export const s_player_skin_box = new MenulistS();
+export const s_player_handedness_box = new MenulistS();
+export const s_player_rate_box = new MenulistS();
+export const s_player_skin_title = new MenuseparatorS();
+export const s_player_model_title = new MenuseparatorS();
+export const s_player_hand_title = new MenuseparatorS();
+export const s_player_rate_title = new MenuseparatorS();
+export const s_player_download_action = new MenuactionS();
 
 const MAX_DISPLAYNAME = 16;
 
@@ -2725,6 +2724,10 @@ interface PlayermodelinfoS {
 
 let s_pmi: PlayermodelinfoS[] = [];
 let s_numplayermodels = 0;
+
+// PlayerConfig_MenuDraw's `static int yaw` -- persists across draws so the
+// preview model keeps rotating one degree per frame.
+let s_playerconfig_yaw = 0;
 
 const rate_tbl = fixedLength("rate_tbl", 5, [2500, 3200, 5000, 10000, 25000]);
 const rate_names = fixedLength("rate_names", 6, [
@@ -3000,29 +3003,73 @@ function PlayerConfig_MenuInit(): boolean {
 }
 
 function PlayerConfig_MenuDraw(): void {
-  // The 3D player preview (CalcFov/re.RegisterModel/re.RenderFrame) is
-  // entirely behind the re-null guard, like every other drawing entry point
-  // here -- so cl_view.ts's not-yet-ported CalcFov is never actually needed
-  // headless.
+  // Every drawing entry point in this file early-returns on `!re`, matching
+  // cl_tent.ts's precedent -- ref_gl/ref_soft aren't linked into headless
+  // test runs. When a real renderer IS registered (bun src/main.ts, via
+  // vid.ts's VID_LoadRefresh -> setRe), the 3D preview below runs for real:
+  // this used to stop at RegisterModel/RegisterSkin and never build a
+  // refdef or call RenderFrame, so the preview box drew its frame with no
+  // model inside on every real run, headless or not.
   if (!re) return;
 
   const pmi = s_pmi[s_player_model_box.curvalue];
-  if (!pmi || pmi.skindisplaynames.length === 0) {
+  if (!pmi) {
     Menu_Draw(s_player_config_menu);
     return;
   }
 
+  const refdef = new RefdefT();
+  refdef.x = viddef.width / 2;
+  refdef.y = viddef.height / 2 - 72;
+  refdef.width = 144;
+  refdef.height = 168;
+  refdef.fov_x = 40;
+  refdef.fov_y = CalcFov(refdef.fov_x, refdef.width, refdef.height);
+  refdef.time = cls.realtime * 0.001;
+
+  // menu.c's PlayerConfig_MenuDraw wraps the entity/Menu_Draw/RenderFrame
+  // block in `if (s_pmi[curvalue].skindisplaynames)`: once MenuKey's ESC
+  // handling has cleared every pmi's skindisplaynames (see
+  // PlayerConfig_MenuKey below), the menu is on its way off the stack and
+  // vanilla draws nothing at all for this frame. Matched here rather than
+  // falling back to a bare Menu_Draw.
+  if (pmi.skindisplaynames.length === 0) return;
+
   const skin = pmi.skindisplaynames[s_player_skin_box.curvalue] ?? "";
-  re.RegisterModel(`players/${pmi.directory}/tris.md2`);
-  re.RegisterSkin(`players/${pmi.directory}/${skin}.pcx`);
+
+  const entity = new EntityT();
+  entity.model = re.RegisterModel(`players/${pmi.directory}/tris.md2`);
+  entity.skin = re.RegisterSkin(`players/${pmi.directory}/${skin}.pcx`);
+  entity.flags = RF_FULLBRIGHT;
+  entity.origin[0] = 80;
+  entity.origin[1] = 0;
+  entity.origin[2] = 0;
+  VectorCopy(entity.origin, entity.oldorigin);
+  entity.frame = 0;
+  entity.oldframe = 0;
+  entity.backlerp = 0.0;
+  // `entity.angles[1] = yaw++; if (++yaw > 360) yaw -= 360;` in the C: the
+  // post-increment feeding the assignment and the pre-increment in the
+  // guard both fire every frame, so yaw actually advances by 2 per draw.
+  // Reproduced exactly rather than "fixed" to 1/frame.
+  entity.angles[1] = s_playerconfig_yaw;
+  s_playerconfig_yaw += 2;
+  if (s_playerconfig_yaw > 360) s_playerconfig_yaw -= 360;
+
+  refdef.areabits = null;
+  refdef.num_entities = 1;
+  refdef.entities = [entity];
+  refdef.lightstyles = [];
+  refdef.rdflags = RDF_NOWORLDMODEL;
 
   Menu_Draw(s_player_config_menu);
 
-  const width = 144;
-  const height = 168;
-  M_DrawTextBox((viddef.width / 2) * (320.0 / viddef.width) - 8, (viddef.height / 2) * (240.0 / viddef.height) - 77, width / 8, height / 8);
+  M_DrawTextBox(refdef.x * (320.0 / viddef.width) - 8, (viddef.height / 2) * (240.0 / viddef.height) - 77, refdef.width / 8, refdef.height / 8);
+  refdef.height += 4;
 
-  re.DrawPic(s_player_config_menu.x - 40, viddef.height / 2 - 72, `/players/${pmi.directory}/${skin}_i.pcx`);
+  re.RenderFrame(refdef);
+
+  re.DrawPic(s_player_config_menu.x - 40, refdef.y, `/players/${pmi.directory}/${skin}_i.pcx`);
 }
 
 function PlayerConfig_MenuKey(key: number): string | null {
@@ -3040,7 +3087,11 @@ function PlayerConfig_MenuKey(key: number): string | null {
   return Default_MenuKey(s_player_config_menu, key);
 }
 
-function M_Menu_PlayerConfig_f(): void {
+// Exported per this file's header precedent (widen the export surface for
+// tests that need to drive a real screen end to end, rather than reach
+// into its private MenuframeworkS/widget singletons): 2026-08-30 audit
+// adds menu_playerconfig.test.ts's model-preview render-call coverage.
+export function M_Menu_PlayerConfig_f(): void {
   if (!PlayerConfig_MenuInit()) {
     Menu_SetStatusBar(s_multiplayer_menu, "No valid player models found");
     return;
