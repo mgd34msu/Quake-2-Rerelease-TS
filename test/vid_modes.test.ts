@@ -36,10 +36,23 @@ are untestable here). See this unit's report for the two manual checks
 implies for Mike's RC checklist.
 */
 
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, afterEach } from "bun:test";
 import { Cvar_Set, Cvar_SetValue } from "../src/qcommon/cvar";
 import { VID_GetModeInfo, VID_GetScale, VID_ClampCustomWidth, VID_ClampCustomHeight, VID_ClampScale, VID_CalcRenderSize, VID_CalcScaledRect } from "../src/platform/vid";
 import { CUSTOM_WIDTH_MIN, CUSTOM_WIDTH_MAX, CUSTOM_HEIGHT_MIN, CUSTOM_HEIGHT_MAX, CUSTOM_WIDTH_DEFAULT, CUSTOM_HEIGHT_DEFAULT, VID_SCALE_MIN, VID_SCALE_MAX } from "../src/platform/vid_scale";
+
+// The cvar system is a process-wide singleton shared with every other test
+// file in the run (rule 13): restore the three cvars this suite mutates so
+// files that consume them through VID_GetScale/VID_GetModeInfo (e.g.
+// test/glimp.test.ts's GLimp_SetMode cases) see the defaults they assume.
+// Found the hard way (in the Quake-2-TS backport of this same file): the
+// last vid_scale write here leaked into glimp.test.ts's render-size
+// expectations whenever bun ordered this file first.
+afterEach(() => {
+  Cvar_SetValue("vid_scale", 1);
+  Cvar_SetValue("r_customwidth", CUSTOM_WIDTH_DEFAULT);
+  Cvar_SetValue("r_customheight", CUSTOM_HEIGHT_DEFAULT);
+});
 
 describe("src/platform/vid.ts -- mode table integrity", () => {
   test("every table mode (0-19) resolves to a positive, finite width/height", () => {
