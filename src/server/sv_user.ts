@@ -566,18 +566,29 @@ export function SV_ExecuteClientMessage(cl: ClientT): void {
       }
 
       case ClcOpsT.clc_move: {
-        if (moveIssued) return; // someone is trying to cheat...
+        // SV_OldClientExecuteMove (qsrc/q2repro/src/server/user.c:1072-1077)
+        // drops the offender instead of silently ignoring the second move:
+        // `SV_DropClient(sv_client, "multiple clc_move commands in packet")`.
+        // Brought in line with the reference here (RULE-17: the reference
+        // engine's observable behavior wins over id's original bare `return`).
+        // This port's SV_DropClient takes no reason string, so the reason is
+        // printed alongside it the way this file's other drop paths do.
+        if (moveIssued) {
+          Com_Printf("%s: multiple clc_move commands in packet\n", cl.name);
+          SV_DropClient(cl);
+          return; // someone is trying to cheat...
+        }
         moveIssued = true;
 
+        // id's leading sequence-checksum byte exists on the wire only for
+        // vanilla/34 -- see codec.ts's clcMoveHasChecksum doc comment for the
+        // three q2proto read paths and the live protocol-35 capture that
+        // caught this. checksumIndex is only meaningful when the byte is
+        // actually present.
+        const hasChecksum = cl.codec.clcMoveHasChecksum === true;
         const checksumIndex = net_message.readcount;
-        const checksum = MSG_ReadByte(net_message);
+        const checksum = hasChecksum ? MSG_ReadByte(net_message) : 0;
         const lastframe = MSG_ReadLong(net_message);
-        if (lastframe !== cl.lastframe) {
-          cl.lastframe = lastframe;
-          if (cl.lastframe > 0) {
-            cl.frame_latency[cl.lastframe & (LATENCY_COUNTS - 1)] = svs.realtime - cl.frames[cl.lastframe & UPDATE_MASK].senttime;
-          }
-        }
 
         const nullcmd = new UsercmdT();
         const oldest = new UsercmdT();
@@ -587,23 +598,61 @@ export function SV_ExecuteClientMessage(cl: ClientT): void {
         cl.codec.readDeltaUsercmd(net_message, oldest, oldcmd);
         cl.codec.readDeltaUsercmd(net_message, oldcmd, newcmd);
 
+        // SV_OldClientExecuteMove checks the spawned state FIRST and forces
+        // lastframe to -1 without ever touching the real one (user.c:
+        // 1082-1087, then SV_SetLastFrame(move->lastframe) at 1087 only on
+        // the spawned path). id's original updated cl->lastframe/frame_latency
+        // before this check; brought in line with the reference here, so the
+        // ordering now matches the sibling batched-move case below.
         if (cl.state !== ClientStateT.cs_spawned) {
           cl.lastframe = -1;
           break;
         }
 
-        // if the checksum fails, ignore the rest of the packet
-        const calculatedChecksum = COM_BlockSequenceCRCByte(
-          net_message.data.subarray(checksumIndex + 1),
-          net_message.readcount - checksumIndex - 1,
-          cl.netchan.incoming_sequence,
-        );
-
-        if (calculatedChecksum !== checksum) {
-          Com_DPrintf("Failed command checksum for %s (%d != %d)/%d\n", cl.name, calculatedChecksum, checksum, cl.netchan.incoming_sequence);
-          return;
+        if (lastframe !== cl.lastframe) {
+          cl.lastframe = lastframe;
+          if (cl.lastframe > 0) {
+            cl.frame_latency[cl.lastframe & (LATENCY_COUNTS - 1)] = svs.realtime - cl.frames[cl.lastframe & UPDATE_MASK].senttime;
+          }
         }
 
+        // if the checksum fails, ignore the rest of the packet
+        if (hasChecksum) {
+          const calculatedChecksum = COM_BlockSequenceCRCByte(
+            net_message.data.subarray(checksumIndex + 1),
+            net_message.readcount - checksumIndex - 1,
+            cl.netchan.incoming_sequence,
+          );
+
+          if (calculatedChecksum !== checksum) {
+            Com_DPrintf("Failed command checksum for %s (%d != %d)/%d\n", cl.name, calculatedChecksum, checksum, cl.netchan.incoming_sequence);
+            return;
+          }
+        }
+
+        // developer-gated diagnostic, the non-batch twin of the
+        // SV_NewClientExecuteMove line in the batched case below -- the
+        // interop matrix's cell (c) counts these to prove protocol 34/35
+        // movement is being decoded and applied continuously across a live
+        // session rather than once at spawn.
+        Com_DPrintf("SV_OldClientExecuteMove: %s lastframe=%d msec=%d fwd=%d side=%d\n", cl.name, lastframe, newcmd.msec, newcmd.forwardmove, newcmd.sidemove);
+
+        // sv_paused gate: KEPT, and mirrored onto the batched-move case
+        // below. Real q2repro has no per-move pause gate, but that is because
+        // its pause lives one level up in the frame loop and is far broader
+        // than this port's: src/server/main.c:1883's `if (svs.initialized &&
+        // !check_paused())` skips SV_CheckTimeouts, SV_CalcPings,
+        // SV_GiveMsec, SV_RunGameFrame, SV_SendClientMessages and
+        // SV_MasterHeartbeat wholesale, and check_paused itself (main.c:
+        // 1669-1703) can only ever return true on a NON-dedicated build with
+        // cl_paused set, no timedemo running, exactly one client
+        // (LIST_SINGLE(&sv_clientlist)) and no MVD/GTV viewers. This port has
+        // no check_paused: sv_main.ts's SV_Frame runs SV_ReadPackets,
+        // SV_GiveMsec and SV_SendClientMessages unconditionally and only
+        // SV_RunGameFrame carries id's narrower `!sv_paused || maxclients > 1`
+        // gate. Dropping the gate here would therefore NOT reproduce
+        // q2repro's behavior -- it would let a paused listen server's player
+        // pmove around a frozen world, which neither engine does. See report.
         const paused = sv_paused ? sv_paused.value !== 0 : false;
         if (!paused) {
           let net_drop = cl.netchan.dropped;
@@ -630,13 +679,13 @@ export function SV_ExecuteClientMessage(cl: ClientT): void {
       // servers share verbatim.
       case ClcOpsT.clc_q2pro_move_nodelta:
       case ClcOpsT.clc_q2pro_move_batched: {
-        // Matches this port's existing clc_move convention above (silent
-        // return, not a drop) rather than real q2repro's own
-        // `SV_DropClient(sv_client, "multiple clc_move commands in packet")`
-        // -- a pre-existing divergence in this port's non-batch clc_move
-        // case this unit did not expand scope to fix (protocol 34 dispatch
-        // is out of this unit's scope; see task report).
-        if (moveIssued) break;
+        // SV_NewClientExecuteMove (user.c:1126-1131), same drop as the
+        // non-batch sibling above now performs.
+        if (moveIssued) {
+          Com_Printf("%s: multiple clc_move commands in packet\n", cl.name);
+          SV_DropClient(cl);
+          return; // someone is trying to cheat...
+        }
         moveIssued = true;
 
         const readBatchMove = cl.codec.readBatchMove;
@@ -684,26 +733,37 @@ export function SV_ExecuteClientMessage(cl: ClientT): void {
         // underflow" line above) -- phase-8 interop evidence that batched
         // move packets are being decoded and applied CONTINUOUSLY across a
         // live session, not just once on the first packet.
-        Com_DPrintf("SV_NewClientExecuteMove: %s numDups=%d newFrameCmds=%d lastframe=%d\n", cl.name, batch.numDups, batch.frames[batch.numDups].cmds.length, batch.lastframe);
+        Com_DPrintf(
+          "SV_NewClientExecuteMove: %s numDups=%d newFrameCmds=%d lastframe=%d fwd=%d side=%d\n",
+          cl.name,
+          batch.numDups,
+          batch.frames[batch.numDups].cmds.length,
+          batch.lastframe,
+          lastcmd.forwardmove,
+          lastcmd.sidemove,
+        );
 
-        // No sv_paused gate here: real q2repro's SV_NewClientExecuteMove has
-        // none (verified by reading the full function body) -- unlike this
-        // port's pre-existing non-batch clc_move case, which does check
-        // sv_paused. Pause handling apparently lives elsewhere in real
-        // q2repro's architecture; not investigated further (out of scope).
-        let net_drop = cl.netchan.dropped;
-        if (net_drop < 20) {
-          while (net_drop > batch.numDups) {
-            SV_ClientThink(cl, cl.lastcmd);
-            net_drop--;
+        // sv_paused gate, matching the non-batch sibling above. Real
+        // q2repro's SV_NewClientExecuteMove has no such gate because its
+        // pause is a whole-frame skip in SV_Frame (main.c:1883's
+        // check_paused) that this port does not have -- the full reasoning
+        // and citations live on the clc_move case above.
+        const paused = sv_paused ? sv_paused.value !== 0 : false;
+        if (!paused) {
+          let net_drop = cl.netchan.dropped;
+          if (net_drop < 20) {
+            while (net_drop > batch.numDups) {
+              SV_ClientThink(cl, cl.lastcmd);
+              net_drop--;
+            }
+            while (net_drop > 0) {
+              const backfillFrame = batch.frames[batch.numDups - net_drop];
+              for (const cmd of backfillFrame.cmds) SV_ClientThink(cl, cmd);
+              net_drop--;
+            }
           }
-          while (net_drop > 0) {
-            const backfillFrame = batch.frames[batch.numDups - net_drop];
-            for (const cmd of backfillFrame.cmds) SV_ClientThink(cl, cmd);
-            net_drop--;
-          }
+          for (const cmd of batch.frames[batch.numDups].cmds) SV_ClientThink(cl, cmd);
         }
-        for (const cmd of batch.frames[batch.numDups].cmds) SV_ClientThink(cl, cmd);
 
         cl.lastcmd = lastcmd;
         break;

@@ -290,10 +290,14 @@ describe("R1Q2_CODEC serverdata handshake", () => {
       }),
     );
     // opcode, protocol(i32=35 LE), servercount(i32=7 LE) -- skip to the tail:
-    // after levelname's NUL, tail is: enhanced(u8=1), version(u16 LE=1905),
+    // after levelname's NUL, tail is: enhanced(u8=0), version(u16 LE=1905),
     // placeholder(u8=0), strafejump_hack(u8=1).
+    //
+    // enhanced MUST be 0: a real q2repro client drops the connection on a
+    // nonzero value (src/client/parse.c:636-638) -- see writeServerData's own
+    // comment in r1q2.ts.
     const tail = bytes.slice(bytes.length - 5);
-    expect(tail[0]).toBe(1); // enhanced
+    expect(tail[0]).toBe(0); // enhanced
     expect(tail.slice(1, 3)).toEqual([1905 & 0xff, (1905 >> 8) & 0xff]);
     expect(tail[3]).toBe(0); // placeholder ("advanced deltas")
     expect(tail[4]).toBe(1); // strafejump_hack
@@ -339,5 +343,59 @@ describe("R1Q2 playerstate delta -- gun offset/angles independent of weaponframe
     R1Q2_CODEC.readPlayerStateDelta(net_message, from, out);
     expect(Array.from(out.gunoffset)).toEqual(Array.from(to.gunoffset).map((v) => Math.round(v * 4) * 0.25));
     expect(out.gunframe).toBe(from.gunframe); // untouched -- PS_WEAPONFRAME was never set
+  });
+});
+
+// =============================================================================
+// clc_r1q2_setting (opcode 5) -- r1q2_server_read_setting,
+// q2proto_proto_r1q2.c:1538-1542: two i16 shorts, index then value. The
+// protocol this opcode is named after had no decoder for it until the
+// protocol-35 spawn diagnosis got a real q2repro client far enough to send
+// one (its very first post-spawn packet; CL_UpdateGunSetting /
+// CL_UpdateRecordingSetting are gated on `cls.netchan.protocol <
+// PROTOCOL_VERSION_R1Q2` in q2repro's src/client/main.c:192 and :270, i.e.
+// they fire for 35 and up).
+// =============================================================================
+
+describe("R1Q2 clc_r1q2_setting", () => {
+  test("reads an i16 index and i16 value from a hand-derived byte vector", () => {
+    const readClientSetting = R1Q2_CODEC.readClientSetting;
+    expect(readClientSetting).toBeDefined();
+    if (!readClientSetting) return;
+
+    // index = 1 (CLS_NOGUN), value = 2 -- little-endian shorts, opcode byte
+    // already consumed by the caller (sv_user.ts's dispatch).
+    loadIntoNetMessage([0x01, 0x00, 0x02, 0x00]);
+    expect(readClientSetting(net_message)).toEqual({ index: 1, value: 2 });
+    expect(net_message.readcount).toBe(4);
+  });
+
+  test("sign-extends both fields as i16 (0xffff reads back as -1, not 65535)", () => {
+    const readClientSetting = R1Q2_CODEC.readClientSetting;
+    expect(readClientSetting).toBeDefined();
+    if (!readClientSetting) return;
+
+    loadIntoNetMessage([0xff, 0xff, 0x00, 0x80]);
+    expect(readClientSetting(net_message)).toEqual({ index: -1, value: -32768 });
+  });
+});
+
+// =============================================================================
+// clc_move shape: R1Q2 DROPPED id's leading sequence-checksum byte.
+// r1q2_server_read_move (q2proto_proto_r1q2.c:1528-1535) starts straight at
+// the i32 lastframe, unlike vanilla_server_read_move
+// (q2proto_proto_vanilla.c:1168-1176) which skips a checksum byte first.
+// Reading it anyway shifted every later field by one and desynchronized the
+// packet -- see codec.ts's clcMoveHasChecksum doc comment.
+// =============================================================================
+
+describe("R1Q2 clc_move has no sequence-checksum byte", () => {
+  test("R1Q2_CODEC does not set clcMoveHasChecksum", () => {
+    expect(R1Q2_CODEC.clcMoveHasChecksum).toBeUndefined();
+  });
+
+  test("createR1Q2Codec at any minor version agrees", () => {
+    expect(createR1Q2Codec(1903).clcMoveHasChecksum).toBeUndefined();
+    expect(createR1Q2Codec(1905).clcMoveHasChecksum).toBeUndefined();
   });
 });

@@ -120,7 +120,7 @@ import { net_message } from "../net_chan";
 import { EntityStateT, PlayerStateT, type UsercmdT, MAX_STATS, MAX_EDICTS, RF_BEAM } from "../../shared/q_shared";
 import { VectorCopy } from "../../shared/math";
 import { ComError, ERR_FATAL } from "../qcommon";
-import type { ProtocolCodec, ServerDataParamsT, ServerDataReadResultT, FrameWriteParamsT, FrameHeaderT } from "./codec";
+import type { ProtocolCodec, ServerDataParamsT, ServerDataReadResultT, FrameWriteParamsT, FrameHeaderT, ClcClientSettingT } from "./codec";
 
 // ---------------------------------------------------------------------------
 // server -> client writes
@@ -140,7 +140,17 @@ function writeServerData(msg: SizeBuf, params: ServerDataParamsT): void {
   MSG_WriteString(msg, params.gamedir);
   MSG_WriteShort(msg, params.clientnum);
   MSG_WriteString(msg, params.levelname);
-  MSG_WriteByte(msg, 1); // r1q2.enhanced -- this engine always reports the "enhanced" server variant
+  // r1q2.enhanced (q2proto_proto_r1q2.c:946). RULE-17 FIX (protocol-35 spawn
+  // diagnosis): this byte announces the R1Q2 "Enhanced" server variant and
+  // its proprietary protocol extensions, none of which this engine
+  // implements. A real q2repro client refuses such a server outright --
+  // src/client/parse.c:636-638, `if (serverdata->r1q2.enhanced)
+  // Com_Error(ERR_DROP, "'Enhanced' R1Q2 servers are not supported")` -- so
+  // reporting 1 here made every protocol-35 session die the instant our
+  // serverdata was parsed, with the same reasoning that already keeps
+  // r1q2StrafejumpHack advertised off (sv_user.ts's SV_New_f): the wire must
+  // describe what this server actually does.
+  MSG_WriteByte(msg, 0);
   MSG_WriteShort(msg, params.r1q2Version ?? PROTOCOL_VERSION_R1Q2_CURRENT);
   MSG_WriteByte(msg, 0); // "advanced deltas" -- hardcoded placeholder, q2proto_proto_r1q2.c:948
   MSG_WriteByte(msg, params.r1q2StrafejumpHack ? 1 : 0);
@@ -887,6 +897,31 @@ function readEntityBits(): { number: number; bits: number } {
   return { number, bits: total >>> 0 };
 }
 
+// r1q2_server_read_setting (q2proto_proto_r1q2.c:1538-1542): two i16 shorts,
+// index then value -- the same shape q2pro.ts and q2repro.ts already read,
+// and the opcode this protocol is NAMED after (clc_r1q2_setting, opcode 5).
+// A real q2repro client sends it under protocol 35 as soon as it enters the
+// game: CL_UpdateGunSetting and CL_UpdateRecordingSetting are both gated on
+// `cls.netchan.protocol < PROTOCOL_VERSION_R1Q2` (src/client/main.c:192,
+// 270), i.e. they fire for 35 and up. Confirmed live once the qport-width fix
+// let protocol 35 reach spawn at all: the first post-spawn packet was
+// opcode 5 and sv_user.ts dropped the client with "unknown command char".
+//
+// There is deliberately NO readBatchMove here. R1Q2 has no batched-move
+// opcode: r1q2_server_read (q2proto_proto_r1q2.c:1415-1450) dispatches
+// exactly clc_nop, clc_move, clc_userinfo, clc_stringcmd and
+// clc_r1q2_setting, and returns Q2P_ERR_BAD_COMMAND for anything else.
+// clc_q2pro_move_batched/move_nodelta first appear in q2pro_server_read
+// (protocol 36) and q2repro_server_read (1038). All protocol-35 movement
+// goes through the three-usercmd clc_move that makeUsercmdCodec's
+// readDeltaUsercmd above already decodes, including R1Q2's compressed
+// BUTTON_UCMD_DBL* form.
+function readClientSetting(msg: SizeBuf): ClcClientSettingT {
+  const index = MSG_ReadShort(msg);
+  const value = MSG_ReadShort(msg);
+  return { index, value };
+}
+
 // ---------------------------------------------------------------------------
 // factory + default instance
 // ---------------------------------------------------------------------------
@@ -917,6 +952,7 @@ export function createR1Q2Codec(minorVersion: number): ProtocolCodec {
     readFrameHeader,
     readFramePlayerstate,
     readPacketEntitiesBegin,
+    readClientSetting,
   };
 }
 
