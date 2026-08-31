@@ -298,6 +298,16 @@ R_Init
 ===============
 */
 export function R_Init(hInstance: unknown, wndProc: unknown): boolean {
+  // ORDER DEVIATION from vanilla r_main.c (which calls Draw_GetPalette
+  // later, after R_Register): the PNG->palette quantize path added for
+  // rerelease-data 2D pics (r_image.ts LoadPNGQuantized) runs inside
+  // Draw_InitLocal's conchars load and nearest-matches against
+  // d_8to24table -- with the table still all zeros, every glyph mapped to
+  // palette index 0 and console text drew solid black (found live on
+  // Mike's RC pass). Vanilla's order was safe only because PCX pixels ARE
+  // palette indices; the palette must now be loaded first. Draw_GetPalette
+  // is self-contained (colormap.pcx read) and idempotent.
+  Draw_GetPalette();
   R_InitImages();
   Mod_Init();
   Draw_InitLocal();
@@ -318,7 +328,8 @@ export function R_Init(hInstance: unknown, wndProc: unknown): boolean {
   SetAliasUvScale(1.0);
 
   R_Register();
-  Draw_GetPalette();
+  // Draw_GetPalette moved to the top of R_Init -- see the order-deviation
+  // comment there (vanilla called it here).
   SWimp_Init(hInstance, wndProc);
 
   // create the window

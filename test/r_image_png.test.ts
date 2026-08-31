@@ -245,3 +245,15 @@ describe("R_FindImage -- rerelease-pak PNG fallback on a PCX miss", () => {
     expect(image).toBeNull();
   });
 });
+
+describe("r_main.ts R_Init ordering -- palette before quantize", () => {
+  test("Draw_GetPalette precedes Draw_InitLocal in R_Init (quantized conchars nearest-match against d_8to24table; an empty table maps every glyph to black -- found live)", async () => {
+    const src = await Bun.file(new URL("../src/ref_soft/r_main.ts", import.meta.url)).text();
+    const body = src.slice(src.indexOf("export function R_Init"));
+    const palette = body.indexOf("Draw_GetPalette()");
+    const initLocal = body.indexOf("Draw_InitLocal()");
+    expect(palette).toBeGreaterThan(-1);
+    expect(initLocal).toBeGreaterThan(-1);
+    expect(palette).toBeLessThan(initLocal);
+  });
+});
