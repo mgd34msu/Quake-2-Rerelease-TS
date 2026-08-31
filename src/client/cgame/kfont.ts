@@ -77,6 +77,8 @@ export interface ParsedKfontT {
 // behavior here; that tokenizer is exactly what SCR_LoadKFont's own
 // COM_Parse calls need.
 import { COM_Parse, type ComParseState } from "../../shared/math";
+// See this file's Kfont_FromTTF doc comment below for the full seam writeup.
+import type { FontAtlasT } from "../../qcommon/ttf";
 
 function parseError(reason: string): null {
   // No engine Con_Printf reachable from this pure module (see file header --
@@ -155,4 +157,108 @@ export function SCR_KFontLookup(font: KfontT, codepoint: number): KfontCharT | n
   const ch = font.chars[index];
   if (!ch || !ch.w) return null;
   return ch;
+}
+
+// ---------------------------------------------------------------------------
+// Kfont_FromTTF -- TTF/OTF-backed kfont seam (OWNER RULING, 2026-08-31).
+//
+// The retail rerelease KPF ships 29 real font files under fonts/ (26 .ttf +
+// 3 .otf -- the KEX UI's actual font stack), separate from the single
+// pre-baked fonts/qconfont.kfont asset ParseKfont/SCR_KFontLookup above
+// already handle. qcommon/ttf.ts parses those files from raw bytes
+// (sfnt/glyf/CFF, no external dependencies) and rasterizes a requested
+// glyph set into an RGBA atlas + per-glyph metrics; this seam relabels that
+// atlas's output into THIS file's own KfontCharT rect shape, so it can be
+// drawn/measured through the exact same DrawStretchPicRegion-against-an-
+// atlas machinery client/cgame/host.ts already has for the classic kfont
+// path above -- no new render path, additive only.
+//
+// Kept pure/renderer-independent, same division of labor as
+// ParseKfont/ParsedKfontT above: this function does NOT touch the
+// filesystem, does NOT call RegisterPic/GL_LoadPic, and does NOT choose the
+// pixel size or codepoint set -- those are the caller's decisions (made via
+// qcommon/ttf.ts's own parseFont/buildFontAtlas/latin1Codepoints).
+//
+// WHY A SEPARATE TYPE (TtfKfontT), NOT KfontT: KfontT.chars is a fixed
+// 95-entry array indexed by `codepoint - KFONT_ASCII_MIN` (32-126) --
+// that's q2repro's own C array-sizing choice for its ASCII-only
+// qconfont.kfont asset, not a limit inherent to the kfont CONCEPT. The
+// OWNER RULING's codepoint set is ASCII + Latin-1 (ttf.ts's own
+// latin1Codepoints(), 0x20-0x7E + 0xA0-0xFF -- verified against the real
+// localization/loc_english.txt, whose only non-ASCII codepoint is U+00F6,
+// already inside that range), which doesn't fit a 95-entry array. TtfKfontT
+// generalizes the same {x,y,w,h} rect shape and the same SCR_KFontLookup
+// lookup contract (a present-but-zero-width entry counts as missing) to an
+// arbitrary codepoint set via a Map instead of a fixed array.
+//
+// INTEGRATION CONTRACT for the caller that wires this to a live cvar (a
+// client/cgame/host.ts change -- OUT OF THIS UNIT'S TERRITORY, see this
+// port's own report for the full cross-boundary writeup; documented here so
+// the seam is discoverable at its call site):
+//   1. bytes = FS_LoadFile(`fonts/${name}.ttf`) (or ".otf") via the
+//      KPF-mounted engine FS -- same FS_LoadFile loadKfontAsset already
+//      uses above, just a different path.
+//   2. const parsed = parseFont(bytes); if (!parsed.ok), fall back to the
+//      classic conchars/kfont path (never a hard error -- matches
+//      SCR_LoadKFont's own "just return" bail-on-failure convention).
+//   3. const atlas = buildFontAtlas(parsed.font, latin1Codepoints(), pxSize)
+//   4. const pic = `/ttf:${name}:${pxSize}`; register the atlas pixels
+//      under that exact name ONCE via the renderer's existing raw-pixel
+//      image entry point -- gl_image.ts's already-public
+//      `GL_LoadPic(pic, atlas.pixels, atlas.width, atlas.height,
+//      ImagetypeT.it_pic, 32)` on the GL renderer, r_image.ts's equivalent
+//      on the software renderer. Both are ALREADY exported (no change
+//      needed to either renderer's image-loading internals): GL_LoadPic
+//      inserts directly into the same gltextures[] cache Draw_FindPic's own
+//      GL_FindImage scans by exact name match, so every subsequent
+//      Draw_FindPic(pic) / DrawStretchPicRegion(..., pic, ...) call after
+//      the first hits that cache -- the same "already registered, no disk
+//      hit" fast path any other pic name gets.
+//   5. const font: TtfKfontT = Kfont_FromTTF(atlas, pic)
+//   6. draw/measure exactly like the existing kfont path above, substituting
+//      TtfKfont_Lookup for SCR_KFontLookup and this file's Map-based
+//      `chars` field for the fixed-array one.
+//
+// Proposed cvar (documented here, not wired -- see contract above): reusing
+// q2repro's own naming family (scr_font/con_font, both plain asset-name
+// string cvars -- see ~/Projects/q2repro/src/client/{cgame,screen,console}.c)
+// would be misleading, since those two cvars govern the UNRELATED classic
+// conchars-style bitmap charset, not the kfont system at all (q2repro loads
+// fonts/qconfont.kfont unconditionally, no cvar gates it -- see
+// screen.c's SCR_Init calling SCR_LoadKFont directly). This project's own
+// three-way choice (classic charset | kfont | ttf:<name>) has no q2repro
+// counterpart, so per the brief: document ours. Proposed name
+// `cl_kfont_source`, default value `"kfont"` (byte-identical to today's
+// unconditional opportunistic-load-with-conchars-fallback behavior --
+// see ensureKfont()/loadKfontAsset() in host.ts), accepted values
+// `"classic"` (force-disable the kfont path, conchars only),
+// `"kfont"` (today's default), `"ttf:<name>"` (this seam, e.g.
+// `"ttf:RobotoMono-Regular"`); a companion `cl_kfont_ttf_size` integer cvar
+// (proposed default 16) supplies the pixel size for the ttf: source.
+export interface TtfKfontT {
+  pic: string; // caller-assigned name (see INTEGRATION CONTRACT step 4); presence of a TtfKfontT at all means this loaded
+  chars: Map<number, KfontCharT>; // codepoint -> rect, arbitrary codepoints (not just 32-126)
+  line_height: number;
+}
+
+// Same lookup contract as SCR_KFontLookup above: a present-but-zero-width
+// entry counts as missing (zero-advance codepoints, if any ever appear in
+// a rasterized set, would otherwise stall the cursor on draw).
+export function TtfKfont_Lookup(font: TtfKfontT, codepoint: number): KfontCharT | null {
+  const ch = font.chars.get(codepoint);
+  if (!ch || !ch.w) return null;
+  return ch;
+}
+
+// The atlas -> TtfKfontT relabel itself: a straight copy of each
+// {x,y,w,h} rect (ttf.ts's AtlasRectT and this file's KfontCharT are
+// structurally identical -- same field set, same units, same meaning) plus
+// ttf.ts's own max-rect-height line_height convention, which already
+// matches ParseKfont's `if (h > line_height) line_height = h;` above.
+export function Kfont_FromTTF(atlas: FontAtlasT, pic: string): TtfKfontT {
+  const chars = new Map<number, KfontCharT>();
+  for (const [codepoint, rect] of atlas.glyphs) {
+    chars.set(codepoint, { x: rect.x, y: rect.y, w: rect.w, h: rect.h });
+  }
+  return { pic, chars, line_height: atlas.lineHeight };
 }
