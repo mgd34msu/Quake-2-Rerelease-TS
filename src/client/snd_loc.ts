@@ -124,6 +124,11 @@ export const s_rawsamples: PortableSamplepairT[] = Array.from({ length: MAX_RAW_
 // pattern) rather than N individual setter functions, since there are eight
 // of them and none is read outside the sound module -- reported deviation
 // from server.ts's per-cvar setter style.
+// s_underwater/s_underwater_gain_hf: q2repro src/client/sound/main.c:155-156
+// (divergence-audit finding #12). Kept in this same holder even though the
+// C reference registers them in main.c's OpenAL-preferring S_Init rather
+// than dma.c's -- this port has one S_Init (snd_dma.ts), and both cvars now
+// gate/parameterize snd_mix.ts's underwater biquad filter.
 export const sndCvars: {
   s_volume: CvarT | null;
   s_nosound: CvarT | null;
@@ -133,6 +138,8 @@ export const sndCvars: {
   s_mixahead: CvarT | null;
   s_testsound: CvarT | null;
   s_primary: CvarT | null;
+  s_underwater: CvarT | null;
+  s_underwater_gain_hf: CvarT | null;
 } = {
   s_volume: null,
   s_nosound: null,
@@ -142,6 +149,8 @@ export const sndCvars: {
   s_mixahead: null,
   s_testsound: null,
   s_primary: null,
+  s_underwater: null,
+  s_underwater_gain_hf: null,
 };
 
 // MAX_QPATH import kept for SfxT.name's size-limit documentation.

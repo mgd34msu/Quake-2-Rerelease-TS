@@ -20,7 +20,7 @@ import { Cmd_AddCommand, Cmd_Argc, Cmd_Argv, Cmd_RemoveCommand } from "../qcommo
 import { Cvar_Get } from "../qcommon/cvar";
 import { FS_FCloseFile, FS_FOpenFile } from "../qcommon/files";
 import { type Vec3, vec3, DotProduct, VectorCopy, VectorNormalize, VectorSubtract } from "../shared/math";
-import { ATTN_STATIC, CVAR_ARCHIVE, CVAR_SOUND, Com_PageInMemory, Com_sprintf, ERR_DROP, ERR_FATAL, type EntityStateT } from "../shared/q_shared";
+import { ATTN_STATIC, CVAR_ARCHIVE, CVAR_SOUND, Com_PageInMemory, Com_sprintf, ERR_DROP, ERR_FATAL, RDF_UNDERWATER, type EntityStateT } from "../shared/q_shared";
 import { cl, cl_entities, cl_parse_entities, clCvars, cls, ConnstateT, MAX_PARSE_ENTITIES } from "./client";
 import { CL_GetEntitySoundOrigin } from "./cl_ents";
 import {
@@ -116,7 +116,14 @@ export function S_Init(): void {
     // (cvar-parity fix); src/platform/snd.ts's rate-selection logic already
     // handles 44/22/other correctly.
     sndCvars.s_khz = Cvar_Get("s_khz", "44", CVAR_ARCHIVE | CVAR_SOUND); // dma.c:560 also flags CVAR_SOUND
-    sndCvars.s_loadas8bit = Cvar_Get("s_loadas8bit", "1", CVAR_ARCHIVE);
+    // divergence-audit finding #14: q2repro's DMA_UploadSfx (dma.c:54-88)
+    // has no s_loadas8bit concept at all -- every sample keeps its native
+    // width. This port keeps the cvar (menu.ts's sound-quality option and
+    // snd_mem.ts's loader both still read it -- removing it outright is a
+    // menu.ts change, out of this unit's territory) but flips its default
+    // off so a fresh install matches the rerelease's out-of-the-box
+    // fidelity instead of vanilla's forced 8-bit crunch.
+    sndCvars.s_loadas8bit = Cvar_Get("s_loadas8bit", "0", CVAR_ARCHIVE);
     // q2repro src/client/sound/dma.c:561 defaults s_mixahead to "0.1", not
     // "0.2" (cvar-parity fix).
     sndCvars.s_mixahead = Cvar_Get("s_mixahead", "0.1", CVAR_ARCHIVE);
@@ -132,12 +139,16 @@ export function S_Init(): void {
     // frontend that owns s_enable/s_ambient/s_auto_focus/s_underwater*/
     // s_num_channels). This port's S_Init above is q2pro/vanilla's DMA-only
     // model with no OpenAL backend and no per-channel pool sizing knob, so
-    // all five are registered, consumer unported.
+    // s_enable/s_ambient/s_auto_focus/s_num_channels are registered,
+    // consumer unported. s_underwater/s_underwater_gain_hf are the
+    // exception: divergence-audit finding #12 -- snd_mix.ts's S_PaintChannels
+    // now runs the same OpenAL-Soft high-shelf biquad q2repro's dma.c:278-329
+    // applies to the paint buffer whenever S_IsUnderWater() (below) is true.
     Cvar_Get("s_enable", "2", CVAR_SOUND);
     Cvar_Get("s_ambient", "1", 0);
     Cvar_Get("s_auto_focus", "2", 0);
-    Cvar_Get("s_underwater", "1", 0);
-    Cvar_Get("s_underwater_gain_hf", "0.25", 0);
+    sndCvars.s_underwater = Cvar_Get("s_underwater", "1", 0);
+    sndCvars.s_underwater_gain_hf = Cvar_Get("s_underwater_gain_hf", "0.25", 0);
     Cvar_Get("s_num_channels", "64", CVAR_SOUND);
     // q2repro src/client/sound/qal.c:199-200 and al.c:640-679 -- the OpenAL
     // backend itself (device selection, HRTF, reverb, looping-sound
@@ -411,6 +422,27 @@ function S_SpatializeOrigin(origin: Vec3, master_vol: number, dist_mult: number)
   if (left_vol < 0) left_vol = 0;
 
   return [left_vol, right_vol];
+}
+
+/*
+=================
+S_IsUnderWater
+
+q2repro src/client/sound/sound.h:178-179's S_IsUnderWater() macro:
+`cls.state == ca_active && (cl.frame.ps.rdflags | cl.predicted_rdflags) &
+RDF_UNDERWATER && s_underwater->integer`. This port's client has no
+predicted_rdflags field (a q2repro prediction-timing refinement with no
+equivalent state anywhere in cl_pred.ts/cl_view.ts today; adding one is out
+of this unit's territory), so this reads the confirmed frame's rdflags only
+(cl.frame.playerstate.rdflags, matching cl_view.ts:579's own read of the
+same field) -- the underwater filter engages one frame later than upstream
+in the worst case, not never.
+=================
+*/
+export function S_IsUnderWater(): boolean {
+  if (cls.state !== ConnstateT.ca_active) return false;
+  if ((cl.frame.playerstate.rdflags & RDF_UNDERWATER) === 0) return false;
+  return (sndCvars.s_underwater ? sndCvars.s_underwater.value : 0) !== 0;
 }
 
 /*
@@ -727,8 +759,22 @@ function S_AddLoopSounds(): void {
     let num = (cl.frame.parse_entities + i) & (MAX_PARSE_ENTITIES - 1);
     let ent = cl_parse_entities[num];
 
+    // q2repro src/client/sound/dma.c:726 routes every autosound origin
+    // through CL_GetEntitySoundOrigin, same as S_Spatialize above (line
+    // ~433) already does for one-shot channel sounds -- divergence-audit
+    // finding #11 found this loop still reading ent.origin directly,
+    // bypassing that shared function entirely. CL_GetEntitySoundOrigin
+    // itself (src/client/cl_ents.ts) is still the vanilla stub with its own
+    // "// FIXME: bmodel issues" comment -- porting the rerelease's
+    // nearest-point-on-bmodel clamp (entities.c:1644-1679) into that
+    // function is out of this unit's territory (cl_ents.ts is off-limits
+    // here). Routing through it now means loop sounds automatically pick
+    // up that clamp once it lands there, instead of permanently bypassing
+    // it even after cl_ents.ts is fixed.
+    const loopOrigin = vec3();
+    CL_GetEntitySoundOrigin(ent.number, loopOrigin);
     // find the total contribution of all sounds of this type
-    let [left_total, right_total] = S_SpatializeOrigin(ent.origin, 255.0, SOUND_LOOPATTENUATE);
+    let [left_total, right_total] = S_SpatializeOrigin(loopOrigin, 255.0, SOUND_LOOPATTENUATE);
     for (let j = i + 1; j < cl.frame.num_entities; j++) {
       if (sounds[j] !== sounds[i]) continue;
       sounds[j] = 0; // don't check this again later
@@ -736,7 +782,8 @@ function S_AddLoopSounds(): void {
       num = (cl.frame.parse_entities + j) & (MAX_PARSE_ENTITIES - 1);
       ent = cl_parse_entities[num];
 
-      const [left, right] = S_SpatializeOrigin(ent.origin, 255.0, SOUND_LOOPATTENUATE);
+      CL_GetEntitySoundOrigin(ent.number, loopOrigin);
+      const [left, right] = S_SpatializeOrigin(loopOrigin, 255.0, SOUND_LOOPATTENUATE);
       left_total += left;
       right_total += right;
     }

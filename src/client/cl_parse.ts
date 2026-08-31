@@ -1000,7 +1000,11 @@ function CL_ParseServerMessageLoop(): void {
         // on-screen banner, even once the text itself is correctly
         // localized.
         if (printLevel === PrintTypeT.PRINT_CENTER || printLevel === PrintTypeT.PRINT_TYPEWRITER) {
-          SCR_CenterPrint(printString);
+          // instant=false engages the queue/typewriter machinery for the
+          // TYPEWRITER level only; PRINT_CENTER shows immediately, matching
+          // the reference's per-level presentation (cg_screen.cpp's queue
+          // reveal -- see SCR_CenterPrint's own doc comment).
+          SCR_CenterPrint(printString, printLevel !== PrintTypeT.PRINT_TYPEWRITER);
         } else {
           Com_Printf("%s", printString);
         }

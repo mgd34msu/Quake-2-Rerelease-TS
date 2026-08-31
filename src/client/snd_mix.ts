@@ -34,12 +34,103 @@ import {
   type SfxcacheT,
 } from "./snd_loc";
 import { S_LoadSound } from "./snd_mem";
-import { S_IssuePlaysound } from "./snd_dma";
+import { S_IssuePlaysound, S_IsUnderWater } from "./snd_dma";
 
 const PAINTBUFFER_SIZE = 2048;
 const paintbuffer: PortableSamplepairT[] = Array.from({ length: PAINTBUFFER_SIZE }, () => new PortableSamplepairT());
 const sndScaletable: Int32Array[] = Array.from({ length: 32 }, () => new Int32Array(256));
 let sndVol = 0;
+
+/*
+===============================================================================
+
+UNDERWATER FILTER
+
+q2repro src/client/sound/dma.c:278-329's OpenAL-Soft high-shelf biquad
+(divergence-audit finding #12). This port's paint buffer holds fixed-point
+values (left/right accumulated at a <<8 scale -- see sTransferStereo16's
+`>> 8` before clamping) rather than dma.c's raw floats, but the filter is
+linear, so applying the same coefficients to the fixed-point accumulator
+produces the same frequency response, just scaled the same way every other
+value in this buffer already is. Coefficients are recomputed lazily (not on
+a cvar "changed" callback -- this port's CvarT has none) whenever dma.speed
+or s_underwater_gain_hf's value has drifted since the last computation.
+
+===============================================================================
+*/
+
+let underwater_b0 = 0;
+let underwater_b1 = 0;
+let underwater_b2 = 0;
+let underwater_a1 = 0;
+let underwater_a2 = 0;
+let underwater_coeffs_speed = 0;
+let underwater_coeffs_gain = -1; // never equals a real gain -- forces first compute
+const underwater_hist = [
+  { z1: 0, z2: 0 },
+  { z1: 0, z2: 0 },
+];
+
+function sUnderwaterRecomputeIfNeeded(): void {
+  const gainRaw = sndCvars.s_underwater_gain_hf?.value ?? 0.25;
+  // dma.c:286's Cvar_ClampValue(self, 0.001f, 1)
+  const gain = Math.min(1, Math.max(0.001, gainRaw));
+
+  if (dma.speed === underwater_coeffs_speed && gain === underwater_coeffs_gain) return;
+  underwater_coeffs_speed = dma.speed;
+  underwater_coeffs_gain = gain;
+
+  const f0norm = 5000.0 / dma.speed;
+  const w0 = Math.PI * 2.0 * f0norm;
+  const sinW0 = Math.sin(w0);
+  const cosW0 = Math.cos(w0);
+  const alpha = (sinW0 / 2.0) * Math.SQRT2;
+  const sqrtGainAlpha2 = 2.0 * Math.sqrt(gain) * alpha;
+
+  let b0 = gain * (gain + 1.0 + (gain - 1.0) * cosW0 + sqrtGainAlpha2);
+  let b1 = gain * (gain - 1.0 + (gain + 1.0) * cosW0) * -2.0;
+  let b2 = gain * (gain + 1.0 + (gain - 1.0) * cosW0 - sqrtGainAlpha2);
+
+  const a0 = gain + 1.0 - (gain - 1.0) * cosW0 + sqrtGainAlpha2;
+  let a1 = (gain - 1.0 - (gain + 1.0) * cosW0) * 2.0;
+  let a2 = gain + 1.0 - (gain - 1.0) * cosW0 - sqrtGainAlpha2;
+
+  a1 /= a0;
+  a2 /= a0;
+  b0 /= a0;
+  b1 /= a0;
+  b2 /= a0;
+
+  underwater_b0 = b0;
+  underwater_b1 = b1;
+  underwater_b2 = b2;
+  underwater_a1 = a1;
+  underwater_a2 = a2;
+}
+
+function sUnderwaterFilterChannel(hist: { z1: number; z2: number }, count: number, isLeft: boolean): void {
+  let z1 = hist.z1;
+  let z2 = hist.z2;
+
+  for (let i = 0; i < count; i++) {
+    const samp = paintbuffer[i]!;
+    const input = isLeft ? samp.left : samp.right;
+    const output = input * underwater_b0 + z1;
+    z1 = input * underwater_b1 - output * underwater_a1 + z2;
+    z2 = input * underwater_b2 - output * underwater_a2;
+    if (isLeft) samp.left = output;
+    else samp.right = output;
+  }
+
+  hist.z1 = z1;
+  hist.z2 = z2;
+}
+
+function sUnderwaterFilter(count: number): void {
+  sUnderwaterRecomputeIfNeeded();
+  sUnderwaterFilterChannel(underwater_hist[0]!, count, true);
+  sUnderwaterFilterChannel(underwater_hist[1]!, count, false);
+}
 
 function clampShort(val: number): number {
   if (val > 0x7fff) return 0x7fff;
@@ -267,6 +358,21 @@ export function S_PaintChannels(endtime: number): void {
         }
       }
     }
+
+    // q2repro dma.c:430,491-492: the underwater filter runs after channels
+    // are painted but BEFORE raw/streaming samples (cinematics, voice-over-
+    // network) are mixed in, so upstream never filters that source. This
+    // port's S_PaintChannels copies raw samples into the paint buffer
+    // FIRST (top of this loop, before the channel-painting loop above) and
+    // channels are added on top of the same buffer, so by this point the
+    // two sources already share the same indices with no clean way to
+    // filter one but not the other -- a pre-existing structural difference
+    // in mixing order, not something introduced by this fix. Filtering the
+    // whole buffer here (divergence-audit finding #12) is the faithful-in-
+    // spirit adaptation: it engages the same OpenAL-Soft biquad on the same
+    // condition (S_IsUnderWater), just over a couple more sample sources
+    // than upstream's own raw/channel split would.
+    if (S_IsUnderWater()) sUnderwaterFilter(end - paintedtime);
 
     // transfer out according to DMA format
     sTransferPaintBuffer(end);

@@ -162,7 +162,14 @@ export function SV_CheckForSavegame(): void {
   const previousState = sv.state;
   sv.state = ServerStateT.ss_loading;
   const ge = requireGe();
-  for (let i = 0; i < frames; i++) ge.RunFrame(false); // savegame catch-up, same mainLoop=false as q2repro
+  // q2repro save.c:652 advances sv.framenum alongside every catch-up
+  // RunFrame(false) (`for (...; i++, sv.framenum++) ge->RunFrame(false)`);
+  // divergence-audit finding #27: our loop used to leave sv.framenum
+  // untouched, so nothing ever recorded that these frames ran.
+  for (let i = 0; i < frames; i++) {
+    ge.RunFrame(false); // savegame catch-up, same mainLoop=false as q2repro
+    sv.framenum++;
+  }
   sv.state = previousState;
 }
 
@@ -301,8 +308,12 @@ export function SV_SpawnServer(server: string, spawnpoint: string, serverstate: 
   // q2repro init.c's explicit ge->RunFrame(false) here, bypassing the kex
   // game's no-player-spawned early-out (see game.ts RunFrame's doc comment;
   // hardcoded true in the binding meant these frames settled nothing).
+  // init.c:202-203 also advances sv.framenum alongside each of these two
+  // calls (`for (i = 0; i < 2; i++, sv.framenum++) ge->RunFrame(false);`).
   ge.RunFrame(false);
+  sv.framenum++;
   ge.RunFrame(false);
+  sv.framenum++;
 
   // all precaches are complete
   sv.state = serverstate;
@@ -375,7 +386,12 @@ export async function SV_InitGame(): Promise<void> {
     if (!maxclients || maxclients.value <= 1) Cvar_FullSet("maxclients", "8", CVAR_SERVERINFO | CVAR_LATCH);
     else if (maxclients.value > MAX_CLIENTS) Cvar_FullSet("maxclients", `${MAX_CLIENTS}`, CVAR_SERVERINFO | CVAR_LATCH);
   } else if (Cvar_VariableValue("coop")) {
-    if (!maxclients || maxclients.value <= 1 || maxclients.value > 4) Cvar_FullSet("maxclients", "4", CVAR_SERVERINFO | CVAR_LATCH);
+    // q2repro init.c:449-455 only floors coop maxclients to 4 when it's
+    // <=1 (a config with no maxclients set at all); above that it's
+    // clamped to MAX_CLIENTS like every other mode, not forced back down
+    // to 4 -- the rerelease-era engine supports coop beyond 4 players.
+    if (!maxclients || maxclients.value <= 1) Cvar_FullSet("maxclients", "4", CVAR_SERVERINFO | CVAR_LATCH);
+    else if (maxclients.value > MAX_CLIENTS) Cvar_FullSet("maxclients", `${MAX_CLIENTS}`, CVAR_SERVERINFO | CVAR_LATCH);
     // Sys_CopyProtect() under #ifdef COPYPROTECT -- dropped, dead in every
     // real build (PORTING.md's #ifdef rule).
   } else {
@@ -384,14 +400,30 @@ export async function SV_InitGame(): Promise<void> {
     // Sys_CopyProtect() under #ifdef COPYPROTECT -- dropped, see above.
   }
 
-  svs.spawncount = Math.floor(Math.random() * 0x7fffffff);
   const maxc = maxclients ? maxclients.value : 0;
+
+  // init network stuff. This is the function's only await, and it must run
+  // here, before any of svs' shared fields are touched below -- matching
+  // q2repro's init.c:455-471, where NET_Config(NET_SERVER) runs before the
+  // client pool (svs.client_pool) is allocated. q2repro's SV_InitGame is
+  // fully synchronous end to end (init.c), so nothing there can ever be
+  // observably interrupted mid-initialization; callers here (SV_Frame,
+  // console commands, connectionless packet handling) can run in between
+  // our awaits, and several of them read/mutate svs.clients without
+  // checking svs.initialized (e.g. sv_ccmds.ts:1117's `!svs.clients.length`
+  // free-slot scan, sv_main.ts's connectionless "connect" handler). Putting
+  // the await before svs.clients/svs.spawncount/svs.num_client_entities/
+  // svs.client_entities are (re)built means every one of those fields
+  // changes in a single synchronous slice with no yield point in the
+  // middle, so an interleaved caller either sees the fully-old state or
+  // the fully-new state -- never a half-built svs.clients array with
+  // unwired edicts.
+  await NET_Config(maxc > 1);
+
+  svs.spawncount = Math.floor(Math.random() * 0x7fffffff);
   svs.clients = Array.from({ length: maxc }, () => new ClientT());
   svs.num_client_entities = maxc * UPDATE_BACKUP * 64;
   svs.client_entities = Array.from({ length: svs.num_client_entities }, () => new EntityStateT());
-
-  // init network stuff
-  await NET_Config(maxc > 1);
 
   // heartbeats will always be sent to the id master
   svs.last_heartbeat = -99999; // send immediately

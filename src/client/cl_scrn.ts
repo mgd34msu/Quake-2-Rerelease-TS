@@ -188,29 +188,130 @@ CENTER PRINTING
 ===============================================================================
 */
 
-let scr_centerstring = "";
-let scr_centertime_start = 0; // for slow victory printing
-let scr_centertime_off = 0;
-let scr_center_lines = 0;
+// [Sam-KEX/Paril-KEX] rerelease centerprint model, ported from
+// quake2-rerelease-dll/rerelease/cg_screen.cpp's CG_QueueCenterPrint /
+// CG_ParseCenterPrint / CG_DrawCenterString / CG_CheckDrawCenterString.
+// That algorithm was already ported once, faithfully, at
+// src/kexgame/cgame/cg_screen.ts -- but that copy is currently dead code
+// (divergence-audit finding #4: src/client/cgame/host.ts never wires the
+// kex cgame's own ParseCenterPrint export to the live client path; host.ts
+// is out of this unit's territory). What follows is the SAME algorithm
+// adapted to this file's own simpler renderer (re.DrawChar directly, no
+// kfont/contrast/bind machinery, no splitscreen/hud_vrect) so the one
+// client path every centerprint takes today -- cl_parse.ts's
+// svc_centerprint and its svc_print PRINT_CENTER/PRINT_TYPEWRITER fallback,
+// see that file's own comment at cl_parse.ts:986-1001 -- gets the fixes
+// divergence-audit findings #29/#30/#31 describe:
+//   - #29: a rotating MAX_CENTER_PRINTS=4 buffer instead of one slot that
+//     unconditionally overwrites; a non-instant print queues behind
+//     whatever's currently showing instead of clobbering it.
+//   - #30: scr_centertime defaults to "5.0" (was vanilla's "2.5") and its
+//     clock starts when the print FINISHES displaying (first draw for an
+//     instant print, end of type-out for a typewriter print), not at parse
+//     time.
+//   - #31: non-instant prints type out one codepoint per scr_printspeed
+//     SECONDS (default "0.04", was vanilla's "8" characters-per-second,
+//     i.e. the opposite unit), drawing only up to the current line, with a
+//     blinking cursor char 10+((realtime>>8)&1) at the end of the line
+//     being typed.
+//
+// SCOPE LIMIT: SCR_CenterPrint's only two callers (cl_parse.ts, off-limits
+// to this unit) both call it with a single argument, so `instant` always
+// defaults to `true` here -- matching legacy svc_centerprint's own
+// always-instant vanilla behavior. Wiring cl_parse.ts's svc_print handler
+// to pass `instant: printLevel === PRINT_CENTER` (false for
+// PRINT_TYPEWRITER, per q2repro's own CL_HandlePrint) so rerelease
+// messages actually exercise the typewriter/queue path is a cl_parse.ts
+// change, left for whichever unit owns that file next -- the queue/typing/
+// timing machinery itself is real and reachable by any future caller
+// today, and is exercised directly by test/cl_scrn_centerprint.test.ts.
+//
+// Centering note: unlike the kex reference's CG_DrawHUDString (which
+// centers a fixed 320-unit virtual line and only measures kfont strings),
+// each line here is centered in real pixel space from its OWN drawn width
+// (buffer.length * 8), matching this port's pre-existing (and untouched)
+// instant-print centering convention. For the typewriter path this means
+// each partially-revealed line recenters every frame as more of it is
+// typed -- a deliberate adaptation, not a byte-identical port of the
+// kex layout math.
+
+const MAX_CENTER_PRINTS = 4;
+
+class CenterPrintSlot {
+  lines: string[] = []; // empty === free slot
+  instant = true;
+  currentLine = 0; // line index currently typing out
+  lineCount = 0; // codepoints revealed on currentLine
+  finished = true; // done typing (or already drawn once, for instant)
+  timeTick = 0; // cls.realtime-scale: next reveal timestamp
+  timeOff = 0; // cls.realtime-scale: expiry timestamp, valid once finished
+}
+
+let scr_centers: CenterPrintSlot[] = Array.from({ length: MAX_CENTER_PRINTS }, () => new CenterPrintSlot());
+let scr_center_index: number | null = null;
+
+/** cg_screen.cpp:109-111's CG_ClearCenterprint, adapted (this file has no
+ *  splitscreen/isplit concept, so there's exactly one queue). Empties the
+ *  whole rotating buffer outright. Exported for test/cl_scrn_centerprint
+ *  .test.ts to reset this module's private queue state cleanly between
+ *  cases; no production call site needs it yet within this unit's scope. */
+export function SCR_ClearCenterPrint(): void {
+  scr_center_index = null;
+  for (const slot of scr_centers) slot.lines = [];
+}
+
+// cg_screen.cpp's FindEndOfUTF8Codepoint, adapted to JS's UTF-16 strings:
+// never stops on a low surrogate (the second half of an astral-plane
+// character's surrogate pair) -- see src/kexgame/cgame/cg_screen.ts's file
+// header "ENCODING ADAPTATION" note for the full rationale (same policy,
+// same caveat: only non-BMP text, absent from the base game, would differ
+// from true byte-for-byte UTF-8 scanning).
+function isLowSurrogate(cu: number): boolean {
+  return cu >= 0xdc00 && cu <= 0xdfff;
+}
+function findEndOfCodepoint(str: string, pos: number): number {
+  if (pos >= str.length) return -1;
+  for (let i = pos; i < str.length; i++) {
+    if (!isLowSurrogate(str.charCodeAt(i))) return i;
+  }
+  return -1;
+}
+
+function SCR_QueueCenterPrint(instant: boolean): CenterPrintSlot {
+  if (scr_center_index === null || instant) {
+    scr_center_index = 0;
+    for (let i = 1; i < MAX_CENTER_PRINTS; i++) scr_centers[i].lines = [];
+    return scr_centers[0]!;
+  }
+
+  // pick the next free index if we can find one
+  for (let i = 1; i < MAX_CENTER_PRINTS; i++) {
+    const slot = scr_centers[(scr_center_index + i) % MAX_CENTER_PRINTS]!;
+    if (slot.lines.length === 0) return slot;
+  }
+
+  // none free: overwrite the currently-displaying slot and skip ahead
+  // (cg_screen.cpp:368-372, ported verbatim including this corner case)
+  const slot = scr_centers[scr_center_index]!;
+  scr_center_index = (scr_center_index + 1) % MAX_CENTER_PRINTS;
+  return slot;
+}
 
 /*
 ==============
 SCR_CenterPrint
 
 Called for important messages that should stay in the center of the screen
-for a few moments
+for a few moments. `instant` (default true; see SCOPE LIMIT above) mirrors
+cg_screen.cpp's CG_ParseCenterPrint(str, isplit, instant): true draws the
+whole message immediately (and flushes the queue back to slot 0); false
+queues it behind whatever's displaying and types it out one codepoint at a
+time.
 ==============
 */
-export function SCR_CenterPrint(str: string): void {
-  scr_centerstring = str;
-  scr_centertime_off = scr_centertime ? scr_centertime.value : 0;
-  scr_centertime_start = cl.time;
-
-  // count the number of lines for centering
-  scr_center_lines = 1;
-  for (let i = 0; i < str.length; i++) {
-    if (str[i] === "\n") scr_center_lines++;
-  }
+export function SCR_CenterPrint(str: string, instant = true): void {
+  const center = SCR_QueueCenterPrint(instant);
+  center.lines = [];
 
   // echo it to the console
   const banner = "\x1d\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1f";
@@ -237,48 +338,137 @@ export function SCR_CenterPrint(str: string): void {
   }
   Com_Printf("\n\n%s\n\n", banner);
   Con_ClearNotify();
+
+  // split into lines (cg_screen.cpp:454-484 / cg_screen.ts:597-618)
+  let lineStart = 0;
+  for (let lineEnd = 0; ; ) {
+    lineEnd = findEndOfCodepoint(str, lineEnd);
+
+    if (lineEnd === -1) {
+      if (lineStart < str.length) center.lines.push(str.slice(lineStart));
+      break;
+    }
+
+    if (str[lineEnd] === "\n") {
+      center.lines.push(lineEnd > lineStart ? str.slice(lineStart, lineEnd) : "");
+      lineStart = lineEnd + 1;
+      lineEnd++;
+      continue;
+    }
+
+    lineEnd++;
+  }
+
+  if (center.lines.length === 0) {
+    center.finished = true;
+    return;
+  }
+
+  center.timeTick = cls.realtime + (scr_printspeed ? scr_printspeed.value : 0) * 1000;
+  center.instant = instant;
+  center.finished = false;
+  center.currentLine = 0;
+  center.lineCount = 0;
 }
 
-function SCR_DrawCenterString(): void {
+function SCR_DrawCenterStringSlot(center: CenterPrintSlot): void {
   if (!re) return;
 
-  let remaining = 9999;
-
-  let start = scr_centerstring;
-
   let y: number;
-  if (scr_center_lines <= 4) y = Math.trunc(viddef.height * 0.35);
+  if (center.lines.length <= 4) y = Math.trunc(viddef.height * 0.35);
   else y = 48;
 
-  for (;;) {
-    let l = 0;
-    while (l < 40 && start[l] !== undefined && start[l] !== "\n") l++;
+  if (center.instant) {
+    for (const line of center.lines) {
+      const l = Math.min(line.length, 40);
+      let x = Math.trunc((viddef.width - l * 8) / 2);
+      SCR_AddDirtyPoint(x, y);
+      for (let j = 0; j < l; j++, x += 8) re.DrawChar(x, y, line.charCodeAt(j));
+      SCR_AddDirtyPoint(x, y + 8);
+      y += 8;
+    }
 
+    if (!center.finished) {
+      center.finished = true;
+      center.timeOff = cls.realtime + (scr_centertime ? scr_centertime.value : 0) * 1000;
+    }
+    return;
+  }
+
+  // typewriter: advance the reveal timer, then draw only up to and
+  // including the current line (cg_screen.cpp:548-621 / cg_screen.ts:675-726)
+  const t = cls.realtime;
+
+  if (!center.finished && center.timeTick < t) {
+    center.timeTick = t + (scr_printspeed ? scr_printspeed.value : 0) * 1000;
+    center.lineCount = findEndOfCodepoint(center.lines[center.currentLine] ?? "", center.lineCount + 1);
+
+    if (center.lineCount === -1) {
+      center.currentLine++;
+      center.lineCount = 0;
+
+      if (center.currentLine === center.lines.length) {
+        center.currentLine--;
+        center.finished = true;
+        center.timeOff = t + (scr_centertime ? scr_centertime.value : 0) * 1000;
+      }
+    }
+  }
+
+  for (let i = 0; i < center.lines.length; i++) {
+    const line = center.lines[i]!;
+    const buffer = center.finished || i !== center.currentLine ? line : line.slice(0, center.lineCount);
+
+    const l = Math.min(buffer.length, 40);
     let x = Math.trunc((viddef.width - l * 8) / 2);
     SCR_AddDirtyPoint(x, y);
-    for (let j = 0; j < l; j++, x += 8) {
-      re.DrawChar(x, y, start.charCodeAt(j));
-      remaining--;
-      if (remaining < 0) return;
+    for (let j = 0; j < l; j++, x += 8) re.DrawChar(x, y, buffer.charCodeAt(j));
+
+    if (i === center.currentLine) {
+      // blinking cursor at the end of the line being typed (or, once
+      // finished, at the end of the last line -- it keeps blinking until
+      // this slot's display time runs out, matching the reference)
+      re.DrawChar(x, y, 10 + ((t >> 8) & 1));
+      x += 8;
     }
     SCR_AddDirtyPoint(x, y + 8);
 
     y += 8;
 
-    let idx = l;
-    while (start[idx] !== undefined && start[idx] !== "\n") idx++;
-
-    if (start[idx] === undefined) break;
-    start = start.slice(idx + 1); // skip the \n
+    if (i === center.currentLine) break;
   }
 }
 
-function SCR_CheckDrawCenterString(): void {
-  scr_centertime_off -= cls.frametime;
+// Exported for test/cl_scrn_centerprint.test.ts: this is the same per-frame
+// entry point SCR_UpdateScreen's 3D-refresh branch already calls (below),
+// so driving it directly from a test exercises the exact production
+// rotate/reveal/expire path.
+export function SCR_CheckDrawCenterString(): void {
+  if (scr_center_index === null) return;
 
-  if (scr_centertime_off <= 0) return;
+  const center = scr_centers[scr_center_index]!;
 
-  SCR_DrawCenterString();
+  // ran out of center time -- rotate to the next queued slot, if any
+  // (cg_screen.cpp:619-653 / cg_screen.ts:729-757)
+  if (center.finished && center.timeOff < cls.realtime) {
+    center.lines = [];
+
+    const nextIndex = (scr_center_index + 1) % MAX_CENTER_PRINTS;
+    const nextCenter = scr_centers[nextIndex]!;
+
+    if (nextCenter.lines.length === 0) {
+      scr_center_index = null;
+      return;
+    }
+
+    scr_center_index = nextIndex;
+    nextCenter.currentLine = 0;
+    nextCenter.lineCount = 0;
+  }
+
+  if (scr_center_index === null) return;
+
+  SCR_DrawCenterStringSlot(scr_centers[scr_center_index]!);
 }
 
 //=============================================================================
@@ -371,8 +561,12 @@ export function SCR_Init(): void {
   // (cvar-parity fix).
   scr_showturtle = Cvar_Get("scr_showturtle", "1", 0);
   scr_showpause = Cvar_Get("scr_showpause", "1", 0);
-  scr_centertime = Cvar_Get("scr_centertime", "2.5", 0);
-  scr_printspeed = Cvar_Get("scr_printspeed", "8", 0);
+  // [Sam-KEX] scr_centertime was "2.5", changed to "5.0" (cg_screen.cpp:1772
+  // comment); scr_printspeed was "8" characters-per-second, changed to
+  // "0.04" SECONDS-per-character (cg_screen.cpp:1773 comment) -- divergence
+  // -audit findings #30/#31, see the CENTER PRINTING section below.
+  scr_centertime = Cvar_Get("scr_centertime", "5.0", 0);
+  scr_printspeed = Cvar_Get("scr_printspeed", "0.04", 0);
   scr_netgraph = Cvar_Get("netgraph", "0", 0);
   scr_timegraph = Cvar_Get("timegraph", "0", 0);
   scr_debuggraph = Cvar_Get("debuggraph", "0", 0);
