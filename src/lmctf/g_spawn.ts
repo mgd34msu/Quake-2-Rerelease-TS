@@ -63,8 +63,8 @@ import {
 import { SolidT } from "./game";
 import { type EdictStringKey, G_FreeEdict, G_Spawn } from "./g_utils";
 import { FIELDS } from "./g_save";
-import { FindItem, PrecacheItem, SetItemNames, SP_flag } from "./g_items";
-import { InitBodyQue, SaveClientData, SP_info_player_coop, SP_info_player_deathmatch, SP_info_player_intermission, SP_info_player_start } from "./p_client";
+import { FindItem, PrecacheItem, SetItemNames, SP_flag, SP_item_health, SP_item_health_large, SP_item_health_mega, SP_item_health_small } from "./g_items";
+import { InitBodyQue, SaveClientData, SP_info_player_blue, SP_info_player_coop, SP_info_player_deathmatch, SP_info_player_intermission, SP_info_player_red, SP_info_player_start } from "./p_client";
 import {
   SP_func_areaportal,
   SP_func_clock,
@@ -288,34 +288,24 @@ interface SpawnT {
 }
 
 // `item_health`/`item_health_small`/`item_health_large`/`item_health_mega`
-// (lmctf60/g_items.c SP_item_health family) -- NOT ported: this port's
-// ITEMLIST (g_items.ts) has no health items, and in the real C source
-// these classnames are actually reached through the item-table check in
-// ED_CallSpawn before ever consulting spawns[] (same "item table wins"
-// quirk documented on g_items.ts's SP_flag), so these registry entries are
-// exactly as reachable/unreachable as the original -- but since neither
-// this port's item table NOR its spawns[] table has a working
-// implementation, a map placing a health item here throws instead of
-// silently doing nothing.
-function notPortedItem(classname: string): (ent: EdictT) => void {
-  return () => {
-    throw new Error(`${classname}: SP_item_health family (lmctf60/g_items.c) is not ported -- no health items exist in this port's ITEMLIST`);
-  };
-}
-
-// `damage_rune` (lmctf60/g_runes.c SP_damage_rune) -- unit B's file
-// (g_runes.ts full port), not this unit's to create or stub differently.
-function notPortedRune(): (ent: EdictT) => void {
-  return () => {
-    throw new Error("damage_rune: SP_damage_rune (lmctf60/g_runes.c) is unit B's SCOPE (g_runes.ts), not ported by this unit");
-  };
-}
+// (lmctf60/g_items.c SP_item_health family) -- now ported for real
+// (g_items.ts). These classnames are NOT intercepted by ED_CallSpawn's
+// item-table-wins check below because the health ITEMLIST entry's
+// `classname` is NULL in the C source (see g_items.ts's makeHealthItem doc
+// comment) -- unlike "flag", these genuinely reach the spawns[] entries
+// below.
+//
+// `damage_rune` (lmctf60/g_runes.c SP_damage_rune) is now ported for real
+// too (g_runes.ts).
+import { RUNE_DAMAGE, RUNE_HASTE, RUNE_REGEN, RUNE_RESIST, RUNE_VAMP, SP_damage_rune, SpawnRune } from "./g_runes";
+import { ctf_validateflags } from "./g_ctffunc";
+import { sl_GameStart } from "./gslog";
 
 export const spawns: SpawnT[] = [
-  { name: "item_health", spawn: notPortedItem("item_health") },
-  { name: "item_health_small", spawn: notPortedItem("item_health_small") },
-  { name: "item_health_large", spawn: notPortedItem("item_health_large") },
-  { name: "item_health_mega", spawn: notPortedItem("item_health_mega") },
+  { name: "item_health", spawn: SP_item_health },
+  { name: "item_health_small", spawn: SP_item_health_small },
+  { name: "item_health_large", spawn: SP_item_health_large },
+  { name: "item_health_mega", spawn: SP_item_health_mega },
 
   { name: "info_player_start", spawn: SP_info_player_start },
   { name: "info_player_deathmatch", spawn: SP_info_player_deathmatch },
@@ -412,11 +402,11 @@ export const spawns: SpawnT[] = [
   { name: "item_flag_team1", spawn: SP_info_flag_red },
   { name: "info_flag_blue", spawn: SP_info_flag_blue },
   { name: "item_flag_team2", spawn: SP_info_flag_blue },
-  { name: "info_player_red", spawn: notPortedPlayerStart("info_player_red") },
-  { name: "info_player_team1", spawn: notPortedPlayerStart("info_player_team1") },
-  { name: "info_player_blue", spawn: notPortedPlayerStart("info_player_blue") },
-  { name: "info_player_team2", spawn: notPortedPlayerStart("info_player_team2") },
-  { name: "damage_rune", spawn: notPortedRune() },
+  { name: "info_player_red", spawn: SP_info_player_red },
+  { name: "info_player_team1", spawn: SP_info_player_red },
+  { name: "info_player_blue", spawn: SP_info_player_blue },
+  { name: "info_player_team2", spawn: SP_info_player_blue },
+  { name: "damage_rune", spawn: SP_damage_rune },
   { name: "misc_ctf_banner", spawn: SP_misc_ctf_banner },
   { name: "misc_ctf_small_banner", spawn: SP_misc_ctf_small_banner },
   { name: "info_position", spawn: SP_info_position },
@@ -470,16 +460,14 @@ function SpawnItemLazy(ent: EdictT, item: ReturnType<typeof FindItemByClassname>
   SpawnItem(ent, item);
 }
 
-// info_player_red/blue's own map-marker classname (and its item_flag_teamN
-// aliases from very old maps) route to notPortedPlayerStart, NOT
-// SP_info_player_red/blue -- see this file's own registry comment: these
-// four spawn-team-player-start markers are ported in p_client.ts under
-// their real names below and used directly.
-function notPortedPlayerStart(classname: string): (ent: EdictT) => void {
-  return () => {
-    throw new Error(`${classname}: unreachable placeholder -- see the real spawns[] entry using p_client.ts's SP_info_player_red/blue`);
-  };
-}
+// info_player_red/info_player_team1 and info_player_blue/info_player_team2
+// (lmctf60/g_spawn.c:284-287, byte-identical: all four classnames map to
+// just two functions, "team1"/"team2" being old-map aliases for
+// "red"/"blue") now route to p_client.ts's real SP_info_player_red/blue --
+// this was a genuine wiring bug, not an intentional stub: nothing in this
+// spawns[] table (or anywhere else) had a real entry for these four
+// classnames before this fix, so every lmctf map placing a team-start
+// marker under any of these names threw at boot.
 
 /*
 ================
@@ -617,13 +605,31 @@ export function SpawnEntities(mapname: string, entities: string, spawnpoint: str
   // (not this unit's SCOPE, not unit B's either); skipped, not stubbed,
   // since nothing in this unit's ported files calls PlayerTrail_* at all.
 
-  // ctf_validateflags()/SpawnTourneyClock()/SpawnRune() x5/Reset_MVP()/
-  // sl_GameStart() (lmctf60's "CTF CODE -- LM_JORM" SpawnEntities tail) --
-  // out of this unit's SCOPE, see file header. A map's "flag"/
-  // "info_flag_red"/"info_flag_blue" entities are still spawned correctly
-  // above via the normal parse loop (SpawnItem/droptofloor/Touch_Item for
-  // "flag", SP_info_flag_red/blue below for the markers) -- only the
-  // programmatic flag-placement-without-a-map-entity path is skipped.
+  // lmctf60/g_spawn.c:1007-1045 ("CTF CODE -- LM_JORM" SpawnEntities
+  // tail) -- ctf_validateflags/SpawnRune x5/sl_GameStart now real; two
+  // pieces still NOT ported and cited individually rather than silently
+  // dropped: SpawnTourneyClock (only reached when Match_Mode() is true,
+  // which it never is by default -- matchstate starts and stays
+  // MATCH_NONE unless g_tourney.ts's own still-unported StartMatch/
+  // SetPause advance it, so this branch is exactly as unreachable here as
+  // it is in a freshly booted real server) and Reset_MVP (g_tourney.ts's
+  // own header scopes the whole MVP subsystem out; omvp/dmvp don't exist
+  // anywhere in this port to reset).
+  if (cvarNum(gameCvars.deathmatch) !== 0) {
+    SetRedFlag(null);
+    SetBlueFlag(null);
+    ctf_validateflags(); // this is the only function allowed to spawn flags
+  }
+
+  // in case you want to play single player runes
+  const runesVal = gameCvars.runes === null ? 0 : gameCvars.runes.value;
+  if ((runesVal & RUNE_DAMAGE) !== 0) SpawnRune(RUNE_DAMAGE);
+  if ((runesVal & RUNE_HASTE) !== 0) SpawnRune(RUNE_HASTE);
+  if ((runesVal & RUNE_RESIST) !== 0) SpawnRune(RUNE_RESIST);
+  if ((runesVal & RUNE_REGEN) !== 0) SpawnRune(RUNE_REGEN);
+  if ((runesVal & RUNE_VAMP) !== 0) SpawnRune(RUNE_VAMP); // added by Vampire
+
+  sl_GameStart();
 }
 
 //===================================================================

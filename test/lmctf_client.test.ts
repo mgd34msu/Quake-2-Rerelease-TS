@@ -404,26 +404,50 @@ describe("g_spawn.ts ED_CallSpawn / spawns registry", () => {
     expect(() => ED_CallSpawn(ent)).not.toThrow();
   });
 
-  test("damage_rune is a documented throwing stub citing unit B's SCOPE", () => {
+  test("damage_rune spawns for real (SP_damage_rune -> SpawnItem(damage_rune))", () => {
     setupWorld();
     const entry = spawns.find((s) => s.name === "damage_rune");
     expect(entry).toBeDefined();
     const ent = g_edicts[5];
     if (ent === undefined || entry === undefined) throw new Error("setup failed");
-    expect(() => entry.spawn(ent)).toThrow(/g_runes\.c/);
+
+    expect(() => entry.spawn(ent)).not.toThrow();
+    expect(ent.model).toBe("models/items/invulner/tris.md2");
+    expect(ent.item).not.toBeNull();
+    expect(ent.item?.classname).toBe("damage_rune");
+    expect(ent.item?.pickup_name).toBe("Damage Artifact");
   });
 
   test("SpawnEntities parses an entity string and spawns worldspawn plus a player start", () => {
     setupWorld();
+    // "info_player_start", not "info_player_deathmatch", PLUS a dedicated
+    // info_flag_red/info_flag_blue pair: SpawnEntities's tail now runs
+    // ctf_validateflags() for real (deathmatch is on in setupWorld()).
+    // Without dedicated flag markers, ctf_spawnflag's own fallback chain
+    // for CTF_TEAM_RED (lmctf60/g_ctffunc.c:420-442, ported byte-identical
+    // in g_ctffunc.ts) tries info_flag_red, then info_player_deathmatch,
+    // then info_player_start -- so a minimal map's lone info_player_start
+    // would otherwise get cannibalized into "info_flag_red" (real,
+    // faithful behavior, covered by test/lmctf_capture.test.ts). Providing
+    // real flag markers here means that fallback chain is never reached,
+    // keeping this test's own info_player_start intact -- exactly the
+    // "entity-string parsing" fidelity this test is actually about.
+    // (ctf_deletespawnpointsnearflag, the other real side effect wired
+    // into this tail, only ever searches "info_player_deathmatch" -- see
+    // its own doc comment -- so it can't touch "info_player_start" either
+    // way.)
     const entities =
-      '{ "classname" "worldspawn" } { "classname" "info_player_deathmatch" "origin" "1 2 3" }';
+      '{ "classname" "worldspawn" } ' +
+      '{ "classname" "info_player_start" "origin" "1 2 3" } ' +
+      '{ "classname" "info_flag_red" "origin" "1000 0 0" } ' +
+      '{ "classname" "info_flag_blue" "origin" "-1000 0 0" }';
 
     expect(() => SpawnEntities("testmap", entities, "")).not.toThrow();
 
     let found = false;
     for (let i = 0; i < globals.num_edicts; i++) {
       const e = g_edicts[i];
-      if (e !== undefined && e.classname === "info_player_deathmatch" && e.s.origin[0] === 1) {
+      if (e !== undefined && e.classname === "info_player_start" && e.s.origin[0] === 1) {
         found = true;
       }
     }
@@ -465,18 +489,27 @@ describe("Flag entity spawn/capture chain", () => {
     expect(ent.touch).not.toBeNull();
   });
 
-  test("touching a spawned flag entity reaches the documented not-ported ctf_flagtouch stub", () => {
+  test("touching a spawned flag entity reaches the real ctf_flagtouch (enemy-flag pickup)", () => {
     setupWorld();
     const flagEnt = g_edicts[5];
     const player = makePlayer(1, CTF_TEAM_BLUE);
     if (flagEnt === undefined) throw new Error("no edict");
     flagEnt.inuse = true;
     flagEnt.classname = "flag";
+    flagEnt.flagteam = CTF_TEAM_RED; // enemy flag, relative to the blue player touching it
     ED_CallSpawn(flagEnt);
     flagEnt.think?.(flagEnt); // droptofloor: assigns touch=Touch_Item
 
     expect(flagEnt.touch).not.toBeNull();
-    expect(() => flagEnt.touch?.(flagEnt, player, null, null)).toThrow(/ctf_flagtouch/);
+    expect(() => flagEnt.touch?.(flagEnt, player, null, null)).not.toThrow();
+
+    // ctf_flagtouch's "Enemy flag" branch: picked up, owner set, inventory
+    // incremented.
+    expect(flagEnt.owner).toBe(player);
+    expect(flagEnt.item).not.toBeNull();
+    if (flagEnt.item !== null && player.client !== null) {
+      expect(player.client.pers.inventory[ITEM_INDEX(flagEnt.item)]).toBe(1);
+    }
   });
 
   test("SP_info_flag_red sets the module-level redflag reference and classname", () => {

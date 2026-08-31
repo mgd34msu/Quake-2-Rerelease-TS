@@ -13,13 +13,12 @@
 // newly ported).
 //
 // Several functions call into g_utils.c/g_items.c/g_ctffunc.c/g_spawn.c
-// symbols that this unit does not own (concurrent unit A owns g_utils.ts,
-// g_items.ts, g_ctffunc.ts, and has not yet created g_spawn.ts). Per
-// .orch/preferences.md rule 12, those stay local throwing stubs cited to
-// their C source below ("Cross-dependencies" section) instead of being
-// faked here or by editing unit A's files. G_Find has already landed in
-// g_utils.ts (checked immediately before writing this file) and is
-// imported for real; the rest have not.
+// symbols this file does not itself define. All of them have since landed
+// for real (g_utils.ts/g_items.ts/g_ctffunc.ts/g_spawn.ts) and are now real
+// imports (ED_NewString/ED_CallSpawn via a lazy require -- see the
+// "Cross-dependencies" section below -- because g_spawn.ts's spawns[]
+// table statically imports this file's SP_damage_rune, and a static import
+// back would close a cycle; everything else is a plain static import).
 
 import { random, vec3, VectorAdd, VectorCopy, VectorScale, VectorSet, VectorSubtract, type Vec3, VectorLength } from "../shared/math";
 import { ATTN_NORM, CHAN_ITEM, MASK_SOLID } from "../shared/q_shared";
@@ -36,8 +35,10 @@ import {
   level,
   redflag,
 } from "./g_local";
-import { ArmorIndex, FindItem, ITEM_INDEX } from "./g_items";
+import { ArmorIndex, drop_temp_touch, FindItem, FindItemByClassname, ITEM_INDEX, SpawnItem, Touch_Item } from "./g_items";
 import { G_Find, G_Spawn, tv, type EdictStringKey } from "./g_utils";
+import { ctf_TossEnt } from "./g_ctffunc";
+import { ValidateSelectedItem } from "./g_cmds";
 
 // lmctf60/g_local.h/q_shared.h rune type bitflags
 export const RUNE_DAMAGE = 1;
@@ -52,56 +53,26 @@ export const RUNE_VAMP = 16; // added by Vampire
 const RUNETHINKTIME = 30;
 
 // ---------------------------------------------------------------------
-// Cross-dependencies into files this unit does not own. Unit A owns
-// g_items.ts (SpawnItem/FindItemByClassname/Touch_Item/drop_temp_touch
-// additions), g_ctffunc.ts (ctf_TossEnt addition), and has not yet
-// created g_spawn.ts (ED_NewString/ED_CallSpawn) or landed
-// ValidateSelectedItem in g_cmds.ts. Each stub below throws if actually
-// invoked and cites its C source plus the ctf-ancestor TS file with the
-// real implementation's shape, so a future integration pass can delete
-// the stub and add a real import with no signature guesswork. None of
-// these are reachable today: nothing in the currently-ported tree calls
-// SpawnRune/SP_damage_rune/Pickup_Rune/Drop_Rune yet (g_spawn.c's spawn
-// table and the item pickup dispatch that would reach them are unit A's
-// pending work), so this is exactly as inert as the previous partial
-// port's un-ported functions were, just now fully written out.
+// Cross-dependencies into g_spawn.ts (ED_NewString/ED_CallSpawn), resolved
+// via a lazy require rather than a static import: g_spawn.ts's spawns[]
+// table statically imports SP_damage_rune from this file (its real
+// "damage_rune" registry entry), so a static import back here would close
+// a value cycle. Per PORTING.md's import-cycle rule, g_spawn.ts (the
+// entity-dispatch module) is not the side that breaks it.
+// SpawnItem/FindItemByClassname/Touch_Item/drop_temp_touch (g_items.ts),
+// ctf_TossEnt (g_ctffunc.ts), and ValidateSelectedItem (g_cmds.ts) are now
+// real imports (checked immediately before writing this file: none of
+// those three modules import g_runes.ts, so no cycle).
 // ---------------------------------------------------------------------
 
-// lmctf60/g_utils.c -- g_items.c's SpawnItem/Touch_Item/drop_temp_touch and
-// g_spawn.c's ED_NewString/ED_CallSpawn signatures below mirror
-// src/ctf/g_items.ts and src/ctf/g_spawn.ts exactly (lmctf60 is
-// byte-identical to ctf for these).
-
-function ED_NewString(_value: string): string {
-  throw new Error("ED_NewString not yet ported (lmctf60/g_spawn.c; owned by unit A's pending g_spawn.ts)");
+function spawnModule(): typeof import("./g_spawn") {
+  return require("./g_spawn") as typeof import("./g_spawn");
 }
-
-function ED_CallSpawn(_ent: EdictT): void {
-  throw new Error("ED_CallSpawn not yet ported (lmctf60/g_spawn.c; owned by unit A's pending g_spawn.ts)");
+function ED_NewString(value: string): string {
+  return spawnModule().ED_NewString(value);
 }
-
-function SpawnItem(_ent: EdictT, _item: GItemT | null): void {
-  throw new Error("SpawnItem not yet ported (lmctf60/g_items.c; owned by unit A's g_items.ts completion)");
-}
-
-function FindItemByClassname(_classname: string): GItemT | null {
-  throw new Error("FindItemByClassname not yet ported (lmctf60/g_items.c; owned by unit A's g_items.ts completion)");
-}
-
-function Touch_Item(_ent: EdictT, _other: EdictT, _plane: unknown, _surf: unknown): void {
-  throw new Error("Touch_Item not yet ported (lmctf60/g_items.c; owned by unit A's g_items.ts completion)");
-}
-
-function drop_temp_touch(_ent: EdictT, _other: EdictT, _plane: unknown, _surf: unknown): void {
-  throw new Error("drop_temp_touch not yet ported (lmctf60/g_items.c; owned by unit A's g_items.ts completion)");
-}
-
-function ctf_TossEnt(_startent: EdictT, _tossent: EdictT): void {
-  throw new Error("ctf_TossEnt not yet ported (lmctf60/g_ctffunc.c:624; owned by unit A's g_ctffunc.ts completion)");
-}
-
-function ValidateSelectedItem(_ent: EdictT): void {
-  throw new Error("ValidateSelectedItem not yet ported (lmctf60/g_cmds.c; owned by unit A's g_cmds.ts completion)");
+function ED_CallSpawn(ent: EdictT): void {
+  spawnModule().ED_CallSpawn(ent);
 }
 
 // ---------------------------------------------------------------------

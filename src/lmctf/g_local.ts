@@ -1190,6 +1190,19 @@ export const gameCvars: {
   // lmctf60/g_local.h: `extern cvar_t *ctfflags;` -- this unit's one
   // required addition (gates CTF_OFFHAND_HOOK, CTF_NO_GRAP_DAMAGE, etc).
   ctfflags: CvarT | null;
+  // lmctf60/g_local.h: `extern cvar_t *refset;` / `extern cvar_t *skinset;`
+  // -- needed by g_ctffunc.ts's ctf_flagtouch (refset gates
+  // CTF_RED_FLAG_FROZEN/CTF_BLUE_FLAG_FROZEN; skinset selects the
+  // redscoreN.wav/bluescoreN.wav capture-sound variant).
+  refset: CvarT | null;
+  skinset: CvarT | null;
+  // lmctf60/g_local.h: `extern cvar_t *flag_init;` -- flag spawn-frame
+  // initialization, read by g_ctffunc.ts's ctf_spawnflag.
+  flag_init: CvarT | null;
+  // lmctf60/g_local.h: `extern cvar_t *runes;` -- bitmask of which runes
+  // SpawnEntities scatters at level load, read by g_spawn.ts's
+  // SpawnEntities tail.
+  runes: CvarT | null;
 } = {
   maxentities: null,
   deathmatch: null,
@@ -1220,6 +1233,10 @@ export const gameCvars: {
   maxspectators: null,
   sv_maplist: null,
   ctfflags: null,
+  refset: null,
+  skinset: null,
+  flag_init: null,
+  runes: null,
 };
 
 //===============================================================

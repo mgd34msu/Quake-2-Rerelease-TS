@@ -88,11 +88,12 @@ InitGame (lmctf60/g_save.c:141) -- PARTIAL, see file header.
 Registers the cvar set the offhand-hook feature and its tests need
 (critically `ctfflags`, gated by CTF_OFFHAND_HOOK/CTF_NO_GRAP_DAMAGE/
 CTF_TEAM_NOTEAMS/CTF_TEAM_ARMOR_PROTECT/CTF_DM_POWER_ARMOR_STRENGTH -- see
-g_local.ts/g_combat.ts/g_cmds.ts), plus the always-present baseq2 set.
-Skips: the LM_CTF-only cvars this unit's ported files never read
-(runes/refset/skinset/hostname/gamedir/motd_file/maplist_file/etc, all
-declared but unused by anything in src/lmctf so far), the maplist.txt file
-read, and StdLog/gslog initialization.
+g_local.ts/g_combat.ts/g_cmds.ts) plus `refset`/`skinset` (now read by
+g_ctffunc.ts's ctf_flagtouch), plus the always-present baseq2 set. Skips:
+the remaining LM_CTF-only cvars this unit's ported files never read
+(runes/hostname/gamedir/motd_file/maplist_file/etc, all declared but
+unused by anything in src/lmctf so far), the maplist.txt file read, and
+StdLog/gslog initialization.
 =================
 */
 export function InitGame(): void {
@@ -135,6 +136,15 @@ export function InitGame(): void {
 
   // lmctf60/g_save.c: `ctfflags = gi.cvar("ctfflags", "0", CVAR_SERVERINFO);`
   gameCvars.ctfflags = gi.cvar("ctfflags", "0", CVAR_SERVERINFO);
+  // lmctf60/g_save.c:210/214 -- needed by g_ctffunc.ts's ctf_flagtouch now
+  // that the flag capture chain is ported.
+  gameCvars.refset = gi.cvar("refset", "0", CVAR_SERVERINFO);
+  gameCvars.skinset = gi.cvar("skinset", "0", CVAR_SERVERINFO);
+  // lmctf60/g_save.c:237 -- `flag_init = gi.cvar("flag_init", "0", 0);`
+  gameCvars.flag_init = gi.cvar("flag_init", "0", 0);
+  // lmctf60/g_save.c:208 -- `runes = gi.cvar("runes", "15", CVAR_SERVERINFO);`
+  // 15 = RUNE_DAMAGE|RUNE_RESIST|RUNE_HASTE|RUNE_REGEN (not RUNE_VAMP).
+  gameCvars.runes = gi.cvar("runes", "15", CVAR_SERVERINFO);
 
   gameCvars.sv_maplist = gi.cvar("sv_maplist", "", 0);
 

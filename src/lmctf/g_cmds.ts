@@ -13,9 +13,9 @@
 // here -- see g_main.ts's InitGame for how this unit wires the two
 // commands it does implement without the full dispatch table.
 
-import { ATTN_NORM, CHAN_ITEM, MAX_INFO_STRING, PRINT_HIGH } from "../shared/q_shared";
+import { ATTN_NORM, CHAN_ITEM, MAX_INFO_STRING, MAX_ITEMS, PRINT_HIGH } from "../shared/q_shared";
 import { ctf_SafePrint, ctf_hook_abort } from "./g_ctffunc";
-import { FindItem, ITEM_INDEX } from "./g_items";
+import { FindItem, GetItemByIndex, ITEM_INDEX } from "./g_items";
 import {
   type EdictT,
   CTF_OFFHAND_HOOK,
@@ -26,12 +26,20 @@ import {
   level,
   svc_stufftext,
 } from "./g_local";
+import { ChaseNext } from "./g_chase";
 // Lazy require, not a static import: p_weapon.ts (Weapon_Hook_Fire) ->
 // g_combat.ts (T_Damage) -> g_cmds.ts (OnSameTeam) -> g_items.ts (this
 // file only needs FindItem/ITEM_INDEX from there, no cycle) would close a
 // value cycle back to this file if Weapon_Hook_Fire were imported
 // statically. Per PORTING.md's import-cycle rule, the command-dispatch
 // layer (this file) is the "less fundamental" side and breaks the cycle.
+//
+// Menu_Next (g_menu.ts) is resolved lazily, not statically, for the same
+// reason: g_menu.ts already statically imports ForceCommand from this
+// file, so a static import back here would close a value cycle.
+function menuModule(): typeof import("./g_menu") {
+  return require("./g_menu") as typeof import("./g_menu");
+}
 
 /*
 =================
@@ -173,4 +181,59 @@ export function Cmd_Unhook_f(ent: EdictT): void {
       ctf_hook_abort(ent);
     }
   }
+}
+
+/*
+=================
+SelectNextItem (lmctf60/g_cmds.c:293) -- byte-identical to the C source.
+Menu_Next's call does NOT return early (the C source's own comment,
+preserved below, explains why: ValidateSelectedItem can reach this
+function while a menu is up and must still fall through to the inventory
+scan). SelectPrevItem (g_cmds.c:333) is a mirror-image function nothing in
+this unit's SCOPE calls and is not ported.
+=================
+*/
+export function SelectNextItem(ent: EdictT, itflags: number): void {
+  const client = ent.client;
+  if (client === null) return;
+
+  if (client.showmenu) {
+    menuModule().Menu_Next(ent);
+    // surt, this causes a bug with dropping items ... this can be called
+    // from validate selected item in which case it must _not_ return
+    // early!!!! (lmctf60 comment, preserved verbatim in spirit)
+  }
+
+  if (client.chase_target !== null) {
+    ChaseNext(ent);
+    return;
+  }
+
+  for (let i = 1; i <= MAX_ITEMS; i++) {
+    const index = (client.pers.selected_item + i) % MAX_ITEMS;
+    if (!client.pers.inventory[index]) continue;
+    const it = GetItemByIndex(index);
+    if (it === null || it.use === null) continue;
+    if ((it.flags & itflags) === 0) continue;
+
+    client.pers.selected_item = index;
+    return;
+  }
+
+  client.pers.selected_item = -1;
+}
+
+/*
+=================
+ValidateSelectedItem (lmctf60/g_cmds.c:375) -- byte-identical to the C
+source.
+=================
+*/
+export function ValidateSelectedItem(ent: EdictT): void {
+  const client = ent.client;
+  if (client === null) return;
+
+  if (client.pers.inventory[client.pers.selected_item]) return; // valid
+
+  SelectNextItem(ent, -1);
 }

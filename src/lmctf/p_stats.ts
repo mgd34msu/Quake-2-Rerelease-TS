@@ -25,7 +25,7 @@
 import { PRINT_HIGH } from "../shared/q_shared";
 import { Match_CanScore } from "./g_tourney";
 import { LowerCase } from "./g_replace";
-import { ctf_SafePrint, CTF_TEAM_MATCHING, CTF_TEAM_UNDEFINED } from "./g_ctffunc";
+import { ctf_SafePrint, ctf_teamstring as ctf_teamstring_real, CTF_TEAM_MATCHING, CTF_TEAM_UNDEFINED } from "./g_ctffunc";
 import { type EdictT, g_edicts, game, gi, StatsPlayerT } from "./g_local";
 
 // p_stats.h:4-22
@@ -271,11 +271,13 @@ function stats_output(ent: EdictT, p_player: StatsPlayerT): void {
 }
 
 // ---------------------------------------------------------------------
-// Cross-dependency into lmctf60/g_ctffunc.c, not yet ported (owned by
-// unit A's g_ctffunc.ts completion).
+// ctf_teamstring (lmctf60/g_ctffunc.c) has since landed for real, with a
+// different signature than this file's call site expects -- see
+// g_replace.ts's identical adapter for the rationale (buf/text/ok vs a
+// plain string return).
 // ---------------------------------------------------------------------
-function ctf_teamstring(_teamnum: number, _teamCompare: number): string {
-  throw new Error("ctf_teamstring not yet ported (lmctf60/g_ctffunc.c; owned by unit A's g_ctffunc.ts completion)");
+function ctf_teamstring(teamnum: number, teamCompare: number): string {
+  return ctf_teamstring_real("", teamnum, teamCompare).text;
 }
 
 /*

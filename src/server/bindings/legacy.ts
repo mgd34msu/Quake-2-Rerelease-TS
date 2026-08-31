@@ -32,8 +32,10 @@ import type { GameExports as CtfGameExports } from "../../ctf/game";
 import { GetGameAPI as CTF_GetGameAPI } from "../../ctf/g_main";
 import { GetGameAPI as XATRIX_GetGameAPI } from "../../xatrix/g_main";
 import { GetGameAPI as ROGUE_GetGameAPI } from "../../rogue/g_main";
+import { GetGameAPI as LMCTF_GetGameAPI } from "../../lmctf/g_main";
 import type { GameExports as XatrixGameExports } from "../../xatrix/game";
 import type { GameExports as RogueGameExports } from "../../rogue/game";
+import type { GameExports as LmctfGameExports } from "../../lmctf/game";
 import { Cvar_Get, Cvar_Set, Cvar_ForceSet } from "../../qcommon/cvar";
 import { Cmd_Argc, Cmd_Argv, Cmd_Args, Cbuf_AddText } from "../../qcommon/cmd";
 import { CM_SetAreaPortalState, CM_AreasConnected } from "../../qcommon/cmodel";
@@ -107,7 +109,7 @@ import {
 // the bridge current. One adapter serves all three pack tracks; the union
 // parameter works because the three interfaces are structurally identical
 // in every member the adapter touches.
-function adaptPackGameExports(ctfGe: CtfGameExports | XatrixGameExports | RogueGameExports): GameExports {
+function adaptPackGameExports(ctfGe: CtfGameExports | XatrixGameExports | RogueGameExports | LmctfGameExports): GameExports {
   return {
     apiversion: ctfGe.apiversion,
     Init: () => ctfGe.Init(),
@@ -238,40 +240,35 @@ geHolder assignment.
 // pack "Lithium CTF" with "no GPL source anywhere in this port's reference
 // libraries" -- both no longer accurate.
 //
-// The dispatch below still routes "lmctf" to CTF_GetGameAPI (stock CTF
-// rules, not LM_CTF's real rules) because src/lmctf's GetGameAPI is not yet
-// complete enough to serve live traffic: as of this comment, only the
-// offhand-hook priority feature (g_cmds.ts/p_weapon.ts/g_ctffunc.ts) plus
-// its supporting foundation (g_local.ts/game.ts/g_combat.ts/g_items.ts
-// partial/g_tourney.ts partial) are ported and tested (test/lmctf_core.test.ts).
-// SpawnEntities/RunFrame/ClientConnect/ClientThink/WriteGame/ReadGame/
-// ServerCommand all throw a named "not ported" error (see src/lmctf/g_main.ts's
-// file header) -- confirmed by direct invocation: GetGameAPI()/Init() run
-// cleanly, but SpawnEntities("lmctf09", ...) throws immediately, so a real
-// boot cannot reach map load, let alone "Server Initialization" the way a
-// working game module does. Do not repoint this dispatch at
-// LMCTF_GetGameAPI until SpawnEntities/RunFrame/ClientConnect/ClientThink
-// are real; doing so today would break every "lmctf" boot outright. This is
-// still a content-to-track alias in the meantime: gameName "lmctf" drives
-// FS_SetGamedir("lmctf") (cvar.ts's "game" latch hook), mounting lmctf's own
-// pak/map data as the active search root, while the compiled game logic
-// served here stays CTF_GetGameAPI (Mike's map pack running under stock CTF
-// rules, not LM_CTF's real rules) until src/lmctf/ is complete.
+// "lmctf" now routes to LMCTF_GetGameAPI (src/lmctf's own GetGameAPI, real
+// LM_CTF rules) instead of CTF_GetGameAPI (stock CTF rules). Flipped once
+// the flag capture chain (ctf_flagtouch/ctf_playerdropflag/
+// ctf_resetflagandplayer + everything they pull in, g_ctffunc.ts),
+// SpawnEntities (g_spawn.ts), ClientConnect/ClientBegin/
+// ClientUserinfoChanged/ClientDisconnect/ClientThink (p_client.ts), and
+// RunFrame (g_main.ts) were all confirmed real (not throwing) by direct
+// invocation and by test/lmctf_capture.test.ts. gameName "lmctf" still
+// drives FS_SetGamedir("lmctf") (cvar.ts's "game" latch hook) the same way
+// it always did; the only change here is which compiled game module serves
+// the resulting traffic.
 export function LoadLegacyGame(gameName: string): GameExports {
   const importsObj = BuildLegacyImports();
 
   // `importsObj`'s type (src/game/game.ts's GameImports) is structurally
-  // identical to src/ctf/game.ts's GameImports (verified: `diff
-  // src/game/game.ts src/ctf/game.ts` adds only the SVF_PROJECTILE constant,
-  // no interface-shape change) and both only take the shared, track-agnostic
-  // `Edict` type as parameters, so passing it to CTF_GetGameAPI needs no
-  // cast. Its GameExports return does NOT assign back structurally (see
-  // adaptPackGameExports's comment above) -- bridged through that adapter.
-  return gameName === "ctf" || gameName === "lmctf"
-    ? adaptPackGameExports(CTF_GetGameAPI(importsObj))
-    : gameName === "xatrix"
-      ? adaptPackGameExports(XATRIX_GetGameAPI(importsObj))
-      : gameName === "rogue"
-        ? adaptPackGameExports(ROGUE_GetGameAPI(importsObj))
-        : GetGameAPI(importsObj);
+  // identical to src/ctf/game.ts's and src/lmctf/game.ts's GameImports
+  // (verified: both only differ from the base by additive constants, no
+  // interface-shape change) and all three only take the shared,
+  // track-agnostic `Edict` type as parameters, so passing it to
+  // CTF_GetGameAPI/LMCTF_GetGameAPI needs no cast. Its GameExports return
+  // does NOT assign back structurally (see adaptPackGameExports's comment
+  // above) -- bridged through that adapter.
+  return gameName === "lmctf"
+    ? adaptPackGameExports(LMCTF_GetGameAPI(importsObj))
+    : gameName === "ctf"
+      ? adaptPackGameExports(CTF_GetGameAPI(importsObj))
+      : gameName === "xatrix"
+        ? adaptPackGameExports(XATRIX_GetGameAPI(importsObj))
+        : gameName === "rogue"
+          ? adaptPackGameExports(ROGUE_GetGameAPI(importsObj))
+          : GetGameAPI(importsObj);
 }

@@ -184,17 +184,25 @@ export function ChasePrev(ent: EdictT): void {
 // (`int Num_Of_Players(edict_t *ent, int Ctf_Team);`) -- the real
 // definition is lmctf60/p_client.c:3310, counting connected CTF_TEAM_RED/
 // CTF_TEAM_BLUE players via ctf_findplayer. p_client.c's TS counterpart,
-// src/lmctf/p_client.ts, does not exist yet and is explicitly out of this
-// unit's SCOPE (owned by a separate concurrent worker), so this follows
-// src/lmctf/g_target.ts's use_target_blaster pattern for a missing
-// same-family dependency: a documented throwing stub rather than an
-// inline reimplementation.
+// src/lmctf/p_client.ts, now exists and exports Num_Of_Players for real
+// (that file's own doc comment on Num_Of_Players cites this exact gap and
+// resolves it) -- resolved via a lazy require, not a static import:
+// p_client.ts statically imports UpdateChaseCam from this file, so a
+// static import back here would close a value cycle.
+function clientModule(): typeof import("./p_client") {
+  return require("./p_client") as typeof import("./p_client");
+}
+
 export function Team_Observer_OK(Team_To_View: number, ent: EdictT): boolean {
-  void Team_To_View;
-  void ent;
-  throw new Error(
-    "Team_Observer_OK: Num_Of_Players (lmctf60/p_client.c:3310) is not ported -- src/lmctf/p_client.ts does not exist and is out of this unit's SCOPE",
-  );
+  if (clientModule().Num_Of_Players(ent, Team_To_View) > 0) return true;
+
+  if (Team_To_View === CTF_TEAM_RED) {
+    gi.centerprintf(ent, "No red players to chase.");
+  } else {
+    gi.centerprintf(ent, "No blue players to chase.");
+  }
+
+  return false;
 }
 
 export function GetChaseTarget(ent: EdictT): void {

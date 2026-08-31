@@ -13,14 +13,11 @@
 // line is cosmetic (license header dropped, `stricmp` -> `Q_stricmp`,
 // a `strncpy` bound, a typo fix in a comment).
 //
-// fire_blaster (g_weapon.c) has no lmctf port in this family (g_weapon.ts
-// does not exist under src/lmctf -- p_weapon.ts only carries the
-// offhand-hook priority feature's hook chain per the foundation's SCOPE,
-// and g_weapon.ts is not listed in this unit's SCOPE either). Creating
-// src/lmctf/g_weapon.ts is out of SCOPE (rule 12: never create a file at a
-// sibling module's real path). use_target_blaster is therefore a reported
-// throwing gap citing that missing dependency; target_blaster still spawns
-// and links correctly, only firing throws.
+// fire_blaster (g_weapon.c) is now ported at src/lmctf/g_weapon.ts (the
+// subset use_target_blaster actually reaches -- fire_blaster/blaster_touch/
+// check_dodge; see that file's own header for the rest of g_weapon.c's
+// SCOPE, which stays with p_weapon.ts's player-weapon-fire dispatch).
+// use_target_blaster below calls it for real.
 
 import { crandom, vec3, vec3_origin, VectorCompare, VectorCopy, VectorMA, VectorNormalize, VectorScale, VectorSet, VectorSubtract } from "../shared/math";
 import {
@@ -70,6 +67,7 @@ import {
   world,
 } from "./g_local";
 import { G_Find, G_FreeEdict, G_SetMovedir, G_Spawn, G_UseTargets, KillBox, vtos } from "./g_utils";
+import { fire_blaster } from "./g_weapon";
 
 function cvarNum(c: CvarT | null): number {
   return c === null ? 0 : c.value;
@@ -468,14 +466,15 @@ export function use_target_blaster(self: EdictT, other: EdictT | null, activator
   // lmctf60 actually uses `effect` here (ctf's own g_target.c always passed
   // the literal EF_BLASTER, a bug this port's ctf ancestor preserves --
   // lmctf60 does not have that bug, so `effect` is used, not discarded).
-  // fire_blaster itself (g_weapon.c) has no port in this family -- see this
-  // file's header comment. `void effect` below documents that the value is
-  // computed correctly and would be threaded through once g_weapon.ts
-  // exists.
-  void effect;
-  throw new Error(
-    "use_target_blaster: fire_blaster (lmctf60/g_weapon.c) is not ported -- src/lmctf/g_weapon.ts does not exist and is out of this unit's SCOPE",
-  );
+  //
+  // The C call site passes the literal `MOD_TARGET_BLASTER` (33) for
+  // fire_blaster's `qboolean hyper` parameter -- always truthy, regardless
+  // of `effect` above. See g_weapon.ts's file header for the resulting
+  // preserved bug (target_blaster kills always attribute as
+  // MOD_HYPERBLASTER). `true` here is that literal's truthiness, not a
+  // simplification.
+  fire_blaster(self, self.s.origin, self.movedir, self.dmg, self.speed, effect, true);
+  gi.sound(self, CHAN_VOICE, self.noise_index, 1, ATTN_NORM, 0);
 }
 
 export function SP_target_blaster(self: EdictT): void {

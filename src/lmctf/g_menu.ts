@@ -62,6 +62,7 @@ import {
   CTF_TEAM_UNDEFINED,
   ctf_findplayer,
   ctf_SafePrint,
+  ctf_validateflags,
 } from "./g_ctffunc";
 import {
   CTF_ALLOW_INVULN,
@@ -92,6 +93,7 @@ import { FindItem } from "./g_items";
 import { GamePaused, Match_Mode } from "./g_tourney";
 import { SkinGetList, SkinListInUse } from "./g_skins";
 import { ForceCommand } from "./g_cmds";
+import { TeamJoin } from "./p_client";
 
 // lmctf60/g_menu.h:12-18
 export const MENU_LOCAL = 0;
@@ -119,12 +121,18 @@ export interface MenuData {
 }
 
 // ---------------------------------------------------------------------
-// Cross-dependencies into files this unit does not own. Unit A owns
-// g_cmds.ts (Cmd_Team_f/Team_Change/Cmd_ToggleFastSwitch_f/Drop_All/
-// PlayTeamSound/PlayVoiceSound), p_client.ts (not yet created --
-// Cmd_Observe_f/TeamJoin/ClientSetSkin), g_ctffunc.ts (ctf_ChangeMap/
-// ctf_validateflags), and g_tourney.ts (StartMatch/KillMatch/SetPause --
-// only Match_Mode/GamePaused exist there today). Each stub throws if
+// Cross-dependencies into files this unit does not own. TeamJoin
+// (p_client.ts) and ctf_validateflags (g_ctffunc.ts) have since landed for
+// real and are imported above (removed from the stub list below). Still
+// outstanding: g_cmds.ts (Cmd_Team_f/Team_Change/Cmd_ToggleFastSwitch_f/
+// Drop_All/PlayTeamSound/PlayVoiceSound), p_client.ts (Cmd_Observe_f --
+// lives in p_observer.ts's own newer implementation instead, not a drop-in
+// signature match; ClientSetSkin -- lmctf60/p_client.c:3145, not ported by
+// any unit yet), g_ctffunc.ts's own ctf_ChangeMap (lmctf60/g_ctffunc.c:1548
+// is a real, small function, but it unconditionally calls KillMatch,
+// g_tourney.c's match-flow system, not ported anywhere in this port), and
+// g_tourney.ts (StartMatch/KillMatch/SetPause -- only Match_Mode/
+// GamePaused exist there today). Each remaining stub throws if
 // actually invoked and cites its C source plus owner.
 // ---------------------------------------------------------------------
 
@@ -156,20 +164,12 @@ function Cmd_Observe_f(_ent: EdictT, _observerType: number): void {
   throw new Error("Cmd_Observe_f not yet ported (lmctf60/p_client.c; owned by unit A's pending p_client.ts)");
 }
 
-function TeamJoin(_ent: EdictT): void {
-  throw new Error("TeamJoin not yet ported (lmctf60/p_client.c; owned by unit A's pending p_client.ts)");
-}
-
 function ClientSetSkin(_ent: EdictT, _skin: string): void {
   throw new Error("ClientSetSkin not yet ported (lmctf60/p_client.c; owned by unit A's pending p_client.ts)");
 }
 
 function ctf_ChangeMap(_mapname: string | null, _immediate: boolean): void {
-  throw new Error("ctf_ChangeMap not yet ported (lmctf60/g_ctffunc.c; owned by unit A's g_ctffunc.ts completion)");
-}
-
-function ctf_validateflags(): void {
-  throw new Error("ctf_validateflags not yet ported (lmctf60/g_ctffunc.c; owned by unit A's g_ctffunc.ts completion)");
+  throw new Error("ctf_ChangeMap not yet ported (lmctf60/g_ctffunc.c:1548; owned by unit A's g_ctffunc.ts completion -- itself blocked on KillMatch, g_tourney.c, not yet ported)");
 }
 
 function StartMatch(_mapname: string | null): void {

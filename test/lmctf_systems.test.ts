@@ -861,17 +861,16 @@ describe("p_stats.ts", () => {
     expect(active.stats[STATS_FRAGS]).toBe(0); // reinitialized, not just kept
   });
 
-  test("Cmd_StatsAll_f: throws on the documented ctf_teamstring cross-dependency, not on anything else", () => {
+  test("Cmd_StatsAll_f: ctf_teamstring has since landed for real, no throw", () => {
     const ent = makePlayer(1);
     if (ent.client === null) throw new Error("no client");
     ent.client.p_stats_player = stats_new_player("player1");
     stats_set(ent, STATS_FRAGS, 2);
 
-    // stats_output (p_stats.ts) unconditionally calls ctf_teamstring, a
-    // cross-dependency into unit A's pending g_ctffunc.ts completion (see
-    // p_stats.ts's own stats_output doc comment) -- this documents exactly
-    // where it currently stops, not a p_stats.ts defect.
-    expect(() => Cmd_StatsAll_f(ent)).toThrow("ctf_teamstring not yet ported");
+    // stats_output (p_stats.ts) calls ctf_teamstring, resolved for real via
+    // a thin signature-adapting wrapper (see p_stats.ts's own doc comment)
+    // now that g_ctffunc.ts's ctf_teamstring is ported.
+    expect(() => Cmd_StatsAll_f(ent)).not.toThrow();
   });
 });
 

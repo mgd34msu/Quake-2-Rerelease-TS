@@ -22,6 +22,7 @@ import {
   type CplaneT,
   type CsurfaceT,
   CS_ITEMS,
+  DF_NO_HEALTH,
   EF_ROTATE,
   EntityEventT,
   MASK_SOLID,
@@ -158,11 +159,149 @@ function makeFlagItem(): GItemT {
   return item;
 }
 
+// lmctf60/g_items.c ~2413: the "damage_rune" itemlist entry -- byte-
+// identical field values to the C source. Only this one rune entry is
+// ported (the task naming it explicitly: "damage_rune spawn wiring"); the
+// other three (resist_rune/haste_rune/regen_rune, ~2437-2503) are NOT
+// ported -- their SP_ spawn functions don't exist in g_spawn.ts's
+// registry either, so a map placing one of those three still falls
+// through to "doesn't have a spawn function" exactly like before this
+// change, a documented follow-up, not a silent gap.
+//
+// Pickup_Rune/Drop_Rune (g_runes.ts) are resolved via a lazy require, not
+// a static import, same reasoning as makeFlagItem's ctf_flagtouch/
+// ctf_playerdropflag above: g_runes.ts already statically imports
+// SpawnItem/FindItemByClassname/etc from this file, so a static import
+// back would close a value cycle.
+function makeDamageRuneItem(): GItemT {
+  const item = new GItemT();
+  item.classname = "damage_rune";
+  item.pickup = (ent: EdictT, other: EdictT): boolean => {
+    const mod = require("./g_runes") as { Pickup_Rune: (ent: EdictT, other: EdictT) => boolean };
+    return mod.Pickup_Rune(ent, other);
+  };
+  item.use = (ent: EdictT, gitem: GItemT): void => {
+    const mod = require("./g_runes") as { Drop_Rune: (ent: EdictT, item: GItemT | null) => void };
+    mod.Drop_Rune(ent, gitem);
+  };
+  item.drop = (ent: EdictT, gitem: GItemT): void => {
+    const mod = require("./g_runes") as { Drop_Rune: (ent: EdictT, item: GItemT | null) => void };
+    mod.Drop_Rune(ent, gitem);
+  };
+  item.pickup_sound = "items/pkup.wav";
+  item.world_model = "models/ctf/damage/tris.md2";
+  item.world_model_flags = EF_ROTATE;
+  item.icon = "a_strength";
+  item.pickup_name = "Damage Artifact";
+  item.count_width = 3;
+  item.flags = IT_POWERUP;
+  item.precaches = "misc/tele_up.wav world/klaxon1.wav";
+  return item;
+}
+
+// lmctf60/g_items.c:46-47 -- `ent->style` bitflags read by Pickup_Health/
+// MegaHealth_think below.
+export const HEALTH_IGNORE_MAX = 1;
+export const HEALTH_TIMED = 2;
+
+// lmctf60/g_runes.c: `#define RUNE_REGEN 8`, also exported for real from
+// g_runes.ts -- kept as a local copy here (not imported) because g_runes.ts
+// already statically imports ArmorIndex/FindItem/ITEM_INDEX from this
+// file; a static import back would close a value cycle. Per PORTING.md's
+// import-cycle rule this file (g_items.c, the more fundamental item-table
+// module) is not the side that breaks it, so this one bitflag constant is
+// duplicated by value instead of lazily required, matching the size/risk
+// tradeoff PORTING.md accepts for a single never-changing #define.
+const RUNE_REGEN = 8;
+
+/*
+=================
+MegaHealth_think (lmctf60/g_items.c:550) -- byte-identical to the C
+source. Only reached for a picked-up HEALTH_TIMED item (item_health_mega),
+whose Pickup_Health branch below re-purposes the entity as a ticking
+"give back the overflow health" timer on its owner instead of freeing or
+respawning it.
+=================
+*/
+export function MegaHealth_think(self: EdictT): void {
+  if (self.owner !== null) {
+    const owner = self.owner;
+    if (owner.client !== null && owner.client.rune !== null && owner.client.rune.runetype === RUNE_REGEN) {
+      if (owner.health > owner.max_health + 25) {
+        self.nextthink = level.time + 2;
+        owner.health -= 1;
+        return;
+      }
+    } else if (owner.health > owner.max_health) {
+      self.nextthink = level.time + 1;
+      owner.health -= 1;
+      return;
+    }
+  }
+
+  if ((self.spawnflags & DROPPED_ITEM) === 0 && gameCvars.deathmatch !== null && gameCvars.deathmatch.value !== 0) {
+    SetRespawn(self, 20);
+  } else {
+    G_FreeEdict(self);
+  }
+}
+
+/*
+=================
+Pickup_Health (lmctf60/g_items.c:581) -- byte-identical to the C source.
+The `#ifdef WEAP_BALANCE_OK` overboard-health clamp (CTF_WEAP_BALANCE) is
+dropped -- that macro is never `#define`d anywhere in lmctf60, same as
+g_weapon.ts's fire_blaster citation for the same macro.
+=================
+*/
+export function Pickup_Health(ent: EdictT, other: EdictT): boolean {
+  if ((ent.style & HEALTH_IGNORE_MAX) === 0 && other.health >= other.max_health) return false;
+
+  other.health += ent.count;
+
+  if ((ent.style & HEALTH_IGNORE_MAX) === 0 && other.health > other.max_health) {
+    other.health = other.max_health;
+  }
+
+  if ((ent.style & HEALTH_TIMED) !== 0) {
+    ent.think = MegaHealth_think;
+    ent.nextthink = level.time + 5;
+    ent.owner = other;
+    ent.flags |= FL_RESPAWN;
+    ent.svflags |= SVF_NOCLIENT;
+    ent.solid = SolidT.SOLID_NOT;
+  } else if ((ent.spawnflags & DROPPED_ITEM) === 0 && gameCvars.deathmatch !== null && gameCvars.deathmatch.value !== 0) {
+    SetRespawn(ent, 30);
+  }
+
+  return true;
+}
+
+// lmctf60/g_items.c ~2334: `/* pickup */ "Health"` itemlist entry --
+// `classname` is NULL in the C source (confirmed by direct read), which
+// matters: g_spawn.ts's ED_CallSpawn checks the item table by classname
+// BEFORE spawns[] (the same "item table wins" quirk SP_flag's own doc
+// comment documents), and a NULL classname here can never match
+// "item_health"/"item_health_small"/etc, so those map classnames correctly
+// fall through to g_spawn.ts's spawns[] table and reach the real
+// SP_item_health family below -- unlike "flag", which DOES collide with
+// the item table and never reaches SP_flag.
+function makeHealthItem(): GItemT {
+  const item = new GItemT();
+  item.pickup = Pickup_Health;
+  item.pickup_sound = "items/pkup.wav";
+  item.icon = "i_health";
+  item.pickup_name = "Health";
+  item.count_width = 3;
+  item.flags = 0;
+  return item;
+}
+
 // `gitem_t itemlist[]` -- partial (see file header). Index 0 is always the
 // null item in the C source (`{}` first entry so index 0 means "no item");
 // preserved here for the same ITEM_INDEX-is-1-based convention src/ctf/g_items.ts
 // uses.
-const ITEMLIST: GItemT[] = [new GItemT(), makeHookItem(), makeFlagItem(), makeBlasterItem()];
+const ITEMLIST: GItemT[] = [new GItemT(), makeHookItem(), makeFlagItem(), makeBlasterItem(), makeHealthItem(), makeDamageRuneItem()];
 // lmctf60/g_items.c's real InitItems() sets `game.num_items` (among other
 // precache work this partial port does not do); `game` is a shared mutable
 // singleton that InitGame's own `game.clear()`/reassignment can wipe after
@@ -563,6 +702,19 @@ export function Touch_Item(ent: EdictT, other: EdictT, plane: CplaneT | null, su
 
 /*
 =================
+drop_temp_touch (lmctf60/g_items.c:961) -- byte-identical to the C source:
+a dropped item can't be immediately re-picked-up by the player who dropped
+it (skips straight past Touch_Item for that one entity), everyone else
+touches it normally.
+=================
+*/
+export function drop_temp_touch(ent: EdictT, other: EdictT, plane: CplaneT | null, surf: CsurfaceT | null): void {
+  if (other === ent.owner) return;
+  Touch_Item(ent, other, plane, surf);
+}
+
+/*
+=================
 SP_flag (lmctf60/g_items.c:837)
 
 NOTE (observable-behavior quirk, preserved bug-for-bug): g_spawn.c's
@@ -594,4 +746,65 @@ export function SP_flag(self: EdictT): void {
   self.think = mod.ctf_flagwave;
   self.nextthink = level.time + 1;
   gi.soundindex("items/m_health.wav");
+}
+
+/*
+=================
+SP_item_health / SP_item_health_small / SP_item_health_large /
+SP_item_health_mega (lmctf60/g_items.c:2539-2603) -- byte-identical to the
+C source. All four route through FindItem("Health") (makeHealthItem's
+ITEMLIST entry above) with SpawnItem, matching Pickup_Health's exact
+count/style per size. Reached via g_spawn.ts's spawns[] table (see
+makeHealthItem's own doc comment for why ED_CallSpawn's item-table-wins
+check doesn't intercept these classnames first).
+=================
+*/
+export function SP_item_health(self: EdictT): void {
+  if (gameCvars.deathmatch !== null && gameCvars.deathmatch.value !== 0 && (gameCvars.dmflags !== null && (gameCvars.dmflags.value & DF_NO_HEALTH) !== 0)) {
+    G_FreeEdict(self);
+    return;
+  }
+
+  self.model = "models/items/healing/medium/tris.md2";
+  self.count = 10;
+  SpawnItem(self, FindItem("Health"));
+  gi.soundindex("items/n_health.wav");
+}
+
+export function SP_item_health_small(self: EdictT): void {
+  if (gameCvars.deathmatch !== null && gameCvars.deathmatch.value !== 0 && (gameCvars.dmflags !== null && (gameCvars.dmflags.value & DF_NO_HEALTH) !== 0)) {
+    G_FreeEdict(self);
+    return;
+  }
+
+  self.model = "models/items/healing/stimpack/tris.md2";
+  self.count = 2;
+  SpawnItem(self, FindItem("Health"));
+  self.style = HEALTH_IGNORE_MAX;
+  gi.soundindex("items/s_health.wav");
+}
+
+export function SP_item_health_large(self: EdictT): void {
+  if (gameCvars.deathmatch !== null && gameCvars.deathmatch.value !== 0 && (gameCvars.dmflags !== null && (gameCvars.dmflags.value & DF_NO_HEALTH) !== 0)) {
+    G_FreeEdict(self);
+    return;
+  }
+
+  self.model = "models/items/healing/large/tris.md2";
+  self.count = 25;
+  SpawnItem(self, FindItem("Health"));
+  gi.soundindex("items/l_health.wav");
+}
+
+export function SP_item_health_mega(self: EdictT): void {
+  if (gameCvars.deathmatch !== null && gameCvars.deathmatch.value !== 0 && (gameCvars.dmflags !== null && (gameCvars.dmflags.value & DF_NO_HEALTH) !== 0)) {
+    G_FreeEdict(self);
+    return;
+  }
+
+  self.model = "models/items/mega_h/tris.md2";
+  self.count = 100;
+  SpawnItem(self, FindItem("Health"));
+  gi.soundindex("items/m_health.wav");
+  self.style = HEALTH_IGNORE_MAX | HEALTH_TIMED;
 }

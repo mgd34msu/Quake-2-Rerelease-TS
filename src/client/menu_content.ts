@@ -61,16 +61,16 @@
 //
 // "lmctf" GAME TRACK -- see src/server/bindings/legacy.ts's own comment at
 // its LoadLegacyGame dispatch: lmctf is LM_CTF (Loki's Minions CTF), a
-// classic-era third-party CTF mod with real GPL source now available
-// (~/Projects/qsrc/lmctf60) and a real, in-progress port at src/lmctf/
-// (currently: the offhand-hook priority feature plus its supporting
-// foundation, tested in test/lmctf_core.test.ts). Selecting it here still
-// plays those maps under OUR compiled ctf track (stock CTF rules) rather
-// than src/lmctf's own rules, because src/lmctf's GetGameAPI cannot yet
-// complete a map load (SpawnEntities/RunFrame/ClientConnect are not
-// ported) -- an explicit, documented scope boundary, not a fidelity claim,
-// and not a permanent one: repoint legacy.ts's dispatch once src/lmctf/ can
-// actually boot a level.
+// classic-era third-party CTF mod with real GPL/authorized-community-port
+// source available (~/Projects/qsrc/lmctf60) and a real port at
+// src/lmctf/ (flag capture chain, item table, blaster fire, and the
+// boot-critical SpawnEntities/RunFrame/ClientConnect/ClientThink path all
+// land for real, tested in test/lmctf_core.test.ts and
+// test/lmctf_capture.test.ts). Selecting it here now plays those maps
+// under src/lmctf's own real LM_CTF rules (legacy.ts's dispatch was
+// repointed at LMCTF_GetGameAPI once src/lmctf/ could actually boot a
+// level) -- no longer the stock ctf-track fallback this comment used to
+// describe.
 //
 // WHY A STATIC TABLE (not fully mapdb-driven)
 // ---------------------------------------------------------------------

@@ -8,13 +8,15 @@
 // replace_artifact, replace_weapon, replace_team, replace_visibleplayers,
 // replace_flaginfo, replace_viewinfo, replace_carrierinfo, LowerCase.
 //
-// Cross-dependencies into lmctf60/g_ctffunc.c symbols this unit does not
-// own (ctf_teamstring/ctf_getteamflag/ctf_flagathome -- not yet in unit A's
-// g_ctffunc.ts) stay local throwing stubs, cited below. Everything else
-// (G_Find, findradius/findallradius, ArmorIndex/PowerArmorType/FindItem/
-// ITEM_INDEX/GetItemByIndex, Info_ValueForKey, ctf_validateplayer,
-// redflag/blueflag) has already landed in the foundation and is imported
-// for real (checked immediately before writing this file).
+// Cross-dependencies into lmctf60/g_ctffunc.c symbols
+// (ctf_teamstring/ctf_getteamflag/ctf_flagathome) have since landed for
+// real and are imported for real below (ctf_teamstring via a thin
+// signature-adapting wrapper, see the "Cross-dependencies" section).
+// Everything else (G_Find, findradius/findallradius,
+// ArmorIndex/PowerArmorType/FindItem/ITEM_INDEX/GetItemByIndex,
+// Info_ValueForKey, ctf_validateplayer, redflag/blueflag) has already
+// landed in the foundation and is imported for real (checked immediately
+// before writing this file).
 
 import { Vec3, VectorSubtract, VectorLength, vec3 } from "../shared/math";
 import { Info_ValueForKey, MASK_SOLID } from "../shared/q_shared";
@@ -35,28 +37,26 @@ import {
   CTF_TEAM_OPPOSING,
   CTF_TEAM_RED,
   CTF_TEAM_UNDEFINED,
+  ctf_flagathome,
+  ctf_getteamflag,
+  ctf_teamstring as ctf_teamstring_real,
   ctf_validateplayer,
 } from "./g_ctffunc";
 import { ArmorIndex, FindItem, GetItemByIndex, ITEM_INDEX, PowerArmorType } from "./g_items";
 import { findallradius, findradius, G_Find, type EdictStringKey } from "./g_utils";
 
 // ---------------------------------------------------------------------
-// Cross-dependencies into lmctf60/g_ctffunc.c, not yet ported (owned by
-// unit A's g_ctffunc.ts completion).
+// ctf_teamstring (lmctf60/g_ctffunc.c) has since landed for real, but with
+// a different signature (`(buf, teamnum, teamnum_option) => {text, ok}`,
+// PORTING.md's "mutate a char* in place" idiom) than the
+// `(teamnum, teamCompare) => string` shape every call site in this file
+// already uses -- this thin adapter keeps those call sites unchanged.
+// ctf_getteamflag/ctf_flagathome match their real signatures exactly and
+// are imported directly above.
 // ---------------------------------------------------------------------
-function ctf_teamstring(_teamnum: number, _teamCompare: number): string {
-  throw new Error("ctf_teamstring not yet ported (lmctf60/g_ctffunc.c; owned by unit A's g_ctffunc.ts completion)");
+function ctf_teamstring(teamnum: number, teamCompare: number): string {
+  return ctf_teamstring_real("", teamnum, teamCompare).text;
 }
-
-function ctf_getteamflag(_teamnum: number, _teamCompare: number): EdictT | null {
-  throw new Error("ctf_getteamflag not yet ported (lmctf60/g_ctffunc.c; owned by unit A's g_ctffunc.ts completion)");
-}
-
-function ctf_flagathome(_flag: EdictT): boolean {
-  throw new Error("ctf_flagathome not yet ported (lmctf60/g_ctffunc.c; owned by unit A's g_ctffunc.ts completion)");
-}
-
-// ---------------------------------------------------------------------
 
 /*
 =================

@@ -1,21 +1,68 @@
-// Ports a SUBSET of lmctf60/g_ctffunc.c -- LM_CTF's team/flag/player-lookup
-// helper library (1564 lines total; wholly new, no CTF-mod ancestor -- the
+// Ports lmctf60/g_ctffunc.c -- LM_CTF's team/flag/player-lookup helper
+// library (1564 lines total; wholly new, no CTF-mod ancestor -- the
 // vanilla `ctf/g_ctf.c` this game family already ported at src/ctf/g_ctf.ts
 // has no equivalent module, LM_CTF's team plumbing is a full rewrite).
 //
-// STATUS: only the functions needed by the offhand-hook priority feature
-// are ported here: ctf_findplayer, ctf_validateplayer, ctf_SafePrint's
-// queueing half, and ctf_hook_abort. The remaining ~50 functions in
-// g_ctffunc.c (flag home/reset/spawn/touch, team-string formatting, spam
-// control, ghost-free team assignment, the replace_* text-macro helpers
-// that actually live in g_replace.c per g_ctffunc.h's own comment, etc.)
-// are NOT ported -- this is a deliberately partial file, reported as a
-// follow-up rather than silently completed.
+// STATUS: the flag capture/pickup/drop/reset/spawn chain is now fully
+// ported (ctf_flagtouch, ctf_playerdropflag, ctf_resetflagandplayer,
+// ctf_ResetFlagProps, ctf_spawnflag, ctf_flagsearch, ctf_findflagposition,
+// ctf_deletespawnpointsnearflag, ctf_TossEnt, Drop_Flag_Think,
+// ctf_getteamflag, ctf_flagathome, ctf_flagatposition, ctf_validateflags),
+// alongside the offhand-hook priority feature's earlier pass
+// (ctf_findplayer, ctf_validateplayer, ctf_SafePrint's queueing half,
+// ctf_hook_abort, ctf_teamstring, ctf_SetEntTeamEx/ctf_SetEntTeam,
+// ctf_flagwave, ctf_BSafePrint). ctf_ChangeMap (g_ctffunc.c:1548) is the
+// one function still NOT ported -- it unconditionally calls KillMatch
+// (g_tourney.c's match-flow system, not ported anywhere in this game
+// family); g_menu.ts's own local stub still cites it. The replace_* text-
+// macro helpers live in g_replace.c per g_ctffunc.h's own comment, not
+// here, and are g_replace.ts's own SCOPE.
 
-import { ATTN_NONE, MAX_INFO_STRING, PRINT_CHAT, PRINT_HIGH, PRINT_LOW } from "../shared/q_shared";
-import { blueflag, CHAN_CTF, type EdictT, FRAMETIME, g_edicts, game, gameCvars, gi, type GItemT, level, redflag } from "./g_local";
+import {
+  ATTN_NONE,
+  ATTN_NORM,
+  CHAN_AUTO,
+  CONTENTS_SOLID,
+  EF_COLOR_SHELL,
+  EF_FLAG1,
+  EF_FLAG2,
+  MASK_SOLID,
+  MAX_INFO_STRING,
+  MulticastT,
+  PRINT_CHAT,
+  PRINT_HIGH,
+  PRINT_LOW,
+  RF_SHELL_BLUE,
+  RF_SHELL_RED,
+  TempEventT,
+} from "../shared/q_shared";
+import { AngleVectors, vec3, type Vec3, VectorAdd, VectorClear, VectorCopy, VectorLength, VectorScale, VectorSet, VectorSubtract } from "../shared/math";
+import {
+  blueflag,
+  CHAN_CTF,
+  CTF_FLAGS_NOFLAGS,
+  CTF_SCORE_BALANCE,
+  DamageT,
+  type EdictT,
+  FL_RESPAWN,
+  FRAMETIME,
+  g_edicts,
+  game,
+  gameCvars,
+  gi,
+  type GItemT,
+  level,
+  MovetypeT,
+  redflag,
+  SetBlueFlag,
+  SetRedFlag,
+  svc_temp_entity,
+} from "./g_local";
 import { SolidT } from "./game";
-import { G_FreeEdict } from "./g_utils";
+import { drop_temp_touch, ITEM_INDEX, Touch_Item } from "./g_items";
+import { G_FreeEdict, G_Find, G_ProjectSource, G_Spawn, Team_cprint, tv } from "./g_utils";
+import { sl_LogScore } from "./stdlog";
+import { matchstate, MatchStatesT } from "./g_tourney";
 
 // lmctf60/g_ctffunc.h
 export const CTF_TEAM_LIMIT = 3;
@@ -30,6 +77,10 @@ export const CTF_TEAM_IGNORETEAM = -4;
 export const CTF_TEAM_ANYTEAM = -5;
 export const CTF_TEAM_OPPOSING = -6;
 export const CTF_TEAM_MATCHING = -7;
+
+// lmctf60/g_ctffunc.h:34-35
+export const CTF_CAPTURE_BONUS_CARRIER = 5;
+export const CTF_CAPTURE_BONUS_TEAM = 10;
 
 /*
 =================
@@ -62,6 +113,43 @@ export function ctf_validateplayer(ent: EdictT | null, teamnum_wanted: number): 
     return ent.client.ctf.teamnum > CTF_TEAM_UNDEFINED && ent.client.ctf.teamnum < CTF_TEAM_LIMIT;
   }
   return teamnum_wanted === ent.client.ctf.teamnum;
+}
+
+/*
+=================
+ctf_flagatposition (lmctf60/g_ctffunc.c:103) / ctf_flagathome
+(lmctf60/g_ctffunc.c:116) -- byte-identical to the C source.
+=================
+*/
+export function ctf_flagatposition(a: Vec3, b: Vec3): boolean {
+  const dir = vec3();
+  VectorSubtract(a, b, dir);
+  return VectorLength(dir) <= 32;
+}
+
+export function ctf_flagathome(whichflag: EdictT | null): boolean {
+  if (whichflag !== null && whichflag.classname === "flag") {
+    return ctf_flagatposition(whichflag.homeposition, whichflag.s.origin);
+  }
+  return false;
+}
+
+/*
+=================
+ctf_getteamflag (lmctf60/g_ctffunc.c:125) -- byte-identical to the C
+source ("very broken for multiteam", the C source's own comment,
+preserved: only CTF_TEAM_RED/CTF_TEAM_BLUE are ever recognized).
+=================
+*/
+export function ctf_getteamflag(teamnum: number, teamnum_option: number): EdictT | null {
+  if (teamnum_option === CTF_TEAM_OPPOSING) {
+    if (teamnum === CTF_TEAM_RED) return blueflag;
+    if (teamnum === CTF_TEAM_BLUE) return redflag;
+    return null;
+  }
+  if (teamnum === CTF_TEAM_RED) return redflag;
+  if (teamnum === CTF_TEAM_BLUE) return blueflag;
+  return null;
 }
 
 /*
@@ -175,23 +263,175 @@ export function ctf_BSafePrint(print_priority: number, buf: string): void {
   }
 }
 
+// ---------------------------------------------------------------------
+// Cross-dependencies resolved via lazy require, not a static import, to
+// avoid closing a value cycle: p_stats.ts and g_cmds.ts both already
+// statically import from this file (ctf_SafePrint/CTF_TEAM_MATCHING/
+// CTF_TEAM_UNDEFINED; ctf_SafePrint/ctf_hook_abort), and g_spawn.ts is
+// reached indirectly (g_spawn.ts -> p_client.ts -> this file, all static).
+// sl_LogScore (stdlog.ts) has no such cycle and is imported for real,
+// directly, below.
+// ---------------------------------------------------------------------
+function statsModule(): typeof import("./p_stats") {
+  return require("./p_stats") as typeof import("./p_stats");
+}
+function cmdsModule(): typeof import("./g_cmds") {
+  return require("./g_cmds") as typeof import("./g_cmds");
+}
+function spawnModule(): typeof import("./g_spawn") {
+  return require("./g_spawn") as typeof import("./g_spawn");
+}
+
+// lmctf60/q_shared.h -- `refset` cvar bits (not `ctfflags` bits, which
+// g_local.ts already exports for real). Not exported anywhere else in
+// this tree yet (g_menu.ts's own header carries the same two values as a
+// local stand-in for the same reason).
+const CTF_RED_FLAG_FROZEN = 1;
+const CTF_BLUE_FLAG_FROZEN = 2;
+
 /*
 =================
-ctf_resetflagandplayer (lmctf60/g_ctffunc.c:334)
-
-NOT PORTED: resets a flag to its home position and (optionally) strips the
-flag from whichplayer's inventory/HUD state -- a substantial function
-(carrier bookkeeping, HUD updates, team broadcast) genuinely out of this
-unit's SCOPE (g_ctffunc.ts's own file header already documents "flag
-home/reset/spawn/touch" as NOT ported). Thrown with citation so
-ctf_flagwave's auto-return branch below fails loudly instead of silently
-no-opping when it's actually reached.
+ctf_validateflags (lmctf60/g_ctffunc.c:229) -- byte-identical to the C
+source. Repairs/creates redflag/blueflag if either is missing or invalid,
+then strips the flag from any invalid holder's inventory.
 =================
 */
-function ctf_resetflagandplayer(whichflag: EdictT, whichplayer: EdictT | null): boolean {
-  throw new Error(
-    "ctf_resetflagandplayer (lmctf60/g_ctffunc.c:334) is not ported -- flag home/reset is out of this unit's SCOPE, see this file's header",
-  );
+export function ctf_validateflags(): boolean {
+  const deathmatch = gameCvars.deathmatch !== null && gameCvars.deathmatch.value !== 0;
+  const ctfflagsVal = gameCvars.ctfflags === null ? 0 : gameCvars.ctfflags.value;
+  if (!deathmatch || (ctfflagsVal & CTF_FLAGS_NOFLAGS) !== 0) return true;
+
+  if (redflag === null || redflag.classname !== "flag" || redflag.item === null || redflag.flagteam !== CTF_TEAM_RED) {
+    SetRedFlag(ctf_flagsearch(CTF_TEAM_RED));
+    if (redflag === null) ctf_spawnflag(CTF_TEAM_RED);
+  }
+
+  if (blueflag === null || blueflag.classname !== "flag" || blueflag.item === null || blueflag.flagteam !== CTF_TEAM_BLUE) {
+    SetBlueFlag(ctf_flagsearch(CTF_TEAM_BLUE));
+    if (blueflag === null) ctf_spawnflag(CTF_TEAM_BLUE);
+  }
+
+  let tmp_player = G_Find(null, "classname", "player");
+  while (tmp_player !== null) {
+    let teamcount = CTF_TEAM_UNDEFINED + 1;
+    while (teamcount < CTF_TEAM_LIMIT) {
+      const tmp_flag = ctf_getteamflag(teamcount, CTF_TEAM_MATCHING);
+      if (tmp_player.client !== null && tmp_flag !== null && tmp_flag.item !== null && tmp_player.client.pers.inventory[ITEM_INDEX(tmp_flag.item)] !== 0) {
+        if (!ctf_validateplayer(tmp_player, CTF_TEAM_ANYTEAM)) {
+          ctf_resetflagandplayer(tmp_flag, tmp_player);
+        }
+      }
+      teamcount++;
+    }
+    tmp_player = G_Find(tmp_player, "classname", "player");
+  }
+
+  if (redflag !== null) gi.linkentity(redflag);
+  else gi.dprintf("Error, red flag missing, please report this.\n");
+  if (blueflag !== null) gi.linkentity(blueflag);
+  else gi.dprintf("Error, blue flag missing, please report this.\n");
+
+  return true;
+}
+
+/*
+=================
+ctf_flagsearch (lmctf60/g_ctffunc.c:297) -- byte-identical to the C
+source. Scans every "flag" entity for one matching `whichteam`; frees any
+flag with no item, an invalid flagteam, or a second flag for a team
+already found (keeping the first).
+=================
+*/
+export function ctf_flagsearch(whichteam: number): EdictT | null {
+  let valid_flag: EdictT | null = null;
+  let current_flag = G_Find(null, "classname", "flag");
+  while (current_flag !== null) {
+    if (current_flag.item === null) {
+      G_FreeEdict(current_flag);
+    } else if (current_flag.flagteam >= CTF_TEAM_LIMIT || current_flag.flagteam <= CTF_TEAM_UNDEFINED) {
+      G_FreeEdict(current_flag);
+    } else if (current_flag.flagteam === whichteam) {
+      if (valid_flag !== null) {
+        ctf_resetflagandplayer(current_flag, current_flag.owner);
+        ctf_resetflagandplayer(valid_flag, valid_flag.owner);
+        G_FreeEdict(current_flag);
+      } else {
+        valid_flag = current_flag;
+      }
+    }
+    current_flag = G_Find(current_flag, "classname", "flag");
+  }
+  return valid_flag;
+}
+
+/*
+=================
+ctf_resetflagandplayer (lmctf60/g_ctffunc.c:334) -- byte-identical to the
+C source.
+=================
+*/
+export function ctf_resetflagandplayer(whichflag: EdictT | null, whichplayer: EdictT | null): boolean {
+  if (whichflag !== null) {
+    VectorCopy(whichflag.homeposition, whichflag.s.origin);
+    VectorCopy(whichflag.homeangles, whichflag.s.angles);
+    ctf_ResetFlagProps(whichflag);
+  }
+  if (whichplayer !== null) {
+    whichplayer.s.effects &= ~EF_COLOR_SHELL;
+    cmdsModule().ValidateSelectedItem(whichplayer);
+    whichplayer.s.modelindex3 = 0;
+    if (whichplayer.client !== null) {
+      if (redflag !== null && redflag.item !== null) whichplayer.client.pers.inventory[ITEM_INDEX(redflag.item)] = 0;
+      if (blueflag !== null && blueflag.item !== null) whichplayer.client.pers.inventory[ITEM_INDEX(blueflag.item)] = 0;
+      if (whichflag !== null && whichflag.item !== null) whichplayer.client.pers.inventory[ITEM_INDEX(whichflag.item)] = 0;
+      cmdsModule().ValidateSelectedItem(whichplayer);
+    }
+  }
+  return true;
+}
+
+/*
+=================
+ctf_ResetFlagProps (lmctf60/g_ctffunc.c:363) -- byte-identical to the C
+source.
+=================
+*/
+export function ctf_ResetFlagProps(whichflag: EdictT): void {
+  if (whichflag.owner !== null) {
+    whichflag.s.modelindex = whichflag.owner.s.modelindex3;
+  }
+  if (whichflag.model !== null) {
+    gi.setmodel(whichflag, whichflag.model);
+  } else if (whichflag.item !== null && whichflag.item.world_model !== null) {
+    gi.setmodel(whichflag, whichflag.item.world_model);
+  }
+
+  VectorCopy(tv(-15, -15, -15), whichflag.mins);
+  VectorCopy(tv(15, 15, 33), whichflag.maxs);
+
+  whichflag.solid = SolidT.SOLID_TRIGGER;
+  gi.linkentity(whichflag);
+
+  whichflag.movetype = MovetypeT.MOVETYPE_TOSS;
+  whichflag.touch = Touch_Item;
+  whichflag.owner = null;
+  whichflag.droptime = 0;
+
+  const dest = vec3();
+  VectorAdd(whichflag.s.origin, tv(0, 0, -128), dest);
+
+  const tr = gi.trace(whichflag.s.origin, whichflag.mins, whichflag.maxs, dest, whichflag, MASK_SOLID);
+
+  VectorCopy(tr.endpos, whichflag.s.origin);
+  VectorClear(whichflag.s.angles);
+
+  // surt, a flag caught moving can land off the pedestal if you don't
+  // clear the velocity
+  VectorClear(whichflag.velocity);
+  whichflag.flags |= FL_RESPAWN;
+
+  whichflag.nextthink = level.time + FRAMETIME;
+  whichflag.think = ctf_flagwave;
 }
 
 /*
@@ -201,12 +441,7 @@ ctf_flagwave (lmctf60/g_ctffunc.c:605) -- flag animation think function.
 Cycles the flag's wave-animation frame every FRAMETIME while solid (dropped
 flags stop animating once picked back up and made SOLID_NOT by whatever
 picks them up), and auto-returns a flag that has sat dropped for 30+
-seconds with no valid carrier. The auto-return branch's actual reset
-(ctf_resetflagandplayer) is not ported -- see that function's own doc
-comment; ctf_flagwave still faithfully evaluates the guard condition and
-plays the correct team's return sound before hitting that throw, so a test
-asserting "an old dropped flag with no carrier tries to auto-return"
-observes the exact right behavior up to the documented gap.
+seconds with no valid carrier.
 =================
 */
 export function ctf_flagwave(ent: EdictT): void {
@@ -229,28 +464,474 @@ export function ctf_flagwave(ent: EdictT): void {
 
 /*
 =================
-ctf_flagtouch (lmctf60/g_ctffunc.c:700) / ctf_playerdropflag
-(lmctf60/g_ctffunc.c:650)
-
-NOT PORTED: the flag capture/pickup/drop chain (team validation, carrier
-assignment, capture scoring, HUD/team broadcast). Both are substantial
-functions squarely in the "flag home/reset/spawn/touch" territory this
-file's header already documents as out of SCOPE. Thrown with citation --
-wired as the "flag" GItemT's pickup/use/drop callbacks in g_items.ts, so a
-flag entity spawns and animates correctly (via ctf_flagwave above) and only
-throws when something actually touches/uses/drops it, matching this unit's
-established "spawn succeeds, only the unreached behavior throws" pattern
-(see g_target.ts's use_target_blaster).
+ctf_findflagposition (lmctf60/g_ctffunc.c:537) -- byte-identical to the C
+source. Picks the info_player_deathmatch/info_flag_red/info_flag_blue spot
+farthest from `whichflag`'s current origin; falls back to the first
+info_player_deathmatch spot if none of those are farther than 0 units.
 =================
 */
-export function ctf_flagtouch(ent: EdictT, other: EdictT): boolean {
-  throw new Error("ctf_flagtouch (lmctf60/g_ctffunc.c:700) is not ported -- flag capture chain is out of this unit's SCOPE");
+export function ctf_findflagposition(whichflag: EdictT): EdictT | null {
+  let bestspot: EdictT | null = null;
+  let bestdistance = 0;
+  const v = vec3();
+
+  let spot = G_Find(null, "classname", "info_player_deathmatch");
+  while (spot !== null) {
+    VectorSubtract(whichflag.s.origin, spot.s.origin, v);
+    const flagdistance = VectorLength(v);
+    if (flagdistance > bestdistance) {
+      bestspot = spot;
+      bestdistance = flagdistance;
+    }
+    spot = G_Find(spot, "classname", "info_player_deathmatch");
+  }
+
+  spot = G_Find(spot, "classname", "info_flag_red");
+  if (spot !== null) {
+    VectorSubtract(whichflag.s.origin, spot.s.origin, v);
+    const flagdistance = VectorLength(v);
+    if (flagdistance > bestdistance) {
+      bestspot = spot;
+      bestdistance = flagdistance;
+    }
+  }
+
+  spot = G_Find(spot, "classname", "info_flag_blue");
+  if (spot !== null) {
+    VectorSubtract(whichflag.s.origin, spot.s.origin, v);
+    const flagdistance = VectorLength(v);
+    if (flagdistance > bestdistance) {
+      bestspot = spot;
+      bestdistance = flagdistance;
+    }
+  }
+
+  if (bestspot !== null) return bestspot;
+
+  // if there is a player just spawned on each and every start spot we
+  // have no choice to turn one into a telefrag meltdown
+  return G_Find(null, "classname", "info_player_deathmatch");
 }
 
-export function ctf_playerdropflag(whichplayer: EdictT, item: GItemT): void {
-  throw new Error(
-    "ctf_playerdropflag (lmctf60/g_ctffunc.c:650) is not ported -- flag capture chain is out of this unit's SCOPE",
-  );
+/*
+=================
+ctf_deletespawnpointsnearflag (lmctf60/g_ctffunc.c:1091) -- byte-identical
+to the C source.
+=================
+*/
+export function ctf_deletespawnpointsnearflag(flag: EdictT): void {
+  if (!(gameCvars.deathmatch !== null && gameCvars.deathmatch.value !== 0)) return;
+
+  let spot = G_Find(null, "classname", "info_player_deathmatch");
+  while (spot !== null) {
+    const v = vec3();
+    VectorSubtract(spot.s.origin, flag.homeposition, v);
+    if (VectorLength(v) <= 256) {
+      G_FreeEdict(spot);
+    }
+    spot = G_Find(spot, "classname", "info_player_deathmatch");
+  }
+}
+
+/*
+=================
+ctf_spawnflag (lmctf60/g_ctffunc.c:407) -- byte-identical to the C source.
+Creates redflag/blueflag if missing, preferring a map's own
+info_flag_red/info_flag_blue marker, then info_player_deathmatch (via
+ctf_findflagposition), then info_player_start/target_changelevel as a last
+resort; fails (returns false) if none exist.
+=================
+*/
+export function ctf_spawnflag(teamnum: number): boolean {
+  if (!(gameCvars.deathmatch !== null && gameCvars.deathmatch.value !== 0)) return false;
+
+  const ctfflagsVal = gameCvars.ctfflags === null ? 0 : gameCvars.ctfflags.value;
+  if ((ctfflagsVal & CTF_FLAGS_NOFLAGS) !== 0) return false;
+
+  let ent: EdictT | null = null;
+
+  if (teamnum === CTF_TEAM_RED && redflag === null) {
+    let spot = G_Find(null, "classname", "info_flag_red");
+    if (spot === null) {
+      spot = G_Find(null, "classname", "info_player_deathmatch");
+      if (spot !== null) spot = ctf_findflagposition(spot);
+      if (spot === null) spot = G_Find(null, "classname", "info_player_start");
+
+      if (spot !== null) {
+        spot.classname = "info_flag_red";
+        spot.s.effects |= EF_COLOR_SHELL;
+        spot.s.renderfx |= RF_SHELL_RED;
+      } else {
+        return false;
+      }
+    }
+
+    ent = G_Spawn();
+    ent.classname = spawnModule().ED_NewString("flag");
+    spawnModule().ED_CallSpawn(ent);
+
+    ent.model = "players/male/flag1.md2";
+
+    VectorCopy(spot.s.origin, ent.s.origin);
+    VectorCopy(spot.s.origin, ent.homeposition);
+    VectorCopy(spot.s.angles, ent.s.angles);
+    VectorCopy(spot.s.angles, ent.homeangles);
+    ent.s.effects = EF_FLAG1;
+    ent.s.frame = gameCvars.flag_init !== null && gameCvars.flag_init.value !== 0 ? 173 : 0;
+    SetRedFlag(ent);
+  } else if (teamnum === CTF_TEAM_BLUE && blueflag === null) {
+    let spot = G_Find(null, "classname", "info_flag_blue");
+    if (spot === null) {
+      spot = G_Find(null, "classname", "info_player_deathmatch");
+      if (spot !== null) {
+        spot = ctf_findflagposition(spot);
+        if (spot !== null) spot = ctf_findflagposition(spot);
+      }
+      if (spot === null) spot = G_Find(null, "classname", "target_changelevel");
+
+      if (spot !== null) {
+        spot.classname = "info_flag_blue";
+        spot.s.effects |= EF_COLOR_SHELL;
+        spot.s.renderfx |= RF_SHELL_BLUE;
+      } else {
+        return false;
+      }
+    }
+
+    ent = G_Spawn();
+    ent.classname = spawnModule().ED_NewString("flag");
+    spawnModule().ED_CallSpawn(ent);
+
+    ent.model = "players/male/flag2.md2";
+
+    VectorCopy(spot.s.origin, ent.s.origin);
+    VectorCopy(spot.s.origin, ent.homeposition);
+    VectorCopy(spot.s.angles, ent.s.angles);
+    VectorCopy(spot.s.angles, ent.homeangles);
+    ent.s.effects = EF_FLAG2;
+    ent.s.frame = gameCvars.flag_init !== null && gameCvars.flag_init.value !== 0 ? 173 : 0;
+    SetBlueFlag(ent);
+  }
+
+  if (ent !== null) {
+    ent.flagteam = teamnum;
+    if (ent.model !== null) gi.setmodel(ent, ent.model);
+    ent.takedamage = DamageT.DAMAGE_NO;
+    ent.dontfree = 1;
+    ctf_resetflagandplayer(ent, null);
+    ent.solid = SolidT.SOLID_TRIGGER;
+    gi.linkentity(ent);
+    ent.movetype = MovetypeT.MOVETYPE_TOSS;
+    ctf_ResetFlagProps(ent);
+    ctf_deletespawnpointsnearflag(ent);
+  }
+  return true;
+}
+
+/*
+=================
+ctf_TossEnt (lmctf60/g_ctffunc.c:624) -- byte-identical to the C source.
+=================
+*/
+export function ctf_TossEnt(startent: EdictT, tossent: EdictT): void {
+  if (startent.client === null) {
+    throw new Error("ctf_TossEnt: startent.client is null (C dereferences it unconditionally here)");
+  }
+  const forward = vec3();
+  const right = vec3();
+  const offset = vec3();
+
+  AngleVectors(startent.client.v_angle, forward, right, null);
+  VectorSet(offset, 24, 0, -16);
+  G_ProjectSource(startent.s.origin, offset, forward, right, tossent.s.origin);
+  const tr = gi.trace(startent.s.origin, tossent.mins, tossent.maxs, tossent.s.origin, startent, CONTENTS_SOLID);
+  VectorCopy(tr.endpos, tossent.s.origin);
+
+  VectorScale(forward, 200, tossent.velocity);
+  tossent.velocity[2] = 300;
+}
+
+/*
+=================
+Drop_Flag_Think (lmctf60/g_ctffunc.c:640) -- byte-identical to the C
+source.
+=================
+*/
+export function Drop_Flag_Think(ent: EdictT): void {
+  ent.touch = Touch_Item;
+  ent.owner = null;
+  ent.think = ctf_flagwave;
+  ent.nextthink = level.time + FRAMETIME;
+}
+
+/*
+=================
+ctf_playerdropflag (lmctf60/g_ctffunc.c:650) -- byte-identical to the C
+source. "this function doesn't use validate player because it should
+always succeed even for players that are not inuse" (C source's own
+comment, preserved).
+=================
+*/
+export function ctf_playerdropflag(whichplayer: EdictT | null, _item: GItemT): void {
+  if (whichplayer === null || whichplayer.client === null) return;
+
+  const whichflag = ctf_getteamflag(whichplayer.client.ctf.teamnum, CTF_TEAM_OPPOSING);
+  ctf_resetflagandplayer(whichflag, whichplayer);
+  if (whichflag !== null) {
+    ctf_ResetFlagProps(whichflag);
+    whichflag.owner = whichplayer;
+    whichflag.touch = drop_temp_touch;
+    whichflag.think = Drop_Flag_Think;
+    whichflag.nextthink = level.time + 1;
+
+    ctf_TossEnt(whichplayer, whichflag);
+
+    const flagcolor = ctf_teamstring("", whichplayer.client.ctf.teamnum, CTF_TEAM_OPPOSING).text;
+    const message = `${whichplayer.client.pers.netname} lost the ${flagcolor} flag.\n`;
+
+    statsModule().stats_add(whichplayer, statsModule().STATS_OFFENSE_FLAGLOST, 1); // STATS - LM_Hati
+
+    // STDLog Flag Carrier Frag - Surt
+    sl_LogScore(whichplayer.client.pers.netname, null, "FC LostFlag", null, 0, level.time);
+    ctf_BSafePrint(PRINT_HIGH, message);
+
+    whichflag.droptime = level.time;
+    gi.linkentity(whichflag);
+  }
+}
+
+/*
+=================
+ctf_flagtouch (lmctf60/g_ctffunc.c:700) -- byte-identical to the C source
+(the flag capture/pickup/drop chain: team validation, carrier assignment,
+capture scoring with assist bonuses, team-balance capture-score bonus,
+HUD/team broadcast).
+
+`last_flagtktime` (C `static float`, function-local persistent state)
+becomes module-level state here, same persistence semantics.
+=================
+*/
+let last_flagtktime = 0;
+
+export function ctf_flagtouch(ent: EdictT, other: EdictT): boolean {
+  ctf_validateflags(); // make sure nothing is weird
+
+  // Make sure it will respawn
+  ent.flags |= FL_RESPAWN;
+
+  if (matchstate >= MatchStatesT.MATCH_RAILGUN_COUNTDOWN) return false;
+
+  if (!ctf_validateplayer(other, CTF_TEAM_ANYTEAM)) return false; // only active players may touch flag
+  if (other.client === null) return false;
+
+  const flagcolorMatching = ctf_teamstring("", ent.flagteam, CTF_TEAM_MATCHING).text;
+
+  // If it is your flag...
+  if (other.client.ctf.teamnum === ent.flagteam) {
+    if (ctf_flagathome(ent)) {
+      // Do we have the enemy flag?
+      if (ent.item !== null && other.client.pers.inventory[ITEM_INDEX(ent.item)] !== 0) {
+        const otherflag = ctf_getteamflag(other.client.ctf.teamnum, CTF_TEAM_OPPOSING);
+
+        const flagcolorOpposing = ctf_teamstring("", ent.flagteam, CTF_TEAM_OPPOSING).text;
+
+        const message = `${other.client.pers.netname} captured your flag!\n`;
+        const elsemessage = `${other.client.pers.netname} captured the ${flagcolorOpposing} flag.\n`;
+
+        if (otherflag !== null) Team_cprint(otherflag.flagteam, message, elsemessage);
+
+        // Award Assists for captures
+        let assister = ctf_findplayer(null, null, other.client.ctf.teamnum); // LM_Hati NULL second argument allows assisting yourself
+        while (assister !== null) {
+          if (assister.client === null) {
+            assister = ctf_findplayer(assister, null, other.client.ctf.teamnum);
+            continue;
+          }
+          const ac = assister.client;
+          if (level.time < ac.kill_carrier_time + 6) {
+            // surt was 60 ... (this is seconds, not tenths)
+            ctf_BSafePrint(PRINT_HIGH, `${ac.pers.netname} assisted the capture by killing the flag carrier.\n`);
+            statsModule().stats_add(assister, statsModule().STATS_SCORE, 1);
+            ac.resp.score += 1;
+            ac.kill_carrier_time = 0;
+            statsModule().stats_add(assister, statsModule().STATS_ASSISTS, 1); // STATS - LM_Hati
+            sl_LogScore(ac.pers.netname, null, "FC Frag Assist", null, 1, level.time);
+          }
+          if (level.time < ac.return_flag_time + 3) {
+            ctf_BSafePrint(PRINT_HIGH, `${ac.pers.netname} assisted the capture by returning the flag.\n`);
+            statsModule().stats_add(assister, statsModule().STATS_SCORE, 1);
+            ac.resp.score += 1;
+            ac.return_flag_time = 0;
+            statsModule().stats_add(assister, statsModule().STATS_ASSISTS, 1); // STATS - LM_Hati
+            sl_LogScore(ac.pers.netname, null, "F Return Assist", null, 1, level.time);
+          }
+          if (level.time < ac.defend_flag_time + 2) {
+            ctf_BSafePrint(PRINT_HIGH, `${ac.pers.netname} assisted the capture by defending the flag.\n`);
+            statsModule().stats_add(assister, statsModule().STATS_SCORE, 1);
+            ac.resp.score += 1;
+            ac.defend_flag_time = 0;
+            statsModule().stats_add(assister, statsModule().STATS_ASSISTS, 1); // STATS - LM_Hati
+            sl_LogScore(ac.pers.netname, null, "F Defend Assist", null, 1, level.time);
+          }
+
+          assister = ctf_findplayer(assister, null, other.client.ctf.teamnum);
+        }
+
+        const skinsetVal = gameCvars.skinset === null ? 0 : Math.trunc(gameCvars.skinset.value);
+        let sound: string;
+        if (other.client.ctf.teamnum === CTF_TEAM_RED) sound = `ctf/redscore${skinsetVal + 1}.wav`;
+        else if (other.client.ctf.teamnum === CTF_TEAM_BLUE) sound = `ctf/bluescore${skinsetVal + 1}.wav`;
+        else sound = "misc/tele_up";
+
+        gi.sound(ent, CHAN_CTF, gi.soundindex(sound), 1, ATTN_NONE, 0);
+
+        gi.WriteByte(svc_temp_entity);
+        gi.WriteByte(TempEventT.TE_BFG_EXPLOSION);
+        gi.WritePosition(ent.s.origin);
+        gi.multicast(ent.s.origin, MulticastT.MULTICAST_PVS);
+
+        // Add score to team
+        statsModule().stats_add(other, statsModule().STATS_SCORE, CTF_CAPTURE_BONUS_CARRIER);
+        other.client.resp.score += CTF_CAPTURE_BONUS_CARRIER; // 5 for being the actual capturer
+        statsModule().stats_add(other, statsModule().STATS_CAPTURES, 1);
+        sl_LogScore(other.client.pers.netname, null, "F Capture", null, CTF_CAPTURE_BONUS_CARRIER, level.time);
+
+        let scorebonus = CTF_CAPTURE_BONUS_TEAM;
+        // surt code to give a scoring bonus for a small team capturing vs a large team
+        const ctfflagsVal = gameCvars.ctfflags === null ? 0 : gameCvars.ctfflags.value;
+        if ((ctfflagsVal & CTF_SCORE_BALANCE) !== 0) {
+          let teammate = ctf_findplayer(null, null, CTF_TEAM_ANYTEAM);
+          let redcount = 1;
+          let bluecount = 1;
+          while (teammate !== null) {
+            if (teammate.client !== null) {
+              if (teammate.client.ctf.teamnum === CTF_TEAM_RED) redcount++;
+              else if (teammate.client.ctf.teamnum === CTF_TEAM_BLUE) bluecount++;
+            }
+            teammate = ctf_findplayer(teammate, null, CTF_TEAM_ANYTEAM);
+          }
+          if (other.client.ctf.teamnum === CTF_TEAM_RED) {
+            scorebonus = Math.trunc((scorebonus * bluecount) / redcount);
+          } else if (other.client.ctf.teamnum === CTF_TEAM_BLUE) {
+            scorebonus = Math.trunc((scorebonus * redcount) / bluecount);
+          }
+        }
+
+        let teammate = ctf_findplayer(null, null, other.client.ctf.teamnum);
+        while (teammate !== null) {
+          if (teammate.client !== null) {
+            statsModule().stats_add(teammate, statsModule().STATS_SCORE, scorebonus);
+            teammate.client.resp.score += scorebonus;
+            sl_LogScore(teammate.client.pers.netname, null, "Team Score", null, scorebonus, level.time);
+          }
+          teammate = ctf_findplayer(teammate, null, other.client.ctf.teamnum);
+        }
+
+        if (otherflag === null) {
+          ctf_validateflags();
+        } else {
+          ctf_resetflagandplayer(otherflag, otherflag.owner);
+        }
+      }
+      return false; // Can't pick up your own flag
+    }
+
+    // Return flag to origin
+    if (ent.flagteam === CTF_TEAM_RED) {
+      gi.sound(ent, CHAN_CTF, gi.soundindex("ctf/r_returned.wav"), 0.8, ATTN_NONE, 0);
+    } else if (ent.flagteam === CTF_TEAM_BLUE) {
+      gi.sound(ent, CHAN_CTF, gi.soundindex("ctf/b_returned.wav"), 0.8, ATTN_NONE, 0);
+    }
+
+    const message = `${other.client.pers.netname} returned your flag!\n`;
+    const elsemessage = `${other.client.pers.netname} returned the ${flagcolorMatching} flag.\n`;
+
+    statsModule().stats_add(other, statsModule().STATS_RETURNS, 1); // STATS - LM_Hati
+    statsModule().stats_add(other, statsModule().STATS_SCORE, 1);
+    sl_LogScore(other.client.pers.netname, null, "F Return", null, 1, level.time);
+
+    other.client.resp.score += 1;
+    other.client.return_flag_time = level.time;
+
+    Team_cprint(other.client.ctf.teamnum, message, elsemessage);
+
+    // Award Assists for returns
+    let assister = ctf_findplayer(null, other, other.client.ctf.teamnum);
+    while (assister !== null) {
+      if (assister.client !== null && level.time < assister.client.kill_carrier_time + 6) {
+        // surt was 60 ... (this is seconds, not tenths)
+        ctf_BSafePrint(
+          PRINT_HIGH,
+          `${assister.client.pers.netname} helped ${other.client.pers.netname} return the ${flagcolorMatching} flag.\n`,
+        );
+        statsModule().stats_add(assister, statsModule().STATS_SCORE, 1);
+        sl_LogScore(assister.client.pers.netname, null, "F Return Assist", null, 1, level.time);
+        assister.client.resp.score += 1;
+        assister.client.kill_carrier_time = 0;
+        statsModule().stats_add(assister, statsModule().STATS_ASSISTS, 1); // STATS - LM_Hati
+      }
+      assister = ctf_findplayer(assister, other, other.client.ctf.teamnum);
+    }
+
+    ctf_resetflagandplayer(ent, null);
+    return false;
+  }
+
+  // Enemy flag
+  if (ent.flagteam === CTF_TEAM_RED && ((gameCvars.refset === null ? 0 : gameCvars.refset.value) & CTF_RED_FLAG_FROZEN) !== 0) {
+    return false;
+  }
+  if (ent.flagteam === CTF_TEAM_BLUE && ((gameCvars.refset === null ? 0 : gameCvars.refset.value) & CTF_BLUE_FLAG_FROZEN) !== 0) {
+    return false;
+  }
+
+  // Give us a glowing shell
+  other.s.effects |= EF_COLOR_SHELL;
+  if (ent.flagteam === CTF_TEAM_BLUE) other.s.renderfx |= RF_SHELL_RED;
+  else if (ent.flagteam === CTF_TEAM_RED) other.s.renderfx |= RF_SHELL_BLUE;
+
+  const message = `${other.client.pers.netname} stole your flag!\n`;
+  const elsemessage = `${other.client.pers.netname} stole the ${flagcolorMatching} flag.\n`;
+
+  statsModule().stats_add(other, statsModule().STATS_OFFENSE_FLAG, 1); // STATS - LM_Hati
+  sl_LogScore(other.client.pers.netname, null, "F Pickup", null, 0, level.time);
+
+  Team_cprint(ent.flagteam, message, elsemessage);
+
+  if (ctf_flagathome(ent)) {
+    gi.sound(ent, CHAN_AUTO, gi.soundindex("ctf/flagtk.wav"), 0.7, ATTN_NORM, 0);
+    if (ent.flagteam === CTF_TEAM_RED) {
+      gi.sound(ent, CHAN_CTF, gi.soundindex("ctf/r_stolen.wav"), 0.8, ATTN_NONE, 0);
+    } else if (ent.flagteam === CTF_TEAM_BLUE) {
+      gi.sound(ent, CHAN_CTF, gi.soundindex("ctf/b_stolen.wav"), 0.8, ATTN_NONE, 0);
+    }
+  } else if (level.time > last_flagtktime + 8) {
+    // surt volume was slightly too loud at 1.0, so always plays when
+    // stolen from home base; surt also irritating if dropped/stolen
+    // repeatedly -- only plays every 5 seconds (sic, comment says 5, the
+    // guard is 8) if not at home base
+    last_flagtktime = level.time;
+    if (ent.flagteam === CTF_TEAM_RED) {
+      gi.sound(ent, CHAN_CTF, gi.soundindex("ctf/r_stolen.wav"), 0.8, ATTN_NORM, 0);
+    } else if (ent.flagteam === CTF_TEAM_BLUE) {
+      gi.sound(ent, CHAN_CTF, gi.soundindex("ctf/b_stolen.wav"), 0.8, ATTN_NORM, 0);
+    }
+  }
+
+  ent.owner = other;
+  ent.flags |= FL_RESPAWN;
+  ent.solid = SolidT.SOLID_NOT;
+  gi.linkentity(ent);
+
+  ent.nextthink = level.time + FRAMETIME;
+  ent.think = ctf_flagwave;
+
+  ent.owner.s.modelindex3 = ent.s.modelindex;
+  ent.s.modelindex = 0;
+
+  if (ent.item !== null) other.client.pers.inventory[ITEM_INDEX(ent.item)]++;
+
+  return true;
 }
 
 /*
