@@ -185,6 +185,58 @@ export function CL_StartUdpDownload(filename: string): void {
 
 /*
 ===============
+fileExistsUnderAlternateExtension
+
+Live defect B (task report): the precache download walk (cl_main.ts's
+CL_RequestNextDownload) was requesting downloads for files that DO exist
+locally, just under a different extension than the one the configstring/env
+loop happened to build -- pics/loc_ping.pcx and pics/friend.pcx ship only as
+.png, env/unit1_*.pcx ships only as .tga -- because the plain
+`FS_LoadFile(filename) !== null` exact-name check below has no notion of
+"the renderer would have found this anyway".
+
+Mirrors gl_image.ts's GL_FindImage, whose own ".pcx" branch already falls
+back to "${base}.png" then "${base}.tga" when the exact .pcx can't be
+loaded (that file's own comment: "the rerelease pak ships many classic 2D
+assets ONLY as PNG ... this port retries the requested name with the other
+supported truecolor extensions instead"). Applied here BEFORE queuing a
+download so this port never asks the server (or an HTTP dlserver) for a
+file the local renderer would resolve on its own.
+
+Additionally covers the "env: .tga <-> .pcx both ways" case: vanilla's env
+loop (CL_RequestNextDownload's ENV_CNT phase) always queues BOTH
+`env/<sky><suf>.tga` and `env/<sky><suf>.pcx` as separate candidate
+filenames per skybox face (see that phase's `n & 1` branch) -- treating
+them as interchangeable for EXISTENCE purposes (not just the one-directional
+.pcx->.png/.tga GL_FindImage already does) means a real .tga sibling
+satisfies a requested env .pcx AND vice versa, exactly like R_SetSky's own
+runtime choice of extension (gl_warp.ts's R_SetSky picks ".pcx" or ".tga"
+per the `gl_ext_palettedtexture` cvar -- either one being present locally is
+enough to never need a network round trip for the other).
+===============
+*/
+function fileExistsUnderAlternateExtension(filename: string): boolean {
+  const dot = filename.lastIndexOf(".");
+  if (dot === -1) return false;
+  const base = filename.slice(0, dot);
+  const ext = filename.slice(dot).toLowerCase();
+
+  let alternates: readonly string[];
+  if (ext === ".pcx") {
+    // GL_FindImage's own fallback order for a missing .pcx
+    alternates = [".png", ".tga"];
+  } else if (ext === ".tga" && filename.startsWith("env/")) {
+    // vanilla's env loop: .tga and .pcx are interchangeable for skyboxes
+    alternates = [".pcx"];
+  } else {
+    return false;
+  }
+
+  return alternates.some((altExt) => FS_LoadFile(`${base}${altExt}`) !== null);
+}
+
+/*
+===============
 CL_CheckOrDownloadFile
 
 Returns true if the file exists, otherwise it attempts to start a download
@@ -206,6 +258,12 @@ export function CL_CheckOrDownloadFile(filename: string, type: HttpDlType = "sin
 
   if (FS_LoadFile(filename) !== null) {
     // it exists, no need to download
+    return true;
+  }
+
+  if (fileExistsUnderAlternateExtension(filename)) {
+    // exists under an extension the renderer's own fallback (or, for env/
+    // skyboxes, either extension) would have found -- no need to download
     return true;
   }
 
@@ -775,6 +833,48 @@ export function SHOWNET(s: string): void {
 }
 
 /*
+=================
+CL_TranslatePlayerNameTokens
+
+q2repro src/client/parse.c:935-967. The re-release game never puts a player's
+name into a broadcast print directly -- it emits the token `##P<n>` and
+leaves the substitution to the client. p_client.cpp:2566 is where the game
+builds it (`return std::string("##P") + std::to_string(playernum);`), and
+this port's src/kexgame/p_client.ts:2742 reproduces that line exactly; the
+server's own PF_Loc_Print says so as well (q2repro src/server/game.c:801-804:
+"the client is supposed to translate `##P<n>` to player names ... ##P0
+translates to player 0's configstring name ... It only occurs for BROADCAST
+prints"). Without this, an obituary reaches the console as the literal
+"##P0 cratered." instead of "PlayerName cratered."
+
+Faithful details of the C: the player number is parsed as an unbounded run of
+digits (so "##P12" is player 12, not player 1 followed by '2'); a number >=
+MAX_CLIENTS consumes the token and substitutes NOTHING (no fallback text);
+and an unknown client's name is simply the empty string. A "##P" not followed
+by a digit is left alone, character by character.
+=================
+*/
+function CL_TranslatePlayerNameTokens(s: string): string {
+  let out = "";
+  let i = 0;
+  while (i < s.length) {
+    if (s.startsWith("##P", i) && s[i + 3] !== undefined && s[i + 3] >= "0" && s[i + 3] <= "9") {
+      i += 3;
+      let playernum = 0;
+      while (i < s.length && s[i] >= "0" && s[i] <= "9") {
+        playernum = playernum * 10 + (s.charCodeAt(i) - 48);
+        i++;
+      }
+      if (playernum < MAX_CLIENTS) out += cl.clientinfo[playernum].name;
+      continue;
+    }
+    out += s[i];
+    i++;
+  }
+  return out;
+}
+
+/*
 =====================
 CL_ParseServerMessage
 =====================
@@ -870,7 +970,13 @@ function CL_ParseServerMessageLoop(): void {
 
       case SvcOpsT.svc_print: {
         const printLevel = MSG_ReadByte(net_message);
-        const printString = MSG_ReadString(net_message);
+        // q2repro's CL_HandlePrint (src/client/parse.c:970-974) runs this
+        // FIRST, on the raw svc_print string, and its own comment explains
+        // the placement: "Called here rather than CL_ParseLocPrint() because
+        // ##P tokens arrive via svc_print broadcast messages, not localized
+        // prints." (The localization pass itself already happened
+        // server-side in gi.Loc_Print -- see src/qcommon/loc.ts.)
+        const printString = CL_TranslatePlayerNameTokens(MSG_ReadString(net_message));
 
         if (printLevel === PRINT_CHAT) {
           S_StartLocalSound("misc/talk.wav");

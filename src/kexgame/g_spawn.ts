@@ -2042,7 +2042,21 @@ export function SP_worldspawn(ent: EdictT): void {
 
   gi.soundindex("infantry/inflies1.wav");
 
-  gi.soundindex("models/objects/gibs/sm_meat/tris.md2"); // sm_meat_index -- see file header
+  // BUG FIX (task report): g_spawn.cpp:1650 is `sm_meat_index.assign(...)`,
+  // where `sm_meat_index` is declared `cached_modelindex sm_meat_index;`
+  // (g_local.h:3648) -- a MODEL index cache, not a sound one. This line
+  // previously called `gi.soundindex()` on a model path, which registered
+  // "models/objects/gibs/sm_meat/tris.md2" into the SOUNDS configstring
+  // region instead of the MODELS one. The client's precache download walk
+  // (src/client/cl_main.ts's CL_RequestNextDownload) later read that string
+  // back out of the sounds region and requested
+  // "sound/models/objects/gibs/sm_meat/tris.md2" -- a file that can never
+  // exist -- while every real consumer of this gib model (ThrowGib's
+  // `gi.modelindex(gibname)`, BecomeExplosion1's
+  // `gi.setmodel(fireball, "models/objects/gibs/sm_meat/tris.md2")`) got a
+  // modelindex that was never pre-warmed, `gi.soundindex`'s two
+  // configstring writes never having touched svs.csr.models at all.
+  gi.modelindex("models/objects/gibs/sm_meat/tris.md2"); // sm_meat_index -- see file header
   gi.modelindex("models/objects/gibs/arm/tris.md2");
   gi.modelindex("models/objects/gibs/bone/tris.md2");
   gi.modelindex("models/objects/gibs/bone2/tris.md2");

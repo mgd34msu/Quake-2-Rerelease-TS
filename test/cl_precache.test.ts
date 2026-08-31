@@ -506,18 +506,78 @@ describe("cl_main.ts -- CL_RequestNextDownload precache walk", () => {
     expect(text.includes("begin 1")).toBe(true);
   });
 
-  test("env/sky phase: requests env/<sky><suf>.tga then .pcx for each of the 6 faces, in order", () => {
+  test("env/sky phase: requests env/<sky><suf>.tga then .pcx for each of the 6 faces, in order, when NEITHER extension exists", () => {
     cl.configstrings[2] = "unit1_"; // CS_SKY (fixed index 2, not per-family)
     begin();
     expect(cls.downloadname).toBe("env/unit1_rt.tga");
     provideFile("env/unit1_rt.tga");
 
     CL_RequestNextDownload();
-    expect(cls.downloadname).toBe("env/unit1_rt.pcx");
-    provideFile("env/unit1_rt.pcx");
-
-    CL_RequestNextDownload();
+    // env/unit1_rt.pcx does NOT get downloaded here even though it's
+    // individually missing on disk: rt.tga (just provided above) already
+    // satisfies it, mirroring "vanilla's env loop" treating .tga/.pcx as
+    // interchangeable for a given skybox face -- see
+    // fileExistsUnderAlternateExtension's own header in cl_parse.ts (live
+    // defect B fix). The walk instead advances straight to the next face.
     expect(cls.downloadname).toBe("env/unit1_bk.tga");
+  });
+
+  // Live defect B (task report): pics/loc_ping.pcx and pics/friend.pcx ship
+  // in the retail data only as .png; env/unit1_*.pcx ships only as .tga.
+  // Before the fix, CL_CheckOrDownloadFile's exact-name existence check
+  // queued a download for each of these even though the renderer
+  // (gl_image.ts's GL_FindImage) would have found the alternate-extension
+  // file on its own.
+  test("image walk: a missing .pcx is satisfied by an existing .png sibling -- no download queued (GL_FindImage's own fallback order)", () => {
+    cl.configstrings[cls.csr.images + 1] = "loc_ping";
+    provideFile("pics/loc_ping.png");
+    provideEnvAndTextures();
+
+    begin();
+    expect(cls.downloadname).toBe(""); // no download was ever started
+    const text = new TextDecoder().decode(cls.netchan.message.data.subarray(0, cls.netchan.message.cursize));
+    expect(text.includes("begin 1")).toBe(true);
+  });
+
+  test("image walk: a missing .pcx with only a .tga sibling is also satisfied (GL_FindImage's second fallback extension)", () => {
+    cl.configstrings[cls.csr.images + 1] = "friend";
+    provideFile("pics/friend.tga");
+    provideEnvAndTextures();
+
+    begin();
+    expect(cls.downloadname).toBe("");
+  });
+
+  test("image walk: neither the exact .pcx nor any alternate extension exists -- still downloads the exact name", () => {
+    cl.configstrings[cls.csr.images + 1] = "genuinely_missing";
+    begin();
+    expect(cls.downloadname).toBe("pics/genuinely_missing.pcx");
+  });
+
+  test("env/sky phase: a missing .pcx is satisfied by an existing .tga sibling for the SAME face -- no download queued", () => {
+    cl.configstrings[2] = "unit1_";
+    provideFile("env/unit1_rt.tga");
+    provideFile("env/unit1_bk.tga");
+    provideFile("env/unit1_lf.tga");
+    provideFile("env/unit1_ft.tga");
+    provideFile("env/unit1_up.tga");
+    provideFile("env/unit1_dn.tga");
+    provideFile("textures/wall.wal");
+
+    begin();
+    // every face's .tga exists, so every face's .pcx is satisfied by it too
+    expect(cls.downloadname).toBe("");
+    const text = new TextDecoder().decode(cls.netchan.message.data.subarray(0, cls.netchan.message.cursize));
+    expect(text.includes("begin 1")).toBe(true);
+  });
+
+  test("env/sky phase: a missing .tga with only a .pcx sibling for that face is also satisfied (the reverse direction)", () => {
+    cl.configstrings[2] = "unit1_";
+    for (const suf of ["rt", "bk", "lf", "ft", "up", "dn"]) provideFile(`env/unit1_${suf}.pcx`);
+    provideFile("textures/wall.wal");
+
+    begin();
+    expect(cls.downloadname).toBe("");
   });
 
   test("texture phase: requests textures/<name>.wal for the map's texinfo once the env phase is satisfied", () => {

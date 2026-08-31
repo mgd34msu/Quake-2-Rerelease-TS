@@ -93,6 +93,8 @@ function noHitTrace(end: Vec3): KexTraceT {
 interface Recorder {
   configstrings: Map<number, string>;
   comPrints: string[];
+  modelindexCalls: string[];
+  soundindexCalls: string[];
 }
 let rec: Recorder;
 
@@ -112,6 +114,7 @@ function makeFakeGameImports(): KexGameImports {
 
   const modelNamesById: string[] = [""];
   function modelindex(name: string): number {
+    rec.modelindexCalls.push(name);
     let idx = modelNamesById.indexOf(name);
     if (idx === -1) {
       idx = modelNamesById.length;
@@ -122,6 +125,7 @@ function makeFakeGameImports(): KexGameImports {
 
   const soundNamesById: string[] = [""];
   function soundindex(name: string): number {
+    rec.soundindexCalls.push(name);
     let idx = soundNamesById.indexOf(name);
     if (idx === -1) {
       idx = soundNamesById.length;
@@ -346,7 +350,7 @@ function setupWorld(): void {
   game.clients = [];
   level.time = GTIME_ZERO;
 
-  rec = { configstrings: new Map(), comPrints: [] };
+  rec = { configstrings: new Map(), comPrints: [], modelindexCalls: [], soundindexCalls: [] };
   SetGameImports(makeFakeGameImports());
   SetGameExports(makeFakeGameExports(edicts, 1));
 
@@ -610,6 +614,26 @@ describe("SpawnEntities (g_spawn.cpp:1145-1275)", () => {
     // inhibited entity: freed before ED_CallSpawn ever ran
     const inhibited = g_edicts.find((e) => e.classname === "freed");
     expect(inhibited).toBeDefined();
+  });
+
+  // BUG FIX regression (task report, live defect B: bogus
+  // "sound/models/objects/gibs/sm_meat/tris.md2" download requests):
+  // g_spawn.cpp:1650's `sm_meat_index.assign("models/objects/gibs/sm_meat/tris.md2")`
+  // is a `cached_modelindex` (g_local.h:3648) -- a MODEL precache, exactly
+  // like the plain `gi.modelindex(...)` calls immediately below it for the
+  // other gib models (arm/bone/bone2/chest/skull/head2/sm_metal). This line
+  // was previously ported as `gi.soundindex(...)`, registering a model path
+  // into the SOUNDS configstring region instead of MODELS -- which is what
+  // sent the client's precache download walk (cl_main.ts's
+  // CL_RequestNextDownload) looking for a nonexistent
+  // "sound/models/objects/gibs/sm_meat/tris.md2" file.
+  test("SP_worldspawn precaches the sm_meat gib model via modelindex, never soundindex (g_spawn.cpp:1650)", () => {
+    const entities = '{ "classname" "worldspawn" }\n';
+    SpawnEntities("test_map", entities, "");
+
+    const GIB_PATH = "models/objects/gibs/sm_meat/tris.md2";
+    expect(rec.modelindexCalls).toContain(GIB_PATH);
+    expect(rec.soundindexCalls).not.toContain(GIB_PATH);
   });
 
   // gap fix (2026-08-30, KEX demo playback unit): SpawnEntities used to call
