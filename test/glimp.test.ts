@@ -39,6 +39,8 @@ covers the same dispatch contract without that risk.
 */
 
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { Pointer } from "bun:ffi";
 import { loadQGLFromSystem, type QGL } from "../src/ref_gl/qgl";
 import { SetRefImports, RserrT } from "../src/ref_gl/gl_local";
@@ -199,6 +201,96 @@ describe("src/ref_gl/qgl.ts -- loadQGLFromSystem's getProcAddress wiring", () =>
       const member = qgl[name];
       expect(member === null || typeof member === "function").toBe(true);
     }
+  });
+});
+
+describe("src/ref_gl/gl_rmain.ts -- cold-start capability-detect ordering (2026-08-31 GL session findings 7+15)", () => {
+  // Mike's live-session finding, reproduced every fresh boot on a real RTX
+  // 3090 / GL 4.6 context: "gl_shaders: program objects unavailable on this
+  // context, falling back to fixed-function" on the FIRST GL context of a
+  // process, but never after a vid_restart. Root cause, confirmed against
+  // q2repro's own src/refresh/main.c:1396-1400 (R_Init calls `vid->init()`
+  // -- creates the context -- strictly BEFORE `QGL_Init()` -- resolves
+  // function pointers): gl_rmain.ts's R_Init used to call
+  // SetQGL(loadQGLFromSystem(glimp.GetProcAddress)) once, BEFORE R_SetMode()
+  // ever created a GL context, so SDL_GL_GetProcAddress/glXGetProcAddressARB
+  // had no context to resolve GL2 program-object entry points against on the
+  // very first such call in the process. A vid_restart happened to work only
+  // because some context had already existed once earlier in the process by
+  // then -- a driver-dependent accident, not a real fix.
+  //
+  // Full end-to-end R_Init can't be driven headlessly in this suite (see
+  // this file's header comment on why VID_LoadRefresh("ref_gl") through real
+  // R_Init/R_Shutdown was tried and deliberately left out). This isolates
+  // the exact mechanism instead: loadQGLFromSystem's getProcAddress
+  // dependency, modeled as a double that only resolves GL2/extension entry
+  // points once a simulated context has been created -- exactly the
+  // distinction R_Init's two SetQGL(loadQGLFromSystem(...)) calls straddle
+  // (the first, pre-context call feeds glimp.ts's own internal vid_scale FBO
+  // setup, which runs synchronously inside R_SetMode and therefore
+  // genuinely needs *some* qgl before that call; the second, post-context
+  // call is what gl_shader.ts's GL_InitShaderPath and the GL_VENDOR/
+  // GL_RENDERER/GL_VERSION queries actually read).
+  function makeContextGatedGetProcAddress(contextLive: () => boolean): (name: string) => Pointer | bigint | null {
+    return (name: string): Pointer | bigint | null => {
+      if (!contextLive()) return null; // no context has ever existed yet -- the cold-start case
+      return 0x1n; // a live context: every entry point resolves (bogus but non-null address, never called)
+    };
+  }
+
+  test("resolving before a context exists yields a null GL2 program-object group (the reproduced bug)", () => {
+    const qgl = loadQGLFromSystem(makeContextGatedGetProcAddress(() => false));
+    expect(qgl.qglCreateShader).toBeNull();
+    expect(qgl.qglCreateProgram).toBeNull();
+    expect(qgl.qglUseProgram).toBeNull();
+  });
+
+  test("re-resolving after a context exists recovers the full GL2 program-object group (the fix)", () => {
+    let contextLive = false;
+    const getProcAddress = makeContextGatedGetProcAddress(() => contextLive);
+
+    const early = loadQGLFromSystem(getProcAddress); // R_Init's pre-R_SetMode call
+    expect(early.qglCreateShader).toBeNull(); // still no context
+
+    contextLive = true; // R_SetMode -> glimp.SetMode -> SDL_GL_CreateContext succeeds and makes it current
+    const afterContext = loadQGLFromSystem(getProcAddress); // R_Init's post-R_SetMode re-resolve
+
+    expect(afterContext.qglCreateShader).not.toBeNull();
+    expect(afterContext.qglCreateProgram).not.toBeNull();
+    expect(afterContext.qglUseProgram).not.toBeNull();
+    expect(afterContext.qglGetUniformLocation).not.toBeNull();
+  });
+
+  test("gl_rmain.ts's R_Init calls SetQGL(loadQGLFromSystem(...)) a second time, strictly after R_SetMode() runs", () => {
+    const src = readFileSync(join(import.meta.dir, "..", "src", "ref_gl", "gl_rmain.ts"), "utf8");
+    const bodyStart = src.indexOf("export function R_Init(");
+    const bodyEnd = src.indexOf("\nexport function R_Shutdown(");
+    expect(bodyStart).toBeGreaterThan(-1);
+    expect(bodyEnd).toBeGreaterThan(bodyStart);
+    const body = src.slice(bodyStart, bodyEnd);
+
+    const setQglCallIndices: number[] = [];
+    let searchFrom = 0;
+    for (;;) {
+      const idx = body.indexOf("SetQGL(loadQGLFromSystem(glimp.GetProcAddress))", searchFrom);
+      if (idx === -1) break;
+      setQglCallIndices.push(idx);
+      searchFrom = idx + 1;
+    }
+    const setModeCallIdx = body.indexOf("if (!R_SetMode())");
+    const shaderPathInitIdx = body.indexOf("GL_InitShaderPath()");
+
+    // exactly one call before R_SetMode (glimp.ts's own vid_scale FBO setup,
+    // called synchronously from inside R_SetMode, needs *a* qgl already) and
+    // at least one call after it (the authoritative, context-guaranteed
+    // resolution GL_InitShaderPath and the GL string dump actually read).
+    expect(setQglCallIndices.length).toBeGreaterThanOrEqual(2);
+    expect(setModeCallIdx).toBeGreaterThan(-1);
+    expect(setQglCallIndices[0]).toBeLessThan(setModeCallIdx);
+    const lastCall = setQglCallIndices[setQglCallIndices.length - 1];
+    expect(lastCall).toBeGreaterThan(setModeCallIdx);
+    expect(shaderPathInitIdx).toBeGreaterThan(-1);
+    expect(lastCall).toBeLessThan(shaderPathInitIdx);
   });
 });
 

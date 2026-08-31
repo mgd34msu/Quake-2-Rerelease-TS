@@ -1254,7 +1254,14 @@ export function R_Init(hInstance: unknown, wndProc: unknown): boolean {
 
   // initialize our QGL dynamic bindings; extension entry points resolve
   // through the platform's GetProcAddress (glX/wgl equivalent) when the
-  // GLimp provides one
+  // GLimp provides one. This first resolution runs before any GL context
+  // exists (R_SetMode/glimp.SetMode below is what actually creates one) --
+  // it exists only so glimp.ts's GLimp_SetMode has a `qgl` to call into for
+  // its own internal render-scale (vid_scale) framebuffer setup, which runs
+  // synchronously as part of context creation itself. A getProcAddress call
+  // made with no GL context ever having existed in this process cannot
+  // reliably resolve entry points beyond core GL 1.1 on every driver (see
+  // the re-resolution below for the citation and the bug this produced).
   try {
     SetQGL(loadQGLFromSystem(glimp.GetProcAddress));
   } catch {
@@ -1273,6 +1280,41 @@ export function R_Init(hInstance: unknown, wndProc: unknown): boolean {
   // create the window and set up the context
   if (!R_SetMode()) {
     ri.Con_Printf(PRINT_ALL, "ref_gl::R_Init() - could not R_SetMode()\n");
+    return false;
+  }
+
+  // Re-resolve QGL now that a context genuinely exists and is current
+  // (glimp.SetMode's SDL_GL_CreateContext call just above makes the new
+  // context current on this thread -- SDL2's own documented behavior).
+  // q2repro's src/refresh/main.c:1396-1400 (R_Init) calls `vid->init()`
+  // (creates the context) strictly BEFORE `QGL_Init()` (resolves function
+  // pointers) for exactly this reason: SDL_GL_GetProcAddress/
+  // glXGetProcAddressARB/wglGetProcAddress are only guaranteed to resolve
+  // extension and GL2+ program-object entry points (glCreateShader,
+  // glCreateProgram, ...) once some context has been made current --
+  // undefined/unreliable before that (GLX_ARB_get_proc_address /
+  // WGL_ARB_extensions_string). The earlier resolution above runs BEFORE
+  // R_SetMode ever creates a context (needed only for glimp.ts's own
+  // internal vid_scale FBO setup, which happens synchronously inside
+  // GLimp_SetMode) and was the root cause of a real, reproduced bug: on the
+  // very first GL context of a process (cold boot straight into vid_ref
+  // "gl"), `resolveGLShaderAPI` in qgl.ts got a null glCreateShader/
+  // glCreateProgram from the getProcAddress path with no context ever
+  // having existed, so GL_InitShaderPath (below) always printed "gl_shaders:
+  // program objects unavailable on this context, falling back to
+  // fixed-function" and forced gl_shaders to 0 even on capable hardware
+  // (confirmed RTX 3090 / GL 4.6). A subsequent vid_restart worked only
+  // because some context had already existed once earlier in the process by
+  // then -- a driver-dependent side effect, not something this port should
+  // rely on. This second, authoritative resolution makes the fix
+  // unconditional instead of accidental: GL_InitShaderPath and the
+  // GL_VENDOR/GL_RENDERER/GL_VERSION queries below always see a `qgl` built
+  // against a context that is actually current at that exact moment, cold
+  // boot or restart alike.
+  try {
+    SetQGL(loadQGLFromSystem(glimp.GetProcAddress));
+  } catch {
+    ri.Con_Printf(PRINT_ALL, `ref_gl::R_Init() - could not load "${glCvars.gl_driver ? glCvars.gl_driver.string : ""}"\n`);
     return false;
   }
 
