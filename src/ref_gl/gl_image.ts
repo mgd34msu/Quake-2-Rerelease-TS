@@ -1187,7 +1187,22 @@ export function GL_FindImage(name: string, type: ImagetypeT): ImageT | null {
   let image: ImageT | null;
   if (ext === ".pcx") {
     const { pic, width, height } = LoadPCX(name);
-    if (!pic) return null;
+    if (!pic) {
+      // The rerelease pak ships many classic 2D assets ONLY as PNG (e.g.
+      // pics/conchars.png, pics/m_cursor*.png -- no .pcx sibling at all), so
+      // a vanilla-style hard .pcx miss leaves draw_chars null and DrawChar
+      // binds texture 0: solid white glyph quads on real GL. q2repro finds
+      // these via IMG_Find's format-override lookup (Q2PRO lineage,
+      // r_override_textures); this port retries the requested name with the
+      // other supported truecolor extensions instead. Order deviation from
+      // q2repro (documented): it probes overrides BEFORE the requested
+      // format, we probe the requested format first -- observably identical
+      // on both retail trees (classic data has only the .pcx, rerelease data
+      // has only the .png), and requested-first keeps classic-data lookups
+      // byte-for-byte on the vanilla path.
+      const base = name.slice(0, len - 4);
+      return GL_FindImage(`${base}.png`, type) ?? GL_FindImage(`${base}.tga`, type);
+    }
     image = GL_LoadPic(name, pic, width, height, type, 8);
   } else if (ext === ".wal") {
     image = GL_LoadWal(name);

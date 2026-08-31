@@ -371,6 +371,41 @@ describe("GL_FindImage", () => {
   test("returns null when the file can't be loaded", () => {
     expect(GL_FindImage("pics/does-not-exist.pcx", ImagetypeT.it_pic)).toBeNull();
   });
+
+  // The rerelease pak ships classic 2D pics ONLY as PNG (pics/conchars.png,
+  // pics/m_cursor*.png -- no .pcx at all), so a hard .pcx miss left
+  // draw_chars null and DrawChar bound texture 0: solid white glyph quads
+  // on a real GL context (found live during Mike's RC pass, 2026-08-30).
+  // See GL_FindImage's own comment for the q2repro IMG_Find precedent and
+  // the documented requested-format-first order deviation.
+  test("a missing .pcx falls back to a .png sibling (rerelease-pak pics)", () => {
+    files.set("pics/m_cursor2.png", buildPngRgba(2, 2, () => [10, 20, 30, 255]));
+
+    const image = GL_FindImage("pics/m_cursor2.pcx", ImagetypeT.it_pic);
+
+    expect(image).not.toBeNull();
+    expect(image?.name).toBe("pics/m_cursor2.png");
+    expect(image?.width).toBe(2);
+  });
+
+  test("a missing .pcx with no .png sibling falls back to a .tga sibling", () => {
+    files.set("pics/only.tga", buildTga24([[1, 2, 3]], 1, 1));
+
+    const image = GL_FindImage("pics/only.pcx", ImagetypeT.it_pic);
+
+    expect(image).not.toBeNull();
+    expect(image?.name).toBe("pics/only.tga");
+  });
+
+  test("an existing .pcx wins over a .png sibling (classic-data path unchanged)", () => {
+    files.set("pics/both.pcx", buildPcxBytes(2, 2, () => 3));
+    files.set("pics/both.png", buildPngRgba(2, 2, () => [10, 20, 30, 255]));
+
+    const image = GL_FindImage("pics/both.pcx", ImagetypeT.it_wall);
+
+    expect(image).not.toBeNull();
+    expect(image?.name).toBe("pics/both.pcx");
+  });
 });
 
 describe("Draw_Char", () => {
