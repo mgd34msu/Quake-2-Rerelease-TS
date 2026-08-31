@@ -64,6 +64,18 @@ import {
   K_KP_MINUS,
   K_KP_PLUS,
   K_PAUSE,
+  K_GAMEPAD_LEFT_TRIGGER,
+  K_GAMEPAD_RIGHT_TRIGGER,
+  K_GAMEPAD_X_BUTTON,
+  K_GAMEPAD_A_BUTTON,
+  K_GAMEPAD_B_BUTTON,
+  K_GAMEPAD_LEFT_STICK,
+  K_GAMEPAD_RIGHT_STICK,
+  K_GAMEPAD_LEFT_SHOULDER,
+  K_GAMEPAD_RIGHT_SHOULDER,
+  K_GAMEPAD_DPAD_LEFT,
+  K_GAMEPAD_DPAD_RIGHT,
+  K_GAMEPAD_DPAD_UP,
   keybindings,
   key_repeats,
   anykeydown,
@@ -211,6 +223,27 @@ const keynames: KeynameT[] = [
   { name: "PAUSE", keynum: K_PAUSE },
 
   { name: "SEMICOLON", keynum: 59 }, // because a raw semicolon seperates commands
+
+  // KEX rerelease gamepad button names -- retail default.cfg's "GAMEPAD"
+  // section binds these by name (see keys.ts's K_GAMEPAD_* citation for the
+  // exact bind lines and source pak). Case kept exactly as default.cfg
+  // spells each one (lowercase snake_case for the buttons/sticks/shoulders,
+  // upper snake_case for the DPAD_* names) since that's the string the real
+  // KEX engine would echo back through its own bindlist/config write --
+  // Key_StringToKeynum's Q_stricmp lookup is already case-insensitive on
+  // parse either way (matches the vanilla C's Key_StringToKeynum).
+  { name: "left_trigger", keynum: K_GAMEPAD_LEFT_TRIGGER },
+  { name: "right_trigger", keynum: K_GAMEPAD_RIGHT_TRIGGER },
+  { name: "x_button", keynum: K_GAMEPAD_X_BUTTON },
+  { name: "a_button", keynum: K_GAMEPAD_A_BUTTON },
+  { name: "b_button", keynum: K_GAMEPAD_B_BUTTON },
+  { name: "left_stick", keynum: K_GAMEPAD_LEFT_STICK },
+  { name: "right_stick", keynum: K_GAMEPAD_RIGHT_STICK },
+  { name: "left_shoulder", keynum: K_GAMEPAD_LEFT_SHOULDER },
+  { name: "right_shoulder", keynum: K_GAMEPAD_RIGHT_SHOULDER },
+  { name: "DPAD_LEFT", keynum: K_GAMEPAD_DPAD_LEFT },
+  { name: "DPAD_RIGHT", keynum: K_GAMEPAD_DPAD_RIGHT },
+  { name: "DPAD_UP", keynum: K_GAMEPAD_DPAD_UP },
 ];
 
 /*

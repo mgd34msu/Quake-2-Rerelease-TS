@@ -116,6 +116,43 @@ export const K_AUX32 = 238;
 export const K_MWHEELDOWN = 239;
 export const K_MWHEELUP = 240;
 
+//
+// KEX rerelease gamepad buttons -- retail default.cfg's "GAMEPAD" section
+// (rerelease/baseq2/pak0.pak's default.cfg, extracted from
+// ~/q2rets/rerelease/baseq2/pak0.pak) binds these by name:
+//   bind left_trigger "+moveup"        bind right_shoulder "+wheel"
+//   bind right_trigger "+attack"       bind left_shoulder "+wheel2"
+//   bind x_button "cmd help"           bind DPAD_LEFT "cl_weapprev"
+//   bind a_button "+moveup"            bind DPAD_RIGHT "cl_weapnext"
+//   bind b_button "+movedown"          bind DPAD_UP "wave 4"
+//   bind left_stick "+movedown"
+//   bind right_stick "centerview"
+// The closed-source KEX engine (quake2ex_steam.exe) owns the real
+// name<->keynum table; neither q2repro checkout (~/Projects/q2repro,
+// ~/Projects/qsrc/q2repro) has any gamepad/SDL_GameController support to
+// read it from (grepped both trees for SDL_CONTROLLER/GameController/
+// left_trigger/K_JOY-adjacent gamepad names -- zero hits; Q2PRO's lineage
+// has no built-in controller input at all). This port's own input layer
+// (src/platform/sdl.ts) likewise has no SDL_GameController polling wired to
+// Key_Event -- these keynums are new, not a rename of the existing generic
+// K_JOY1-4/K_AUX1-32 joystick-button abstraction above (reusing those would
+// make Key_KeynumToString's first-match-wins scan return "JOY1" etc.
+// instead of these names, breaking round-trip). Parsing/display only: the
+// event-generation half (real controller -> Key_Event) is a separate,
+// larger input-layer feature, not attempted here.
+export const K_GAMEPAD_LEFT_TRIGGER = 241;
+export const K_GAMEPAD_RIGHT_TRIGGER = 242;
+export const K_GAMEPAD_X_BUTTON = 243;
+export const K_GAMEPAD_A_BUTTON = 244;
+export const K_GAMEPAD_B_BUTTON = 245;
+export const K_GAMEPAD_LEFT_STICK = 246;
+export const K_GAMEPAD_RIGHT_STICK = 247;
+export const K_GAMEPAD_LEFT_SHOULDER = 248;
+export const K_GAMEPAD_RIGHT_SHOULDER = 249;
+export const K_GAMEPAD_DPAD_LEFT = 250;
+export const K_GAMEPAD_DPAD_RIGHT = 251;
+export const K_GAMEPAD_DPAD_UP = 252;
+
 // `char *keybindings[256]` -- each slot is the bound command string, or
 // null when unbound (C's NULL pointer).
 export const keybindings: (string | null)[] = new Array(256).fill(null);
