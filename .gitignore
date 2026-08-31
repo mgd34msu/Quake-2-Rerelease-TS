@@ -2,3 +2,4 @@ node_modules/
 
 .goodvibes/
 .orch/
+dist/
