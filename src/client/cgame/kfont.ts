@@ -55,6 +55,14 @@ export interface KfontCharT {
   y: number;
   w: number;
   h: number;
+  // true for a COLR v0 + CPAL color glyph baked as a full-RGBA atlas region
+  // (ttf.ts's AtlasRectT.color -- see that field's own doc comment and
+  // buildFontAtlas's "COLR v0 + CPAL COLOR GLYPHS" section); the classic
+  // .kfont path (ParseKfont below) never sets this -- its qconfont.png
+  // atlas has no color-icon regions at all -- so it stays undefined there,
+  // which host.ts's drawKfontChar treats the same as false (tinted, the
+  // pre-existing behavior for every classic-kfont glyph).
+  color?: boolean;
 }
 
 // The parsed-but-not-yet-renderer-registered shape: everything ParseKfont
@@ -252,13 +260,15 @@ export function TtfKfont_Lookup(font: TtfKfontT, codepoint: number): KfontCharT 
 
 // The atlas -> TtfKfontT relabel itself: a straight copy of each
 // {x,y,w,h} rect (ttf.ts's AtlasRectT and this file's KfontCharT are
-// structurally identical -- same field set, same units, same meaning) plus
-// ttf.ts's own max-rect-height line_height convention, which already
-// matches ParseKfont's `if (h > line_height) line_height = h;` above.
+// structurally identical -- same field set, same units, same meaning),
+// carrying through AtlasRectT's `color` flag verbatim (see KfontCharT's own
+// doc comment on that field), plus ttf.ts's own max-rect-height line_height
+// convention, which already matches ParseKfont's
+// `if (h > line_height) line_height = h;` above.
 export function Kfont_FromTTF(atlas: FontAtlasT, pic: string): TtfKfontT {
   const chars = new Map<number, KfontCharT>();
   for (const [codepoint, rect] of atlas.glyphs) {
-    chars.set(codepoint, { x: rect.x, y: rect.y, w: rect.w, h: rect.h });
+    chars.set(codepoint, { x: rect.x, y: rect.y, w: rect.w, h: rect.h, color: rect.color });
   }
   return { pic, chars, line_height: atlas.lineHeight };
 }

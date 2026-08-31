@@ -179,7 +179,12 @@ let kfontCache: KfontT | null = null;
 // unchanged to both wrapped sources.
 // ---------------------------------------------------------------------------
 
-interface ActiveKfontT {
+// Exported for tests (see drawKfontChar's own export below): the COLR/CPAL
+// color-region draw-selection unit tests this shape directly rather than
+// re-deriving it from a real TTF/kfont load, since ActiveKfontT.lookup is
+// already the exact seam both wrapClassicKfont and wrapTtfKfont funnel
+// through.
+export interface ActiveKfontT {
   pic: string;
   line_height: number;
   lookup(codepoint: number): KfontCharT | null;
@@ -359,7 +364,34 @@ function measureFontStringDispatch(font: ActiveKfontT | null, str: string, scale
 // measureFontStringDispatch's doc comment for why this differs from the
 // UNSCALED width the measure path sums; both sides are faithful to
 // q2repro's own respective functions.
-function drawKfontChar(font: ActiveKfontT, x: number, y: number, scale: number, codepoint: number, color: DrawColorT, shadow: boolean): number {
+// Exported for tests (test/cgame_host_kfont_colr_draw.test.ts): this is the
+// actual single-glyph draw-selection function the COLR/CPAL untinted-region
+// fix lives in, and it is the correct granularity to unit test at -- see
+// this function's own color-region comment below for why the STRING-level
+// entry points (drawKStringStretch/drawKStringMultiStretch, and therefore
+// the public SCR_DrawFontString/SCR_DrawBind imports) can't carry a PUA
+// icon codepoint (0xF0000+) through a plain JS string at all: they iterate
+// `s.charCodeAt(i)`, one UTF-16 CODE UNIT at a time, and a codepoint above
+// 0xFFFF is a surrogate PAIR in JS -- charCodeAt would yield the two
+// surrogate halves (0xD800-0xDFFF), neither of which equals the real
+// codepoint the atlas is keyed by. This is not a regression: q2repro's own
+// SCR_DrawKStringStretch (src/client/screen.c) is even more restricted --
+// `while (*s && maxlen--) { x += R_DrawKFontChar(..., *s++, ...); }` passes
+// a raw BYTE (`*s++`, a `const char*` dereference) as the uint32_t
+// codepoint, so it can never represent a codepoint above 0xFF either. In
+// q2repro, real icon glyphs reach R_DrawKFontChar (the exact single-glyph
+// primitive this port's drawKfontChar mirrors) through a DIFFERENT,
+// dedicated call site that already has the decoded numeric codepoint in
+// hand, never through the generic string walker. This port has no such
+// dedicated bind-icon call site yet (SCR_DrawBind above renders key names
+// as literal text, e.g. "[MOUSE1] Reload", not icon glyphs) -- wiring one
+// is future work, out of this unit's scope (buildFontAtlas/kfont
+// draw-model shape only), and does not block this fix: whatever future
+// call site draws a real icon glyph will call drawKfontChar directly with
+// the numeric codepoint, exactly like q2repro's own icon call site calls
+// R_DrawKFontChar directly, and will get the correct untinted color-region
+// behavior this function now implements.
+export function drawKfontChar(font: ActiveKfontT, x: number, y: number, scale: number, codepoint: number, color: DrawColorT, shadow: boolean): number {
   if (!re) return 0;
   const ch = font.lookup(codepoint);
   if (!ch) return 0;
@@ -372,7 +404,25 @@ function drawKfontChar(font: ActiveKfontT, x: number, y: number, scale: number, 
     const black: DrawColorT = { r: 0, g: 0, b: 0, a: color.a };
     re.DrawStretchPicRegion(x + offset, y + offset, w, h, font.pic, ch.x, ch.y, ch.w, ch.h, black);
   }
-  re.DrawStretchPicRegion(x, y, w, h, font.pic, ch.x, ch.y, ch.w, ch.h, color);
+  // ch.color (ttf.ts's AtlasRectT.color, carried through by kfont.ts's
+  // Kfont_FromTTF -- see that field's own doc comment) marks a COLR v0 +
+  // CPAL color-icon region baked into the atlas with its REAL composited
+  // RGBA colors, not the usual white-RGB/coverage-alpha text mask. Drawing
+  // it tinted by the string's own text `color` (the classic single-tint
+  // shape every OTHER kfont glyph uses) would recolor the button-icon
+  // artwork -- e.g. a green Xbox "A" button glyph drawn inside white HUD
+  // text would come out white too. Draw it with an untinted DrawColorT
+  // instead (white RGB so the renderer's tint-modulate step is an identity
+  // on the baked pixel colors -- GL_MODULATE's `rgb * 1` on ref_gl,
+  // buildColorRemap(255,255,255)'s identity palette remap on ref_soft --
+  // while still preserving the caller's own alpha, so a color glyph fades
+  // consistently with any text glyphs drawn alongside it in the same HUD
+  // fade). No q2repro precedent for this branch: see ttf.ts's own
+  // buildFontAtlas doc comment for the full citation (q2repro's
+  // draw_kfont_char applies one color to every glyph unconditionally,
+  // because its kfont system has no color-icon concept at all).
+  const drawColor: DrawColorT = ch.color ? { r: 255, g: 255, b: 255, a: color.a } : color;
+  re.DrawStretchPicRegion(x, y, w, h, font.pic, ch.x, ch.y, ch.w, ch.h, drawColor);
 
   return w;
 }

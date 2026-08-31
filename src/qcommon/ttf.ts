@@ -61,14 +61,31 @@
 //     test/ttf_colr_retail.test.ts). COLRv1 (the gradient/paint-graph
 //     extension) is NOT implemented -- parseCOLR only accepts version 0,
 //     see its own doc comment; no font in the shipped retail set uses v1.
-//     rasterizeColorGlyph() produces a standalone RGBA8 bitmap, NOT an
-//     atlas rect wired into buildFontAtlas()/kfont's single-tint draw model
-//     (DrawStretchPicRegion draws ONE atlas rect tinted by ONE DrawColorT
-//     per character -- see client/cgame/kfont.ts) -- mapping the 7
-//     controller-icon fonts' color glyphs onto an actual HUD draw path
-//     (repeated DrawColorPic-tinted rects per layer, or a small compositor
-//     at atlas-build time, per .orch/followups.md's "V1.0.0 QUEUE" note)
-//     remains a separate, not-yet-scheduled integration unit.
+//     rasterizeColorGlyph() -- WIRED into buildFontAtlas()/the kfont draw
+//     model as of the COLR draw-path completion unit (see buildFontAtlas's
+//     own "COLR v0 + CPAL COLOR GLYPHS" doc comment below and
+//     client/cgame/kfont.ts's KfontCharT.color / client/cgame/host.ts's
+//     drawKfontChar): a color-glyph codepoint is baked into the atlas as a
+//     full-RGBA region (AtlasRectT.color = true) instead of the usual
+//     white-RGB/coverage-alpha mask, and drawKfontChar draws that region
+//     UNTINTED (white RGB, caller's alpha preserved) instead of tinted by
+//     the string's text color -- no new render path, same single
+//     DrawStretchPicRegion-per-character call either way, just a per-region
+//     choice of which DrawColorT to pass. NO q2repro PRECEDENT EXISTS for
+//     this distinction: q2repro's own draw_kfont_char (src/refresh/draw.c)
+//     applies exactly one caller-supplied `color` to every glyph rect
+//     unconditionally, because q2repro's kfont system only ever consumes
+//     ONE pre-baked qconfont.png atlas that never mixes multi-color icon
+//     art with text glyphs in the first place (see this file's own top-of-
+//     file comment and client/cgame/kfont.ts's header) -- this is a
+//     TTF-path-specific completion, needed only because THIS port newly
+//     parses the real KexControllerIcons*.ttf files directly. The nearest
+//     C-side precedent is structural, not behavioral: q2repro's own
+//     fonts/qconfont.kfont format already establishes "one shared atlas
+//     texture, many independent per-glyph {x,y,w,h} regions" (see
+//     client/cgame/kfont.ts's ParseKfont/KfontCharT) -- this unit extends
+//     that same per-region-rect precedent with a second per-region
+//     attribute (tinted vs untinted) rather than inventing a new shape.
 //   - CFF (Type 2 charstrings): the 3 .otf files (AtkinsonHyperLegible-
 //     Regular, NotoSansJP-Regular, NotoSansKR-Regular) all carry 'CFF '
 //     outlines, not 'glyf'. AtkinsonHyperLegible is a plain (non-CID) CFF
@@ -1585,14 +1602,36 @@ export interface AtlasRectT {
   y: number;
   w: number;
   h: number;
+  // true for a COLR v0 + CPAL color glyph baked as a full-RGBA region (its
+  // pixels are the glyph's REAL composited colors, not a white/coverage-alpha
+  // mask) -- see this function's own doc comment below and
+  // client/cgame/host.ts's drawKfontChar, which reads this flag to draw the
+  // region untinted instead of tinted by the caller's text color. false for
+  // every ordinary (non-color) glyph, unchanged from this atlas format's
+  // original white-RGB/coverage-alpha shape.
+  color: boolean;
 }
 
 export interface FontAtlasT {
   width: number;
   height: number;
-  pixels: Uint8Array; // RGBA8 straight alpha, width*height*4, white RGB / coverage alpha (matches conchars-style single-channel-as-alpha glyph art)
+  pixels: Uint8Array; // RGBA8 straight alpha, width*height*4 -- white RGB / coverage alpha for ordinary glyphs (matches conchars-style single-channel-as-alpha glyph art), REAL composited RGBA for glyphs whose AtlasRectT.color is true (see that field's doc comment)
   glyphs: Map<number, AtlasRectT>; // codepoint -> atlas rect (kfont's own KfontCharT shape)
   lineHeight: number; // max rect height over every included glyph, matching kfont.ts's ParseKfont convention
+}
+
+// One rasterized cell awaiting packing -- either an ordinary glyph's
+// coverage-alpha mask (rasterizeGlyph) or a COLR/CPAL color glyph's already-
+// composited RGBA bitmap (rasterizeColorGlyph). Unified so the shelf packer
+// below only has to know each entry's width/height, not which rasterizer
+// produced it.
+interface AtlasCellT {
+  codepoint: number;
+  width: number;
+  height: number;
+  color: boolean;
+  coverage: Uint8Array | null; // set when !color
+  rgba: Uint8Array | null; // set when color
 }
 
 // Rasterizes every codepoint in `codepoints` that this font's cmap actually
@@ -1601,52 +1640,98 @@ export interface FontAtlasT {
 // has for the real qconfont.kfont asset) into a single shelf-packed RGBA
 // atlas, 1px gaps between cells (bleed hygiene for bilinear-filtered
 // sampling; not load-bearing for correctness).
+//
+// COLR v0 + CPAL COLOR GLYPHS (completes the follow-up ttf.ts's own header
+// FINDING recorded: "rasterizeColorGlyph() produces a standalone RGBA8
+// bitmap, NOT an atlas rect wired into buildFontAtlas()/kfont's single-tint
+// draw model"): a codepoint whose mapped gid has a COLR base-glyph record
+// (`font.colorLayers(gid) !== null` -- true today only for the 7 real
+// KexControllerIcons*.ttf PUA icon glyphs, see test/ttf_colr_retail.test.ts)
+// is rasterized via rasterizeColorGlyph() instead of rasterizeGlyph(), and
+// its REAL composited RGBA pixels are copied into the atlas verbatim (not
+// forced to white RGB + coverage alpha the way an ordinary glyph is) --
+// AtlasRectT.color records which case applies so the draw path
+// (client/cgame/host.ts's drawKfontChar) knows to skip its usual text-color
+// tint for this region. rasterizeColorGlyph()'s own default palette (id 0)
+// and default foreground color (opaque white, for any layer using the COLR
+// 0xFFFF "use the caller's text color" sentinel) are used here, since an
+// atlas is built once and shared by every subsequent draw call at
+// potentially different text colors -- a per-draw-call foreground tint for
+// THOSE specific sentinel layers is not achievable through a pre-baked
+// atlas rect and is out of scope for this pass; no glyph in the real
+// retail controller-icon fonts actually uses the sentinel (verified:
+// test/ttf_colr_retail.test.ts's real-bytes layer dump for
+// KexControllerIconsDS4.ttf's codepoint 0xF0000 has three CPAL-indexed
+// layers, no 0xFFFF sentinel among them), so this is a documented
+// theoretical gap, not an observed one.
 export function buildFontAtlas(font: ParsedFontT, codepoints: Iterable<number>, px: number, maxWidth = 512): FontAtlasT {
-  const rasters: { codepoint: number; raster: RasterizedGlyphT }[] = [];
+  const cells: AtlasCellT[] = [];
   let lineHeight = 0;
   for (const cp of codepoints) {
     const gid = font.cmapLookup(cp);
     if (gid === 0) continue;
+    if (font.colorLayers(gid) !== null) {
+      const raster = rasterizeColorGlyph(font, gid, px);
+      if (raster === null) continue; // colorLayers() said yes but the composite came back empty -- stay defensive like rasterizeGlyph's own callers, skip rather than fail the whole atlas
+      if (raster.height > lineHeight) lineHeight = raster.height;
+      cells.push({ codepoint: cp, width: raster.width, height: raster.height, color: true, coverage: null, rgba: raster.pixels });
+      continue;
+    }
     const raster = rasterizeGlyph(font, gid, px);
     if (raster.height > lineHeight) lineHeight = raster.height;
-    rasters.push({ codepoint: cp, raster });
+    cells.push({ codepoint: cp, width: raster.width, height: raster.height, color: false, coverage: raster.coverage, rgba: null });
   }
 
-  const sorted = [...rasters].sort((a, b) => b.raster.height - a.raster.height);
+  const sorted = [...cells].sort((a, b) => b.height - a.height);
   const gap = 1;
   const atlasWidth = maxWidth;
   let cursorX = gap;
   let cursorY = gap;
   let shelfHeight = 0;
   const placements = new Map<number, { x: number; y: number }>();
-  for (const { codepoint, raster } of sorted) {
-    if (cursorX + raster.width + gap > atlasWidth) {
+  for (const { codepoint, width, height } of sorted) {
+    if (cursorX + width + gap > atlasWidth) {
       cursorX = gap;
       cursorY += shelfHeight + gap;
       shelfHeight = 0;
     }
     placements.set(codepoint, { x: cursorX, y: cursorY });
-    cursorX += raster.width + gap;
-    if (raster.height > shelfHeight) shelfHeight = raster.height;
+    cursorX += width + gap;
+    if (height > shelfHeight) shelfHeight = height;
   }
   const atlasHeight = cursorY + shelfHeight + gap;
 
   const pixels = new Uint8Array(atlasWidth * atlasHeight * 4);
   const glyphs = new Map<number, AtlasRectT>();
-  for (const { codepoint, raster } of rasters) {
-    const pos = placements.get(codepoint);
+  for (const cell of cells) {
+    const pos = placements.get(cell.codepoint);
     if (pos === undefined) continue;
-    for (let y = 0; y < raster.height; y++) {
-      for (let x = 0; x < raster.width; x++) {
-        const a = raster.coverage[y * raster.width + x];
-        const dst = ((pos.y + y) * atlasWidth + (pos.x + x)) * 4;
-        pixels[dst] = 255;
-        pixels[dst + 1] = 255;
-        pixels[dst + 2] = 255;
-        pixels[dst + 3] = a;
+    if (cell.color) {
+      const src = cell.rgba!;
+      for (let y = 0; y < cell.height; y++) {
+        for (let x = 0; x < cell.width; x++) {
+          const so = (y * cell.width + x) * 4;
+          const dst = ((pos.y + y) * atlasWidth + (pos.x + x)) * 4;
+          pixels[dst] = src[so];
+          pixels[dst + 1] = src[so + 1];
+          pixels[dst + 2] = src[so + 2];
+          pixels[dst + 3] = src[so + 3];
+        }
+      }
+    } else {
+      const src = cell.coverage!;
+      for (let y = 0; y < cell.height; y++) {
+        for (let x = 0; x < cell.width; x++) {
+          const a = src[y * cell.width + x];
+          const dst = ((pos.y + y) * atlasWidth + (pos.x + x)) * 4;
+          pixels[dst] = 255;
+          pixels[dst + 1] = 255;
+          pixels[dst + 2] = 255;
+          pixels[dst + 3] = a;
+        }
       }
     }
-    glyphs.set(codepoint, { x: pos.x, y: pos.y, w: raster.width, h: raster.height });
+    glyphs.set(cell.codepoint, { x: pos.x, y: pos.y, w: cell.width, h: cell.height, color: cell.color });
   }
 
   return { width: atlasWidth, height: atlasHeight, pixels, glyphs, lineHeight };
