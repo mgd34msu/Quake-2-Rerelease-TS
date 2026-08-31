@@ -263,6 +263,13 @@ export const glCvars: {
 
   vid_fullscreen: CvarT | null;
   vid_gamma: CvarT | null;
+  // v1.0.0 RC resolution scaling (src/platform/vid_scale.ts/glimp.ts): no
+  // C-original or q2repro field to mirror -- see vid.ts's VID_GetScale
+  // header comment. Tracked here only so R_BeginFrame/R_SetMode can detect
+  // "modified" and force the same mode-restart path gl_mode/vid_fullscreen
+  // already use; glimp.ts reads the cvar's live value directly, not through
+  // this struct.
+  vid_scale: CvarT | null;
 
   intensity: CvarT | null;
 } = {
@@ -333,6 +340,7 @@ export const glCvars: {
 
   vid_fullscreen: null,
   vid_gamma: null,
+  vid_scale: null,
 
   intensity: null,
 };

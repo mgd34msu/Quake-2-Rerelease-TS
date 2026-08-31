@@ -58,6 +58,7 @@ import { cl, cls, re, setRe, KeydestT } from "../client/client";
 import { viddef } from "../client/vid";
 import { S_StopAllSounds } from "../client/snd_dma";
 import { SDL_BackendEnabled, SDLGL_GetProcAddress, SDLVID_SetWindowTitle } from "./sdl";
+import { CUSTOM_HEIGHT_DEFAULT, CUSTOM_WIDTH_DEFAULT, VID_ClampCustomHeight, VID_ClampCustomWidth, VID_ClampScale, VID_SCALE_DEFAULT } from "./vid_scale";
 
 export function VID_WriteScreenshot(path: string, data: Uint8Array): void {
   mkdirSync(dirname(path), { recursive: true });
@@ -106,12 +107,66 @@ const vid_modes: VidmodeT[] = [
   // Extension beyond the C table (vid_menu.c stopped at 1600x1200 in the
   // 4:3 CRT era): a 16:9 mode so `vid_mode 10` gives native 1080p.
   new VidmodeT("Mode 10: 1920x1080", 1920, 1080, 10),
+  // v1.0.0 RC modern-display set (task: "more video modes"). q2repro carries
+  // no numeric mode table at all to supersede -- its vid_modelist is a
+  // string spec parsed by VID_GetFullscreen, not an indexable array (see
+  // this unit's report) -- so these are appended past the existing 0-10
+  // table (never renumbered: existing configs pinning sw_mode/gl_mode to a
+  // low index must keep resolving to the same resolution) rather than
+  // matched against any upstream table.
+  new VidmodeT("Mode 11: 1280x720", 1280, 720, 11),
+  new VidmodeT("Mode 12: 1366x768", 1366, 768, 12),
+  new VidmodeT("Mode 13: 1440x900", 1440, 900, 13),
+  new VidmodeT("Mode 14: 1600x900", 1600, 900, 14),
+  new VidmodeT("Mode 15: 1920x1200", 1920, 1200, 15),
+  new VidmodeT("Mode 16: 2560x1080", 2560, 1080, 16),
+  new VidmodeT("Mode 17: 2560x1440", 2560, 1440, 17),
+  new VidmodeT("Mode 18: 3440x1440", 3440, 1440, 18),
+  new VidmodeT("Mode 19: 3840x2160", 3840, 2160, 19),
 ];
 
+let r_customwidth: CvarT | null = null;
+let r_customheight: CvarT | null = null;
+let vid_scale: CvarT | null = null;
+
+// mode -1: a custom resolution read from r_customwidth/r_customheight
+// instead of the fixed table above -- this port's own naming for the
+// idea (no equivalent in q2repro at all: no r_customwidth/r_customheight,
+// no numeric "-1 means custom" convention anywhere in its history --
+// verified against its full git history, see this unit's report). The
+// closest real-world precedent for these exact cvar names/semantics is
+// idTech 3 (Quake III Arena/ioquake3's r_mode -1 + r_customwidth/
+// r_customheight), not Q2PRO -- documented deviation from the brief's
+// attribution per rule 3/14, kept because it is the closest faithful fit
+// for this file's existing vanilla-style indexed mode table.
+function customModeInfo(): { width: number; height: number } {
+  if (!r_customwidth) r_customwidth = Cvar_Get("r_customwidth", String(CUSTOM_WIDTH_DEFAULT), CVAR_ARCHIVE);
+  if (!r_customheight) r_customheight = Cvar_Get("r_customheight", String(CUSTOM_HEIGHT_DEFAULT), CVAR_ARCHIVE);
+  return {
+    width: VID_ClampCustomWidth(r_customwidth ? r_customwidth.value : CUSTOM_WIDTH_DEFAULT),
+    height: VID_ClampCustomHeight(r_customheight ? r_customheight.value : CUSTOM_HEIGHT_DEFAULT),
+  };
+}
+
 export function VID_GetModeInfo(mode: number): { width: number; height: number } | null {
+  if (mode === -1) return customModeInfo();
   if (mode < 0 || mode >= vid_modes.length) return null;
   return { width: vid_modes[mode].width, height: vid_modes[mode].height };
 }
+
+// vid_scale: fraction of the chosen mode's resolution actually rendered
+// internally, then presented scaled (aspect-preserving letterbox) to fill
+// that mode's window/display -- e.g. vid_mode 10 (1920x1080) + vid_scale
+// 0.667 renders at ~1280x720 and displays fullscreen at 1080p. No q2repro
+// precedent (checked: no r_scale/vid_scale/downscale-to-present feature
+// anywhere in its refresh or GL backend -- see this unit's report), so
+// named "vid_scale" per the brief's own fallback and documented as ours.
+export function VID_GetScale(): number {
+  if (!vid_scale) vid_scale = Cvar_Get("vid_scale", String(VID_SCALE_DEFAULT), CVAR_ARCHIVE);
+  return VID_ClampScale(vid_scale ? vid_scale.value : VID_SCALE_DEFAULT);
+}
+
+export { VID_ClampScale, VID_ClampCustomWidth, VID_ClampCustomHeight, VID_CalcRenderSize, VID_CalcScaledRect, type VidRect } from "./vid_scale";
 
 export function VID_NewWindow(width: number, height: number): void {
   viddef.width = width;
@@ -334,6 +389,12 @@ export function VID_Init(): void {
   vid_ypos = Cvar_Get("vid_ypos", "22", CVAR_ARCHIVE);
   vid_fullscreen = Cvar_Get("vid_fullscreen", "0", CVAR_ARCHIVE);
   Cvar_Get("vid_gamma", "1", CVAR_ARCHIVE);
+  // v1.0.0 RC: custom resolution (mode -1) and internal-render-resolution
+  // scaling -- see VID_GetModeInfo/VID_GetScale above for the semantics and
+  // this unit's report for why neither has a q2repro precedent to match.
+  r_customwidth = Cvar_Get("r_customwidth", String(CUSTOM_WIDTH_DEFAULT), CVAR_ARCHIVE);
+  r_customheight = Cvar_Get("r_customheight", String(CUSTOM_HEIGHT_DEFAULT), CVAR_ARCHIVE);
+  vid_scale = Cvar_Get("vid_scale", String(VID_SCALE_DEFAULT), CVAR_ARCHIVE);
 
   // Add some console commands that we want to handle
   Cmd_AddCommand("vid_restart", VID_Restart_f);

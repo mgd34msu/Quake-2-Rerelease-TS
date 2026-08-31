@@ -76,6 +76,7 @@ export interface QGL {
   qglEnd(): void;
   qglFinish(): void;
   qglFrustum(left: number, right: number, bottom: number, top: number, zNear: number, zFar: number): void;
+  qglGenTextures(n: number, textures: GLPointer): void;
   qglGetError(): number;
   qglGetFloatv(pname: number, params: GLPointer): void;
   qglGetString(name: number): Pointer | null;
@@ -168,6 +169,25 @@ export interface QGL {
   qglUniform3f: ((location: number, v0: number, v1: number, v2: number) => void) | null;
   qglUniform3fv: ((location: number, count: number, value: GLPointer) => void) | null;
   qglUniform4f: ((location: number, v0: number, v1: number, v2: number, v3: number) => void) | null;
+
+  // --- ARB_framebuffer_object / GL3.0 core (resolution-scaling render
+  // target: src/platform/glimp.ts renders the frame into a texture sized to
+  // the internal render resolution, then blits it scaled into the window at
+  // the display resolution when vid_scale shrinks the two apart). No qgl.h
+  // entry point to mirror -- vanilla ref_gl never used framebuffer objects --
+  // so these are new members, same "ours" precedent as the GL2 program-object
+  // group above. Resolved together as one all-or-nothing group (see
+  // `resolveGLFramebufferAPI` below): a context with any one of them has all
+  // of them, so glimp.ts treats "any member null" as "no scaling on this
+  // context" and renders unscaled instead.
+  qglGenFramebuffers: ((n: number, framebuffers: GLPointer) => void) | null;
+  qglBindFramebuffer: ((target: number, framebuffer: number) => void) | null;
+  qglFramebufferTexture2D: ((target: number, attachment: number, textarget: number, texture: number, level: number) => void) | null;
+  qglCheckFramebufferStatus: ((target: number) => number) | null;
+  qglBlitFramebuffer: (
+    (srcX0: number, srcY0: number, srcX1: number, srcY1: number, dstX0: number, dstY0: number, dstX1: number, dstY1: number, mask: number, filter: number) => void
+  ) | null;
+  qglDeleteFramebuffers: ((n: number, framebuffers: GLPointer) => void) | null;
 }
 
 export interface QGLCall {
@@ -269,6 +289,13 @@ export class QGLRecording implements QGL {
   }
   qglFrustum(left: number, right: number, bottom: number, top: number, zNear: number, zFar: number): void {
     this.record("qglFrustum", [left, right, bottom, top, zNear, zFar]);
+  }
+  private nextTextureName = 1;
+  qglGenTextures(n: number, textures: GLPointer): void {
+    this.record("qglGenTextures", [n, textures]);
+    if (textures instanceof Uint32Array) {
+      for (let i = 0; i < n; i++) textures[i] = this.nextTextureName++;
+    }
   }
   qglGetError(): number {
     this.record("qglGetError", []);
@@ -452,6 +479,41 @@ export class QGLRecording implements QGL {
   qglUniform4f = (location: number, v0: number, v1: number, v2: number, v3: number): void => {
     this.record("qglUniform4f", [location, v0, v1, v2, v3]);
   };
+
+  private nextFramebufferName = 1;
+  qglGenFramebuffers = (n: number, framebuffers: GLPointer): void => {
+    this.record("qglGenFramebuffers", [n, framebuffers]);
+    if (framebuffers instanceof Uint32Array) {
+      for (let i = 0; i < n; i++) framebuffers[i] = this.nextFramebufferName++;
+    }
+  };
+  qglBindFramebuffer = (target: number, framebuffer: number): void => {
+    this.record("qglBindFramebuffer", [target, framebuffer]);
+  };
+  qglFramebufferTexture2D = (target: number, attachment: number, textarget: number, texture: number, level: number): void => {
+    this.record("qglFramebufferTexture2D", [target, attachment, textarget, texture, level]);
+  };
+  qglCheckFramebufferStatus = (target: number): number => {
+    this.record("qglCheckFramebufferStatus", [target]);
+    return 0x8cd5; // GL_FRAMEBUFFER_COMPLETE
+  };
+  qglBlitFramebuffer = (
+    srcX0: number,
+    srcY0: number,
+    srcX1: number,
+    srcY1: number,
+    dstX0: number,
+    dstY0: number,
+    dstX1: number,
+    dstY1: number,
+    mask: number,
+    filter: number,
+  ): void => {
+    this.record("qglBlitFramebuffer", [srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter]);
+  };
+  qglDeleteFramebuffers = (n: number, framebuffers: GLPointer): void => {
+    this.record("qglDeleteFramebuffers", [n, framebuffers]);
+  };
 }
 
 // linux/qgl_linux.c's QGL_Init() dlopen()s `gl_driver`'s value (cvar,
@@ -520,6 +582,7 @@ const glSymbols = {
   glEnd: { args: [], returns: voidType },
   glFinish: { args: [], returns: voidType },
   glFrustum: { args: [f64, f64, f64, f64, f64, f64], returns: voidType },
+  glGenTextures: { args: [i32, ptr], returns: voidType },
   glGetError: { args: [], returns: u32 },
   glGetFloatv: { args: [u32, ptr], returns: voidType },
   glGetString: { args: [u32], returns: ptr },
@@ -799,6 +862,61 @@ function resolveGLShaderAPI(libraryPath: string, getProcAddress: GLGetProcAddres
   }
 }
 
+// --- ARB_framebuffer_object / GL3.0 core (resolution-scaling render target,
+// see the QGL interface's banner comment on `qglGenFramebuffers`) ----------
+const glFramebufferSymbols = {
+  glGenFramebuffers: { args: [i32, ptr], returns: voidType },
+  glBindFramebuffer: { args: [u32, u32], returns: voidType },
+  glFramebufferTexture2D: { args: [u32, u32, u32, u32, i32], returns: voidType },
+  glCheckFramebufferStatus: { args: [u32], returns: u32 },
+  glBlitFramebuffer: { args: [i32, i32, i32, i32, i32, i32, i32, i32, u32, u32], returns: voidType },
+  glDeleteFramebuffers: { args: [i32, ptr], returns: voidType },
+} as const;
+
+interface GLFramebufferRawSymbols {
+  glGenFramebuffers(n: number, framebuffers: GLPointer): void;
+  glBindFramebuffer(target: number, framebuffer: number): void;
+  glFramebufferTexture2D(target: number, attachment: number, textarget: number, texture: number, level: number): void;
+  glCheckFramebufferStatus(target: number): number;
+  glBlitFramebuffer(srcX0: number, srcY0: number, srcX1: number, srcY1: number, dstX0: number, dstY0: number, dstX1: number, dstY1: number, mask: number, filter: number): void;
+  glDeleteFramebuffers(n: number, framebuffers: GLPointer): void;
+}
+
+// Resolves every ARB_framebuffer_object entry point as one all-or-nothing
+// group, same rationale and shape as `resolveGLShaderAPI` above (a computed
+// `{ [name]: sig }` object can't be built without an `as` cast to widen the
+// key, which PORTING.md's no-`as`-except-`as const` rule forbids).
+function resolveGLFramebufferAPI(libraryPath: string, getProcAddress: GLGetProcAddressFn | undefined): GLFramebufferRawSymbols | null {
+  if (getProcAddress) {
+    const pGenFramebuffers = getProcAddress("glGenFramebuffers");
+    if (pGenFramebuffers === null) return null;
+    const pBindFramebuffer = getProcAddress("glBindFramebuffer");
+    if (pBindFramebuffer === null) return null;
+    const pFramebufferTexture2D = getProcAddress("glFramebufferTexture2D");
+    if (pFramebufferTexture2D === null) return null;
+    const pCheckFramebufferStatus = getProcAddress("glCheckFramebufferStatus");
+    if (pCheckFramebufferStatus === null) return null;
+    const pBlitFramebuffer = getProcAddress("glBlitFramebuffer");
+    if (pBlitFramebuffer === null) return null;
+    const pDeleteFramebuffers = getProcAddress("glDeleteFramebuffers");
+    if (pDeleteFramebuffers === null) return null;
+
+    return linkSymbols({
+      glGenFramebuffers: { args: [i32, ptr], returns: voidType, ptr: pGenFramebuffers },
+      glBindFramebuffer: { args: [u32, u32], returns: voidType, ptr: pBindFramebuffer },
+      glFramebufferTexture2D: { args: [u32, u32, u32, u32, i32], returns: voidType, ptr: pFramebufferTexture2D },
+      glCheckFramebufferStatus: { args: [u32], returns: u32, ptr: pCheckFramebufferStatus },
+      glBlitFramebuffer: { args: [i32, i32, i32, i32, i32, i32, i32, i32, u32, u32], returns: voidType, ptr: pBlitFramebuffer },
+      glDeleteFramebuffers: { args: [i32, ptr], returns: voidType, ptr: pDeleteFramebuffers },
+    }).symbols;
+  }
+  try {
+    return dlopen(libraryPath, glFramebufferSymbols).symbols;
+  } catch {
+    return null;
+  }
+}
+
 function cstrBuf(s: string): Uint8Array {
   return new TextEncoder().encode(`${s}\0`);
 }
@@ -877,6 +995,7 @@ export function loadQGLFromSystem(getProcAddress?: GLGetProcAddressFn): QGL {
   const glMTexCoord2fSGIS = resolveGlMTexCoord2fSGIS(libraryPath, getProcAddress);
   const glSelectTextureSGIS = resolveGlSelectTextureSGIS(libraryPath, getProcAddress);
   const glShader = resolveGLShaderAPI(libraryPath, getProcAddress);
+  const glFramebuffer = resolveGLFramebufferAPI(libraryPath, getProcAddress);
   return {
     qglAlphaFunc: (func, ref) => s.glAlphaFunc(func, ref),
     qglArrayElement: (i) => s.glArrayElement(i),
@@ -904,6 +1023,7 @@ export function loadQGLFromSystem(getProcAddress?: GLGetProcAddressFn): QGL {
     qglEnd: () => s.glEnd(),
     qglFinish: () => s.glFinish(),
     qglFrustum: (left, right, bottom, top, zNear, zFar) => s.glFrustum(left, right, bottom, top, zNear, zFar),
+    qglGenTextures: (n, textures) => s.glGenTextures(n, textures),
     qglGetError: () => s.glGetError(),
     qglGetFloatv: (pname, params) => s.glGetFloatv(pname, params),
     qglGetString: (name) => {
@@ -974,5 +1094,17 @@ export function loadQGLFromSystem(getProcAddress?: GLGetProcAddressFn): QGL {
     qglUniform3f: glShader ? (location, v0, v1, v2) => glShader.glUniform3f(location, v0, v1, v2) : null,
     qglUniform3fv: glShader ? (location, count, value) => glShader.glUniform3fv(location, count, value) : null,
     qglUniform4f: glShader ? (location, v0, v1, v2, v3) => glShader.glUniform4f(location, v0, v1, v2, v3) : null,
+
+    qglGenFramebuffers: glFramebuffer ? (n, framebuffers) => glFramebuffer.glGenFramebuffers(n, framebuffers) : null,
+    qglBindFramebuffer: glFramebuffer ? (target, framebuffer) => glFramebuffer.glBindFramebuffer(target, framebuffer) : null,
+    qglFramebufferTexture2D: glFramebuffer
+      ? (target, attachment, textarget, texture, level) => glFramebuffer.glFramebufferTexture2D(target, attachment, textarget, texture, level)
+      : null,
+    qglCheckFramebufferStatus: glFramebuffer ? (target) => glFramebuffer.glCheckFramebufferStatus(target) : null,
+    qglBlitFramebuffer: glFramebuffer
+      ? (srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter) =>
+          glFramebuffer.glBlitFramebuffer(srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter)
+      : null,
+    qglDeleteFramebuffers: glFramebuffer ? (n, framebuffers) => glFramebuffer.glDeleteFramebuffers(n, framebuffers) : null,
   };
 }

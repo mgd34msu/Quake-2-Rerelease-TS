@@ -17,6 +17,17 @@ the rendered frame and there is nothing to present it to.
 
 import { RserrT, ri, sw_state, vid } from "../ref_soft/r_local";
 import { SDL_BackendEnabled, SDLVID_Active, SDLVID_Init, SDLVID_Present, SDLVID_Shutdown, SDL_AppActivate } from "./sdl";
+import { VID_CalcRenderSize } from "./vid_scale";
+import type * as VidModule from "./vid";
+
+// vid.ts (VID_LoadRefresh) statically imports ref_soft/r_main.ts, which
+// statically imports this file for the real SWimp_* implementation --
+// importing vid.ts's VID_GetScale back from here would close that loop.
+// Resolved lazily on this (less fundamental, platform-utility) side, same
+// idiom as sdl.ts's keysMod/clInputMod/commonMod.
+function vidMod(): typeof VidModule {
+  return require("./vid");
+}
 
 // The real linux/rw_x11.c SWimp_SetMode ends by calling
 // R_GammaCorrectAndSetPalette(d_8to24table) to push the mode's palette to
@@ -31,7 +42,7 @@ export function SWimp_Init(hInstance: unknown, wndProc: unknown): number {
 export function SWimp_SetMode(width: number, height: number, mode: number, fullscreen: boolean): { pwidth: number; pheight: number; rserr: RserrT } {
   ri.Con_Printf(0, `setting mode ${mode}:`);
 
-  const info = ri.Vid_GetModeInfo(mode);
+  const info = ri.Vid_GetModeInfo(mode); // the display's (window/mode) size
   if (!info) {
     ri.Con_Printf(0, " invalid mode\n");
     return { pwidth: width, pheight: height, rserr: RserrT.rserr_invalid_mode };
@@ -39,26 +50,38 @@ export function SWimp_SetMode(width: number, height: number, mode: number, fulls
 
   ri.Con_Printf(0, ` ${info.width} ${info.height}\n`);
 
-  vid.width = info.width;
-  vid.height = info.height;
-  vid.rowbytes = info.width;
-  vid.buffer = new Uint8Array(info.width * info.height);
+  // vid_scale (v1.0.0 RC): the engine renders at `render`, decoupled from
+  // the window's `info` (display) size -- SDLVID_Init creates the window at
+  // `info` and the streaming texture at `render`, so SDLVID_Present's blit
+  // upscales (aspect-preserving letterbox) the smaller render buffer to fill
+  // the window. scale===1 (the default) makes render===info, byte-for-byte
+  // the pre-existing behavior.
+  const scale = vidMod().VID_GetScale();
+  const render = VID_CalcRenderSize(info.width, info.height, scale);
+
+  vid.width = render.width;
+  vid.height = render.height;
+  vid.rowbytes = render.width;
+  vid.buffer = new Uint8Array(render.width * render.height);
 
   // rw_x11.c's SWimp_SetMode tells the engine the drawable size; without
   // this the client-side viddef stays 0x0 and SCR_CalcVrect renders nothing.
-  ri.Vid_NewWindow(info.width, info.height);
+  // Reports the render (internal) size, not the display size, so 2D/HUD
+  // drawing and the software rasterizer agree on one resolution -- the whole
+  // frame (game view and HUD together) is what gets scaled up on presentation.
+  ri.Vid_NewWindow(render.width, render.height);
 
   // rw_x11.c: "if ( !SWimp_InitGraphics( false ) ) return rserr_invalid_mode;"
   // -- a failed window/renderer/texture creation must not report success, or
   // the engine renders into a buffer nothing will ever present. When the SDL
   // backend is not armed (dedicated server, headless tests) a false return
   // is the designed degradation, not a failure: vid.buffer IS the frame.
-  if (!SDLVID_Init(info.width, info.height, fullscreen) && SDL_BackendEnabled()) {
+  if (!SDLVID_Init(render.width, render.height, fullscreen, info.width, info.height) && SDL_BackendEnabled()) {
     ri.Con_Printf(0, " SDL window/renderer creation failed\n");
-    return { pwidth: info.width, pheight: info.height, rserr: RserrT.rserr_invalid_mode };
+    return { pwidth: render.width, pheight: render.height, rserr: RserrT.rserr_invalid_mode };
   }
 
-  return { pwidth: info.width, pheight: info.height, rserr: RserrT.rserr_ok };
+  return { pwidth: render.width, pheight: render.height, rserr: RserrT.rserr_ok };
 }
 
 // A NULL palette means to use the existing palette. The palette is

@@ -100,6 +100,11 @@ const SHADER_SYMBOL_NAMES = [
   "glUniform4f",
 ];
 
+// v1.0.0 RC vid_scale (resolution-scaling render target, src/platform/glimp.ts):
+// qgl.ts's resolveGLFramebufferAPI resolves this ARB_framebuffer_object
+// group the same all-or-nothing way as the GL2 program-object group above.
+const FRAMEBUFFER_SYMBOL_NAMES = ["glGenFramebuffers", "glBindFramebuffer", "glFramebufferTexture2D", "glCheckFramebufferStatus", "glBlitFramebuffer", "glDeleteFramebuffers"];
+
 describe("src/ref_gl/qgl.ts -- loadQGLFromSystem's getProcAddress wiring", () => {
   test("queries every *_EXT/*_SGIS name through the resolver and falls back to a no-op when it comes back empty", () => {
     const queried: string[] = [];
@@ -110,13 +115,14 @@ describe("src/ref_gl/qgl.ts -- loadQGLFromSystem's getProcAddress wiring", () =>
 
     const qgl: QGL = loadQGLFromSystem(fakeGetProcAddress);
 
-    // resolveGLShaderAPI queries its group in a fixed order and bails on the
-    // first null (see that function's header comment: an all-or-nothing
-    // group gains nothing from probing the rest once one member is known
-    // absent) -- unlike the seven independent *_EXT/*_SGIS resolvers below,
-    // each of which always queries regardless of the others' results, so
-    // only "glCreateShader" (first in the group) appears here, not all 19.
-    expect(queried.slice().sort()).toEqual([...EXTENSION_SYMBOL_NAMES, "glCreateShader"].sort());
+    // resolveGLShaderAPI/resolveGLFramebufferAPI each query their own group
+    // in a fixed order and bail on the first null (see resolveGLShaderAPI's
+    // header comment: an all-or-nothing group gains nothing from probing the
+    // rest once one member is known absent) -- unlike the seven independent
+    // *_EXT/*_SGIS resolvers below, each of which always queries regardless
+    // of the others' results, so only "glCreateShader"/"glGenFramebuffers"
+    // (first in each group) appear here, not all of either group.
+    expect(queried.slice().sort()).toEqual([...EXTENSION_SYMBOL_NAMES, "glCreateShader", "glGenFramebuffers"].sort());
 
     // unresolved extensions are null, exactly the C's NULL function
     // pointers -- every engine call site checks before calling, and the
@@ -136,6 +142,14 @@ describe("src/ref_gl/qgl.ts -- loadQGLFromSystem's getProcAddress wiring", () =>
     expect(qgl.qglCreateShader).toBeNull();
     expect(qgl.qglUseProgram).toBeNull();
     expect(qgl.qglGetUniformLocation).toBeNull();
+
+    // same all-or-nothing contract for the ARB_framebuffer_object group
+    // (see qgl.ts's resolveGLFramebufferAPI header comment): a context
+    // missing even one member means src/platform/glimp.ts's vid_scale
+    // support falls back to unscaled rendering.
+    expect(qgl.qglGenFramebuffers).toBeNull();
+    expect(qgl.qglBindFramebuffer).toBeNull();
+    expect(qgl.qglBlitFramebuffer).toBeNull();
   });
 
   test("a resolver that finds every extension is queried by name but its no-op fallback is never used", () => {
@@ -151,7 +165,7 @@ describe("src/ref_gl/qgl.ts -- loadQGLFromSystem's getProcAddress wiring", () =>
     };
 
     expect(() => loadQGLFromSystem(fakeGetProcAddress)).not.toThrow();
-    expect(resolved).toEqual(new Set([...EXTENSION_SYMBOL_NAMES, ...SHADER_SYMBOL_NAMES]));
+    expect(resolved).toEqual(new Set([...EXTENSION_SYMBOL_NAMES, ...SHADER_SYMBOL_NAMES, ...FRAMEBUFFER_SYMBOL_NAMES]));
   });
 
   test("with no resolver at all (gl_rmain.ts's own zero-arg call site), every QGL member still exists", () => {
@@ -178,6 +192,8 @@ describe("src/ref_gl/qgl.ts -- loadQGLFromSystem's getProcAddress wiring", () =>
       "qglUseProgram",
       "qglGetUniformLocation",
       "qglUniform3f",
+      "qglGenFramebuffers",
+      "qglBlitFramebuffer",
     ];
     for (const name of extensions) {
       const member = qgl[name];

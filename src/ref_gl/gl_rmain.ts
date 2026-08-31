@@ -958,6 +958,7 @@ function R_Register(): void {
 
   glCvars.vid_fullscreen = ri.Cvar_Get("vid_fullscreen", "0", CVAR_ARCHIVE);
   glCvars.vid_gamma = ri.Cvar_Get("vid_gamma", "1.0", CVAR_ARCHIVE);
+  glCvars.vid_scale = ri.Cvar_Get("vid_scale", "1", CVAR_ARCHIVE);
   // vid_ref: gl_local.ts has no field for it (client-owned elsewhere);
   // registered here purely for its console-visibility side effect, matching
   // the original's own local (non-stored) `cvar_t *vid_ref` use.
@@ -985,6 +986,7 @@ function R_SetMode(): boolean {
 
   if (glCvars.vid_fullscreen) glCvars.vid_fullscreen.modified = false;
   if (glCvars.gl_mode) glCvars.gl_mode.modified = false;
+  if (glCvars.vid_scale) glCvars.vid_scale.modified = false;
 
   const modeValue = glCvars.gl_mode ? glCvars.gl_mode.value : 0;
   let result = glimp.SetMode(vid.width, vid.height, modeValue, fullscreen);
@@ -1201,7 +1203,7 @@ export function R_BeginFrame(camera_separation: number): void {
   /*
   ** change modes if necessary
   */
-  if ((glCvars.gl_mode && glCvars.gl_mode.modified) || (glCvars.vid_fullscreen && glCvars.vid_fullscreen.modified)) {
+  if ((glCvars.gl_mode && glCvars.gl_mode.modified) || (glCvars.vid_fullscreen && glCvars.vid_fullscreen.modified) || (glCvars.vid_scale && glCvars.vid_scale.modified)) {
     // FIXME: only restart if CDS is required
     const ref = ri.Cvar_Get("vid_ref", "gl", 0);
     if (ref) ref.modified = true;

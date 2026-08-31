@@ -25,6 +25,7 @@ freezes its public struct layouts.
 */
 
 import { dlopen, FFIType, type Pointer } from "bun:ffi";
+import { VID_CalcScaledRect } from "./vid_scale";
 import { Cvar_Get, Cvar_VariableValue } from "../qcommon/cvar";
 import { Cmd_AddCommand } from "../qcommon/cmd";
 import { Com_DPrintf, Com_Printf } from "../qcommon/common";
@@ -119,7 +120,9 @@ const SDL_WINDOW_FULLSCREEN = 0x00000001;
 // FULLSCREEN flag asks for a video-mode change, which Wayland cannot do --
 // SDL's wayland backend then leaves the surface in a state Hyprland
 // eventually flags "not responding". Desktop fullscreen composites at the
-// native resolution and RenderSetLogicalSize scales the frame.
+// native resolution; SDLVID_Present's explicit dstrect (see VID_CalcScaledRect)
+// is what scales the frame to fill it when vid_scale renders smaller than
+// the window.
 const SDL_WINDOW_FULLSCREEN_DESKTOP = 0x00001001;
 // window usable with an OpenGL context -- glimp.ts's SDLGL_CreateWindow variant
 const SDL_WINDOW_OPENGL = 0x00000002;
@@ -194,7 +197,6 @@ const symbols = {
 
   SDL_CreateRenderer: { args: ["ptr", "i32", "u32"], returns: "ptr" },
   SDL_DestroyRenderer: { args: ["ptr"], returns: "void" },
-  SDL_RenderSetLogicalSize: { args: ["ptr", "i32", "i32"], returns: "i32" },
   SDL_RenderClear: { args: ["ptr"], returns: "i32" },
   SDL_RenderCopy: { args: ["ptr", "ptr", "ptr", "ptr"], returns: "i32" },
   SDL_RenderPresent: { args: ["ptr"], returns: "void" },
@@ -328,8 +330,15 @@ let renderer: Pointer | bigint | null = null;
 let texture: Pointer | bigint | null = null;
 let texWidth = 0;
 let texHeight = 0;
+// The window's client-area size (v1.0.0 RC vid_scale support): equal to
+// texWidth/texHeight unless the caller asked for a smaller render buffer
+// than the window/display it presents into (SDLVID_Present then upscales,
+// aspect-preserving letterbox, via VID_CalcScaledRect below).
+let dispWidth = 0;
+let dispHeight = 0;
 let rgba = new Uint8Array(0);
 let framesPresented = 0;
+const dstRectBuf = new Int32Array(4); // reused SDL_Rect (x,y,w,h) for SDL_RenderCopy's dstrect
 
 export function SDLVID_Active(): boolean {
   return texture !== null;
@@ -362,7 +371,17 @@ export function SDLVID_ExpandFrame(buffer: Uint8Array, rowbytes: number, width: 
   }
 }
 
-export function SDLVID_Init(width: number, height: number, fullscreen: boolean): boolean {
+/*
+`renderWidth`/`renderHeight` size the streaming texture the software
+framebuffer is expanded into every frame; `displayWidth`/`displayHeight`
+(defaulting to the render size, i.e. no scaling -- every pre-existing call
+site that only ever passed one size still gets exactly that size on both)
+size the actual OS window. When they differ (src/platform/swimp.ts's
+vid_scale support), SDLVID_Present blits the smaller texture into an
+aspect-preserving letterboxed rect sized to fit the window instead of
+1:1 pixel-copying it.
+*/
+export function SDLVID_Init(renderWidth: number, renderHeight: number, fullscreen: boolean, displayWidth: number = renderWidth, displayHeight: number = renderHeight): boolean {
   const l = lib();
   if (!l) return false;
   if (!initSubsystem(l, SDL_INIT_VIDEO)) return false;
@@ -370,7 +389,7 @@ export function SDLVID_Init(width: number, height: number, fullscreen: boolean):
   SDLVID_Shutdown();
 
   const flags = SDL_WINDOW_SHOWN | (fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
-  window = l.symbols.SDL_CreateWindow(cstr("Quake 2"), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, width, height, flags);
+  window = l.symbols.SDL_CreateWindow(cstr("Quake 2"), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, displayWidth, displayHeight, flags);
   if (!window) {
     Com_Printf("SDL: SDL_CreateWindow failed: %s\n", sdlError(l));
     return false;
@@ -383,18 +402,19 @@ export function SDLVID_Init(width: number, height: number, fullscreen: boolean):
     SDLVID_Shutdown();
     return false;
   }
-  l.symbols.SDL_RenderSetLogicalSize(renderer, width, height);
 
-  texture = l.symbols.SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, width, height);
+  texture = l.symbols.SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, renderWidth, renderHeight);
   if (!texture) {
     Com_Printf("SDL: SDL_CreateTexture failed: %s\n", sdlError(l));
     SDLVID_Shutdown();
     return false;
   }
 
-  texWidth = width;
-  texHeight = height;
-  rgba = new Uint8Array(width * height * 4);
+  texWidth = renderWidth;
+  texHeight = renderHeight;
+  dispWidth = displayWidth;
+  dispHeight = displayHeight;
+  rgba = new Uint8Array(renderWidth * renderHeight * 4);
   framesPresented = 0;
   return true;
 }
@@ -416,6 +436,8 @@ export function SDLVID_Shutdown(): void {
   }
   texWidth = 0;
   texHeight = 0;
+  dispWidth = 0;
+  dispHeight = 0;
   rgba = new Uint8Array(0);
   IN_DeactivateMouse();
   // deliberately NOT quitSubsystem(SDL_INIT_VIDEO): the subsystem stays
@@ -437,8 +459,15 @@ export function SDLVID_Present(buffer: Uint8Array, rowbytes: number, width: numb
   SDLVID_ExpandFrame(buffer, rowbytes, width, height, palette, rgba);
 
   l.symbols.SDL_UpdateTexture(texture, null, rgba, width * 4);
-  l.symbols.SDL_RenderClear(renderer);
-  l.symbols.SDL_RenderCopy(renderer, texture, null, null);
+  l.symbols.SDL_RenderClear(renderer); // paints the letterbox bars when dispW/H != texW/H
+
+  const rect = VID_CalcScaledRect(texWidth, texHeight, dispWidth, dispHeight);
+  dstRectBuf[0] = rect.x;
+  dstRectBuf[1] = rect.y;
+  dstRectBuf[2] = rect.w;
+  dstRectBuf[3] = rect.h;
+  l.symbols.SDL_RenderCopy(renderer, texture, null, dstRectBuf);
+
   l.symbols.SDL_RenderPresent(renderer);
   framesPresented++;
 }

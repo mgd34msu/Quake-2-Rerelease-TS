@@ -540,6 +540,12 @@ export const rCvars: {
 
   vid_fullscreen: CvarT | null;
   vid_gamma: CvarT | null;
+  // v1.0.0 RC resolution scaling (src/platform/vid_scale.ts/swimp.ts): no
+  // C-original or q2repro field to mirror -- see vid.ts's VID_GetScale
+  // header comment. Tracked here only so R_BeginFrame's mode-restart loop
+  // can detect "modified" the same way sw_mode/vid_fullscreen already do;
+  // swimp.ts reads the cvar's live value directly, not through this struct.
+  vid_scale: CvarT | null;
 } = {
   sw_aliasstats: null,
   sw_clearcolor: null,
@@ -569,6 +575,7 @@ export const rCvars: {
 
   vid_fullscreen: null,
   vid_gamma: null,
+  vid_scale: null,
 };
 
 export const view_clipplanes: [ClipplaneT, ClipplaneT, ClipplaneT, ClipplaneT] = [
