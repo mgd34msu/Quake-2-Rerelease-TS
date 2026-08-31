@@ -430,6 +430,33 @@ export function MSG_ReadShort(msgRead: SizeBuf): number {
   return c;
 }
 
+/*
+q2repro src/common/msg.c:1750-1762 `int MSG_ReadWord(void)` -- the UNSIGNED
+16-bit counterpart of MSG_ReadShort above (`c = (uint16_t)RL16(buf)`, same
+-1 short-read sentinel). Vanilla msg.c has no such reader because vanilla's
+own 16-bit wire fields are all written from values it first proved to be
+< 0x8000; the rerelease entity-delta encoders deliberately push the whole
+0x0000..0xffff range through their 16-bit field width (q2repro msg.c:633,
+`mask = 0xffff0000`, vs :635's `0xffff8000 // don't confuse old clients`),
+so every rerelease-family 16-bit entity field has to be read back unsigned
+or bit 15 sign-extends into bits 16..31.
+*/
+export function MSG_ReadWord(msgRead: SizeBuf): number {
+  let c: number;
+
+  if (msgRead.readcount + 2 > msgRead.cursize) {
+    c = -1;
+  } else {
+    const b0 = msgRead.data[msgRead.readcount];
+    const b1 = msgRead.data[msgRead.readcount + 1];
+    c = (b0 | (b1 << 8)) >>> 0; // (uint16_t) cast
+  }
+
+  msgRead.readcount += 2;
+
+  return c;
+}
+
 export function MSG_ReadLong(msgRead: SizeBuf): number {
   let c: number;
 

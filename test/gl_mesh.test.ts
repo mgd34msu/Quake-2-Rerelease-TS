@@ -25,9 +25,9 @@ which other test files ran first in the same bun test process.
 import { describe, test, expect, beforeEach } from "bun:test";
 import type { RefImports } from "../src/client/ref";
 import { EntityT, POWERSUIT_SCALE } from "../src/client/ref";
-import { RF_WEAPONMODEL, RF_FULLBRIGHT, RF_SHELL_RED } from "../src/shared/q_shared";
+import { RF_WEAPONMODEL, RF_FULLBRIGHT, RF_SHELL_RED, RF_IR_VISIBLE } from "../src/shared/q_shared";
 import { QGLRecording, type QGLCall } from "../src/ref_gl/qgl";
-import { SetQGL } from "../src/ref_gl/gl_image";
+import { SetQGL, GL_TEXTURE_2D } from "../src/ref_gl/gl_image";
 import { SetRefImports, SetCurrentModel, SetCurrentEntity, glCvars, r_newrefdef, ImageT } from "../src/ref_gl/gl_local";
 import { ModelT, ParsedMd2T } from "../src/ref_gl/gl_model";
 import { R_DrawAliasModel, r_avertexnormals, r_avertexnormal_dots } from "../src/ref_gl/gl_mesh";
@@ -242,6 +242,74 @@ describe("gl_mesh.ts -- R_DrawAliasModel / GL_DrawAliasFrameLerp", () => {
       expect(vx).toBeCloseTo(10 + rawVerts[i][0] + normal[0] * POWERSUIT_SCALE, 5);
       expect(vy).toBeCloseTo(20 + rawVerts[i][1] + normal[1] * POWERSUIT_SCALE, 5);
       expect(vz).toBeCloseTo(30 + rawVerts[i][2] + normal[2] * POWERSUIT_SCALE, 5);
+    }
+  });
+
+  // Symptom pin for the live "solid yellow untextured props" defect
+  // (.orch/followups.md finding 2). The renderer itself is faithful -- the
+  // wire bug that produced it lived in the 1038/kex entity-delta READ (16-bit
+  // fields read signed; see test/protocol_q2repro.test.ts). These two cases
+  // lock the exact discriminator that turned one wrong bit into the visible
+  // blob, so a future regression on either side is caught here too.
+  function drawWithFlags(flags: number): QGLCall[] {
+    const paliashdr = buildTestMd2();
+    const model = new ModelT();
+    model.name = "test.md2";
+    model.extradata = paliashdr;
+    const skin = new ImageT();
+    skin.texnum = 7;
+    model.skins[0] = skin;
+    SetCurrentModel(model);
+
+    const e = makeEntity(flags);
+    SetCurrentEntity(e);
+
+    const rec = new QGLRecording();
+    SetQGL(rec);
+    R_DrawAliasModel(e);
+    return [...rec.calls];
+  }
+
+  test("RF_IR_VISIBLE alone is NOT a shell: texturing stays on and the model draws textured", () => {
+    // 0x8000 is what src/kexgame/g_spawn.ts's SpawnEntities leaves on every
+    // prop whose spawn function set no other renderfx (misc_explobox,
+    // misc_deadsoldier, misc_gib_*) -- confirmed against a real base1 boot.
+    const calls = drawWithFlags(RF_WEAPONMODEL | RF_IR_VISIBLE);
+    const block = triangleBlock(calls);
+
+    expect(block.filter((c) => c.name === "qglTexCoord2f").length).toBe(3);
+    expect(calls.some((c) => c.name === "qglDisable" && c.args[0] === GL_TEXTURE_2D)).toBe(false);
+  });
+
+  test("the sign-extended 0xffff8000 renderfx draws the untextured yellow (0.9,0.7,0) shell -- the reported symptom", () => {
+    // Reading RF_IR_VISIBLE back through a SIGNED 16-bit wire field yields
+    // -32768, i.e. bits 15..31: RF_SHELL_DOUBLE|RF_SHELL_HALF_DAM set,
+    // RF_SHELL_RED/GREEN/BLUE clear. R_DrawAliasModel's colour block then
+    // picks the RF_SHELL_DOUBLE arm (0.9, 0.7, 0.0), isShellFlags disables
+    // GL_TEXTURE_2D and puffs the mesh, but GL_DrawAliasFrameLerp's
+    // immediate-mode branch tests only RED|GREEN|BLUE (faithful to id's own
+    // gl_mesh.c:258 discrepancy vs :205's vertex-array branch), so it emits
+    // per-vertex `l * shadelight` instead of a flat colour: an untextured,
+    // Gouraud-shaded yellow blob at exactly R:G = 0.9:0.7 = 1.2857 -- the
+    // ratio measured across the reported screenshots.
+    const signExtended = -32768;
+    const calls = drawWithFlags(RF_WEAPONMODEL | signExtended);
+    const block = triangleBlock(calls);
+
+    // GL_TEXTURE_2D is disabled (isShellFlags), so the model is untextured --
+    // but the immediate-mode else-branch still emits its qglTexCoord2f calls,
+    // which are inert with texturing off. That combination (no texture, but
+    // per-vertex Gouraud colour) is precisely what neither a normal draw nor a
+    // proper flat shell produces, and is the screenshots' exact appearance.
+    expect(calls.some((c) => c.name === "qglDisable" && c.args[0] === GL_TEXTURE_2D)).toBe(true);
+    expect(block.filter((c) => c.name === "qglTexCoord2f").length).toBe(3);
+
+    const colorCalls = block.filter((c) => c.name === "qglColor4f");
+    expect(colorCalls.length).toBe(3);
+    for (const c of colorCalls) {
+      const [r, g, b] = c.args as [number, number, number, number];
+      expect(b).toBe(0);
+      expect(r / g).toBeCloseTo(0.9 / 0.7, 6);
     }
   });
 });

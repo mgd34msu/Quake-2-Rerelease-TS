@@ -23,7 +23,17 @@
 import { describe, test, expect, beforeEach } from "bun:test";
 import { SizeBuf, SZ_Init, SZ_Clear, MSG_BeginReading } from "../src/qcommon/sizebuf";
 import { net_message } from "../src/qcommon/net_chan";
-import { EntityStateT, PlayerStateT, UsercmdT } from "../src/shared/q_shared";
+import {
+  EntityStateT,
+  PlayerStateT,
+  UsercmdT,
+  RF_IR_VISIBLE,
+  RF_SHELL_RED,
+  RF_SHELL_GREEN,
+  RF_SHELL_BLUE,
+  RF_SHELL_DOUBLE,
+  RF_SHELL_HALF_DAM,
+} from "../src/shared/q_shared";
 import { Q2REPRO_CODEC } from "../src/qcommon/protocol/q2repro";
 import { VANILLA_CODEC } from "../src/qcommon/protocol/vanilla";
 
@@ -603,6 +613,75 @@ describe("Q2REPRO_CODEC read-side round trips", () => {
     expect(out.effects).toBe(0x1234);
     expect(out.solid).toBe(0x00123456);
     expect(out.modelindex).toBe(300);
+  });
+
+  // ===========================================================================
+  // 16-bit entity fields are UNSIGNED on the wire (live defect: "solid yellow
+  // untextured props", .orch/followups.md finding 2).
+  //
+  // writeDeltaEntity sizes skinnum/effects/morefx/renderfx with
+  // `widthOf(x, /*uint16Safe=*/true)` -- q2repro src/common/msg.c:633's
+  // `mask = 0xffff0000` (vs :635's `0xffff8000  // don't confuse old clients`
+  // on the narrow protocols) -- so the whole 0x8000..0xffff range rides the
+  // 16-bit field. q2repro reads every one of them back with MSG_ReadWord()
+  // (msg.c:2185-2220), and q2proto_proto_q2repro.c:444/476/485/494 with
+  // `READ_CHECKED(..., u16)`. Reading them signed sign-extends bit 15 across
+  // bits 16..31; for renderfx that turned the rerelease game's RF_IR_VISIBLE
+  // (0x8000 -- g_spawn.cpp sets it on EVERY spawned entity, ported at
+  // src/kexgame/g_spawn.ts) into 0xffff8000, which lights up RF_SHELL_DOUBLE
+  // (0x10000) + RF_SHELL_HALF_DAM (0x20000) while leaving
+  // RF_SHELL_RED/GREEN/BLUE clear -- exactly the flag set that makes
+  // ref_gl/gl_mesh.ts draw an untextured, POWERSUIT_SCALE-puffed,
+  // (0.9, 0.7, 0.0) yellow blob instead of the model.
+  // ===========================================================================
+  for (const value of [0x8000, 0x8200, 0xbeef, 0xffff]) {
+    test(`entity delta: 16-bit renderfx/effects/skinnum/morefx 0x${value.toString(16)} round-trips unsigned`, () => {
+      const from = new EntityStateT();
+      from.number = 42;
+      const to = new EntityStateT();
+      to.number = 42;
+      to.renderfx = value;
+      to.effects = value;
+      to.skinnum = value;
+      to.morefx = value;
+
+      Q2REPRO_CODEC.writeDeltaEntity(net_message, from, to, true, true);
+      MSG_BeginReading(net_message);
+      const { number, bits } = Q2REPRO_CODEC.readEntityBits();
+      const out = new EntityStateT();
+      Q2REPRO_CODEC.readDeltaEntity(from, out, number, bits);
+
+      expect(out.renderfx).toBe(value);
+      expect(out.effects).toBe(value);
+      expect(out.skinnum).toBe(value);
+      expect(out.morefx).toBe(value);
+    });
+  }
+
+  test("entity delta: a plain RF_IR_VISIBLE prop arrives with no RF_SHELL_* bit set", () => {
+    // src/kexgame/g_spawn.ts's SpawnEntities does
+    // `current.s.renderfx |= RF_IR_VISIBLE` after every ED_CallSpawn (PGM, a
+    // faithful port of g_spawn.cpp), so every map prop whose own spawn
+    // function set no other renderfx -- misc_explobox, misc_deadsoldier,
+    // misc_gib_* -- ships renderfx === 0x8000 exactly. Verified against a
+    // real base1 boot under the kex game: barrels/dead soldiers/gib heads all
+    // reported renderfx=0x8000.
+    const from = new EntityStateT();
+    from.number = 238;
+    const to = new EntityStateT();
+    to.number = 238;
+    to.renderfx = RF_IR_VISIBLE;
+    to.modelindex = 92;
+
+    Q2REPRO_CODEC.writeDeltaEntity(net_message, from, to, true, true);
+    MSG_BeginReading(net_message);
+    const { number, bits } = Q2REPRO_CODEC.readEntityBits();
+    const out = new EntityStateT();
+    Q2REPRO_CODEC.readDeltaEntity(from, out, number, bits);
+
+    expect(out.renderfx).toBe(RF_IR_VISIBLE);
+    expect(out.renderfx & (RF_SHELL_RED | RF_SHELL_GREEN | RF_SHELL_BLUE | RF_SHELL_DOUBLE | RF_SHELL_HALF_DAM)).toBe(0);
+    expect(out.renderfx).toBeGreaterThan(0); // never the sign-extended -32768
   });
 
   test("entity delta: alpha=0/scale=0 sentinel round-trips as 0, not the encoded byte", () => {

@@ -133,7 +133,7 @@
 //   inc/q2proto/q2proto_limits.h         -- Q2PROTO_MAX_DAMAGE_INDICATORS(4)/
 //                                            Q2PROTO_MAX_LOCALIZATION_ARGS(8)
 
-import { SizeBuf, SZ_Init, MSG_BeginReading, MSG_ReadByte, MSG_ReadChar, MSG_ReadShort, MSG_ReadLong, MSG_ReadFloat, MSG_ReadString, MSG_ReadData, MSG_ReadDir } from "../sizebuf";
+import { SizeBuf, SZ_Init, MSG_BeginReading, MSG_ReadByte, MSG_ReadChar, MSG_ReadShort, MSG_ReadWord, MSG_ReadLong, MSG_ReadFloat, MSG_ReadString, MSG_ReadData, MSG_ReadDir } from "../sizebuf";
 import {
   U_ORIGIN1,
   U_ORIGIN2,
@@ -347,17 +347,25 @@ function readDeltaEntity(from: EntityStateT, to: EntityStateT, number: number, b
   copyEntityState(to, from);
   to.number = number;
 
+  // Every 16-bit entity field below is read UNSIGNED (MSG_ReadWord), matching
+  // q2proto_proto_kex.c's own `READ_CHECKED(client_read, io_arg, <field>, u16)`
+  // (:426 for renderfx, and the identical u16 reads for modelindex/frame/
+  // skinnum/effects). A signed read sign-extends bit 15 across bits 16..31 --
+  // for renderfx that turns the rerelease game's RF_IR_VISIBLE (0x8000, set
+  // on every spawned entity by g_spawn.cpp) into 0xffff8000, lighting up
+  // RF_SHELL_DOUBLE|RF_SHELL_HALF_DAM and drawing the model as an untextured
+  // yellow shell blob.
   const model16 = (bits & U_MODEL16) !== 0;
-  if (bits & U_MODEL) to.modelindex = model16 ? MSG_ReadShort(net_message) : MSG_ReadByte(net_message);
-  if (bits & U_MODEL2) to.modelindex2 = model16 ? MSG_ReadShort(net_message) : MSG_ReadByte(net_message);
-  if (bits & U_MODEL3) to.modelindex3 = model16 ? MSG_ReadShort(net_message) : MSG_ReadByte(net_message);
-  if (bits & U_MODEL4) to.modelindex4 = model16 ? MSG_ReadShort(net_message) : MSG_ReadByte(net_message);
+  if (bits & U_MODEL) to.modelindex = model16 ? MSG_ReadWord(net_message) : MSG_ReadByte(net_message);
+  if (bits & U_MODEL2) to.modelindex2 = model16 ? MSG_ReadWord(net_message) : MSG_ReadByte(net_message);
+  if (bits & U_MODEL3) to.modelindex3 = model16 ? MSG_ReadWord(net_message) : MSG_ReadByte(net_message);
+  if (bits & U_MODEL4) to.modelindex4 = model16 ? MSG_ReadWord(net_message) : MSG_ReadByte(net_message);
 
   if (bits & U_FRAME8) to.frame = MSG_ReadByte(net_message);
-  else if (bits & U_FRAME16) to.frame = MSG_ReadShort(net_message);
+  else if (bits & U_FRAME16) to.frame = MSG_ReadWord(net_message);
 
   if ((bits & (U_SKIN8 | U_SKIN16)) === (U_SKIN8 | U_SKIN16)) to.skinnum = MSG_ReadLong(net_message); // laser colors, kex.c:381
-  else if (bits & U_SKIN16) to.skinnum = MSG_ReadShort(net_message);
+  else if (bits & U_SKIN16) to.skinnum = MSG_ReadWord(net_message);
   else if (bits & U_SKIN8) to.skinnum = MSG_ReadByte(net_message);
 
   // kex.c:391-411: 64-bit effects. Low 32 bits sent first (gated by
@@ -370,7 +378,7 @@ function readDeltaEntity(from: EntityStateT, to: EntityStateT, number: number, b
   let effects32 = 0;
   const effectsCombo = bits & (U_EFFECTS8 | U_EFFECTS16);
   if (effectsCombo === (U_EFFECTS8 | U_EFFECTS16)) effects32 = MSG_ReadLong(net_message) >>> 0;
-  else if (bits & U_EFFECTS16) effects32 = MSG_ReadShort(net_message) >>> 0;
+  else if (bits & U_EFFECTS16) effects32 = MSG_ReadWord(net_message) >>> 0;
   else if (bits & U_EFFECTS8) effects32 = MSG_ReadByte(net_message) >>> 0;
 
   if (bits & (U_KEX_EFFECTS64 | U_EFFECTS8 | U_EFFECTS16)) {
@@ -386,7 +394,7 @@ function readDeltaEntity(from: EntityStateT, to: EntityStateT, number: number, b
   }
 
   if ((bits & (U_RENDERFX8 | U_RENDERFX16)) === (U_RENDERFX8 | U_RENDERFX16)) to.renderfx = MSG_ReadLong(net_message);
-  else if (bits & U_RENDERFX16) to.renderfx = MSG_ReadShort(net_message);
+  else if (bits & U_RENDERFX16) to.renderfx = MSG_ReadWord(net_message);
   else if (bits & U_RENDERFX8) to.renderfx = MSG_ReadByte(net_message);
 
   // kex.c:434-441: solid moves BEFORE origin/angles (unlike q2repro), and

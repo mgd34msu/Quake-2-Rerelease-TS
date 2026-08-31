@@ -177,7 +177,7 @@
 
 import type { SizeBuf } from "../sizebuf";
 import { MSG_WriteByte, MSG_WriteChar, MSG_WriteShort, MSG_WriteLong, MSG_WriteLong64, MSG_WriteFloat, MSG_WriteString, MSG_WriteDeltaUsercmd, SZ_Write } from "../sizebuf";
-import { MSG_ReadByte, MSG_ReadChar, MSG_ReadShort, MSG_ReadLong, MSG_ReadLong64, MSG_ReadFloat, MSG_ReadString, MSG_ReadDeltaUsercmd, MSG_ReadData } from "../sizebuf";
+import { MSG_ReadByte, MSG_ReadChar, MSG_ReadShort, MSG_ReadWord, MSG_ReadLong, MSG_ReadLong64, MSG_ReadFloat, MSG_ReadString, MSG_ReadDeltaUsercmd, MSG_ReadData } from "../sizebuf";
 import {
   U_ORIGIN1,
   U_ORIGIN2,
@@ -1121,25 +1121,36 @@ function readDeltaEntity(from: EntityStateT, to: EntityStateT, number: number, b
   to.old_origin.set(from.origin);
   to.number = number;
 
+  // Every 16-bit entity field below is read UNSIGNED (MSG_ReadWord), matching
+  // q2repro src/common/msg.c:2185-2220's own MSG_ReadWord() calls and
+  // q2proto_proto_q2repro.c:444/476/485/494's `READ_CHECKED(..., u16)`.
+  // This is load-bearing, not cosmetic: writeDeltaEntity above sizes these
+  // fields with `widthOf(x, /*uint16Safe=*/true)` (q2repro msg.c:633's
+  // `mask = 0xffff0000`), so any value in 0x8000..0xffff rides the 16-bit
+  // wire -- a signed read sign-extends bit 15 across bits 16..31. For
+  // renderfx that turns the rerelease game's near-universal
+  // RF_IR_VISIBLE (0x8000, set on every spawned entity by g_spawn.cpp)
+  // into 0xffff8000, which lights up RF_SHELL_DOUBLE|RF_SHELL_HALF_DAM and
+  // makes ref_gl draw the model as an untextured yellow shell blob.
   const model16 = (bits & U_MODEL16) !== 0;
-  if (bits & U_MODEL) to.modelindex = model16 ? MSG_ReadShort(net_message) : MSG_ReadByte(net_message);
-  if (bits & U_MODEL2) to.modelindex2 = model16 ? MSG_ReadShort(net_message) : MSG_ReadByte(net_message);
-  if (bits & U_MODEL3) to.modelindex3 = model16 ? MSG_ReadShort(net_message) : MSG_ReadByte(net_message);
-  if (bits & U_MODEL4) to.modelindex4 = model16 ? MSG_ReadShort(net_message) : MSG_ReadByte(net_message);
+  if (bits & U_MODEL) to.modelindex = model16 ? MSG_ReadWord(net_message) : MSG_ReadByte(net_message);
+  if (bits & U_MODEL2) to.modelindex2 = model16 ? MSG_ReadWord(net_message) : MSG_ReadByte(net_message);
+  if (bits & U_MODEL3) to.modelindex3 = model16 ? MSG_ReadWord(net_message) : MSG_ReadByte(net_message);
+  if (bits & U_MODEL4) to.modelindex4 = model16 ? MSG_ReadWord(net_message) : MSG_ReadByte(net_message);
 
-  if (bits & U_FRAME16) to.frame = MSG_ReadShort(net_message);
+  if (bits & U_FRAME16) to.frame = MSG_ReadWord(net_message);
   else if (bits & U_FRAME8) to.frame = MSG_ReadByte(net_message);
 
   if ((bits & (U_SKIN8 | U_SKIN16)) === (U_SKIN8 | U_SKIN16)) to.skinnum = MSG_ReadLong(net_message);
-  else if (bits & U_SKIN16) to.skinnum = MSG_ReadShort(net_message);
+  else if (bits & U_SKIN16) to.skinnum = MSG_ReadWord(net_message);
   else if (bits & U_SKIN8) to.skinnum = MSG_ReadByte(net_message);
 
   if ((bits & (U_EFFECTS8 | U_EFFECTS16)) === (U_EFFECTS8 | U_EFFECTS16)) to.effects = MSG_ReadLong(net_message);
-  else if (bits & U_EFFECTS16) to.effects = MSG_ReadShort(net_message);
+  else if (bits & U_EFFECTS16) to.effects = MSG_ReadWord(net_message);
   else if (bits & U_EFFECTS8) to.effects = MSG_ReadByte(net_message);
 
   if ((bits & (U_RENDERFX8 | U_RENDERFX16)) === (U_RENDERFX8 | U_RENDERFX16)) to.renderfx = MSG_ReadLong(net_message);
-  else if (bits & U_RENDERFX16) to.renderfx = MSG_ReadShort(net_message);
+  else if (bits & U_RENDERFX16) to.renderfx = MSG_ReadWord(net_message);
   else if (bits & U_RENDERFX8) to.renderfx = MSG_ReadByte(net_message);
 
   if (bits & U_ORIGIN1) to.origin[0] = MSG_ReadFloat(net_message);
@@ -1178,7 +1189,7 @@ function readDeltaEntity(from: EntityStateT, to: EntityStateT, number: number, b
   if (bits & U_SOLID) to.solid = MSG_ReadLong(net_message);
 
   if (bitsHasHi(bits, HI_MOREFX16) && bits & U_MOREFX8) to.morefx = MSG_ReadLong(net_message);
-  else if (bitsHasHi(bits, HI_MOREFX16)) to.morefx = MSG_ReadShort(net_message);
+  else if (bitsHasHi(bits, HI_MOREFX16)) to.morefx = MSG_ReadWord(net_message); // unsigned: q2repro msg.c:2264-2270, same widthOf(...,true) writer
   else if (bits & U_MOREFX8) to.morefx = MSG_ReadByte(net_message);
 
   if (bits & U_ALPHA) to.alpha = decodeAlpha(MSG_ReadByte(net_message));
