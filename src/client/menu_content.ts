@@ -490,14 +490,27 @@ pak-internal maps/*.bsp entries passed in `extraBspPaths`. Empty when
 neither source has anything; the caller (menu.ts's RebuildStartPoints)
 falls back to the single default "Start" entry in that case, same as
 before this task.
+
+`allowBspScan` gates tier (c) only -- see StartPointsForSelection's own
+comment for why: the alphabetical maps/*.bsp scan is a last resort for
+UNKNOWN discovered content (Mike's ruling, quoted there), never for a
+CONTENT_LIST famous campaign, whose maps/ dir (when the tree even has a
+loose one at all) mixes every dm/ctf/sp bsp together with no campaign
+order to recover -- exactly the "multiplayer maps, zero campaign maps"
+shape a famous SP campaign must never show. maplist.txt (tier (b)) stays
+available to every caller, curated or discovered alike (lmctf's own
+LAUNCH_TABLE entry has no mapdb episode at all and relies entirely on its
+maplist.txt for a start-point browser -- see menu_content.ts's header).
 ===============
 */
-export function StartPointsForGamedir(seam: GameFsSeam, gamedirPath: string, extraBspPaths: readonly string[] = []): MapdbUnitEntry[] {
+export function StartPointsForGamedir(seam: GameFsSeam, gamedirPath: string, extraBspPaths: readonly string[] = [], allowBspScan = true): MapdbUnitEntry[] {
   const maplistText = seam.readTextFile(`${gamedirPath}/maplist.txt`);
   if (maplistText !== null) {
     const entries = ParseMaplistTxt(maplistText);
     if (entries.length) return entries;
   }
+
+  if (!allowBspScan) return [];
 
   const loose = seam.listFiles(`${gamedirPath}/maps/*.bsp`) ?? [];
   const names = bspBasenamesFrom([...loose, ...extraBspPaths]);
@@ -522,6 +535,25 @@ basedir one is); empty when nothing anywhere has a map, in which case the
 caller falls back to the single default "Start" entry, same as before this
 task.
 
+FIX (Mike, live RC report, 2026-08-31): tier (c), the raw maps/*.bsp
+alphabetical scan, is passed `allowBspScan = game.kind === "discovered"` --
+it is "a last resort for UNKNOWN discovered games only" (Mike's own words
+for the ruling this function already claimed to implement); it must never
+run for a CONTENT_LIST famous campaign (baseq2/xatrix/rogue/ctf/mg2/n64/
+lmctf). Before this fix a classic-only install with no mapdb.json (no
+content_root, no rerelease data at all) would have this fall through to
+scanning e.g. basedir/baseq2/maps/*.bsp -- a directory classic Quake II
+data ships as ONE flat folder holding sp, dm, AND ctf bsps together with
+no authored order to recover -- producing exactly the reported "start at"
+symptom (dm/ctf-looking names, no recognizable campaign order) for a
+screen whose whole point is "famous campaigns list their mapdb units in
+campaign order; the bsp scan is a last resort for unknown content only".
+A famous campaign with no mapdb data now shows the single static default
+(ResolveLaunch's own plan.map, via the caller's "Start" fallback) instead.
+Tier (b), maplist.txt, is unaffected -- it stays available to curated
+content too (lmctf's own LAUNCH_TABLE entry has no mapdb episode at all
+and relies entirely on its maplist.txt for a start-point browser).
+
 `mapdbUnitsForContent` is injected (rather than this function importing
 qcommon/mapdb.ts's UnitsForContent itself) purely so tests can supply a
 synthetic mapdb answer without standing up FS_InitFilesystem/mapdb.json at
@@ -542,8 +574,9 @@ export function StartPointsForSelection(
   const dirname = FsFallbackGamedirName(game, ruleset);
   if (!dirname) return [];
 
+  const allowBspScan = game.kind === "discovered";
   for (const root of gamedirRoots) {
-    const candidate = StartPointsForGamedir(seam, `${root}/${dirname}`, extraBspPaths);
+    const candidate = StartPointsForGamedir(seam, `${root}/${dirname}`, extraBspPaths, allowBspScan);
     if (candidate.length) return candidate;
   }
   return [];

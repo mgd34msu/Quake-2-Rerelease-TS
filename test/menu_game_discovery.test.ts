@@ -43,7 +43,7 @@ later full-suite run.
 */
 
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Cvar_ForceSet, Cvar_VariableString } from "../src/qcommon/cvar";
@@ -56,7 +56,7 @@ import {
   FS_TestRestoreSearchPaths,
   type FsSearchPathSnapshotT,
 } from "../src/qcommon/files";
-import { MapDB_Shutdown } from "../src/qcommon/mapdb";
+import { MapDB_Init, MapDB_Shutdown } from "../src/qcommon/mapdb";
 import {
   CONTENT_LIST,
   DiscoverGameDirs,
@@ -64,6 +64,7 @@ import {
   GameListDisplayName,
   StartPointsForGamedir,
   StartPointsForSelection,
+  UnitsForContent,
   ParseMaplistTxt,
   LaunchPlanForDiscovered,
   ResolveLaunchForGame,
@@ -282,6 +283,47 @@ describe("menu_content.ts -- StartPointsForSelection (Mike's 2026-08-31 addendum
       rmSync(tmpRoot, { recursive: true, force: true });
     }
   });
+
+  test("14b. RC FIX (Mike, live report 2026-08-31): a FAMOUS campaign with mapdb absent shows the static default, NEVER the maps/*.bsp scan -- the exact bug shape (dm/ctf names, no campaign order) a bsp scan of a classic gamedir's one flat maps/ folder would otherwise produce", () => {
+    const tmpRoot = mkdtempSync(join(tmpdir(), "q2startpoints-famous-noscan-"));
+    try {
+      // A classic-style baseq2 tree: sp campaign AND dm/ctf maps all mixed in
+      // one flat maps/ dir, no maplist.txt -- exactly the real shape a
+      // classic Quake II install ships. Before the fix, StartPointsForSelection
+      // would alphabetize this whole mixed bag for a FAMOUS campaign pick.
+      mkdirSync(join(tmpRoot, "baseq2", "maps"), { recursive: true });
+      writeFileSync(join(tmpRoot, "baseq2", "maps", "base1.bsp"), "");
+      writeFileSync(join(tmpRoot, "baseq2", "maps", "q2dm1.bsp"), "");
+      writeFileSync(join(tmpRoot, "baseq2", "maps", "q2ctf1.bsp"), "");
+
+      const noMapdb = (_content: ContentId) => [];
+      const result = StartPointsForSelection(baseq2Game, "classic", noMapdb, realSeam, [tmpRoot]);
+      expect(result).toEqual([]);
+    } finally {
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("14c. the SAME on-disk mixed maps/ dir DOES drive a discovered (unknown) game's browser -- proves 14b's gate is per-game-kind, not a global scan removal", () => {
+    const tmpRoot = mkdtempSync(join(tmpdir(), "q2startpoints-disc-scan-"));
+    try {
+      mkdirSync(join(tmpRoot, "buzzmod", "maps"), { recursive: true });
+      writeFileSync(join(tmpRoot, "buzzmod", "maps", "base1.bsp"), "");
+      writeFileSync(join(tmpRoot, "buzzmod", "maps", "q2dm1.bsp"), "");
+      writeFileSync(join(tmpRoot, "buzzmod", "maps", "q2ctf1.bsp"), "");
+
+      const discoveredGame: SelectableGame = { kind: "discovered", dirname: "buzzmod" };
+      const shouldNeverBeCalled = (_content: ContentId) => fakeMapdbUnits;
+      const result = StartPointsForSelection(discoveredGame, "classic", shouldNeverBeCalled, realSeam, [tmpRoot]);
+      expect(result).toEqual([
+        { title: "base1", bsp: "base1" },
+        { title: "q2ctf1", bsp: "q2ctf1" },
+        { title: "q2dm1", bsp: "q2dm1" },
+      ]);
+    } finally {
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("menu_content.ts -- LaunchPlanForDiscovered / ResolveLaunchForGame", () => {
@@ -365,5 +407,73 @@ describe("menu.ts wiring -- Content_MenuInit discovers a real mkdtemp gamedir en
       // later full-suite regate).
       for (let i = 0; i < CONTENT_LIST.length; i++) Content_MenuKey(K_LEFTARROW);
     }
+  });
+});
+
+// RC repro (Mike, live, 2026-08-31): "the New Game screen's 'start at' list
+// shows MULTIPLAYER maps (dm/ctf-looking names) and ZERO campaign maps when
+// starting a campaign", against the REAL retail rerelease install at the
+// exact basedir his launch command uses (no content_root). Same
+// retail-install convention as test/cl_demo_retail.test.ts: skip (never
+// fail) when this machine has no retail rerelease install.
+//
+// This investigation's finding (see task report): MapDB_Init() already
+// finds mapdb.json fine off a plain `basedir` mount with no content_root at
+// all -- FS_LoadFile("mapdb.json") walks the WHOLE fs_searchpaths list
+// (files.ts's FS_FOpenFile), and FS_InitFilesystem always mounts
+// `${basedir}/baseq2` (files.ts:1226) regardless of content_root, so a
+// basedir that IS the rerelease tree already has baseq2/pak0.pak's
+// mapdb.json on the search path. The two tests below prove that positively
+// (both rulesets); the real bug this RC report was hitting was
+// StartPointsForSelection's missing curated-vs-discovered gate on the
+// maps/*.bsp scan tier, fixed above (test 14b) and in
+// src/client/menu_content.ts's StartPointsForGamedir/StartPointsForSelection.
+const RETAIL_ROOT = "/home/buzzkill/q2rets/rerelease";
+const haveRetail = existsSync(join(RETAIL_ROOT, "baseq2", "pak0.pak"));
+
+describe.skipIf(!haveRetail)("menu_content.ts -- StartPointsForSelection against REAL retail rerelease data (RC report repro, skipped if the retail install isn't present)", () => {
+  const baseq2Game: SelectableGame = { kind: "curated", content: CONTENT_LIST[0] as (typeof CONTENT_LIST)[number] };
+
+  let fsSnapshot: FsSearchPathSnapshotT;
+  let prevBasedir: string;
+  let prevHomedir: string;
+
+  beforeAll(() => {
+    prevBasedir = Cvar_VariableString("basedir");
+    prevHomedir = Cvar_VariableString("homedir");
+    fsSnapshot = FS_TestSnapshotSearchPaths();
+
+    Cvar_ForceSet("basedir", RETAIL_ROOT);
+    Cvar_ForceSet("homedir", "");
+    FS_InitFilesystem();
+    MapDB_Init();
+  });
+
+  afterAll(() => {
+    MapDB_Shutdown();
+    FS_TestRestoreSearchPaths(fsSnapshot);
+    Cvar_ForceSet("basedir", prevBasedir);
+    Cvar_ForceSet("homedir", prevHomedir);
+  });
+
+  function assertRealCampaignOrder(ruleset: "classic" | "rerelease"): void {
+    const units = StartPointsForSelection(baseq2Game, ruleset, UnitsForContent, realSeam, [RETAIL_ROOT]);
+
+    expect(units.length).toBeGreaterThan(0);
+    expect(units[0]).toEqual({ title: "Unit 1: Base", bsp: "base1" });
+
+    for (const u of units) {
+      expect(u.bsp).not.toMatch(/^q2dm/i);
+      expect(u.bsp).not.toMatch(/^q2ctf/i);
+      expect(u.bsp).not.toMatch(/^dm\d/i);
+    }
+  }
+
+  test("mapdb episode order under the CLASSIC ruleset: real campaign units, start unit is base1, no dm/ctf names", () => {
+    assertRealCampaignOrder("classic");
+  });
+
+  test("mapdb episode order under the RERELEASE ruleset: same real campaign units, no dm/ctf names", () => {
+    assertRealCampaignOrder("rerelease");
   });
 });
