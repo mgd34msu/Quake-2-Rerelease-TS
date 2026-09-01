@@ -251,16 +251,24 @@ describe("decodeJPG -- restart markers", () => {
   });
 });
 
-describe("decodeJPG -- unsupported variants (recognized but not decoded, never misdecoded)", () => {
-  test("progressive DCT (SOF2) reports unsupported", () => {
+describe("decodeJPG -- progressive DCT (SOF2) is now a supported variant, not a bare marker probe", () => {
+  // Progressive (SOF2) decoding was added (see jpg.ts's own header comment
+  // and test/jpg_progressive.test.ts for the real per-scan coverage) --
+  // SOF2 is no longer in the "recognized but not decoded" bucket below, so
+  // a bare SOF2-then-EOI probe (no SOS at all) now fails the same way a
+  // bare SOF0-then-EOI probe already does ("missing SOS marker" -- see the
+  // "missing SOS marker" test further down), not "unsupported".
+  test("SOF2 with no SOS reports missing SOS marker, not unsupported", () => {
     const bytes = buildMinimalSof(0xc2, 8, 8, 8, 3);
     const result = decodeJPG(bytes);
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.reason.startsWith("unsupported")).toBe(true);
-    expect(result.reason).toContain("progressive");
+    expect(result.reason).toBe("missing SOS marker");
+    expect(result.reason.startsWith("unsupported")).toBe(false);
   });
+});
 
+describe("decodeJPG -- unsupported variants (recognized but not decoded, never misdecoded)", () => {
   test("extended sequential DCT (SOF1) reports unsupported", () => {
     const bytes = buildMinimalSof(0xc1, 8, 8, 8, 3);
     const result = decodeJPG(bytes);

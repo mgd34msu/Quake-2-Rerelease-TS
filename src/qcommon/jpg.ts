@@ -15,43 +15,56 @@
 // markers (no DRI segment in any of them). Subsampling splits two ways:
 // 184 files 4:2:0 (H=2,V=2 on the Y component), 14 files 4:4:4 (H=1,V=1
 // on every component, all under vault/preview/ or vault/*.jpg full-size
-// concept art) -- no 4:2:2 example exists in the shipped data. Given that,
-// a baseline-only decoder is sufficient for 100% of the real retail data;
-// progressive/arithmetic-coded/12-bit support was not needed and is
-// deliberately out of scope (reported as "unsupported", never misdecoded --
-// see below). 4:2:2 and restart-marker support ARE implemented anyway
-// (both are simple extensions of the same general subsampling-factor and
-// entropy-alignment logic already required for 4:2:0), since a decoder
-// that only handles the exact subsampling ratios/absence of restart
-// markers seen in one snapshot of one pak is needlessly brittle -- this
-// mirrors PORTING.md's "recognized but unsupported variant" contract
-// (below) being reserved for genuinely unimplemented compression FAMILIES
-// (progressive, arithmetic, 12-bit), not for parameter values this decoder
-// already generalizes over.
+// concept art) -- no 4:2:2 example exists in the shipped data. A
+// baseline-only decoder was therefore sufficient for 100% of the real
+// retail data, and progressive (SOF2) support was originally left
+// unimplemented (reported as "unsupported", never misdecoded). It has
+// since been added as a scoped follow-up (this file's SOF2 branch) so
+// that non-retail progressive JPEGs (mod/tool-authored content, or future
+// retail updates) decode correctly instead of hard-failing; the baseline
+// (SOF0) decode path below is untouched by that follow-up. 4:2:2 and
+// restart-marker support were also implemented beyond what the retail
+// survey required (both are simple extensions of the same general
+// subsampling-factor and entropy-alignment logic already needed for
+// 4:2:0), since a decoder that only handles the exact subsampling ratios
+// seen in one snapshot of one pak is needlessly brittle.
 //
 // Scope, matching png.ts's "narrow deliberately" precedent:
-//   - SOF0 (baseline sequential DCT) only. SOF1 (extended sequential),
-//     SOF2/SOF6 (progressive), SOF3/SOF7 (lossless), SOF9-SOF15
-//     (arithmetic-coded variants) are recognized by marker byte and
-//     reported as `{ ok: false, reason: "unsupported JPEG variant: ..." }`
-//     -- never misdecoded as baseline.
-//   - 8-bit sample precision only (SOF0's precision byte); 12-bit is
+//   - SOF0 (baseline sequential DCT) and SOF2 (progressive DCT, Huffman
+//     coding) are supported. SOF1 (extended sequential), SOF3/SOF7
+//     (lossless), SOF5/SOF6 (differential sequential/progressive),
+//     SOF9-SOF15 (arithmetic-coded variants) are recognized by marker
+//     byte and reported as `{ ok: false, reason: "unsupported JPEG
+//     variant: ..." }` -- never misdecoded as baseline or progressive.
+//   - 8-bit sample precision only (SOF0/SOF2's precision byte); 12-bit is
 //     recognized and reported unsupported, matching png.ts's bit-depth
 //     check.
 //   - 1 (grayscale) or 3 (YCbCr) component scans only; anything else
 //     (e.g. 4-component CMYK/YCCK, seen in some Adobe-authored JPEGs but
-//     never in the shipped retail data) reports unsupported.
+//     never in the shipped retail data) reports unsupported. This applies
+//     to SOF2 as well, even though the spec permits up to 4 components in
+//     a progressive frame (Table B.2) -- CMYK/YCCK was out of scope for
+//     the baseline decoder and stays out of scope here.
 //   - Arbitrary integer H/V sampling factors (1-4) per component -- not
 //     hardcoded to 4:2:0/4:2:2/4:4:4 specifically, so any legal baseline
-//     subsampling ratio decodes correctly.
-//   - A single interleaved scan (one SOS) is supported; a second SOS
-//     (non-interleaved multi-scan baseline, legal but vanishingly rare and
-//     absent from the retail data) reports unsupported rather than being
-//     silently dropped.
-//   - Restart markers (DRI/RSTn) are supported: DC predictors reset and
-//     the entropy bitstream re-aligns to a byte boundary at each restart,
-//     matching the spec (ITU-T T.81 Annex F.2.2.7/B.2.5) exactly, not just
-//     "well enough for the current retail data" (which has none).
+//     or progressive subsampling ratio decodes correctly.
+//   - Baseline (SOF0): a single interleaved scan (one SOS) is supported;
+//     a second SOS (non-interleaved multi-scan baseline, legal but
+//     vanishingly rare and absent from the retail data) reports
+//     unsupported rather than being silently dropped.
+//   - Progressive (SOF2): an arbitrary number of scans is supported --
+//     DC first scan and DC refinement scans (interleaved or
+//     non-interleaved), AC first scans (spectral selection, one
+//     component per scan, with end-of-band run coding), and AC
+//     refinement scans (successive approximation, with correction bits
+//     and ZRL) -- see decodeProgressiveScan and its helpers below.
+//   - Restart markers (DRI/RSTn) are supported for both baseline and
+//     progressive scans: DC predictors and (for progressive AC scans)
+//     the end-of-band run counter reset, and the entropy bitstream
+//     re-aligns to a byte boundary, at each restart interval boundary
+//     (ITU-T T.81 B.1.1.5 Note 1 for the byte-alignment padding
+//     convention; G.1.2.2's EOBRUN text and F.2.4.4/B.2.4.4 for restart
+//     semantics generally).
 // Anything outside that returns `{ ok: false }`, the same "recognized but
 // not handled, degrade gracefully" shape LoadPCX/LoadTGA/decodePNG already
 // use for their own out-of-spec inputs -- callers decide whether that's a
@@ -81,6 +94,115 @@
 //     simplest correct baseline reconstruction (real decoders often use
 //     smarter interpolation, but nothing in the JPEG spec requires it).
 //   - YCbCr->RGB uses the standard ITU-R BT.601 full-range JFIF formula.
+//
+// Progressive (SOF2) decoding model (ITU-T T.81 Annex G -- "Progressive
+// DCT-based mode of operation"; Annex G.2 states decoder operation
+// explicitly: "Decoder operation is defined by reversing the function of
+// each step described in the encoder flow charts [Figures G.3-G.11], and
+// performing the steps in reverse order" -- there are no decoder-side
+// flowcharts in the spec for this mode, only encoder ones, by design):
+//   - Unlike baseline's single scan that goes straight from Huffman-coded
+//     bits to dequantized-and-IDCT'd pixels per block (decodeBlockInto),
+//     a progressive frame spreads each block's 64 DCT coefficients across
+//     many scans: a DC first scan plus zero or more DC refinement scans
+//     (Ss=Se=0), and one AC first scan plus zero or more AC refinement
+//     scans per contiguous spectral band (1<=Ss<=Se<=63) per component
+//     (ITU-T T.81 A.4, G.1.1.1.1). This file accumulates each component's
+//     raw (pre-dequantization) coefficient levels into a persistent
+//     Int32Array (Component.coeffs, one 64-entry natural-order block per
+//     entry, allocated once per component when SOF2 is parsed) that scans
+//     progressively fill in and refine; only after every scan has been
+//     processed does finalizeProgressive dequantize (ITU-T T.81 A.3.4)
+//     and run the coefficients through the SAME idct8x8/pixel-store logic
+//     baseline uses, so the existing dequant/IDCT/upsample/color-convert
+//     stages are unchanged -- progressive decoding differs only in how
+//     the 64 coefficients per block are assembled before that point.
+//   - Successive approximation (ITU-T T.81 A.4, B.2.3's Ah/Al fields):
+//     each scan of a spectral band codes coefficients at a fixed bit
+//     position Al, refining a lower-precision version coded in an earlier
+//     scan (Ah = the Al of the previous scan of that band; Ah=0 means
+//     "first scan of this band"). The DC point transform is an
+//     arithmetic shift right by Al at the encoder / a shift left by Al at
+//     the decoder (A.4); the AC point transform is an integer divide by
+//     2^Al at the encoder / a rescale by 2^Al at the decoder. This file
+//     applies that rescale at the moment a coefficient is first written
+//     (`<< al`) and applies later refinement scans as direct additions of
+//     +-2^Al (DC: a single OR'd-in bit at position Al; AC: correction
+//     bits per G.1.2.3, see below) -- so by the time finalizeProgressive
+//     runs, every stored coefficient is already at full (Al=0) scale and
+//     dequantization proceeds exactly like the baseline path's.
+//   - DC coefficient decoding (ITU-T T.81 G.1.2.1): the first DC scan for
+//     a component (Ah=0) is decoded exactly like baseline's DC coding
+//     (F.2.2.1 EXTEND over a Huffman-coded magnitude category, added to a
+//     running per-component predictor reset at each scan/restart), then
+//     left-shifted by Al. A DC refinement scan (Ah!=0) carries no Huffman
+//     coding at all -- G.1.2.1: "the least significant bits are appended
+//     to the compressed bit stream without compression or modification"
+//     -- so the decoder just reads one raw bit per block and ORs it into
+//     the coefficient at bit position Al.
+//   - AC first-scan decoding (ITU-T T.81 G.1.2.2, Table G.1, Figure G.2):
+//     within a spectral band [Ss,Se], coefficients are decoded with the
+//     same RRRRSSSS composite Huffman code as baseline AC decoding
+//     (F.2.2.2), except the all-zero "EOB" code point is replaced by 15
+//     EOBn codes (RRRR=0..14, SSSS=0) that each mean "the current block's
+//     remaining band is zero, and so are the next N-1 blocks' entire
+//     bands" -- Table G.1 gives the run length per EOBn (EOBn's range is
+//     2^RRRR .. 2^(RRRR+1)-1, with RRRR extra bits selecting the exact
+//     value, mirroring EXTEND's category encoding); RRRR=15,SSSS=0 (ZRL)
+//     still means "16 zero coefficients" as in baseline. The end-of-band
+//     run counter (EOBRUN) persists across blocks within a scan and is
+//     reset to zero at the start of the scan and at each restart interval
+//     (Table G.1's text, mirroring F.2.4.4/B.2.4.4's restart semantics).
+//   - AC refinement-scan decoding (ITU-T T.81 G.1.2.3, Figures G.7-G.9,
+//     reversed per G.2): this is the trickiest part of progressive JPEG.
+//     Within a block's band, existing (non-zero-history) coefficients
+//     each carry one "correction" bit (rule b, T.81 page 125): a 1-bit
+//     means "add 2^Al to the coefficient's magnitude" (sign preserved).
+//     RRRR in a composite code counts *zero-history* coefficients only,
+//     skipping over (but still correcting) any non-zero-history
+//     coefficients encountered along the way (T.81 page 124-125,
+//     G.1.2.3's intro text) -- this file's inner skip loop in
+//     decodeACRefineBlock implements exactly that rule. A composite code
+//     with SSSS=1 introduces a newly non-zero coefficient of magnitude
+//     2^Al with one sign bit following (rule a); ZRL (RRRR=15, SSSS=0)
+//     skips exactly 16 zero-history coefficients (correcting any
+//     non-zero-history ones passed over) without placing a value, and --
+//     since RRRR can only directly express 0-15 -- longer zero-history
+//     runs are ZRL-chained exactly like baseline/AC-first coding. An
+//     EOBn code (SSSS=0, RRRR<15) sets EOBRUN and means "the rest of this
+//     block's band, and the next EOBRUN-1 blocks' entire bands, get
+//     correction bits only (no new coefficients)"; while EOBRUN>0, each
+//     subsequent block in the scan applies correction bits to its
+//     existing non-zero coefficients across the whole band and then
+//     decrements EOBRUN, with no Huffman codes read for that block at
+//     all.
+//   - Interleaving (ITU-T T.81 clause 4.10, G.1.1.1.1): only DC scans may
+//     interleave more than one component (decoded MCU-by-MCU exactly
+//     like baseline); AC scans are always single-component
+//     ("non-interleaved"), decoded in the component's own block-raster
+//     order (A.2.2) rather than MCU order. A non-interleaved scan's block
+//     grid is the *tight* grid derived straight from that component's own
+//     sample dimensions (A.1.1: xi=ceil(X*Hi/Hmax), yi=ceil(Y*Vi/Vmax),
+//     then ceil(./8) blocks each way) -- NOT the MCU-padded grid
+//     (mcusPerLine*Hi etc.) baseline/interleaved-DC scans use, since
+//     A.2.4's "extend to a whole number of blocks per Hi/Vi" padding rule
+//     is explicitly conditioned on "if the component is to be
+//     interleaved". The coefficient buffer itself is always sized to the
+//     MCU-padded grid, though (that's what the DC scan already
+//     allocated) -- so non-interleaved scans iterate the tight grid's
+//     block *count* but still address the padded grid's *stride* when
+//     computing each block's offset into Component.coeffs. Getting this
+//     wrong is a classic progressive-decoder bug for subsampled (e.g.
+//     4:2:0) images whose dimensions aren't exact multiples of 16;
+//     Component.tightBlocksPerLine/tightBlocksPerColumn (loop bounds) vs
+//     Component.coeffBlocksPerLine/coeffBlocksPerColumn (buffer stride,
+//     also the plane dimensions) keep the two apart.
+//   - Restart interval semantics (ITU-T T.81 B.2.4.4, clause 4.8.2): Ri
+//     counts MCUs, and clause 4.8.2 defines "for non-interleaved data the
+//     MCU is one data unit" -- so for a non-interleaved (AC, or
+//     single-component DC) scan, Ri directly counts 8x8 blocks, exactly
+//     like this file's restart-countdown loop already does for both scan
+//     shapes.
 
 export interface DecodedJpgT {
   width: number;
@@ -281,11 +403,26 @@ interface Component {
   planeHeight: number;
   plane: Uint8Array; // level-shifted back to 0..255 already
   dcPred: number;
+  // Progressive (SOF2) only, below -- unused (empty/zero) for baseline.
+  // Raw (pre-dequantization) coefficient levels accumulated across scans,
+  // one 64-entry natural-order (not zigzag) block per entry. See the
+  // "Progressive (SOF2) decoding model" comment above.
+  coeffs: Int32Array;
+  // Buffer stride/dimensions: the MCU-padded grid (mcusPerLine*h etc, the
+  // same grid baseline's plane already uses), always used to compute a
+  // block's offset into `coeffs` and `plane`.
+  coeffBlocksPerLine: number;
+  coeffBlocksPerColumn: number;
+  // Loop bounds for a non-interleaved (AC, or single-component DC) scan:
+  // the tight grid derived from this component's own sample dimensions
+  // (ITU-T T.81 A.1.1/A.2.4) -- see the header comment's "Interleaving"
+  // paragraph for why this differs from coeffBlocksPerLine/Column.
+  tightBlocksPerLine: number;
+  tightBlocksPerColumn: number;
 }
 
 const SOF_NAMES: Record<number, string> = {
   0xc1: "extended sequential DCT (SOF1)",
-  0xc2: "progressive DCT (SOF2)",
   0xc3: "lossless (SOF3)",
   0xc5: "differential sequential DCT (SOF5)",
   0xc6: "differential progressive DCT (SOF6)",
@@ -324,6 +461,15 @@ function decodeJPGInner(buffer: Uint8Array): DecodeJpgResultT {
   let restartInterval = 0;
   let sawSOF = false;
   let sawSOS = false;
+  let progressive = false;
+  // Frame-level MCU grid (ITU-T T.81 A.1.1/A.2.1), needed by every
+  // progressive scan and by the final coefficient-to-pixel pass; computed
+  // once from ALL of the frame's components right after SOF2, since an AC
+  // scan only lists a single component and can't derive maxH/maxV itself.
+  let frameMaxH = 1;
+  let frameMaxV = 1;
+  let mcusPerLine = 0;
+  let mcusPerColumn = 0;
 
   let pos = 2;
   while (pos < buffer.length) {
@@ -343,9 +489,13 @@ function decodeJPGInner(buffer: Uint8Array): DecodeJpgResultT {
     const segStart = pos + 2;
     const segEnd = pos + length;
 
-    if (marker === 0xc0) {
-      // SOF0 -- baseline sequential DCT
-      if (segEnd - segStart < 6) return { ok: false, reason: "malformed SOF0 segment" };
+    if (marker === 0xc0 || marker === 0xc2) {
+      // SOF0 -- baseline sequential DCT; SOF2 -- progressive DCT, Huffman
+      // coding (ITU-T T.81 B.2.2 Figure B.3; Table B.2 lists SOF0/SOF2's
+      // frame header as byte-for-byte identical: P, Y, X, Nf, then Nf
+      // component-specification triples).
+      progressive = marker === 0xc2;
+      if (segEnd - segStart < 6) return { ok: false, reason: `malformed SOF${progressive ? "2" : "0"} segment` };
       precision = buffer[segStart]!;
       if (precision !== 8) return { ok: false, reason: `unsupported JPEG bit depth ${precision}` };
       height = view.getUint16(segStart + 1, false);
@@ -354,7 +504,9 @@ function decodeJPGInner(buffer: Uint8Array): DecodeJpgResultT {
       if (numComponents !== 1 && numComponents !== 3) {
         return { ok: false, reason: `unsupported JPEG component count ${numComponents}` };
       }
-      if (segEnd - segStart < 6 + numComponents * 3) return { ok: false, reason: "malformed SOF0 segment" };
+      if (segEnd - segStart < 6 + numComponents * 3) {
+        return { ok: false, reason: `malformed SOF${progressive ? "2" : "0"} segment` };
+      }
       components = [];
       for (let c = 0; c < numComponents; c++) {
         const off = segStart + 6 + c * 3;
@@ -375,7 +527,38 @@ function decodeJPGInner(buffer: Uint8Array): DecodeJpgResultT {
           planeHeight: 0,
           plane: new Uint8Array(0),
           dcPred: 0,
+          coeffs: new Int32Array(0),
+          coeffBlocksPerLine: 0,
+          coeffBlocksPerColumn: 0,
+          tightBlocksPerLine: 0,
+          tightBlocksPerColumn: 0,
         });
+      }
+      if (progressive) {
+        // Allocate every component's coefficient-accumulation buffer and
+        // pixel plane once, up front, sized to the MCU-padded grid (ITU-T
+        // T.81 A.1.1/A.2.4) -- the same grid baseline's decodeScan builds
+        // per-scan, but built once here since scans only partially fill
+        // each block and later scans must accumulate into what earlier
+        // scans already wrote.
+        frameMaxH = Math.max(...components.map((c) => c.h));
+        frameMaxV = Math.max(...components.map((c) => c.v));
+        mcusPerLine = Math.ceil(width / (frameMaxH * 8));
+        mcusPerColumn = Math.ceil(height / (frameMaxV * 8));
+        for (const comp of components) {
+          comp.coeffBlocksPerLine = mcusPerLine * comp.h;
+          comp.coeffBlocksPerColumn = mcusPerColumn * comp.v;
+          comp.planeWidth = comp.coeffBlocksPerLine * 8;
+          comp.planeHeight = comp.coeffBlocksPerColumn * 8;
+          comp.plane = new Uint8Array(comp.planeWidth * comp.planeHeight);
+          comp.coeffs = new Int32Array(comp.coeffBlocksPerLine * comp.coeffBlocksPerColumn * 64);
+          // Tight (non-MCU-padded) per-component grid for non-interleaved
+          // scans -- ITU-T T.81 A.1.1's xi/yi formula, then blocks of 8.
+          const xi = Math.ceil((width * comp.h) / frameMaxH);
+          const yi = Math.ceil((height * comp.v) / frameMaxV);
+          comp.tightBlocksPerLine = Math.ceil(xi / 8);
+          comp.tightBlocksPerColumn = Math.ceil(yi / 8);
+        }
       }
       sawSOF = true;
     } else if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
@@ -423,11 +606,15 @@ function decodeJPGInner(buffer: Uint8Array): DecodeJpgResultT {
       if (segEnd - segStart < 2) return { ok: false, reason: "malformed DRI segment" };
       restartInterval = view.getUint16(segStart, false);
     } else if (marker === 0xda) {
-      // SOS
-      if (sawSOS) return { ok: false, reason: "unsupported JPEG variant: multiple scans" };
+      // SOS (ITU-T T.81 B.2.3 Figure B.4): Ns, then Ns * (Csj, Tdj|Taj)
+      // pairs, then Ss, Se, Ah|Al -- identical layout for baseline and
+      // progressive; only the allowed *values* of Ss/Se/Ah/Al differ
+      // (Table B.3).
+      if (!progressive && sawSOS) return { ok: false, reason: "unsupported JPEG variant: multiple scans" };
       if (!sawSOF) return { ok: false, reason: "missing SOF marker" };
       const numScanComponents = buffer[segStart]!;
       if (segEnd - segStart < 1 + numScanComponents * 2 + 3) return { ok: false, reason: "malformed SOS segment" };
+      const scanComponents: Component[] = [];
       for (let c = 0; c < numScanComponents; c++) {
         const off = segStart + 1 + c * 2;
         const selector = buffer[off]!;
@@ -436,20 +623,51 @@ function decodeJPGInner(buffer: Uint8Array): DecodeJpgResultT {
         if (!comp) return { ok: false, reason: "malformed SOS segment (unknown component selector)" };
         comp.dcTableId = tables >> 4;
         comp.acTableId = tables & 0xf;
+        scanComponents.push(comp); // SOS order, not frame order (A.2.3)
       }
-      // Entropy-coded data isn't length-prefixed (`length` above only
-      // covers the scan header): decodeScan's own bit reader consumes
-      // exactly the entropy-coded bytes (including any embedded restart
-      // markers, which it handles itself) and its final position lands
-      // right after the last consumed byte -- which, since baseline
-      // encoders always pad the last partial byte to a boundary, is
-      // exactly the next real marker (EOI for a single-scan image).
-      // Deliberately NOT a byte-level re-scan for the next `0xFF <marker>`
-      // pair from segEnd: restart markers are genuine unstuffed `0xFF Dx`
-      // bytes embedded inside the entropy-coded data, so a naive re-scan
-      // would latch onto the first one instead of the real trailing
-      // marker.
-      pos = decodeScan(buffer, segEnd, components, quantTables, dcTables, acTables, restartInterval, width, height);
+      const tailOff = segStart + 1 + numScanComponents * 2;
+      const ss = buffer[tailOff]!;
+      const se = buffer[tailOff + 1]!;
+      const ahAl = buffer[tailOff + 2]!;
+      const ah = ahAl >> 4;
+      const al = ahAl & 0xf;
+
+      if (progressive) {
+        if (ss > se || se > 63) return { ok: false, reason: "malformed SOS segment (bad Ss/Se)" };
+        const isDcScan = ss === 0;
+        if (isDcScan && se !== 0) return { ok: false, reason: "malformed SOS segment (Se must be 0 when Ss is 0)" };
+        if (!isDcScan && numScanComponents !== 1) {
+          return { ok: false, reason: "malformed SOS segment (AC scan must be non-interleaved)" };
+        }
+        pos = decodeProgressiveScan(
+          buffer,
+          segEnd,
+          scanComponents,
+          ss,
+          se,
+          ah,
+          al,
+          dcTables,
+          acTables,
+          restartInterval,
+          mcusPerLine,
+          mcusPerColumn,
+        );
+      } else {
+        // Entropy-coded data isn't length-prefixed (`length` above only
+        // covers the scan header): decodeScan's own bit reader consumes
+        // exactly the entropy-coded bytes (including any embedded restart
+        // markers, which it handles itself) and its final position lands
+        // right after the last consumed byte -- which, since baseline
+        // encoders always pad the last partial byte to a boundary, is
+        // exactly the next real marker (EOI for a single-scan image).
+        // Deliberately NOT a byte-level re-scan for the next `0xFF <marker>`
+        // pair from segEnd: restart markers are genuine unstuffed `0xFF Dx`
+        // bytes embedded inside the entropy-coded data, so a naive re-scan
+        // would latch onto the first one instead of the real trailing
+        // marker.
+        pos = decodeScan(buffer, segEnd, components, quantTables, dcTables, acTables, restartInterval, width, height);
+      }
       sawSOS = true;
       continue;
     } else {
@@ -464,6 +682,12 @@ function decodeJPGInner(buffer: Uint8Array): DecodeJpgResultT {
   if (!sawSOF) return { ok: false, reason: "missing SOF marker" };
   if (!sawSOS) return { ok: false, reason: "missing SOS marker" };
   if (width <= 0 || height <= 0) return { ok: false, reason: "zero-size image" };
+
+  // All progressive scans only accumulate coefficient levels (see the
+  // "Progressive (SOF2) decoding model" header comment); dequantize and
+  // IDCT every block now, once, through the same stage baseline's
+  // decodeBlockInto uses per-block during its single scan.
+  if (progressive) finalizeProgressive(components, quantTables);
 
   const pixels = renderOutput(components, width, height);
   return { ok: true, image: { width, height, pixels } };
@@ -583,6 +807,338 @@ function decodeBlockInto(
 
   const blockOriginX = (mcuX * comp.h + bx) * 8;
   const blockOriginY = (mcuY * comp.v + by) * 8;
+  for (let y = 0; y < 8; y++) {
+    const rowOff = (blockOriginY + y) * comp.planeWidth + blockOriginX;
+    for (let x = 0; x < 8; x++) {
+      const s = spatial[x + y * 8]! + 128;
+      comp.plane[rowOff + x] = s < 0 ? 0 : s > 255 ? 255 : Math.round(s);
+    }
+  }
+}
+
+// Decodes one progressive scan's entropy-coded data, accumulating into
+// each named component's Component.coeffs (see the "Progressive (SOF2)
+// decoding model" header comment for the algorithm and its ITU-T T.81
+// citations). Returns the buffer position immediately after the last
+// consumed byte, same contract as decodeScan.
+function decodeProgressiveScan(
+  buffer: Uint8Array,
+  scanDataStart: number,
+  scanComponents: Component[],
+  ss: number,
+  se: number,
+  ah: number,
+  al: number,
+  dcTables: Map<number, HuffTable>,
+  acTables: Map<number, HuffTable>,
+  restartInterval: number,
+  mcusPerLine: number,
+  mcusPerColumn: number,
+): number {
+  const br = new BitReader(buffer, scanDataStart);
+  const isDcScan = ss === 0;
+  // ITU-T T.81 clause 4.10/G.1.1.1.1: only DC scans may interleave more
+  // than one component; the SOS parser already rejected a multi-component
+  // AC scan, so `scanComponents.length > 1` here implies a DC scan.
+  const interleaved = scanComponents.length > 1;
+
+  for (const comp of scanComponents) comp.dcPred = 0;
+  let eobrun = 0;
+
+  const decodeOneUnit = (comp: Component, blockIndex: number): void => {
+    if (isDcScan) {
+      const dcTable = ah === 0 ? dcTables.get(comp.dcTableId) : undefined;
+      if (ah === 0 && !dcTable) throw new JpgDecodeError("missing DHT table referenced by SOS");
+      decodeDCBlock(br, comp, dcTable, ah, al, blockIndex);
+    } else {
+      const acTable = acTables.get(comp.acTableId);
+      if (!acTable) throw new JpgDecodeError("missing DHT table referenced by SOS");
+      eobrun =
+        ah === 0
+          ? decodeACFirstBlock(br, comp, acTable, ss, se, al, blockIndex, eobrun)
+          : decodeACRefineBlock(br, comp, acTable, ss, se, al, blockIndex, eobrun);
+    }
+  };
+
+  const restartAndResync = (): void => {
+    br.byteAlign();
+    if (buffer[br.pos] !== 0xff || buffer[br.pos + 1] === undefined || !(buffer[br.pos + 1]! >= 0xd0 && buffer[br.pos + 1]! <= 0xd7)) {
+      throw new JpgDecodeError("expected restart marker");
+    }
+    br.pos += 2;
+    for (const comp of scanComponents) comp.dcPred = 0;
+    eobrun = 0; // Table G.1 text: EOBRUN resets at the start of each restart interval
+  };
+
+  if (interleaved) {
+    // DC scan, MCU-interleaved: identical iteration shape to baseline's
+    // decodeScan (A.2.3 interleaved ordering), just decoding one DC
+    // coefficient (or its refinement bit) per block instead of a full
+    // 64-coefficient block.
+    let mcusUntilRestart = restartInterval > 0 ? restartInterval : Infinity;
+    const totalMcus = mcusPerLine * mcusPerColumn;
+    let mcusDone = 0;
+    for (let mcuY = 0; mcuY < mcusPerColumn; mcuY++) {
+      for (let mcuX = 0; mcuX < mcusPerLine; mcuX++) {
+        for (const comp of scanComponents) {
+          for (let by = 0; by < comp.v; by++) {
+            for (let bx = 0; bx < comp.h; bx++) {
+              const blockCol = mcuX * comp.h + bx;
+              const blockRow = mcuY * comp.v + by;
+              decodeOneUnit(comp, blockRow * comp.coeffBlocksPerLine + blockCol);
+            }
+          }
+        }
+        mcusDone++;
+        mcusUntilRestart--;
+        if (mcusUntilRestart === 0 && mcusDone < totalMcus) {
+          restartAndResync();
+          mcusUntilRestart = restartInterval;
+        }
+      }
+    }
+  } else {
+    // Non-interleaved (AC scan, or a single-component DC scan): iterate
+    // the component's own tight block grid (A.2.2 non-interleaved
+    // ordering; A.1.1/A.2.4 for why this grid can be smaller than the
+    // MCU-padded coeffBlocksPerLine/Column grid used for addressing) --
+    // clause 4.8.2 defines the MCU as one data unit here, so the restart
+    // interval directly counts blocks.
+    const comp = scanComponents[0]!;
+    const bpl = comp.tightBlocksPerLine;
+    const bpc = comp.tightBlocksPerColumn;
+    let unitsUntilRestart = restartInterval > 0 ? restartInterval : Infinity;
+    const totalUnits = bpl * bpc;
+    let unitsDone = 0;
+    for (let row = 0; row < bpc; row++) {
+      for (let col = 0; col < bpl; col++) {
+        decodeOneUnit(comp, row * comp.coeffBlocksPerLine + col);
+        unitsDone++;
+        unitsUntilRestart--;
+        if (unitsUntilRestart === 0 && unitsDone < totalUnits) {
+          restartAndResync();
+          unitsUntilRestart = restartInterval;
+        }
+      }
+    }
+  }
+
+  return br.pos;
+}
+
+// ITU-T T.81 G.1.2.1, reversed per G.2: a DC first scan (ah === 0) decodes
+// exactly like baseline DC coding (F.2.2.1 EXTEND over a Huffman-coded
+// magnitude category, added to the running per-component predictor), then
+// left-shifts by al (A.4's decoder-side point-transform rescale). A DC
+// refinement scan (ah !== 0) has no entropy coding at all -- it's a single
+// raw bit per block, OR'd into the coefficient at bit position al.
+function decodeDCBlock(br: BitReader, comp: Component, dcTable: HuffTable | undefined, ah: number, al: number, blockIndex: number): void {
+  const coeffOffset = blockIndex * 64;
+  if (ah === 0) {
+    const size = huffmanDecode(br, dcTable!);
+    const diffBits = size > 0 ? br.receiveBits(size) : 0;
+    const diff = extend(diffBits, size);
+    comp.dcPred += diff;
+    comp.coeffs[coeffOffset] = comp.dcPred << al;
+  } else {
+    const bit = br.nextBit();
+    if (bit) comp.coeffs[coeffOffset] |= 1 << al;
+  }
+}
+
+// ITU-T T.81 G.1.2.2 (Table G.1, Figure G.2), reversed per G.2: the first
+// AC scan of a spectral band [ss,se]. Same RRRRSSSS composite Huffman
+// code as baseline AC decoding, except SSSS=0 no longer means a single
+// "EOB" -- RRRR=0..14 selects one of 15 EOBn codes, each meaning "this
+// block's remaining band, and the next (run-1) blocks' entire bands, are
+// zero" (run given by Table G.1: 2**RRRR, plus RRRR extra bits selecting
+// the exact value within that range, mirroring EXTEND's category coding).
+// RRRR=15 is still ZRL (16 zero coefficients), same as baseline. Returns
+// the updated EOBRUN (persists across blocks within the scan).
+function decodeACFirstBlock(
+  br: BitReader,
+  comp: Component,
+  acTable: HuffTable,
+  ss: number,
+  se: number,
+  al: number,
+  blockIndex: number,
+  eobrunIn: number,
+): number {
+  if (eobrunIn > 0) return eobrunIn - 1; // this block's whole band is covered by a pending EOB run
+  const coeffOffset = blockIndex * 64;
+  let eobrun = 0;
+  let k = ss;
+  while (k <= se) {
+    const rs = huffmanDecode(br, acTable);
+    const r = rs >> 4;
+    const s = rs & 0xf;
+    if (s === 0) {
+      if (r < 15) {
+        let run = 1 << r;
+        if (r > 0) run += br.receiveBits(r);
+        eobrun = run - 1; // this block is the first of the run; consume it now
+        break;
+      }
+      k += 16; // ZRL
+      continue;
+    }
+    k += r;
+    if (k > se) throw new JpgDecodeError("corrupt progressive AC coefficient run (out of band bounds)");
+    const bits = br.receiveBits(s);
+    const value = extend(bits, s);
+    comp.coeffs[coeffOffset + ZIGZAG[k]!] = value << al;
+    k++;
+  }
+  return eobrun;
+}
+
+// ITU-T T.81 G.1.2.3 (Figures G.7-G.9), reversed per G.2: an AC
+// successive-approximation (refinement) scan. Every existing non-zero
+// coefficient in the band carries a one-bit "correction" (rule b, page
+// 125: 1 means add 2**al to the magnitude, sign unchanged); RRRR in a
+// composite code counts only *zero-history* coefficients, skipping over
+// (but still correcting) any non-zero-history coefficients found along
+// the way (page 124-125's "RRRR... the number of zero coefficients...
+// skipped over when counting"). SSSS=1 introduces a newly non-zero
+// coefficient of magnitude 2**al with a following sign bit (rule a); ZRL
+// (RRRR=15, SSSS=0) skips zero-history coefficients the same way a
+// value-placing code does, just with RRRR's literal decoded value (15,
+// not 16) and no value placed at the position that resolves it -- since a
+// single composite code's RRRR can only directly express 0-15, longer
+// zero-history runs chain ZRLs exactly like baseline/AC-first coding. An
+// EOBn code (SSSS=0, RRRR<15) sets EOBRUN; while EOBRUN>0, every
+// subsequent block applies correction bits across its whole band and
+// reads no Huffman codes at all.
+//
+// Composite-code boundary (the subtle part): once a composite code's
+// RRRR budget is exhausted, its "job" ends at the very next position --
+// whether that position is the fresh zero-history coefficient it
+// resolves (place a value, or nothing for ZRL) or, if intervening
+// coefficients are already non-zero, once those are corrected. Either
+// way, resolution happens by unconditionally advancing one more position
+// (this is what lets a lone value-placing/ZRL code and a following run of
+// already-non-zero corrections share one composite code, and is also why
+// RRRR's skip count for ZRL is 15 rather than 16 -- the 16th zero-history
+// position is consumed by that same unconditional advance, not by an
+// extra decrement): the very next Huffman code is always read immediately
+// after, before any further already-non-zero corrections past that point
+// are applied, not after them.
+function decodeACRefineBlock(
+  br: BitReader,
+  comp: Component,
+  acTable: HuffTable,
+  ss: number,
+  se: number,
+  al: number,
+  blockIndex: number,
+  eobrunIn: number,
+): number {
+  const coeffOffset = blockIndex * 64;
+  const positive = 1 << al;
+  const negative = -positive;
+  let eobrun = eobrunIn;
+  let k = ss;
+
+  // Rule b (page 125) only defines the correction for a coefficient not
+  // already refined at this bit position this scan; guard against
+  // re-applying it (matches the reference decoder's "skip if the target
+  // bit is already set" check) even though well-formed input never visits
+  // a position twice within one call.
+  const applyCorrection = (idx: number): void => {
+    const current = comp.coeffs[idx]!;
+    if ((current & positive) !== 0) return;
+    if (br.nextBit()) {
+      comp.coeffs[idx] = current + (current > 0 ? positive : negative);
+    }
+  };
+
+  if (eobrun === 0) {
+    outer: while (k <= se) {
+      const rs = huffmanDecode(br, acTable);
+      const r = rs >> 4;
+      const s = rs & 0xf;
+
+      if (s === 0 && r < 15) {
+        // EOBn: the rest of this block's band, plus the next (run-1)
+        // blocks' whole bands, get correction bits only.
+        let run = 1 << r;
+        if (r > 0) run += br.receiveBits(r);
+        eobrun = run;
+        break;
+      }
+
+      // ZRL (s === 0, r === 15): 15 zero-history skips, then the 16th
+      // zero-history position found also gets consumed (below) without a
+      // value placed -- RRRR's literal decoded value, not 16 (see the
+      // "composite-code boundary" note above). New coefficient (s !== 0,
+      // always size 1 in refinement scans): r zero-history skips, then
+      // place +-2**al at the (r+1)-th zero-history position per the
+      // following sign bit.
+      let zerosToSkip = s === 0 ? 15 : r;
+      const placeValue = s !== 0;
+      const newValue = placeValue ? (br.nextBit() ? positive : negative) : 0;
+
+      while (k <= se) {
+        const idx = coeffOffset + ZIGZAG[k]!;
+        if (comp.coeffs[idx] !== 0) {
+          applyCorrection(idx);
+          k++;
+          continue;
+        }
+        if (zerosToSkip > 0) {
+          zerosToSkip--;
+          k++;
+          continue;
+        }
+        // The zero-history position that resolves this composite code:
+        // place the new coefficient (if any), then unconditionally
+        // advance past it -- this composite code's job ends exactly here,
+        // so the very next position (zero-history or not) belongs to a
+        // fresh composite code, read by resuming the outer loop
+        // immediately.
+        if (placeValue) comp.coeffs[idx] = newValue;
+        k++;
+        continue outer;
+      }
+    }
+  }
+
+  if (eobrun > 0) {
+    while (k <= se) {
+      const idx = coeffOffset + ZIGZAG[k]!;
+      if (comp.coeffs[idx] !== 0) applyCorrection(idx);
+      k++;
+    }
+    eobrun--;
+  }
+  return eobrun;
+}
+
+// Dequantizes (ITU-T T.81 A.3.4) and runs the IDCT for every block of
+// every component once all progressive scans have been decoded, using
+// the exact same idct8x8 + level-shift-and-clamp pipeline baseline's
+// decodeBlockInto uses per-block during its single scan.
+function finalizeProgressive(components: Component[], quantTables: Map<number, Int32Array>): void {
+  for (const comp of components) {
+    const quant = quantTables.get(comp.quantTableId);
+    if (!quant) throw new JpgDecodeError("missing DQT table referenced by SOF");
+    const totalBlocks = comp.coeffBlocksPerLine * comp.coeffBlocksPerColumn;
+    for (let b = 0; b < totalBlocks; b++) {
+      const blockOriginX = (b % comp.coeffBlocksPerLine) * 8;
+      const blockOriginY = Math.floor(b / comp.coeffBlocksPerLine) * 8;
+      renderCoeffBlock(comp, quant, b * 64, blockOriginX, blockOriginY);
+    }
+  }
+}
+
+function renderCoeffBlock(comp: Component, quant: Int32Array, coeffOffset: number, blockOriginX: number, blockOriginY: number): void {
+  const dequantized = new Float64Array(64); // natural order, like decodeBlockInto's `coeffs`
+  for (let zz = 0; zz < 64; zz++) {
+    const nat = ZIGZAG[zz]!;
+    dequantized[nat] = comp.coeffs[coeffOffset + nat]! * quant[zz]!;
+  }
+  const spatial = idct8x8(dequantized);
   for (let y = 0; y < 8; y++) {
     const rowOff = (blockOriginY + y) * comp.planeWidth + blockOriginX;
     for (let x = 0; x < 8; x++) {
