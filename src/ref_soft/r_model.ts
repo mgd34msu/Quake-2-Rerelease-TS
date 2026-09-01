@@ -66,7 +66,7 @@ import {
   dvisNumClusters,
   dvisBitofs,
 } from "../qcommon/qfiles";
-import { parseBspxDirectory, parseDecoupledLM, parseLightgrid, type DecoupledLmResultT, type LightgridT } from "../qcommon/bspx";
+import { parseBspxDirectory, parseDecoupledLM, parseLightgrid, type DecoupledLmFaceT, type DecoupledLmResultT, type LightgridT } from "../qcommon/bspx";
 import { type SurfcacheT, ri, r_notexture_mip, r_worldmodel, MAX_LBM_HEIGHT, SetWorldModel, SetOldViewCluster } from "./r_local";
 import type * as RImageModule from "./r_image";
 import type * as RRastModule from "./r_rast";
@@ -213,6 +213,51 @@ export class MtexinfoT {
   next: MtexinfoT | null = null; // animation chain
 }
 
+/*
+BSPX DECOUPLED_LM data attached to one face, in the two forms this
+renderer's two lighting consumers each need.
+
+`width`/`height`/`axis`/`offset` are the raw lump fields (see
+qcommon/bspx.ts's DecoupledLmFaceT and gl_model.ts's identical
+MsurfaceT.decoupledLm): the decoupled lightmap's own texel grid and the
+world-space -> lightmap-texel mapping `ds = DotProduct(point, axis[0]) +
+offset[0]`. r_light.ts's RecursiveLightPoint uses those directly, exactly
+as gl_light.ts does, because it already has the world-space impact point.
+
+`map` is this renderer's addition, and exists because the software
+surface cache has no room for a second texel grid: r_surf.ts/r_scan.ts
+walk ONE grid per surface, the classic scale-16 texture-axis grid of
+smax*tmax = (extents[0]>>4)+1 by (extents[1]>>4)+1 texels, and every
+consumer downstream of R_BuildLightMap (the surface cache blocks, the
+dynamic-light injector R_AddDynamicLights, the r_lightptr row stepping in
+r_surf.ts's block drawers) is built around it. So instead of teaching all
+of that about a second grid, R_BuildLightMap RESAMPLES the decoupled
+lightmap onto the classic grid, and `map` is the affine transform that
+does it: classic lightmap texel (s,t) -> decoupled lightmap texel
+
+    ds = sBase + s*sStepS + t*sStepT
+    dt = tBase + s*tStepS + t*tStepT
+
+Derived once at load time in SetupDecoupledLightmap. Both grids are
+planar samplings of the same face, so the exact relation between them IS
+affine -- this is a resampling of correct data onto a coarser grid, not
+an approximation of the lighting itself.
+*/
+export interface SoftDecoupledLmT {
+  readonly width: number;
+  readonly height: number;
+  readonly axis: readonly [Vec3, Vec3];
+  readonly offset: readonly [number, number];
+  readonly map: {
+    readonly sBase: number;
+    readonly sStepS: number;
+    readonly sStepT: number;
+    readonly tBase: number;
+    readonly tStepS: number;
+    readonly tStepT: number;
+  };
+}
+
 export class MsurfaceT {
   visframe = 0; // should be drawn when node is crossed
 
@@ -236,6 +281,16 @@ export class MsurfaceT {
   // lighting info
   styles: number[] = new Array<number>(4).fill(0); // MAXLIGHTMAPS
   samples: Uint8Array | null = null; // [numstyles*surfsize]
+
+  // This port only -- not in vanilla's msurface_t. Set only for a face
+  // carried by a BSPX DECOUPLED_LM lump (see SetupDecoupledLightmap below);
+  // null for every classic face, which keeps every classic map on exactly
+  // the vanilla code path. r_light.ts reads it in two places:
+  // RecursiveLightPoint (samples the decoupled grid directly from the world
+  // -space impact point, mirroring gl_light.ts) and R_BuildLightMap (walks
+  // the classic smax*tmax grid and resamples the decoupled grid through
+  // `map` below).
+  decoupledLm: SoftDecoupledLmT | null = null;
 
   nextalphasurface: MsurfaceT | null = null;
 
@@ -982,6 +1037,119 @@ function CalcSurfaceExtents(s: MsurfaceT): void {
 }
 
 /*
+================
+SetupDecoupledLightmap
+
+Applies one face's BSPX DECOUPLED_LM record: rebinds s.samples to the
+decoupled lightmap's own offset and derives the classic-grid -> decoupled
+-grid affine transform described on SoftDecoupledLmT.
+
+Mirrors gl_model.ts's DECOUPLED_LM override block in Mod_LoadFaces (and
+q2repro's BSP_ParseDecoupledLM, which does the same unconditional per-face
+overwrite of lightofs/samples right after the classic face lump loads).
+The one difference from the GL side is the lightdata index: this renderer
+converts the 24-bit RGB LIGHTING lump down to one byte per luxel at load
+time (Mod_LoadLighting, "brightest component" -- vanilla ref_soft does the
+same), so a byte offset into the on-disk RGB lump becomes offset/3 here,
+exactly as the classic lightofs reads a few lines up already do.
+
+Deriving `map`: a classic lightmap texel (s,t) names the point P on the
+face's plane whose texture coordinates are
+
+    DotProduct(P, tex.vecs[0]) + tex.vecs[0][3] = texturemins[0] + 16*s
+    DotProduct(P, tex.vecs[1]) + tex.vecs[1][3] = texturemins[1] + 16*t
+
+which, together with the plane equation DotProduct(P, normal) = dist,
+is a 3x3 solve for P. Writing that solve with the rows tex.vecs[0],
+tex.vecs[1], normal gives the inverse's columns as the usual cross
+products over the determinant, so P is affine in (s,t):
+
+    P(s,t) = P0 + s*(16*colS) + t*(16*colT)
+
+Feeding P(s,t) through the decoupled mapping ds = DotProduct(P, axis[0])
++ offset[0] then collapses to the six scalars stored in `map`.
+
+A face whose texture axes are degenerate against its own plane (zero
+determinant) has no such solve. That does not occur in well-formed
+content, but rather than emit garbage coordinates this falls back to
+stretching the decoupled grid across the classic one, which keeps the
+face lit and merely misaligned.
+
+Exported only so test/r_soft_decoupled_lm.test.ts can exercise the
+transform directly (static in spirit, like R_BuildLightMap in r_light.ts).
+================
+*/
+export function SetupDecoupledLightmap(s: MsurfaceT, dlmFace: DecoupledLmFaceT): void {
+  s.samples = dlmFace.lightofs === null || !loadmodel.lightdata ? null : loadmodel.lightdata.subarray(Math.floor(dlmFace.lightofs / 3));
+
+  const tex = s.texinfo;
+  const plane = s.plane;
+  const axis0 = vec3(dlmFace.lmAxis[0][0], dlmFace.lmAxis[0][1], dlmFace.lmAxis[0][2]);
+  const axis1 = vec3(dlmFace.lmAxis[1][0], dlmFace.lmAxis[1][1], dlmFace.lmAxis[1][2]);
+
+  const smax = (s.extents[0] >> 4) + 1;
+  const tmax = (s.extents[1] >> 4) + 1;
+
+  // "stretch the decoupled grid over the classic grid" fallback, used when
+  // the 3x3 solve below is degenerate (see this function's header comment).
+  const stretch = () => ({
+    sBase: 0,
+    sStepS: smax > 1 ? (dlmFace.lmWidth - 1) / (smax - 1) : 0,
+    sStepT: 0,
+    tBase: 0,
+    tStepS: 0,
+    tStepT: tmax > 1 ? (dlmFace.lmHeight - 1) / (tmax - 1) : 0,
+  });
+
+  let map: SoftDecoupledLmT["map"];
+  if (!tex || !plane) {
+    map = stretch();
+  } else {
+    const r0 = vec3(tex.vecs[0][0], tex.vecs[0][1], tex.vecs[0][2]);
+    const r1 = vec3(tex.vecs[1][0], tex.vecs[1][1], tex.vecs[1][2]);
+    const n = plane.normal;
+
+    const cross = (a: Vec3, b: Vec3): Vec3 => vec3(a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]);
+
+    const c0 = cross(r1, n); // inverse column for the tex.vecs[0] coordinate
+    const c1 = cross(n, r0); // inverse column for the tex.vecs[1] coordinate
+    const c2 = cross(r0, r1); // inverse column for the plane-distance coordinate
+    const det = DotProduct(r0, c0);
+
+    if (Math.abs(det) < 1e-9) {
+      map = stretch();
+    } else {
+      const inv = 1 / det;
+      const colS = vec3(c0[0] * inv, c0[1] * inv, c0[2] * inv);
+      const colT = vec3(c1[0] * inv, c1[1] * inv, c1[2] * inv);
+      const colD = vec3(c2[0] * inv, c2[1] * inv, c2[2] * inv);
+
+      const u0 = s.texturemins[0] - tex.vecs[0][3];
+      const v0 = s.texturemins[1] - tex.vecs[1][3];
+      const d = plane.dist;
+      const p0 = vec3(u0 * colS[0] + v0 * colT[0] + d * colD[0], u0 * colS[1] + v0 * colT[1] + d * colD[1], u0 * colS[2] + v0 * colT[2] + d * colD[2]);
+
+      map = {
+        sBase: DotProduct(p0, axis0) + dlmFace.lmOffset[0],
+        sStepS: 16 * DotProduct(colS, axis0),
+        sStepT: 16 * DotProduct(colT, axis0),
+        tBase: DotProduct(p0, axis1) + dlmFace.lmOffset[1],
+        tStepS: 16 * DotProduct(colS, axis1),
+        tStepT: 16 * DotProduct(colT, axis1),
+      };
+    }
+  }
+
+  s.decoupledLm = {
+    width: dlmFace.lmWidth,
+    height: dlmFace.lmHeight,
+    axis: [axis0, axis1],
+    offset: dlmFace.lmOffset,
+    map,
+  };
+}
+
+/*
 =================
 Mod_LoadFaces
 =================
@@ -1029,6 +1197,12 @@ function Mod_LoadFaces(l: LumpT): void {
     const lightofs = mod_view.getInt32(base + 16, true);
     if (lightofs === -1) s.samples = null;
     else s.samples = loadmodel.lightdata ? loadmodel.lightdata.subarray(Math.floor(lightofs / 3)) : null;
+
+    // BSPX DECOUPLED_LM override -- must run after CalcSurfaceExtents (it
+    // needs the classic grid's texturemins/extents) and before the SURF_WARP/
+    // SURF_FLOWING blocks below overwrite those with the turbulent sentinels.
+    const dlmFace = loadmodel.bspx?.decoupledLm?.faces[surfnum] ?? null;
+    if (dlmFace) SetupDecoupledLightmap(s, dlmFace);
 
     // set the drawing flags flag
     if (!s.texinfo.image) continue;
@@ -1107,6 +1281,12 @@ function Mod_LoadFacesExt(l: LumpT): void {
     for (let i = 0; i < MAXLIGHTMAPS; i++) s.styles[i] = din.styles[i];
     if (din.lightofs === -1) s.samples = null;
     else s.samples = loadmodel.lightdata ? loadmodel.lightdata.subarray(Math.floor(din.lightofs / 3)) : null;
+
+    // BSPX DECOUPLED_LM override -- same placement rationale as the classic
+    // Mod_LoadFaces above (after CalcSurfaceExtents, before the turbulent
+    // sentinels overwrite texturemins/extents).
+    const dlmFace = loadmodel.bspx?.decoupledLm?.faces[surfnum] ?? null;
+    if (dlmFace) SetupDecoupledLightmap(s, dlmFace);
 
     // set the drawing flags flag
     if (!s.texinfo.image) continue;
@@ -1611,45 +1791,39 @@ function Mod_LoadBrushModel(mod: ModelT, buffer: Uint8Array): void {
     loadmodel.bspx = decoupledLm || lightgrid ? { decoupledLm, lightgrid } : null;
   }
 
-  // BSPX DECOUPLED_LM maps: q2repro (the only rerelease-era reference this
-  // port has) HAS NO SOFTWARE RENDERER AT ALL (verified: no
-  // src/refresh/*soft*, no sw_*.c anywhere in ~/Projects/qsrc/q2repro) --
-  // there is no reference "how does the soft path handle DECOUPLED_LM"
-  // behavior to port, faithfully or otherwise, and this renderer's
-  // lighting pipeline (r_light.ts/r_surf.ts) never reads BSPX data, so a
-  // DECOUPLED_LM face's real per-texel lighting cannot be reproduced here
-  // without a rewrite of the surface-cache/lightmap pipeline (it assumes
-  // one texel grid, scale 16, shared by both texture and lightmap
-  // sampling -- DECOUPLED_LM's whole point on the GL side is a SEPARATE
-  // lightmap axis/scale/offset from the texture's own, which this
-  // renderer's data model has no room for).
+  // BSPX DECOUPLED_LM maps: on a real rerelease BSP the classic dface_t
+  // lightofs field is -1 for EVERY face (verified against
+  // baseq2/maps/base1.bsp: all 16787 faces), while the LUMP_LIGHTING lump
+  // is fully populated (4335168 bytes for that same map) -- the lightmaps
+  // are all there, and DECOUPLED_LM is the only thing that says where each
+  // face's lightmap lives and how it maps onto the face. A renderer that
+  // ignores DECOUPLED_LM therefore finds no lightmap for any surface in
+  // the map.
   //
-  // This was previously a whole-map refusal (ERR_DROP). Real data shows
-  // that is a worse degrade than necessary: a DECOUPLED_LM map's classic
-  // dface_t lightofs field is -1 for every face (verified against
-  // baseq2/maps/base1.bsp: all 16787 faces) -- and this renderer's own
-  // R_BuildLightMap (r_light.ts) ALREADY treats lightofs===-1 (surf.samples
-  // === null) as "no static lightmap data", clearing blocklights to 0,
-  // which the bound/invert/shift step at the end of R_BuildLightMap turns
-  // into the renderer's ordinary MAXIMUM-brightness encoding -- i.e. a
-  // ready-made, pre-existing, faithful-to-vanilla fullbright fallback for
-  // exactly this case (the same path any classic lightofs===-1 brush,
-  // decoupled or not, has always taken). So DECOUPLED_LM surfaces render
-  // with correct geometry and textures, just flat/fullbright-shaded
-  // instead of properly lit -- a per-surface flat-shade fallback, not a
-  // per-map refusal -- and need no code change at all beyond not refusing
-  // to load. (Some DECOUPLED_LM remaster maps -- verified real:
+  // This used to be exactly that: parse-and-warn only, on the belief that
+  // surf.samples === null degraded to fullbright. It does not. Only the
+  // r_fullbright / "map has no lightdata at all" early-out in
+  // R_BuildLightMap leaves blocklights at 0 (the brightest value in this
+  // renderer's INVERTED light encoding). A lit map whose individual face
+  // has no samples falls through to the normal path, where the closing
+  // bound/invert/shift turns a zero accumulator into (255*256) >> (8 -
+  // VID_CBITS) == 16320, whose `light & 0xFF00` colormap row is 63 -- the
+  // DARKEST row. So the old behavior rendered every surface of every
+  // rerelease map near-black, not fullbright.
+  //
+  // SetupDecoupledLightmap (above) now consumes the lump for real, in the
+  // one way this renderer's data model allows: r_light.ts's
+  // RecursiveLightPoint samples the decoupled grid directly (mirroring
+  // gl_light.ts), and R_BuildLightMap resamples it onto the classic
+  // scale-16 grid the surface cache is built around. See SoftDecoupledLmT
+  // for why resampling rather than a second grid.
+  //
+  // (Some DECOUPLED_LM remaster maps -- verified real:
   // baseq2/maps/rhangar1.bsp, q2dm3.bsp, rlava1.bsp, rlava2.bsp,
   // rmine1.bsp -- separately also have a handful of surfaces whose plain
   // geometry/texture-axis extents exceed the classic 256-unit cap; those
   // are caught and skipped independently by SURF_EXTENTS_SKIP below, same
   // as the non-BSPX Q64 case, not by this block.)
-  if (loadmodel.bspx?.decoupledLm) {
-    ri.Con_Printf(
-      PRINT_ALL,
-      `${mod.name}: this map uses BSPX decoupled lightmaps (DECOUPLED_LM, ${loadmodel.bspx.decoupledLm.faces.length} faces) -- the software renderer does not consume BSPX data, so affected surfaces render fullbright (flat-shaded) instead of properly lit; load with the OpenGL renderer for correct lighting\n`,
-    );
-  }
 
   // Classic (non-BSPX) content whose raw geometry/texture-axis extents
   // genuinely exceed vanilla's 256-unit surface-cache cap -- verified

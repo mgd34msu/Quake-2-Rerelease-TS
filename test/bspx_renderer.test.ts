@@ -1,14 +1,18 @@
 /*
 Tests for BSPX DECOUPLED_LM consumption in the GL renderer (src/ref_gl/
-gl_model.ts, gl_rsurf.ts, gl_light.ts) and the software renderer's per-
-surface fullbright fallback for a DECOUPLED_LM map (src/ref_soft/r_model.ts)
--- see this unit's brief: q2repro's src/refresh/surf.c build_surface_poly's
-`if (bsp->lm_decoupled)` branch and src/common/bsp.c's BSP_ParseDecoupledLM/
-BSP_RecursiveLightPoint are the reference this port's selection logic
-matches; q2repro has no software renderer at all (verified: no sw_*.c or
-*soft* anywhere under ~/Projects/qsrc/q2repro/src/), which is why the
-software-renderer half of this file only tests that the map still loads and
-renders (fullbright), not any attempt at real decoupled lighting support.
+gl_model.ts, gl_rsurf.ts, gl_light.ts) and in the software renderer
+(src/ref_soft/r_model.ts's SetupDecoupledLightmap) -- q2repro's
+src/refresh/surf.c build_surface_poly's `if (bsp->lm_decoupled)` branch and
+src/common/bsp.c's BSP_ParseDecoupledLM/BSP_RecursiveLightPoint are the
+reference this port's selection logic matches.
+
+q2repro has no software renderer at all (verified: no sw_*.c or *soft*
+anywhere under ~/Projects/qsrc/q2repro/src/), so the software side has no
+reference to copy structurally; what it does instead is resample the
+decoupled lightmap onto the classic scale-16 grid its surface cache is
+built around (see SoftDecoupledLmT in src/ref_soft/r_model.ts). The
+software-renderer block below covers lump attachment; the resampling math
+and the lit end-to-end path are covered by r_soft_decoupled_lm.test.ts.
 
 Self-sufficient per PORTING.md rule 13: each test initializes the globals it
 reads (SetRefImports, Mod_Init/Mod_FreeAll, SetQGL, SetNoTexture) and does
@@ -497,11 +501,11 @@ describe("GL renderer -- BSPX DECOUPLED_LM", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Software renderer: src/ref_soft/r_model.ts -- per-surface fullbright
-// fallback (loads and renders, no whole-map refusal)
+// Software renderer: src/ref_soft/r_model.ts -- DECOUPLED_LM is consumed
+// per face (SetupDecoupledLightmap), no whole-map refusal.
 // ---------------------------------------------------------------------------
 
-describe("Software renderer -- BSPX DECOUPLED_LM fullbright fallback", () => {
+describe("Software renderer -- BSPX DECOUPLED_LM consumption", () => {
   const filesSoft = new Map<string, Uint8Array>();
   let conPrints: string[] = [];
 
@@ -579,7 +583,7 @@ describe("Software renderer -- BSPX DECOUPLED_LM fullbright fallback", () => {
     rModel.Mod_FreeAll();
   });
 
-  test("Mod_ForName: BSPX DECOUPLED_LM box room loads successfully with a one-time fullbright-fallback warning (no whole-map refusal)", () => {
+  test("Mod_ForName: BSPX DECOUPLED_LM box room loads and attaches the decoupled lightmap to every face (no whole-map refusal, no fullbright surrender)", () => {
     const name = "maps/decoupled.bsp";
     registerSoft(name, appendDecoupledLm(buildBoxRoomBsp(undefined, { renderable: true }), SIX_BOX_FACES));
 
@@ -592,11 +596,26 @@ describe("Software renderer -- BSPX DECOUPLED_LM fullbright fallback", () => {
     expect(model.numsurfaces).toBe(6);
     expect(rModel.loadmodel.bspx?.decoupledLm).not.toBeNull();
 
-    // exactly one summary warning explaining the fullbright degrade, not a
-    // Sys_Error/thrown refusal.
-    const warnings = conPrints.filter((s) => s.includes("DECOUPLED_LM") && s.includes("fullbright"));
-    expect(warnings.length).toBe(1);
-    expect(warnings[0]).toMatch(/does not consume BSPX data/);
+    // Every face now carries its DECOUPLED_LM record plus the classic-grid
+    // resampling transform SetupDecoupledLightmap derives -- the software
+    // renderer consumes the lump rather than warning that it cannot. (This
+    // fixture's lightofs fields are all the "no lightmap" sentinel and
+    // bsp_builder's LUMP_LIGHTING is empty, so `samples` stays null; the
+    // lit case is covered by r_soft_decoupled_lm.test.ts.)
+    for (let i = 0; i < model.numsurfaces; i++) {
+      const dlm = model.surfaces[i].decoupledLm;
+      expect(dlm).not.toBeNull();
+      if (!dlm) throw new Error("decoupledLm not set");
+      expect(dlm.width).toBe(SIX_BOX_FACES[i].width);
+      expect(dlm.height).toBe(SIX_BOX_FACES[i].height);
+      expect(Number.isFinite(dlm.map.sStepS)).toBe(true);
+      expect(Number.isFinite(dlm.map.tStepT)).toBe(true);
+    }
+
+    // the old "does not consume BSPX data / renders fullbright" surrender
+    // warning is gone, because it is no longer true.
+    expect(conPrints.filter((s) => s.includes("fullbright")).length).toBe(0);
+    expect(conPrints.filter((s) => s.includes("does not consume BSPX data")).length).toBe(0);
   });
 
   test("Mod_ForName: classic box room (no BSPX) is never rejected by the DECOUPLED_LM check, and Mod_LoadFaces populates all 6 faces", () => {

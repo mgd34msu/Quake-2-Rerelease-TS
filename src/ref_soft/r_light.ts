@@ -159,6 +159,39 @@ function RecursiveLightPoint(node: MnodeOrLeaf, start: Vec3, end: Vec3): number 
 
     if (surf.flags & (SURF_DRAWTURB | SURF_DRAWSKY)) continue; // no lightmaps
 
+    // BSPX DECOUPLED_LM face: sample the decoupled grid straight from the
+    // world-space impact point, which is what its lm_axis/lm_offset are
+    // for. Mirrors gl_light.ts's RecursiveLightPoint branch (and q2repro's
+    // BSP_RecursiveLightPoint, which samples every face this way and never
+    // touches surf->texinfo for it), placed likewise BEFORE the `!tex`
+    // guard. The classic branch below is untouched, so a classic map's
+    // lighting is bit-identical to before. The only difference from the GL
+    // sibling is the stride: this renderer's lightdata is one byte per
+    // luxel (Mod_LoadLighting collapses the 24-bit lump to its brightest
+    // component), not three, so the offsets here are unscaled.
+    const dlm = surf.decoupledLm;
+    if (dlm) {
+      const dsf = DotProduct(mid, dlm.axis[0]) + dlm.offset[0];
+      const dtf = DotProduct(mid, dlm.axis[1]) + dlm.offset[1];
+
+      if (dsf < 0 || dsf > dlm.width - 1) continue;
+      if (dtf < 0 || dtf > dlm.height - 1) continue;
+
+      if (!surf.samples) return 0;
+
+      VectorCopy(vec3_origin, pointcolor);
+
+      let dlmOffset = (dtf | 0) * dlm.width + (dsf | 0);
+      for (let maps = 0; maps < MAXLIGHTMAPS && surf.styles[maps] !== 255; maps++) {
+        const samp = (surf.samples[dlmOffset] ?? 0) * (1.0 / 255); // adjust for gl scale
+        const scales = r_newrefdef.lightstyles[surf.styles[maps]].rgb;
+        VectorMA(pointcolor, samp, scales, pointcolor);
+        dlmOffset += dlm.width * dlm.height;
+      }
+
+      return 1;
+    }
+
     const tex = surf.texinfo;
     if (!tex) continue;
 
@@ -329,7 +362,49 @@ export function R_BuildLightMap(): void {
 
   // add all the lightmaps
   const lightmap = surf.samples;
-  if (lightmap) {
+  const dlm = surf.decoupledLm;
+  if (lightmap && dlm) {
+    // BSPX DECOUPLED_LM face. The decoupled lightmap has its own texel grid
+    // (its own resolution, orientation and origin on the face), so a texel
+    // of it does NOT correspond to a texel of the classic scale-16 grid
+    // that blocklights and everything downstream of it are sized around.
+    // Resample it onto the classic grid through the affine transform
+    // derived at load time -- see r_model.ts's SoftDecoupledLmT for why
+    // this renderer resamples instead of carrying a second grid, and
+    // SetupDecoupledLightmap for the derivation.
+    //
+    // Everything else is structurally the classic loop below: same
+    // blocklights accumulator, same per-style 8.8 lightadj scale, same
+    // "advance one whole lightmap per style" stride -- only that stride is
+    // the decoupled lightmap's own size rather than the classic grid's.
+    // That keeps every later stage (R_AddDynamicLights, the bound/invert/
+    // shift, r_surf.ts's row stepping) on its untouched vanilla path.
+    const map = dlm.map;
+    const lmsize = dlm.width * dlm.height;
+    const maxS = dlm.width - 1;
+    const maxT = dlm.height - 1;
+
+    let offset = 0;
+    for (let maps = 0; maps < MAXLIGHTMAPS && surf.styles[maps] !== 255; maps++) {
+      const scale = r_drawsurf.lightadj[maps]; // 8.8 fraction
+      for (let t = 0; t < tmax; t++) {
+        let ds = map.sBase + t * map.sStepT;
+        let dt = map.tBase + t * map.tStepT;
+        for (let s = 0; s < smax; s++, ds += map.sStepS, dt += map.tStepS) {
+          let ls = Math.round(ds);
+          let lt = Math.round(dt);
+          if (ls < 0) ls = 0;
+          else if (ls > maxS) ls = maxS;
+          if (lt < 0) lt = 0;
+          else if (lt > maxT) lt = maxT;
+
+          const i = t * smax + s;
+          blocklights[i] = (blocklights[i] + (lightmap[offset + lt * dlm.width + ls] ?? 0) * scale) >>> 0;
+        }
+      }
+      offset += lmsize; // skip to next lightmap
+    }
+  } else if (lightmap) {
     let offset = 0;
     for (let maps = 0; maps < MAXLIGHTMAPS && surf.styles[maps] !== 255; maps++) {
       const scale = r_drawsurf.lightadj[maps]; // 8.8 fraction
