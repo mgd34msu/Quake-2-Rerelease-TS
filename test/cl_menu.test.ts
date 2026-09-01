@@ -23,6 +23,7 @@ import { M_PushMenu, M_PopMenu, M_ForceMenuOff, M_Draw, M_Keydown, M_Menu_Main_f
 import { MenuframeworkS, MenuactionS, MenuseparatorS, MenusliderS, MTYPE_ACTION, MTYPE_SEPARATOR, MTYPE_SLIDER } from "../src/client/qmenu";
 import { Menu_AddItem, Menu_AdjustCursor, Menu_SlideItem, Menu_ItemAtCursor } from "../src/client/qmenu_impl";
 import { API_VERSION, type RefExports } from "../src/client/ref";
+import { SfxVolumeFormatter, SensitivityFormatter } from "../src/client/menu";
 
 beforeEach(() => {
   M_ForceMenuOff();
@@ -318,5 +319,32 @@ describe("M_Draw's backdrop is drawn before the menu's own content", () => {
     } finally {
       setRe(null);
     }
+  });
+});
+
+// QoL addition (Mike, 2026-09-01): slider live value readouts (see
+// src/client/qmenu.ts's MenusliderS.valueFormatter). These two formatters
+// back the options menu's "effects volume"/"mouse speed" sliders -- see
+// Options_MenuInit in src/client/menu.ts for their minvalue/maxvalue/
+// callback wiring.
+describe("SfxVolumeFormatter -- effects volume slider readout (s_volume = curvalue/10)", () => {
+  test.each([
+    [0, "0%"],
+    [5, "50%"],
+    [7, "70%"],
+    [10, "100%"], // native/max
+  ])("curvalue %p -> %p", (curvalue, expected) => {
+    expect(SfxVolumeFormatter(curvalue)).toBe(expected);
+  });
+});
+
+describe("SensitivityFormatter -- mouse speed slider readout (sensitivity = curvalue/2.0)", () => {
+  test.each([
+    [2, "1.0"], // minvalue
+    [3, "1.5"],
+    [10, "5.0"],
+    [22, "11.0"], // maxvalue
+  ])("curvalue %p -> %p", (curvalue, expected) => {
+    expect(SensitivityFormatter(curvalue)).toBe(expected);
   });
 });

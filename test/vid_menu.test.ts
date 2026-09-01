@@ -23,12 +23,18 @@ import {
   s_customwidth_field,
   s_customheight_field,
   s_scale_slider,
+  s_scale_fit_box,
   s_screensize_slider,
   s_brightness_slider,
   s_fs_box,
   CUSTOM_MODE_INDEX,
   SOFTWARE_MENU,
   OPENGL_MENU,
+  ScaleFormatter,
+  ScreenSizeFormatter,
+  BrightnessFormatter,
+  TextureQualityFormatter,
+  modeLabel,
 } from "../src/platform/vid_menu";
 
 // A table mode a few rows into resolutions[] (see vid_menu.ts's own list):
@@ -45,6 +51,7 @@ function primeCvars(opts: { swMode: number; glMode: number; customWidth: number;
   Cvar_Get("r_customwidth", "1280", 0);
   Cvar_Get("r_customheight", "720", 0);
   Cvar_Get("vid_scale", "1", 0);
+  Cvar_Get("vid_scale_fit", "1", 0);
   Cvar_Get("vid_ref", "soft", 0);
   Cvar_Get("vid_fullscreen", "0", 0);
   Cvar_Get("vid_gamma", "1", 0);
@@ -149,16 +156,96 @@ describe("VID_MenuInit -- row layout is spaced on a uniform rhythm (defect item 
     expect(widthY - modeY).toBe(18);
   });
 
-  test("rows past the scale slider fall back to a flat, gap-free 10-unit rhythm (no more of the old 70->90/100->120 double gaps)", () => {
+  test("rows past the scale slider fall back to a flat, gap-free 10-unit rhythm (no more of the old 70->90/100->120 double gaps), now including the new scale-to-fullscreen row", () => {
     VID_MenuInit();
 
     const scaleY = s_scale_slider[OPENGL_MENU]?.generic.y ?? -1;
+    const scaleFitY = s_scale_fit_box[OPENGL_MENU]?.generic.y ?? -1;
     const screensizeY = s_screensize_slider[OPENGL_MENU]?.generic.y ?? -1;
     const brightnessY = s_brightness_slider[OPENGL_MENU]?.generic.y ?? -1;
     const fsBoxY = s_fs_box[OPENGL_MENU]?.generic.y ?? -1;
 
-    expect(screensizeY - scaleY).toBe(10);
+    // QoL addition (Mike, 2026-09-01): s_scale_fit_box's row was inserted
+    // right after the scale slider, shifting every row from "screen size"
+    // onward down by 10 -- see vid_menu.ts's VID_MenuInit doc comment.
+    expect(scaleFitY - scaleY).toBe(10);
+    expect(screensizeY - scaleFitY).toBe(10);
     expect(brightnessY - screensizeY).toBe(10);
     expect(fsBoxY - brightnessY).toBe(10);
+  });
+});
+
+// QoL addition (Mike, 2026-09-01): slider live value readouts -- see
+// src/client/qmenu.ts's MenusliderS.valueFormatter and this file's own
+// ScaleFormatter/ScreenSizeFormatter/BrightnessFormatter/
+// TextureQualityFormatter, each mirroring its slider's own callback/
+// ApplyChanges cvar-write math exactly.
+describe("vid_menu.ts formatter value tables", () => {
+  test.each([
+    [1, "0.10x"], // VID_SCALE_MIN * 10
+    [5, "0.50x"],
+    [10, "1.00x (native)"], // VID_SCALE_MAX * 10 -- the owner's own reference point
+  ])("ScaleFormatter(%p) -> %p", (curvalue, expected) => {
+    expect(ScaleFormatter(curvalue)).toBe(expected);
+  });
+
+  test.each([
+    [3, "30%"], // minvalue
+    [10, "100%"],
+    [12, "120%"], // maxvalue
+  ])("ScreenSizeFormatter(%p) -> %p", (curvalue, expected) => {
+    expect(ScreenSizeFormatter(curvalue)).toBe(expected);
+  });
+
+  test.each([
+    [5, "1.30"], // minvalue -- dimmest
+    [9, "0.90"],
+    [13, "0.50"], // maxvalue -- brightest
+  ])("BrightnessFormatter(%p) -> %p", (curvalue, expected) => {
+    expect(BrightnessFormatter(curvalue)).toBe(expected);
+  });
+
+  test.each([
+    [0, "lowest (picmip 3)"], // minvalue
+    [1, "low (picmip 2)"],
+    [2, "medium (picmip 1)"],
+    [3, "high (picmip 0)"], // maxvalue
+  ])("TextureQualityFormatter(%p) -> %p", (curvalue, expected) => {
+    expect(TextureQualityFormatter(curvalue)).toBe(expected);
+  });
+});
+
+describe("s_scale_fit_box -- \"scale to fullscreen\" toggle (defect: postage-stamp fullscreen)", () => {
+  test("defaults to curvalue 1 (\"fit screen\") on a fresh VID_MenuInit", () => {
+    VID_MenuInit();
+
+    expect(s_scale_fit_box[SOFTWARE_MENU]?.curvalue).toBe(1);
+    expect(s_scale_fit_box[OPENGL_MENU]?.curvalue).toBe(1);
+    expect(s_scale_fit_box[OPENGL_MENU]?.itemnames).toEqual(["1:1 pixels", "fit screen"]);
+  });
+
+  test("tracks vid_scale_fit=0 (\"1:1 pixels\") when the cvar is off", () => {
+    Cvar_SetValue("vid_scale_fit", 0);
+
+    VID_MenuInit();
+
+    expect(s_scale_fit_box[SOFTWARE_MENU]?.curvalue).toBe(0);
+    expect(s_scale_fit_box[OPENGL_MENU]?.curvalue).toBe(0);
+  });
+});
+
+describe("modeLabel -- colloquial + aspect-ratio mode labels (defect: no reference point on the mode list)", () => {
+  test.each([
+    [1280, 720, "1280x720 (720p, 16:9)"],
+    [1920, 1080, "1920x1080 (1080p, 16:9)"],
+    [2560, 1440, "2560x1440 (1440p, 16:9)"],
+    [3840, 2160, "3840x2160 (2160p, 16:9)"],
+    [1920, 1200, "1920x1200 (16:10)"],
+    [1366, 768, "1366x768 (16:9)"], // tolerance case: 1366/768 != 16/9 exactly
+    [2560, 1080, "2560x1080 (21:9)"], // marketing-convention special case
+    [3440, 1440, "3440x1440 (21:9)"], // marketing-convention special case
+    [640, 480, "640x480 (4:3)"],
+  ])("modeLabel(%p, %p) -> %p", (w, h, expected) => {
+    expect(modeLabel(w, h)).toBe(expected);
   });
 });

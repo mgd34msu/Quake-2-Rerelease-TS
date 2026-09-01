@@ -58,6 +58,7 @@ export function SWimp_SetMode(width: number, height: number, mode: number, fulls
   // the pre-existing behavior.
   const scale = vidMod().VID_GetScale();
   const render = VID_CalcRenderSize(info.width, info.height, scale);
+  const fit = vidMod().VID_GetScaleFit();
 
   vid.width = render.width;
   vid.height = render.height;
@@ -76,7 +77,7 @@ export function SWimp_SetMode(width: number, height: number, mode: number, fulls
   // the engine renders into a buffer nothing will ever present. When the SDL
   // backend is not armed (dedicated server, headless tests) a false return
   // is the designed degradation, not a failure: vid.buffer IS the frame.
-  if (!SDLVID_Init(render.width, render.height, fullscreen, info.width, info.height) && SDL_BackendEnabled()) {
+  if (!SDLVID_Init(render.width, render.height, fullscreen, info.width, info.height, fit) && SDL_BackendEnabled()) {
     ri.Con_Printf(0, " SDL window/renderer creation failed\n");
     return { pwidth: render.width, pheight: render.height, rserr: RserrT.rserr_invalid_mode };
   }

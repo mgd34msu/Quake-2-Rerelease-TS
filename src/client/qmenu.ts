@@ -82,6 +82,13 @@ export class MenusliderS {
   curvalue = 0;
 
   range = 0;
+
+  // QoL addition (Mike, 2026-09-01): optional curvalue -> display-string
+  // formatter. When set, Slider_Draw (qmenu_impl.ts) draws the formatted
+  // string just past the slider track, in the same row. Display-only --
+  // never affects range/step/cvar writes. No formatter set = today's
+  // rendering, byte-for-byte unchanged.
+  valueFormatter: ((curvalue: number) => string) | null = null;
 }
 
 export class MenulistS {

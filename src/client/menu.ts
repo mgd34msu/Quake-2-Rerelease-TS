@@ -807,6 +807,20 @@ function MouseSpeedFunc(): void {
   Cvar_SetValue("sensitivity", s_options_sensitivity_slider.curvalue / 2.0);
 }
 
+// QoL addition (Mike, 2026-09-01): slider live value readouts -- see
+// MenusliderS.valueFormatter in qmenu.ts. Display-only; the real cvar
+// writes stay in UpdateVolumeFunc/MouseSpeedFunc above. Exported (new
+// functions, no original-C-name collision) so test/cl_menu.test.ts can
+// drive them directly -- same precedent as vid_menu.ts exporting its own
+// widget arrays for test/vid_menu.test.ts.
+export function SfxVolumeFormatter(curvalue: number): string {
+  return `${Math.round(curvalue * 10)}%`;
+}
+
+export function SensitivityFormatter(curvalue: number): string {
+  return (curvalue / 2.0).toFixed(1);
+}
+
 function ClampCvar(min: number, max: number, value: number): number {
   if (value < min) return min;
   if (value > max) return max;
@@ -930,6 +944,7 @@ function Options_MenuInit(): void {
   s_options_sfxvolume_slider.minvalue = 0;
   s_options_sfxvolume_slider.maxvalue = 10;
   s_options_sfxvolume_slider.curvalue = Cvar_VariableValue("s_volume") * 10;
+  s_options_sfxvolume_slider.valueFormatter = SfxVolumeFormatter;
 
   s_options_cdvolume_box.generic.type = MTYPE_SPINCONTROL;
   s_options_cdvolume_box.generic.x = 0;
@@ -962,6 +977,7 @@ function Options_MenuInit(): void {
   s_options_sensitivity_slider.generic.callback = MouseSpeedFunc;
   s_options_sensitivity_slider.minvalue = 2;
   s_options_sensitivity_slider.maxvalue = 22;
+  s_options_sensitivity_slider.valueFormatter = SensitivityFormatter;
 
   s_options_alwaysrun_box.generic.type = MTYPE_SPINCONTROL;
   s_options_alwaysrun_box.generic.x = 0;

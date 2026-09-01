@@ -59,8 +59,8 @@ import { PRINT_ALL, CVAR_REFRESH } from "../shared/q_shared";
 import type { GLimp } from "../ref_gl/gl_rmain";
 import { ri, RserrT } from "../ref_gl/gl_local";
 import { qgl } from "../ref_gl/gl_image";
-import { SDL_AppActivate, SDLGL_CreateContext, SDLGL_CreateWindow, SDLGL_GetProcAddress, SDLGL_SetSwapInterval, SDLGL_Shutdown, SDLGL_SwapWindow } from "./sdl";
-import { VID_CalcRenderSize, VID_CalcScaledRect } from "./vid_scale";
+import { SDL_AppActivate, SDLGL_CreateContext, SDLGL_CreateWindow, SDLGL_GetProcAddress, SDLGL_GetWindowSize, SDLGL_SetSwapInterval, SDLGL_Shutdown, SDLGL_SwapWindow } from "./sdl";
+import { VID_CalcRenderSize, VID_CalcBlitRect, VID_CalcOutputSize } from "./vid_scale";
 import type * as VidModule from "./vid";
 
 // vid.ts (VID_LoadRefresh) statically imports this file's CreateGLimp;
@@ -96,6 +96,11 @@ let scaleDisplayWidth = 0;
 let scaleDisplayHeight = 0;
 let scaleActive = false;
 let scaleWarned = false;
+// QoL addition (Mike, 2026-09-01, "scale to fullscreen" toggle, cvar
+// vid_scale_fit): whether GLimp_EndFrame stretches the render target to
+// fill scaleDisplayWidth/scaleDisplayHeight (true, byte-for-byte the
+// pre-existing behavior) or centers it at its own size, unscaled (false).
+let scaleFit = true;
 
 // Frees the render-scale target, if one exists. Safe to call whether or not
 // GLScale_Setup ever succeeded (every GLimp_SetMode call clears the previous
@@ -118,7 +123,7 @@ function GLScale_Shutdown(): void {
 // -- GLimp_SetMode's caller then renders unscaled at the render resolution
 // directly to the window rather than failing the whole mode set over a
 // feature nothing but vid_scale depends on.
-function GLScale_Setup(renderWidth: number, renderHeight: number, displayWidth: number, displayHeight: number): boolean {
+function GLScale_Setup(renderWidth: number, renderHeight: number, displayWidth: number, displayHeight: number, fit: boolean): boolean {
   if (!qgl.qglGenFramebuffers || !qgl.qglBindFramebuffer || !qgl.qglFramebufferTexture2D || !qgl.qglCheckFramebufferStatus || !qgl.qglBlitFramebuffer || !qgl.qglDeleteFramebuffers) {
     if (!scaleWarned) {
       ri.Con_Printf(PRINT_ALL, "GLimp: framebuffer objects unavailable on this context -- vid_scale disabled\n");
@@ -155,6 +160,7 @@ function GLScale_Setup(renderWidth: number, renderHeight: number, displayWidth: 
   scaleDisplayWidth = displayWidth;
   scaleDisplayHeight = displayHeight;
   scaleActive = true;
+  scaleFit = fit;
   return true;
 }
 
@@ -216,8 +222,23 @@ export function GLimp_SetMode(width: number, height: number, mode: number, fulls
 
   SDLGL_SetSwapInterval(1);
 
-  if (render.width !== info.width || render.height !== info.height) {
-    GLScale_Setup(render.width, render.height, info.width, info.height); // false leaves scaleActive false: renders unscaled, see that function's header comment
+  // QoL addition (Mike, 2026-09-01): SDL_WINDOW_FULLSCREEN_DESKTOP (see
+  // sdl.ts's SDLGL_CreateWindow) resizes the real window to the desktop's
+  // native resolution regardless of info.width/info.height above -- query
+  // it and use THAT as the output surface size in fullscreen, so a small
+  // mode (e.g. 1280x720) on a larger real display (e.g. 3840x2160) still
+  // activates the scale/blit path below instead of leaving the rest of the
+  // real, larger surface never cleared/painted (the corner-anchored
+  // "postage stamp" bug -- see this unit's report). Windowed mode keeps
+  // using info's own size -- it IS the real window size there.
+  let displaySize = { width: info.width, height: info.height };
+  if (fullscreen) {
+    const actual = SDLGL_GetWindowSize();
+    displaySize = VID_CalcOutputSize(info.width, info.height, actual.width, actual.height, true);
+  }
+
+  if (render.width !== displaySize.width || render.height !== displaySize.height) {
+    GLScale_Setup(render.width, render.height, displaySize.width, displaySize.height, vidMod().VID_GetScaleFit()); // false leaves scaleActive false: renders unscaled, see that function's header comment
   }
 
   return { rserr: RserrT.rserr_ok, width: render.width, height: render.height };
@@ -246,7 +267,7 @@ export function GLimp_BeginFrame(camera_separation: number): void {
 
 export function GLimp_EndFrame(): void {
   if (scaleActive && qgl.qglBindFramebuffer && qgl.qglBlitFramebuffer) {
-    const rect = VID_CalcScaledRect(scaleRenderWidth, scaleRenderHeight, scaleDisplayWidth, scaleDisplayHeight);
+    const rect = VID_CalcBlitRect(scaleRenderWidth, scaleRenderHeight, scaleDisplayWidth, scaleDisplayHeight, scaleFit);
 
     qgl.qglBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
     qgl.qglViewport(0, 0, scaleDisplayWidth, scaleDisplayHeight);

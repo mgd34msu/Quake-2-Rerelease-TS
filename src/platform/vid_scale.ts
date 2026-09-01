@@ -105,3 +105,41 @@ export function VID_CalcScaledRect(renderWidth: number, renderHeight: number, di
   const y = Math.floor((dh - h) / 2);
   return { x, y, w, h };
 }
+
+// "Scale to fullscreen" toggle (Mike, 2026-09-01, cvar vid_scale_fit):
+// VID_CalcScaledRect above always stretches (aspect-preserving fill) the
+// render size into the display size. When the player wants crisp,
+// unscaled pixels instead, this returns the render's own size centered in
+// the display -- no stretch, letterboxed/pillarboxed around it (or,
+// symmetrically cropped, if the render is larger than the display).
+export function VID_CalcCenteredRect(renderWidth: number, renderHeight: number, displayWidth: number, displayHeight: number): VidRect {
+  const dw = Number.isFinite(displayWidth) && displayWidth > 0 ? displayWidth : 0;
+  const dh = Number.isFinite(displayHeight) && displayHeight > 0 ? displayHeight : 0;
+  if (!(Number.isFinite(renderWidth) && renderWidth > 0) || !(Number.isFinite(renderHeight) && renderHeight > 0) || dw <= 0 || dh <= 0) {
+    return { x: 0, y: 0, w: dw, h: dh };
+  }
+  return { x: Math.floor((dw - renderWidth) / 2), y: Math.floor((dh - renderHeight) / 2), w: renderWidth, h: renderHeight };
+}
+
+// Single entry point both blit call sites (sdl.ts's SDLVID_Present,
+// glimp.ts's GLimp_EndFrame) use: `fit` true = VID_CalcScaledRect's
+// existing stretch-to-fill behavior; false = VID_CalcCenteredRect's 1:1
+// crisp-pixel behavior. Display-only -- never resizes the render target.
+export function VID_CalcBlitRect(renderWidth: number, renderHeight: number, displayWidth: number, displayHeight: number, fit: boolean): VidRect {
+  return fit ? VID_CalcScaledRect(renderWidth, renderHeight, displayWidth, displayHeight) : VID_CalcCenteredRect(renderWidth, renderHeight, displayWidth, displayHeight);
+}
+
+// Fullscreen output-surface sizing rule (Mike, 2026-09-01: "on a 4K monitor
+// picking 720p fullscreen doesn't mean I want a 720-pixel-high thing, I
+// want to PLAY in 720p"): windowed mode's output surface is the selected
+// mode's own size (unchanged pre-existing behavior); fullscreen's output
+// surface is always the display's native size -- the selected mode instead
+// sizes the RENDER target, which VID_CalcBlitRect then stretches (fit) or
+// centers (no fit) into that native-size output. No physical display-mode
+// switch either way -- SDL_WINDOW_FULLSCREEN_DESKTOP only, see sdl.ts.
+export function VID_CalcOutputSize(modeWidth: number, modeHeight: number, nativeDisplayWidth: number, nativeDisplayHeight: number, fullscreen: boolean): { width: number; height: number } {
+  if (fullscreen && Number.isFinite(nativeDisplayWidth) && nativeDisplayWidth > 0 && Number.isFinite(nativeDisplayHeight) && nativeDisplayHeight > 0) {
+    return { width: Math.round(nativeDisplayWidth), height: Math.round(nativeDisplayHeight) };
+  }
+  return { width: modeWidth, height: modeHeight };
+}

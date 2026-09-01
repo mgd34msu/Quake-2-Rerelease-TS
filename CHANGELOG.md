@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.0.1 — 2026-09-01
+
+### Video UX patch
+- Every menu slider shows a live value readout (resolution scale marks
+  "1.00x (native)"; brightness, sensitivity, volumes, texture quality
+  all show real values).
+- New "scale to fullscreen" toggle (vid_scale_fit, default on): output
+  stretches to fill the display; off means centered 1:1 pixels.
+- Fixed the corner-anchored small-image bug: fullscreen blits were
+  computed against the requested mode size while the window silently
+  resized to desktop-native; geometry now uses the real window size.
+- Fullscreen semantics: the selected mode is the render resolution and
+  output always fills the display — no physical mode switching.
+- Video mode list shows aspect ratios on every entry and colloquial
+  names where standard: "1920x1080 (1080p, 16:9)", "1920x1200 (16:10)".
+- Settings persistence: the whole video cvar family (fullscreen mode
+  included) survives restarts; gl_mode/sw_mode were registered without
+  the archive flag in one path.
+
 ## v1.0.0 — 2026-09-01
 
 First stable release: a complete TypeScript port of Quake 2 (2023

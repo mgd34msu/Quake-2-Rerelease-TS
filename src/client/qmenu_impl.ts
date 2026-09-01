@@ -522,6 +522,12 @@ function Slider_Draw(s: MenusliderS): void {
   re.DrawFill(trackX + 2, trackY + 2, 1, 4, 4); // left end cap
   re.DrawFill(trackX + trackW - 3, trackY + 2, 1, 4, 4); // right end cap
   DrawChar(8 + RCOLUMN_OFFSET + parent.x + s.generic.x + (SLIDER_RANGE - 1) * 8 * s.range, s.generic.y + parent.y, 131);
+
+  // QoL addition (Mike, 2026-09-01): live value readout just past the
+  // track, same row -- see MenusliderS.valueFormatter in qmenu.ts.
+  if (s.valueFormatter) {
+    Menu_DrawString(trackX + trackW + 8, trackY, s.valueFormatter(s.curvalue));
+  }
 }
 
 function SpinControl_DoEnter(s: MenulistS): void {
