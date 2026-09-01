@@ -438,7 +438,7 @@ export async function SV_InitGame(): Promise<void> {
   NET_StringToAdr(`192.246.40.37:${PORT_MASTER}`, master_adr[0]);
 
   // init game
-  SV_InitGameProgs(); // sv_game.ts pending stub -- throws until that unit lands; see report
+  SV_InitGameProgs(); // sv_game.ts is a real implementation now (no longer a throwing stub)
 
   const ge = requireGe();
   for (let i = 0; i < maxc; i++) {

@@ -2,8 +2,11 @@
 Self-sufficient test for the ref_soft type core: constructs the r_local.ts/
 r_model.ts data structures ported from r_local.h/r_model.h, checks that
 SWimp_SetMode (src/platform/swimp.ts) allocates a correctly-sized headless
-framebuffer, and checks that a representative PendingPort stub throws with
-its C function name (PORTING.md's "Pending stubs" convention).
+framebuffer, and checks that a representative bodyless-C-declaration guard
+throws with its C function name (Mod_ClearAll -- PORTING.md's convention for
+a declared-but-never-defined C function; a different, permanent stub class
+from the historical "PendingPort" placeholder PORTING.md also documents,
+which had zero references left once its close phase ran).
 */
 
 import { describe, test, expect } from "bun:test";

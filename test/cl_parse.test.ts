@@ -179,17 +179,13 @@ describe("CL_ParseServerMessage -- svc_* dispatch", () => {
     expect(() => CL_ParseConfigString()).toThrow(ComError);
   });
 
-  test("svc_serverdata calls CL_ClearState, which (transitively, via S_StopAllSounds) still bottoms out in a sibling pending stub -- reported gap, not this unit's to fix", () => {
-    // CL_ClearState itself is now a real cl_main.ts port (landed concurrently
-    // with this unit), but it calls S_StopAllSounds first, which is still
-    // snd_dma.c's pending stub -- so CL_ParseServerData still can't complete
-    // end to end. Asserted as "some PendingPort", not a specific function
-    // name, since which stub it bottoms out at is another unit's business
-    // and may change as siblings land.
+  test("svc_serverdata calls CL_ClearState, which (transitively, via S_StopAllSounds) is real end to end; a truncated message dies on the protocol-version check instead", () => {
+    // CL_ClearState and S_StopAllSounds are both real implementations now
+    // (snd_dma.ts's sound path landed), so CL_ParseServerData no longer
+    // bottoms out in a sibling stub here -- the truncated message below
+    // instead dies on the C's own protocol-version check (ERR_DROP -> ComError).
     MSG_WriteByte(net_message, SvcOpsT.svc_serverdata);
     MSG_BeginReading(net_message);
-    // the sound path is real now; the truncated message dies on the C's own
-    // protocol-version check instead (ERR_DROP -> ComError)
     expect(() => CL_ParseServerMessage()).toThrow(/version/);
 
     resetNetMessage();

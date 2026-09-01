@@ -20,14 +20,13 @@
 // crosshair is Cvar_Get'd by cl_view.c's V_Init (confirmed by grep of
 // quake-2-c), not by SCR_Init -- screen.ts's own banner comment claiming
 // "registered by SCR_Init" is inaccurate (pre-existing, out of this unit's
-// SCOPE to fix); SCR_TouchPics null-guards it accordingly since cl_view.ts
-// is still a pending stub in this port.
+// SCOPE to fix); SCR_TouchPics null-guards it defensively in case it ever
+// runs before V_Init has registered the cvar.
 //
 // SCR_UpdateScreen's normal 3D-refresh branch calls V_RenderView
-// (cl_view.ts) and M_Draw (menu.ts), both still pending stubs that throw --
-// faithful to the C call order; callers must expect that throw until those
-// units land (same situation cl_main.ts already documents for its own
-// SCR_UpdateScreen call sites).
+// (cl_view.ts) and M_Draw (menu.ts) -- both are real, landed implementations
+// (this comment used to describe them as pending stubs that threw; that was
+// true only before cl_view.ts/menu.ts landed).
 
 import {
   scr_con_current,

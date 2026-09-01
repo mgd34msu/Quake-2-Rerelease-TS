@@ -562,7 +562,7 @@ describe("KillBox", () => {
     expect(KillBox(ent)).toBe(true);
   });
 
-  test("propagates the T_Damage PendingPort stub when something blocks the spot", () => {
+  test("calls the real T_Damage (deals damage) when something blocks the spot", () => {
     setupWorld();
     const ent = g_edicts[2];
     ent.mins = vec3(-16, -16, -24);

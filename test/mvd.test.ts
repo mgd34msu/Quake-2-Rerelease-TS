@@ -18,7 +18,7 @@ import { join } from "node:path";
 
 import { Cvar_ForceSet, Cvar_Get } from "../src/qcommon/cvar";
 import { FS_InitFilesystem, FS_Gamedir } from "../src/qcommon/files";
-import { SizeBuf, SZ_Init, MSG_WriteByte, MSG_WriteLong, MSG_WriteShort, MSG_WriteString } from "../src/qcommon/sizebuf";
+import { SizeBuf, SZ_Init, MSG_WriteByte, MSG_WriteLong, MSG_WriteShort, MSG_WriteString, MSG_BeginReading } from "../src/qcommon/sizebuf";
 import { net_message, net_message_buffer } from "../src/qcommon/net_chan";
 import { VANILLA_CODEC } from "../src/qcommon/protocol/vanilla";
 import { SvcOpsT, U_MOREBITS1, U_NUMBER16, U_MODEL } from "../src/qcommon/qcommon";
@@ -37,6 +37,8 @@ import {
   mvd_serverdata,
   MSG_WriteDeltaMvdPlayerstate,
   MSG_ReadDeltaMvdPlayerstate,
+  MSG_WriteDeltaMvdPlayerstateRerelease,
+  MSG_ReadDeltaMvdPlayerstateRerelease,
   MSG_WriteMvdPlayersEnd,
   MSG_ValidMvdClientNumber,
 } from "../src/qcommon/protocol/mvd";
@@ -1132,6 +1134,50 @@ describe("Kex/rerelease MVD sub-protocol", () => {
     expect(ps?.damage_blend[0]).toBeCloseTo(0.5, 2);
     expect(ps?.damage_blend[3]).toBeCloseTo(1, 2);
     expect(ps?.stats[10]).toBe(777);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Rule-17 UB re-audit: MSG_ReadDeltaMvdPlayerstateRerelease's gunframe field
+// used a signed MSG_ReadShort, sign-extending any wire value >= 0x8000 into
+// a negative number (same bug class q2repro.ts's protocol_signed_unsigned_
+// audit fixed for the kex-family codec at cf4c673 -- q2repro's own
+// msg.c:2501/2653/2789 all use the unsigned MSG_ReadWord() for gunframe
+// under MSG_PS_RERELEASE). Self-sufficient direct round trip over the
+// exported write/read pair, no MVD file/record machinery needed.
+// ---------------------------------------------------------------------------
+describe("MSG_WriteDeltaMvdPlayerstateRerelease / MSG_ReadDeltaMvdPlayerstateRerelease -- gunframe >= 0x8000", () => {
+  test("a gunframe value in [0x8000, 0xffff) round-trips as a positive number, not sign-extended", () => {
+    const msg = new SizeBuf();
+    const buf = new Uint8Array(256);
+    SZ_Init(msg, buf, buf.length);
+
+    const to = new PlayerStateT();
+    to.gunframe = 40000; // >= 0x8000; would come back as 40000 - 65536 = -25536 if sign-extended
+
+    MSG_WriteDeltaMvdPlayerstateRerelease(msg, null, to, 1, true);
+
+    MSG_BeginReading(msg);
+    const result = MSG_ReadDeltaMvdPlayerstateRerelease(msg, null);
+
+    expect(result.removed).toBe(false);
+    expect(result.ps.gunframe).toBe(40000);
+  });
+
+  test("a gunframe value of exactly 0xffff round-trips as 65535, not -1", () => {
+    const msg = new SizeBuf();
+    const buf = new Uint8Array(256);
+    SZ_Init(msg, buf, buf.length);
+
+    const to = new PlayerStateT();
+    to.gunframe = 0xffff;
+
+    MSG_WriteDeltaMvdPlayerstateRerelease(msg, null, to, 1, true);
+
+    MSG_BeginReading(msg);
+    const result = MSG_ReadDeltaMvdPlayerstateRerelease(msg, null);
+
+    expect(result.ps.gunframe).toBe(0xffff);
   });
 });
 

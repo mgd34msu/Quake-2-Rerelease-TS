@@ -9,19 +9,23 @@ a R_FindImage call this file needs to avoid for its node/leaf tree test, see
 below) and fakes the `ri` (RefImports) engine callback table Mod_ForName
 needs, per PORTING.md's "test files are self-sufficient" rule.
 
-Known limitation (reported per brief): r_image.ts's R_FindImage, r_rast.ts's
-R_InitSkyBox, r_main.ts's R_NewMap, and r_surf.ts's D_FlushCaches are all
-still PendingPort stubs elsewhere in the ref_soft track. r_model.ts calls
-them in the same order the original C does, so a full Mod_LoadBrushModel or
-R_BeginRegistration run throws PendingPort partway through -- but only
-*after* mutating the model object in place (JS objects are references), so
-the tests below catch that expected throw and then inspect the
-already-populated model via the exported `mod_known`/`mod_inline` arrays.
-The one BSP used for the node/leaf gold test below deliberately has zero
-texinfo/faces entries so Mod_LoadTexinfo's per-entry loop (which calls
-R_FindImage) never executes, letting Mod_LoadBrushModel run all the way to
-its own PendingPort call (R_InitSkyBox, the last line of the function) with
-every node/leaf/plane/submodel field already correctly populated.
+r_image.ts's R_FindImage, r_rast.ts's R_InitSkyBox, r_main.ts's R_NewMap,
+and r_surf.ts's D_FlushCaches are all real, landed implementations now (none
+of the "still a PendingPort stub" state this file's tests were originally
+written against remains) -- but they still run against this file's own
+fake, minimal `ri` (RefImports) table, which doesn't provide everything a
+real engine boot would, so a full Mod_LoadBrushModel or R_BeginRegistration
+run can still throw partway through for an unrelated reason (a missing fake
+`ri` method, a file the fake FS_LoadFile doesn't have registered, etc) --
+but only *after* mutating the model object in place (JS objects are
+references), so the tests below tolerate either outcome (throw or clean
+return) and then inspect the already-populated model via the exported
+`mod_known`/`mod_inline` arrays. The one BSP used for the node/leaf gold
+test below deliberately has zero texinfo/faces entries so Mod_LoadTexinfo's
+per-entry loop (which calls R_FindImage) never executes, letting
+Mod_LoadBrushModel run all the way to its final call (R_InitSkyBox, the
+last line of the function) with every node/leaf/plane/submodel field
+already correctly populated.
 */
 
 import { describe, test, expect, beforeEach } from "bun:test";
@@ -80,7 +84,8 @@ import {
 // ---------------------------------------------------------------------------
 // fake `ri` -- FS_LoadFile serves buffers registered by name; Sys_Error
 // throws a plain Error carrying the message so tests can match on it and
-// tell it apart from a PendingPort thrown by a sibling stub.
+// tell it apart from an unrelated error a real sibling function (R_FindImage,
+// R_InitSkyBox, etc) throws against this file's minimal fake `ri`.
 // ---------------------------------------------------------------------------
 
 const files = new Map<string, Uint8Array>();
@@ -361,10 +366,9 @@ function buildTestSp2(numFrames: 0): Uint8Array {
 // Mod_ForName call anywhere in this file that actually reaches an IBSP
 // loader must therefore be this one, before any other test claims slot 0.
 // Every assertion below reads state Mod_LoadBrushModel populates *before*
-// its final call (R_InitSkyBox) -- whatever that sibling call currently
-// does (PendingPort stub, or a landed implementation that errors for an
-// unrelated reason given this fake `ri`) is caught and ignored, per the
-// file header's "live siblings" note.
+// its final call (R_InitSkyBox) -- R_InitSkyBox is a real, landed
+// implementation now, but it can still error against this fake `ri`
+// (per the file header) -- that outcome is caught and ignored either way.
 describe("Mod_LoadBrushModel: node/leaf tree over a hand-built IBSP", () => {
   const name = "maps/testroom.bsp";
   registerFile(name, buildTestBrushBsp());
@@ -373,10 +377,10 @@ describe("Mod_LoadBrushModel: node/leaf tree over a hand-built IBSP", () => {
     try {
       Mod_ForName(name, false);
     } catch {
-      // R_InitSkyBox is the last statement in Mod_LoadBrushModel -- whether
-      // it's still a PendingPort stub or a landed implementation that can't
-      // run against this fake `ri`, everything asserted below was already
-      // set before this call runs.
+      // R_InitSkyBox is the last statement in Mod_LoadBrushModel -- it's a
+      // real, landed implementation now, but it may still not run cleanly
+      // against this fake `ri`; either way, everything asserted below was
+      // already set before this call runs.
     }
 
     const model = mod_known.find((m) => m.name === name);
@@ -456,9 +460,10 @@ describe("Mod_LoadAliasModel: hand-built minimal MD2", () => {
 
   test("1 skin: still parses frame/vertex/triangle counts and reads the skin name", () => {
     registerFile("models/test1.md2", buildTestMd2(1));
-    // R_FindImage (r_image.ts) may be a PendingPort stub or a landed
-    // implementation mid-session (see file header); either way,
-    // Mod_LoadAliasModel attaches ModelT.extradata before this loop runs.
+    // R_FindImage (r_image.ts) is a real, landed implementation now (see
+    // file header), but may still error against this fake `ri`; either
+    // way, Mod_LoadAliasModel attaches ModelT.extradata before this loop
+    // runs.
     try {
       Mod_ForName("models/test1.md2", false);
     } catch {

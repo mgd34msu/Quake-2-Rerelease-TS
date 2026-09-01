@@ -1,8 +1,9 @@
 /*
 Integration test: loads a synthetic BSP (built by test/support/bsp_builder.ts,
 no copyrighted map data), wires it into `sv.models[1]` the same minimal way
-SV_SpawnServer does (without calling SV_SpawnServer itself, since the game
-DLL boundary -- sv_game.ts's SV_InitGameProgs -- is still a pending stub),
+SV_SpawnServer does (without calling SV_SpawnServer itself -- sv_game.ts's
+SV_InitGameProgs is a real implementation now, but driving it here would
+need a full game module boot this unit test doesn't otherwise require),
 and exercises the area-node BSP: SV_ClearWorld/SV_LinkEdict/SV_UnlinkEdict/
 SV_AreaEdicts/SV_PointContents/SV_Trace.
 */
@@ -65,8 +66,9 @@ describe("sv_world.ts -- area tree, entity linking, point contents, traces", () 
     FS_InitFilesystem();
 
     // minimal replication of SV_SpawnServer's sv.models[1] wiring (sv_init.ts),
-    // skipped rather than called since it also drives SV_InitGameProgs, which
-    // is still a pending stub on the game-DLL boundary.
+    // skipped rather than called since it also drives SV_InitGameProgs -- a
+    // real implementation now, but a full game module boot this unit test
+    // doesn't otherwise need.
     const { model } = CM_LoadMap("maps/testroom.bsp", false);
     sv.models[1] = model;
   });

@@ -61,8 +61,10 @@ import { NET_SendPacket, NET_AdrToString } from "../platform/net_udp";
 // net_from/net_message/net_message_buffer are declared (not just extern'd) in
 // net_chan.c, so this is their owning module. The original leaves them
 // uninitialized until sv_main.c/cl_main.c's Init routines call SZ_Init on
-// net_message -- those modules are not yet ported, so net_message is
-// initialized eagerly here instead; see report.
+// net_message. sv_main.ts's SV_Init now does exactly that (redundantly, on
+// top of this file's eager init, below); cl_main.ts's CL_Init still has no
+// equivalent call, so this file's eager init remains load-bearing on the
+// client side.
 export const net_from: NetadrT = new NetadrT();
 export const net_message_buffer: Uint8Array = new Uint8Array(MAX_MSGLEN);
 export const net_message: SizeBuf = new SizeBuf();

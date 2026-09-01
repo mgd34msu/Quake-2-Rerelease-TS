@@ -1,9 +1,12 @@
 /*
 Self-sufficient test for the ref_gl scaffold: the QGL recording fake's call
 log (the test seam described in this unit's brief), a representative
-PendingPort stub throwing with its C function name (PORTING.md's "Pending
-stubs" convention, mirrored from test/ref_types.test.ts), and glconfig_t/
-glstate_t/image_t faithful defaults from gl_local.ts.
+bodyless-C-declaration guard throwing with its C function name (Mod_ClearAll
+-- PORTING.md's convention for a declared-but-never-defined C function,
+mirrored from test/ref_types.test.ts; this is a different, permanent stub
+class from the historical "PendingPort" placeholder PORTING.md also
+documents, which had zero references left once its close phase ran), and
+glconfig_t/glstate_t/image_t faithful defaults from gl_local.ts.
 */
 
 import { describe, test, expect } from "bun:test";

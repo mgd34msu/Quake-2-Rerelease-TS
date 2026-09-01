@@ -278,10 +278,9 @@ describe("CL_ParseTEnt(TE_EXPLOSION1)", () => {
     MSG_WritePos(net_message, vec3(64, -32, 128));
     MSG_BeginReading(net_message);
 
-    // S_StartSound (snd_dma.ts) is still a PendingPort stub, and
-    // CL_ParseTEnt's TE_EXPLOSION1 branch calls it after the explosion is
-    // already allocated and populated -- so the expected throw happens
-    // snd_dma landed real; the parse path completes now.
+    // S_StartSound (snd_dma.ts) is a real implementation now; CL_ParseTEnt's
+    // TE_EXPLOSION1 branch calls it after the explosion is already
+    // allocated and populated, and the whole parse path completes cleanly.
     expect(() => CL_ParseTEnt()).not.toThrow();
 
     const ex = cl_explosions.find((e) => e.type === ExptypeT.ex_poly && e.ent.origin[0] === 64 && e.ent.origin[1] === -32 && e.ent.origin[2] === 128);

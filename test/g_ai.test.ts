@@ -270,11 +270,10 @@ describe("ai_stand", () => {
       walked = true;
     };
 
-    // FindTarget/ai_stand's non-heard/non-sight paths may reach into
-    // p_trail.c-style sibling stubs in other AI functions, but ai_stand's
-    // own "no enemy" branch only calls FindTarget then monsterinfo.walk --
-    // assert-and-log the PendingPort case defensively in case a future
-    // sibling wiring changes that.
+    // FindTarget/ai_stand's non-heard/non-sight paths used to be able to
+    // reach into sibling AI stubs that hadn't landed yet; all of those are
+    // real now, so any throw here is treated as a genuine bug (see below),
+    // not an expected pending-port gap.
     let threw: unknown;
     try {
       ai_stand(self, 0);

@@ -89,19 +89,27 @@ import { Developer_searchpath } from "../qcommon/files";
 
 //PGM -- extern in game/q_shared.h, defined here (confirmed by grep of the
 // full v3.19 tree); set by win32/vid_dll.c, which per PORTING.md's platform
-// mapping is not ported (only src/platform/vid.ts would be, and that module
-// does not exist yet) -- reported gap. Stays 0 (VIDREF_OTHER's absence)
-// until a future platform/vid.ts wires up the setter.
+// mapping is not ported. src/platform/vid.ts exists now (both ref_gl and
+// ref_soft are real, landed renderers), but nothing in it calls
+// setVidrefVal -- reported gap, now more consequential than when this was
+// written: cl_newfx.ts/cl_fx.ts/cl_tent.ts's `vidref_val === VIDREF_GL`
+// branches always take the non-GL path regardless of which renderer is
+// actually active. Stays 0 (VIDREF_OTHER's absence) until platform/vid.ts's
+// renderer-selection path wires up the setter.
 export let vidref_val = 0;
 export function setVidrefVal(v: number): void {
   vidref_val = v;
 }
 
-// extern in cl_ents.c, defined in cl_tent.c (CL_RegisterTEntModels). That
-// module is still a pending stub with no export for this symbol and is out
-// of this unit's SCOPE -- reported gap; kept here (with a setter, mirroring
-// client.ts's gun_frame/gun_model pattern) until cl_tent.ts is ported for
-// real and can call setClModPowerscreen from CL_RegisterTEntModels.
+// extern in cl_ents.c, defined in cl_tent.c (CL_RegisterTEntModels).
+// cl_tent.ts's CL_RegisterTEntModels is a real, landed implementation now,
+// but it assigns its OWN module-local `cl_mod_powerscreen` export directly
+// (src/client/cl_tent.ts) rather than calling this file's setClModPowerscreen
+// -- so this copy is never actually written and the RF_POWERSCREEN consumer
+// below always sees null. LIVE BUG, not fixed here (out of this unit's
+// SCOPE): wire cl_tent.ts's CL_RegisterTEntModels to call
+// setClModPowerscreen, or have this file import cl_tent.ts's real binding
+// directly and drop this dead local copy.
 export let cl_mod_powerscreen: ModelS | null = null;
 export function setClModPowerscreen(v: ModelS | null): void {
   cl_mod_powerscreen = v;

@@ -115,6 +115,7 @@ import {
   MSG_ReadDeltaUsercmd,
   MSG_ReadByte,
   MSG_ReadShort,
+  MSG_ReadWord,
   MSG_ReadLong,
   MSG_ReadString,
   MSG_ReadChar,
@@ -764,19 +765,26 @@ function readDeltaEntity(from: EntityStateT, to: EntityStateT, number: number, b
   if (bits & U_MODEL4) to.modelindex4 = MSG_ReadByte(net_message);
 
   if (bits & U_FRAME8) to.frame = MSG_ReadByte(net_message);
-  if (bits & U_FRAME16) to.frame = MSG_ReadShort(net_message);
+  // RULE-17 FIX: q2proto_proto_q2pro.c reads frame/skinnum/effects/renderfx's
+  // 16-bit-only path as `u16` (unsigned) -- q2pro.ts's own encoder above
+  // writes frame's U_FRAME16 case unconditionally for any value >= 256 (no
+  // 32-bit escape hatch exists for frame at all), so a signed MSG_ReadShort
+  // here sign-extends any frame/skinnum/effects/renderfx value >= 0x8000
+  // into a negative number -- same bug class as q2repro.ts's/kexdemo.ts's
+  // cf4c673 fix and mvd.ts's Rerelease-codec gunframe fix.
+  if (bits & U_FRAME16) to.frame = MSG_ReadWord(net_message);
 
   if (bits & U_SKIN8 && bits & U_SKIN16) to.skinnum = MSG_ReadLong(net_message);
   else if (bits & U_SKIN8) to.skinnum = MSG_ReadByte(net_message);
-  else if (bits & U_SKIN16) to.skinnum = MSG_ReadShort(net_message);
+  else if (bits & U_SKIN16) to.skinnum = MSG_ReadWord(net_message);
 
   if ((bits & (U_EFFECTS8 | U_EFFECTS16)) === (U_EFFECTS8 | U_EFFECTS16)) to.effects = MSG_ReadLong(net_message);
   else if (bits & U_EFFECTS8) to.effects = MSG_ReadByte(net_message);
-  else if (bits & U_EFFECTS16) to.effects = MSG_ReadShort(net_message);
+  else if (bits & U_EFFECTS16) to.effects = MSG_ReadWord(net_message);
 
   if ((bits & (U_RENDERFX8 | U_RENDERFX16)) === (U_RENDERFX8 | U_RENDERFX16)) to.renderfx = MSG_ReadLong(net_message);
   else if (bits & U_RENDERFX8) to.renderfx = MSG_ReadByte(net_message);
-  else if (bits & U_RENDERFX16) to.renderfx = MSG_ReadShort(net_message);
+  else if (bits & U_RENDERFX16) to.renderfx = MSG_ReadWord(net_message);
 
   if (bits & U_ORIGIN1) to.origin[0] = MSG_ReadCoord(net_message);
   if (bits & U_ORIGIN2) to.origin[1] = MSG_ReadCoord(net_message);

@@ -11,7 +11,7 @@ import { describe, test, expect, beforeEach } from "bun:test";
 import { SizeBuf, SZ_Init, SZ_Clear, MSG_BeginReading, MSG_ReadByte, MSG_ReadShort, MSG_ReadLong, MSG_ReadString } from "../src/qcommon/sizebuf";
 import { net_message } from "../src/qcommon/net_chan";
 import { EntityStateT, PlayerStateT, UsercmdT } from "../src/shared/q_shared";
-import { SvcOpsT, PROTOCOL_VERSION_Q2PRO } from "../src/qcommon/qcommon";
+import { SvcOpsT, PROTOCOL_VERSION_Q2PRO, U_EFFECTS16, U_RENDERFX16 } from "../src/qcommon/qcommon";
 import { Q2PRO_CODEC, createQ2ProCodec, noteQ2ProFrameOpcodeExtrabits } from "../src/qcommon/protocol/q2pro";
 import type { FrameWriteParamsT } from "../src/qcommon/protocol/codec";
 import { ClientT, sv, svs } from "../src/server/server";
@@ -403,5 +403,73 @@ describe("SV_WriteFrameToClient E2E with client.codec = Q2PRO_CODEC", () => {
       svs.client_entities = savedClientEntities;
       sv.framenum = savedFramenum;
     }
+  });
+});
+
+// =============================================================================
+// Rule-17 UB re-audit: readDeltaEntity's frame/skinnum/effects/renderfx 16-bit
+// -only reads used a signed MSG_ReadShort, sign-extending any wire value
+// >= 0x8000 into a negative number. q2proto_proto_q2pro.c reads all four as
+// `u16` for the 16-bit-only path (lines 446-447 frame, 451-453 skinnum,
+// 460-462 effects, 469-471 renderfx) -- unlike vanilla.c/r1q2.c, which keep
+// vanilla's own original signed-short bug (uint16_safe=false in q2proto's
+// shared choose_width_flags helper); q2pro.c passes uint16_safe=true for
+// skinnum/effects/renderfx (q2proto_proto_q2pro.c:1596-1617), and frame has
+// no 32-bit escape hatch at all in any of these protocols, so a real q2pro
+// peer (or this port's own encoder above, for skinnum/frame specifically)
+// can legitimately put a value >= 0x8000 on the wire.
+// =============================================================================
+describe("entity delta: frame/skinnum/effects/renderfx 16-bit reads are unsigned", () => {
+  test("frame: a value >= 0x8000 round-trips through this port's own encoder as positive, not sign-extended", () => {
+    const from = baseEntity(2);
+    const to = baseEntity(2);
+    to.frame = 0x9c40; // no 32-bit fallback exists for frame -- always U_FRAME16 above 255
+
+    const bytes = bufOf((msg) => Q2PRO_CODEC.writeDeltaEntity(msg, from, to, false, false));
+    loadIntoNetMessage(bytes);
+
+    const { number, bits } = Q2PRO_CODEC.readEntityBits();
+    const out = new EntityStateT();
+    Q2PRO_CODEC.readDeltaEntity(from, out, number, bits);
+
+    expect(out.frame).toBe(0x9c40);
+  });
+
+  test("skinnum: a value in [0x8000, 0x10000) round-trips through this port's own encoder as positive, not sign-extended", () => {
+    const from = baseEntity(2);
+    const to = baseEntity(2);
+    to.skinnum = 0xabcd; // this port's own U_SKIN16 gate is < 0x10000, matching real q2pro
+
+    const bytes = bufOf((msg) => Q2PRO_CODEC.writeDeltaEntity(msg, from, to, false, false));
+    loadIntoNetMessage(bytes);
+
+    const { number, bits } = Q2PRO_CODEC.readEntityBits();
+    const out = new EntityStateT();
+    Q2PRO_CODEC.readDeltaEntity(from, out, number, bits);
+
+    expect(out.skinnum).toBe(0xabcd);
+  });
+
+  // effects/renderfx: this port's own encoder is conservative (gates the
+  // 16-bit-only path at < 0x8000, matching vanilla/r1q2 rather than real
+  // q2pro's < 0x10000 -- a documented, benign divergence since both ends of
+  // THIS port's own round trip agree; not touched here, see q2pro.ts's own
+  // encoder comment). A real q2pro peer can still send U_EFFECTS16/
+  // U_RENDERFX16 alone for a value >= 0x8000, so the read side is tested
+  // directly against hand-built bits instead of this port's own encoder.
+  test("effects: U_EFFECTS16 alone with a wire value >= 0x8000 reads as unsigned", () => {
+    loadIntoNetMessage([0x40, 0x9c]); // 0x9c40, little-endian u16
+    const from = baseEntity(2);
+    const out = new EntityStateT();
+    Q2PRO_CODEC.readDeltaEntity(from, out, 2, U_EFFECTS16);
+    expect(out.effects).toBe(0x9c40);
+  });
+
+  test("renderfx: U_RENDERFX16 alone with a wire value >= 0x8000 reads as unsigned", () => {
+    loadIntoNetMessage([0xff, 0xff]); // 0xffff, little-endian u16
+    const from = baseEntity(2);
+    const out = new EntityStateT();
+    Q2PRO_CODEC.readDeltaEntity(from, out, 2, U_RENDERFX16);
+    expect(out.renderfx).toBe(0xffff);
   });
 });

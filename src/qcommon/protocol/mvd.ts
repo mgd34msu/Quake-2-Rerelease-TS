@@ -50,7 +50,7 @@
 // which is a byte-count difference, not an observable state difference.
 
 import type { SizeBuf } from "../sizebuf";
-import { MSG_WriteByte, MSG_WriteShort, MSG_WriteChar, MSG_WriteLong, MSG_WriteLong64, MSG_ReadByte, MSG_ReadShort, MSG_ReadChar, MSG_ReadLong, MSG_ReadLong64 } from "../sizebuf";
+import { MSG_WriteByte, MSG_WriteShort, MSG_WriteChar, MSG_WriteLong, MSG_WriteLong64, MSG_ReadByte, MSG_ReadShort, MSG_ReadWord, MSG_ReadChar, MSG_ReadLong, MSG_ReadLong64 } from "../sizebuf";
 import { ANGLE2SHORT, SHORT2ANGLE, PlayerStateT } from "../../shared/q_shared";
 
 // ---------------------------------------------------------------------------
@@ -725,7 +725,11 @@ export function MSG_ReadDeltaMvdPlayerstateRereleaseBody(msg: SizeBuf, from: Pla
     ps.gunindex = packed & 0x1fff;
     ps.gunskin = (packed >>> GUNINDEX_BITS) & 0x7;
   }
-  if (pflags & PPS_WEAPONFRAME) ps.gunframe = MSG_ReadShort(msg);
+  // RULE-17 FIX: q2repro's own msg.c:2501/2653/2789 all use MSG_ReadWord()
+  // (unsigned) for gunframe under MSG_PS_RERELEASE, matching q2repro.ts's
+  // identical gunframe fix (cf4c673) -- a plain MSG_ReadShort here
+  // sign-extends any gunframe value >= 0x8000 into a negative number.
+  if (pflags & PPS_WEAPONFRAME) ps.gunframe = MSG_ReadWord(msg);
 
   if (pflags & PPS_GUNOFFSET) {
     ps.gunoffset[0] = MSG_ReadShort(msg) / RERELEASE_GUNOFFSET_SCALE;

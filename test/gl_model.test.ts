@@ -9,11 +9,12 @@ own beforeEach, and does not rely on another test file having run first.
 Reuses test/support/bsp_builder.ts's buildBoxRoomBsp({renderable:true}) for
 the brush-model suite (node/leaf tree, GL polygon build, submodel count) --
 unlike ref_soft/r_model.ts's own test file, this one does not need to avoid
-texinfo/faces: GL_FindImage (gl_image.ts) is still a PendingPort stub, but
-gl_model.ts's Mod_LoadTexinfo already falls back to r_notexture on that
-exception (see gl_model.ts's file header), so a fake width/height texture
-registered via SetNoTexture is enough to let the whole brush-model load run
-to completion, including GL_BuildPolygonFromSurface.
+texinfo/faces: GL_FindImage (gl_image.ts) is a real, fully implemented
+function now, but a synthetic BSP's texture names never resolve to a real
+file on disk, so gl_model.ts's Mod_LoadTexinfo falls back to r_notexture on
+the resulting null return (see gl_model.ts's file header), so a fake
+width/height texture registered via SetNoTexture is enough to let the whole
+brush-model load run to completion, including GL_BuildPolygonFromSurface.
 */
 
 import { describe, test, expect, beforeEach } from "bun:test";
@@ -92,9 +93,10 @@ beforeEach(() => {
   Mod_Init();
   Mod_FreeAll(); // rule 13: other suites in this file cache models by name
 
-  // GL_FindImage (gl_image.ts) is a PendingPort stub; gl_model.ts's
+  // GL_FindImage (gl_image.ts) is real now, but a synthetic BSP's texture
+  // names never resolve to a real file on disk, so gl_model.ts's
   // Mod_LoadTexinfo/Mod_LoadAliasModel/Mod_LoadSpriteModel fall back to
-  // r_notexture on that exception -- give it real dimensions so
+  // r_notexture on that null return -- give it real dimensions so
   // GL_BuildPolygonFromSurface's `s /= image.width` doesn't divide by a
   // null image.
   const fakeTex = new ImageT();

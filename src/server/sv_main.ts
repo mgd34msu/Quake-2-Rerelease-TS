@@ -1040,7 +1040,7 @@ export function SV_Frame(msec: number): void {
   SV_SendClientMessages();
 
   // save the entire world state if recording a serverdemo
-  SV_RecordDemoMessage(); // sv_ents.ts pending stub -- throws until that unit lands
+  SV_RecordDemoMessage(); // sv_ents.ts is a real implementation now (no longer a throwing stub)
 
   // send a heartbeat to the master if needed
   Master_Heartbeat();
@@ -1374,9 +1374,8 @@ export function SV_Shutdown(finalmsg: string, reconnect: boolean): void {
   if (svs.clients.length) SV_FinalMessage(finalmsg, reconnect);
 
   Master_Shutdown();
-  // SV_ShutdownGameProgs() -- sv_game.ts pending stub; always throws until
-  // that unit lands. See report: SV_Shutdown cannot be exercised end-to-end
-  // until then.
+  // sv_game.ts's SV_ShutdownGameProgs is a real implementation now (no
+  // longer a throwing stub); SV_Shutdown can be exercised end-to-end.
   SV_ShutdownGameProgs();
 
   // free current level (main.c:2328-2329: "CM_FreeMap(&sv.cm); Nav_Unload();"

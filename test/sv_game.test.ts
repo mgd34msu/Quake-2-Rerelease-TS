@@ -3,16 +3,12 @@
 // every global this suite reads is initialized here, not assumed from
 // another test file's run order.
 //
-// SV_InitGameProgs's final step (`ge.Init()`) calls into g_main.ts's
-// InitGame, which still throws PendingPort("g_save.c:InitGame") because
-// g_save.c has not landed yet (see .orch/followups.md). That happens *after*
-// geHolder.ge has already been assigned and after GetGameAPI has already
-// called SetGameImports, so this suite verifies what it can up to that
-// point and asserts the PendingPort throw explicitly rather than skipping
-// the whole function. Anything that needs a spawned map (SV_Begin_f's
+// SV_InitGameProgs's final step (`ge.Init()`) calls into g_save.ts's
+// InitGame, which is a real implementation now (see below) -- SV_InitGameProgs
+// runs end to end. Anything that needs a spawned map (SV_Begin_f's
 // ge.ClientBegin, SV_GameMap_f's real level save/load round-trip,
-// SV_ExecuteClientMessage's clc_move path) is out of reach without a real
-// BSP + game session and is not exercised here.
+// SV_ExecuteClientMessage's clc_move path) is still out of reach without a
+// real BSP + game session and is not exercised here.
 
 import { beforeAll, describe, expect, test } from "bun:test";
 import { GAME_API_VERSION } from "../src/game/game";
@@ -181,12 +177,13 @@ describe("SV_ExecuteUserCommand", () => {
 // test and skipped per this unit's brief:
 //   - SV_New_f / SV_Configstrings_f / SV_Baselines_f / SV_Begin_f: require a
 //     populated sv.state === ss_game with real ge.edicts and a live
-//     ge.ClientBegin (still PendingPort via p_client.c).
+//     ge.ClientBegin (real in p_client.ts now, but needs that populated state).
 //   - SV_ExecuteClientMessage's clc_move branch: requires a real
 //     ge.ClientThink and a wire-format usercmd delta sequence.
 //   - SV_GameMap_f / SV_Map_f / SV_Loadgame_f / SV_Savegame_f: require
-//     SV_Map (loads an actual BSP via sv_init.ts) and g_save.c's
-//     WriteGame/ReadGame/WriteLevel/ReadLevel, both still PendingPort.
+//     SV_Map (loads an actual BSP via sv_init.ts); g_save.ts's own
+//     WriteGame/ReadGame/WriteLevel/ReadLevel are real implementations now,
+//     but still need that real BSP + game session to exercise.
 //   - SV_ServerRecord_f: always takes the "couldn't open" branch on this
 //     port (no write primitive on the sanctioned file-I/O surface -- see
 //     sv_ccmds.ts's header comment), so there is no signon-message dump to

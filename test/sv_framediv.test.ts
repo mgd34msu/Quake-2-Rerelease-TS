@@ -70,9 +70,9 @@ describe("origin-history ring (framediv interpolation) -- recording only", () =>
     FS_InitFilesystem();
 
     // minimal replication of SV_SpawnServer's sv.models[1] wiring (sv_init.ts),
-    // skipped rather than called since it also drives SV_InitGameProgs, which
-    // is still a pending stub on the game-DLL boundary (same rationale as
-    // sv_world.test.ts).
+    // skipped rather than called since it also drives SV_InitGameProgs -- a
+    // real implementation now, but a full game module boot this unit test
+    // doesn't otherwise need (same rationale as sv_world.test.ts).
     const { model } = CM_LoadMap("maps/testroom.bsp", false);
     sv.models[1] = model;
   });
