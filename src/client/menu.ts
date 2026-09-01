@@ -124,7 +124,22 @@ import {
 import { COM_Parse, type ComParseState, VectorCopy } from "../shared/math";
 import { CalcFov } from "./cl_view";
 import { RefdefT, EntityT } from "./ref";
-import { FS_Gamedir, FS_LoadFile, FS_FreeFile, FS_ListFiles, FS_ListPakFiles, FS_NextPath, FS_ReadRawFile, Developer_searchpath, fs_basedir, fs_homedir } from "../qcommon/files";
+import {
+  FS_Gamedir,
+  FS_LoadFile,
+  FS_FreeFile,
+  FS_ListFiles,
+  FS_ListPakFiles,
+  FS_ListPackFileEntries,
+  FS_RootIsRerelease,
+  FS_NextPath,
+  FS_ReadRawFile,
+  Developer_searchpath,
+  fs_basedir,
+  fs_homedir,
+  fs_data_root_classic,
+  fs_data_root_rerelease,
+} from "../qcommon/files";
 import {
   MenuframeworkS,
   MenuactionS,
@@ -153,15 +168,24 @@ import {
   NeedsSkillSelectForGame,
   UnitsForContent,
   PerformLaunch,
-  DiscoverGameDirs,
   BuildGameList,
-  GameListDisplayName,
+  DiscoverGameDirs,
   FsFallbackGamedirName,
   StartPointsForSelection,
   ResolveLaunchForGame,
+  DataTreeDisplayName,
+  EffectiveDataTreeFor,
+  DataMountPlanFor,
+  CachedScanDataTree,
+  AvailableDataTreesFor,
+  AvailableRulesetsForGameInTrees,
+  DiscoverGameDirsInTrees,
+  GameListDisplayNameInTrees,
   type SelectableGame,
   type GameFsSeam,
   type RulesetId,
+  type DataTreeId,
+  type DataTreeScans,
 } from "./menu_content";
 
 // C's per-widget callbacks take `void *self` and cast it back to the
@@ -1587,6 +1611,12 @@ const s_content_skill_list = new MenulistS();
 // screen or console cvars). Default off; "begin" always forces
 // deathmatch 0 either way (PerformLaunch).
 const s_content_coop_list = new MenulistS();
+// The DATA TREE choice (Mike's RC ruling, 2026-09-01) -- see
+// menu_content.ts's DATA TREES section. Rebuilt per (game, ruleset)
+// selection: only the trees that actually hold the selection are listed, so
+// a one-tree selection shows a single greyed row instead of an option that
+// would fail.
+const s_content_data_list = new MenulistS();
 const s_content_begin_action = new MenuactionS();
 
 // Index-aligned with the currently displayed spincontrol itemnames --
@@ -1594,6 +1624,10 @@ const s_content_begin_action = new MenuactionS();
 // pattern as StartServer_MenuInit's own `mapnames` array above.
 let content_rulesets: RulesetId[] = [];
 let content_units: MapdbUnitEntry[] = [];
+let content_data_trees: DataTreeId[] = [];
+// The two trees' scans for the currently open screen, taken once per open so
+// every rebuild in this screen's cascade sees one consistent reading.
+let content_scans: DataTreeScans | null = null;
 // The full selectable-game list (curated CONTENT_LIST rows, famous ones
 // first, then any discovered gamedirs) rebuilt every time this screen
 // opens -- see Content_MenuInit's DiscoverGameDirs call, same "reload on
@@ -1611,7 +1645,21 @@ const gameFsSeam: GameFsSeam = {
     const raw = FS_ReadRawFile(path);
     return raw ? new TextDecoder().decode(raw) : null;
   },
+  listPakEntries: FS_ListPackFileEntries,
 };
+
+// Both data trees as the data_root_* cvars name them, re-read every time
+// this screen opens (same reload-on-open idiom as MapDB_Init/DiscoverGameDirs
+// below) so a data_root_* set from the console after boot is picked up.
+// CachedScanDataTree memoizes the actual pak-directory parsing per root.
+function currentDataTreeScans(): DataTreeScans {
+  const classicRoot = fs_data_root_classic ? fs_data_root_classic.string : "";
+  const rereleaseRoot = fs_data_root_rerelease ? fs_data_root_rerelease.string : "";
+  return {
+    classic: CachedScanDataTree(gameFsSeam, "classic", classicRoot),
+    rerelease: CachedScanDataTree(gameFsSeam, "rerelease", rereleaseRoot),
+  };
+}
 
 // basedir, then homedir when set -- same root set files.ts's own
 // FS_InitFilesystem mounts baseq2 from (content_root is deliberately
@@ -1632,13 +1680,59 @@ function currentRuleset(): RulesetId | null {
   return content_rulesets[s_content_ruleset_list.curvalue] ?? null;
 }
 
+function currentScans(): DataTreeScans {
+  if (!content_scans) content_scans = currentDataTreeScans();
+  return content_scans;
+}
+
+// Which tree the engine itself booted against -- the default the data row
+// starts on, so opening the screen and pressing "begin" keeps playing out of
+// the tree the client was launched with.
+function bootedDataTree(): DataTreeId {
+  const basedir = fs_basedir ? fs_basedir.string : "";
+  return FS_RootIsRerelease(basedir) ? "rerelease" : "classic";
+}
+
+function currentDataTree(): DataTreeId | null {
+  const picked = content_data_trees[s_content_data_list.curvalue] ?? null;
+  if (picked) return picked;
+  // Nothing selectable: EffectiveDataTreeFor decides whether that means "no
+  // remount" (classic) or "rerelease anyway" (kex -- rule (a)).
+  const ruleset = currentRuleset();
+  return ruleset ? EffectiveDataTreeFor(ruleset, content_data_trees, bootedDataTree()) : null;
+}
+
+// The third rung of the cascade (game -> ruleset -> DATA TREE -> start
+// points): which trees the current (game, ruleset) pair can run out of.
+// A selection that exists in only one tree gets that tree forced and the
+// row greyed -- the player is shown what will happen rather than being
+// offered a choice with one legal value.
+function RebuildDataTrees(): void {
+  const game = currentSelectableGame();
+  const ruleset = currentRuleset();
+
+  content_data_trees = ruleset ? AvailableDataTreesFor(game, ruleset, currentScans()) : [];
+  s_content_data_list.itemnames = content_data_trees.length ? content_data_trees.map(DataTreeDisplayName) : [DataTreeDisplayName(bootedDataTree())];
+  // Default to the tree the engine booted against, when this selection is
+  // available in it -- not to list position 0.
+  if (s_content_data_list.curvalue >= s_content_data_list.itemnames.length) s_content_data_list.curvalue = 0;
+  const bootedIndex = content_data_trees.indexOf(bootedDataTree());
+  if (bootedIndex >= 0) s_content_data_list.curvalue = bootedIndex;
+  // Same QMF_GRAYED-as-honest-marker convention as the skill row above.
+  s_content_data_list.generic.flags = content_data_trees.length > 1 ? 0 : QMF_GRAYED;
+}
+
 // Rebuilds the ruleset spincontrol for whichever game is now selected,
 // then cascades into RebuildStartPoints (the unit browser depends on both
 // game AND ruleset -- a classic-ruleset selection never has mapdb units to
 // browse, only the rerelease side does).
 function RebuildRulesets(): void {
   const game = currentSelectableGame();
-  content_rulesets = AvailableRulesetsForGame(game);
+  // Tree-aware: a ruleset with no usable data tree on this machine is not
+  // offered at all (menu_content.ts's AvailableRulesetsForGameInTrees) --
+  // that is what keeps the kex ruleset off a classic-only install, where
+  // selecting it used to produce Mike's finding-2 asset spam.
+  content_rulesets = AvailableRulesetsForGameInTrees(game, currentScans());
   s_content_ruleset_list.itemnames = content_rulesets.map((id) => RULESETS.find((r) => r.id === id)?.name ?? id);
   if (s_content_ruleset_list.curvalue >= content_rulesets.length) s_content_ruleset_list.curvalue = 0;
 
@@ -1658,6 +1752,7 @@ function RebuildRulesets(): void {
   // marker, matching the pre-existing intent without the side effect.
   s_content_skill_list.generic.flags = NeedsSkillSelectForGame(game) ? 0 : QMF_GRAYED;
 
+  RebuildDataTrees();
   RebuildStartPoints();
 }
 
@@ -1709,6 +1804,11 @@ function ContentChangeFunc(): void {
 }
 
 function ContentRulesetChangeFunc(): void {
+  RebuildDataTrees();
+  RebuildStartPoints();
+}
+
+function ContentDataChangeFunc(): void {
   RebuildStartPoints();
 }
 
@@ -1724,7 +1824,13 @@ export function BeginContentFunc(): void {
   const bsp = content_units[s_content_start_list.curvalue]?.bsp ?? plan.map;
   const skill = NeedsSkillSelectForGame(game) ? s_content_skill_list.curvalue : null;
 
-  PerformLaunch(plan, bsp, skill, s_content_coop_list.curvalue === 1);
+  // The data-tree remount (menu_content.ts's DATA TREES section): the kex
+  // ruleset on original data mounts the classic tree over the rerelease one,
+  // everything else mounts a single tree.
+  const tree = currentDataTree();
+  const mount = tree ? DataMountPlanFor(ruleset, tree) : null;
+
+  PerformLaunch(plan, bsp, skill, s_content_coop_list.curvalue === 1, mount);
   M_ForceMenuOff();
 }
 
@@ -1736,7 +1842,14 @@ function Content_MenuInit(): void {
   // append them so any installed mod/content shows up (Mike's ruling,
   // 2026-08-31: "the maps should come from whatever is available as a
   // game").
-  const discovered = DiscoverGameDirs(gameFsSeam, gamedirScanRoots());
+  // Re-read both data trees for this open, then discover mods across the
+  // UNION of (a) the roots this client actually booted with -- basedir and
+  // homedir, the pre-data-tree behavior, which must keep working whether or
+  // not the data_root_* cvars name anything -- and (b) whichever data trees
+  // are configured, so a mod installed in the tree the client did NOT boot
+  // from still shows up. Deduped and re-sorted so the list is stable.
+  content_scans = currentDataTreeScans();
+  const discovered = [...new Set([...DiscoverGameDirs(gameFsSeam, gamedirScanRoots()), ...DiscoverGameDirsInTrees(content_scans)])].sort();
   game_list = BuildGameList(discovered);
 
   s_content_menu.x = viddef.width * 0.5;
@@ -1746,7 +1859,10 @@ function Content_MenuInit(): void {
   s_content_list.generic.x = 0;
   s_content_list.generic.y = 0;
   s_content_list.generic.name = "content";
-  s_content_list.itemnames = game_list.map(GameListDisplayName);
+  // Tree-tagged labels: a game that exists in only one tree says so
+  // ("Lithium CTF (map pack) (original)"), since its "maps/data" row will be
+  // a forced, greyed single value.
+  s_content_list.itemnames = game_list.map((g) => GameListDisplayNameInTrees(g, currentScans()));
   s_content_list.generic.callback = ContentChangeFunc;
 
   s_content_ruleset_list.generic.type = MTYPE_SPINCONTROL;
@@ -1755,32 +1871,39 @@ function Content_MenuInit(): void {
   s_content_ruleset_list.generic.name = "ruleset";
   s_content_ruleset_list.generic.callback = ContentRulesetChangeFunc;
 
+  s_content_data_list.generic.type = MTYPE_SPINCONTROL;
+  s_content_data_list.generic.x = 0;
+  s_content_data_list.generic.y = 40;
+  s_content_data_list.generic.name = "maps/data";
+  s_content_data_list.generic.callback = ContentDataChangeFunc;
+
   s_content_start_list.generic.type = MTYPE_SPINCONTROL;
   s_content_start_list.generic.x = 0;
-  s_content_start_list.generic.y = 40;
+  s_content_start_list.generic.y = 60;
   s_content_start_list.generic.name = "start at";
 
   s_content_skill_list.generic.type = MTYPE_SPINCONTROL;
   s_content_skill_list.generic.x = 0;
-  s_content_skill_list.generic.y = 60;
+  s_content_skill_list.generic.y = 80;
   s_content_skill_list.generic.name = "skill";
   s_content_skill_list.itemnames = ["easy", "medium", "hard"];
 
   s_content_coop_list.generic.type = MTYPE_SPINCONTROL;
   s_content_coop_list.generic.x = 0;
-  s_content_coop_list.generic.y = 80;
+  s_content_coop_list.generic.y = 100;
   s_content_coop_list.generic.name = "coop";
   s_content_coop_list.itemnames = ["no", "yes"];
 
   s_content_begin_action.generic.type = MTYPE_ACTION;
   s_content_begin_action.generic.flags = QMF_LEFT_JUSTIFY;
   s_content_begin_action.generic.x = 24;
-  s_content_begin_action.generic.y = 100;
+  s_content_begin_action.generic.y = 120;
   s_content_begin_action.generic.name = "begin";
   s_content_begin_action.generic.callback = BeginContentFunc;
 
   Menu_AddItem(s_content_menu, s_content_list);
   Menu_AddItem(s_content_menu, s_content_ruleset_list);
+  Menu_AddItem(s_content_menu, s_content_data_list);
   Menu_AddItem(s_content_menu, s_content_start_list);
   Menu_AddItem(s_content_menu, s_content_skill_list);
   Menu_AddItem(s_content_menu, s_content_coop_list);

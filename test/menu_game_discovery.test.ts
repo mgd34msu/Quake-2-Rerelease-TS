@@ -50,6 +50,7 @@ import { Cvar_ForceSet, Cvar_VariableString } from "../src/qcommon/cvar";
 import { Com_SetServerState } from "../src/qcommon/common";
 import {
   FS_ListFiles,
+  FS_ListPackFileEntries,
   FS_ReadRawFile,
   FS_InitFilesystem,
   FS_TestSnapshotSearchPaths,
@@ -87,6 +88,7 @@ const realSeam: GameFsSeam = {
     const raw = FS_ReadRawFile(path);
     return raw ? new TextDecoder().decode(raw) : null;
   },
+  listPakEntries: FS_ListPackFileEntries,
 };
 
 describe("menu_content.ts -- DiscoverGameDirs over a mkdtemp fixture basedir", () => {

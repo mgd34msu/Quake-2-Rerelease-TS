@@ -124,7 +124,7 @@ import { CL_PredictMovement } from "./cl_pred";
 import { CL_RunDLights, CL_RunLightStyles, CL_ClearEffects } from "./cl_fx";
 import { CL_ClearTEnts } from "./cl_tent";
 import { S_StopAllSounds, S_Update, S_Init, S_Shutdown } from "./snd_dma";
-import { CL_RegisterSounds, CL_ParseClientinfo, CL_ParseServerMessage, CL_StartUdpDownload, CL_CheckOrDownloadFile } from "./cl_parse";
+import { CL_RegisterSounds, CL_ParseClientinfo, CL_ParseServerMessage, CL_StartUdpDownload, CL_CheckOrDownloadFile as CL_CheckOrDownloadFileRemote } from "./cl_parse";
 import { HTTP_Init, HTTP_SetServer, HTTP_SetCallbacks, HTTP_CleanupDownloads, HTTP_RunDownloads } from "./cl_http";
 import { CL_PrepRefresh, V_Init } from "./cl_view";
 import { SCR_Init, SCR_UpdateScreen, SCR_BeginLoadingPlaque, SCR_EndLoadingPlaque, SCR_RunConsole } from "./cl_scrn";
@@ -1311,6 +1311,92 @@ function parsePlayerSkinConfigstring(s: string, parseDogtag: boolean): { model: 
   return { model, skin: skin ?? "", dogtag };
 }
 
+// Set once per precache walk, so the "not downloading from ourselves" note
+// is printed at most once per connection instead of once per missing file.
+let precache_local_notice = false;
+
+/*
+===============
+CL_ServerIsOurOwn
+
+"The server we are downloading from is this same process." q2repro spells
+this `NET_IsLocalAddress(&cls.serverAddress)`, where cls.serverAddress.type
+is set to NA_LOOPBACK only in CL_CheckForResend's listen-server branch
+(q2repro src/client/main.c:412-416).
+
+This port has no cls.serverAddress field, and neither obvious substitute
+works alone:
+
+  - net_udp.ts's NET_IsLocalAddress is VANILLA's version, `NET_CompareAdr(adr,
+    net_local_adr)` against a net_local_adr its own comment says nothing in
+    this port ever assigns -- a different question entirely from q2repro's
+    `type == NA_LOOPBACK` macro.
+
+  - the NA_LOOPBACK type test alone is unsafe here because NetadrT.type
+    DEFAULTS to NA_LOOPBACK (qcommon.ts's NetadrT initializer), so a netchan
+    that has not been set up yet reads as "local" and would silently disable
+    downloads against a genuinely remote server.
+
+So both halves are required: Com_ServerState() answers "is this process
+running a server at all" unambiguously, and the NA_LOOPBACK test then
+distinguishes that server's own loopback client from any other peer.
+===============
+*/
+function CL_ServerIsOurOwn(): boolean {
+  return Com_ServerState() !== 0 && cls.netchan.remote_address.type === NetadrtypeT.NA_LOOPBACK;
+}
+
+/*
+===============
+CL_CheckOrDownloadFile (precache-walk wrapper)
+
+q2repro gates its ENTIRE download walk on the server being remote
+(src/client/download.c:627, the first substantive statement of
+CL_RequestNextDownload):
+
+    if (allow_download->integer <= 0 || NET_IsLocalAddress(&cls.serverAddress)) {
+        if (precache_check <= PRECACHE_MAP)
+            CL_RegisterBspModels();
+        CL_Begin();
+        return;
+    }
+
+with NET_IsLocalAddress(adr) == ((adr)->type == NA_LOOPBACK)
+(q2repro inc/common/net/net.h:105). Vanilla has no such check
+(quake-2-c/client/cl_main.c:1117-1128 tests only allow_download), so this is
+a q2repro-era addition, adopted here for the reason Mike hit on 2026-09-01:
+a LISTEN server cannot serve a file it does not itself have, so every one of
+those requests is guaranteed to fail, and a ruleset whose asset set the
+mounted data tree does not cover turns that into hundreds of doomed
+"Downloading ..." lines.
+
+Ported as a per-file skip rather than q2repro's whole-walk early return:
+this port's walk does registration work along the way that its ENV_CNT/
+TEXTURE_CNT phases depend on, and it has no CL_RegisterBspModels/CL_Begin
+pair to jump to (rule 17 -- the observable behavior q2repro produces, no
+download attempts and no per-file spam on a local server, is what is
+preserved; the internal route to it differs because the surrounding walk
+does).
+
+Returning true means "treat as present" -- exactly what the walk does for a
+file that already resolved -- so it advances to the next item instead of
+stalling on a request that will never be answered. The explicit `download`
+console command (cl_parse.ts's CL_Download_f) is deliberately NOT routed
+through here: an operator asking for a specific file by hand should still
+get the attempt and its error.
+===============
+*/
+function CL_CheckOrDownloadFile(filename: string, type: Parameters<typeof CL_CheckOrDownloadFileRemote>[1] = "single"): boolean {
+  if (CL_ServerIsOurOwn()) {
+    if (!precache_local_notice) {
+      precache_local_notice = true;
+      Com_DPrintf("Local server: skipping downloads for missing files\n");
+    }
+    return true;
+  }
+  return CL_CheckOrDownloadFileRemote(filename, type);
+}
+
 export function CL_RequestNextDownload(): void {
   if (cls.state !== ConnstateT.ca_connected) return;
 
@@ -1608,6 +1694,10 @@ export function CL_Precache_f(): void {
   precache_model_skinnames = null;
   precache_model_skin = 0;
   precache_sexed_check = 0;
+  // The local-server download-skip notice is per walk, so the next
+  // connection gets its own single line rather than staying silent because
+  // an earlier session already printed one.
+  precache_local_notice = false;
   // The per-player skin_i/dogtag resume latches must reset with the rest of
   // the walk cursor state: a reconnect (or the next server) starting a fresh
   // precache sequence otherwise inherits latches from the previous session's

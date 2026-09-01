@@ -38,6 +38,9 @@ import { CL_ParseDownload, CL_StartUdpDownload } from "../src/client/cl_parse";
 import { readMd2SkinNames, MD2_IDENT, MD2_VERSION, MD2_MAX_SKINNAME } from "../src/qcommon/qfiles";
 import { MSG_WriteShort, MSG_WriteByte } from "../src/qcommon/sizebuf";
 import { net_message } from "../src/qcommon/net_chan";
+import { Com_ServerState, Com_SetServerState } from "../src/qcommon/common";
+import { ServerStateT } from "../src/server/server";
+import { NetadrtypeT } from "../src/qcommon/qcommon";
 
 // ===========================================================================
 // group 1: readMd2SkinNames -- pure unit tests against hand-built model bytes
@@ -393,6 +396,79 @@ describe("cl_main.ts -- CL_RequestNextDownload precache walk", () => {
     cl.configstrings[cls.csr.models + 1] = "maps/missing.bsp";
     begin();
     expect(cls.downloadname).toBe("maps/missing.bsp");
+  });
+
+  // Mike's 2026-09-01 finding 2, second half: a LISTEN server cannot serve a
+  // file it does not itself have, so the walk must not request one -- q2repro
+  // gates its whole download walk on exactly this (src/client/download.c:627,
+  // "allow_download->integer <= 0 || NET_IsLocalAddress(&cls.serverAddress)").
+  // The walk must still COMPLETE (reach "begin"), not stall on the missing
+  // file.
+  describe("local (listen) server: missing files are skipped, not requested", () => {
+    function withLocalServer(run: () => void): void {
+      const savedState = Com_ServerState();
+      const savedType = cls.netchan.remote_address.type;
+      Com_SetServerState(ServerStateT.ss_game);
+      cls.netchan.remote_address.type = NetadrtypeT.NA_LOOPBACK;
+      try {
+        run();
+      } finally {
+        Com_SetServerState(savedState);
+        cls.netchan.remote_address.type = savedType;
+      }
+    }
+
+    // The map itself is deliberately left present: a listen server has by
+    // definition already loaded the map it is serving, so the client cannot
+    // be missing it. What a listen server CAN be missing is any asset the
+    // running game module references but the mounted data tree does not
+    // carry -- Mike's kex-on-1997-data case.
+    test("a missing model is NOT requested when we are the server, and the walk still completes", () => {
+      provideEnvAndTextures();
+      cl.configstrings[cls.csr.models + 2] = "models/monsters/nope/tris.md2";
+
+      withLocalServer(begin);
+
+      expect(cls.downloadname).toBe("");
+      const text = new TextDecoder().decode(cls.netchan.message.data.subarray(0, cls.netchan.message.cursize));
+      expect(text.includes("begin 1")).toBe(true);
+    });
+
+    test("a whole walk's worth of missing assets produces zero download requests", () => {
+      // Every phase (model, sound, image, env, texture) has a missing file
+      // to trip over -- the shape of Mike's finding-2 console spam.
+      cl.configstrings[cls.csr.models + 2] = "models/monsters/nope/tris.md2";
+      cl.configstrings[cls.csr.sounds + 1] = "world/nope.wav";
+      cl.configstrings[cls.csr.images + 1] = "i_nope";
+
+      withLocalServer(begin);
+
+      expect(cls.downloadname).toBe("");
+      const text = new TextDecoder().decode(cls.netchan.message.data.subarray(0, cls.netchan.message.cursize));
+      expect(text.includes("begin 1")).toBe(true);
+    });
+
+    test("a REMOTE server still gets the request -- the skip is local-only", () => {
+      // Same missing map, but this process is not the server.
+      cl.configstrings[cls.csr.models + 1] = "maps/missing.bsp";
+      begin();
+      expect(cls.downloadname).toBe("maps/missing.bsp");
+    });
+
+    test("being the server is not enough on its own -- a non-loopback peer still downloads", () => {
+      const savedState = Com_ServerState();
+      const savedType = cls.netchan.remote_address.type;
+      Com_SetServerState(ServerStateT.ss_game);
+      cls.netchan.remote_address.type = NetadrtypeT.NA_IP;
+      try {
+        cl.configstrings[cls.csr.models + 1] = "maps/missing.bsp";
+        begin();
+        expect(cls.downloadname).toBe("maps/missing.bsp");
+      } finally {
+        Com_SetServerState(savedState);
+        cls.netchan.remote_address.type = savedType;
+      }
+    });
   });
 
   test("model walk: requests a missing non-map model and skips '*' (inline) and '#' (localized) entries", () => {

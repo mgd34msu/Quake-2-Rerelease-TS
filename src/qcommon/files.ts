@@ -120,7 +120,7 @@ interface PackFileT {
   filelen: number;
 }
 
-interface PackT {
+export interface PackT {
   filename: string;
   handle: number; // fd; kept open for the lifetime of the pack, matching
   // pack_t.handle in the original -- opened once here, only ever closed when
@@ -170,6 +170,52 @@ export let fs_gamedirvar: CvarT | null = null;
 // FS_InitFilesystem's own comment at the registration site and
 // platform/sys.ts's Sys_GetDefaultHomedir for the citations.
 export let fs_homedir: CvarT | null = null;
+// data_root_classic / data_root_rerelease <path> -- the two DATA TREES the
+// New Game screen lets the player choose between (menu_content.ts's
+// DataTreeId). See FS_SetDataRoot's own header for the remount lifecycle
+// and why this exists alongside, rather than instead of, content_root.
+export let fs_data_root_classic: CvarT | null = null;
+export let fs_data_root_rerelease: CvarT | null = null;
+
+// The data roots the LAST FS_SetDataRoot call mounted, lowest search
+// priority first. Empty until a `data_root` command actually runs, which is
+// what makes the boot-time mount path below byte-for-byte what it was
+// before this feature existed (contentRootsLowToHigh() falls back to the
+// single basedir the original FS_InitFilesystem/FS_SetGamedir always used).
+let fs_data_roots: string[] = [];
+
+// The packs the LAST FS_SetDataRoot call opened. It closes exactly these on
+// the next call, and nothing else -- see its own header for why it must not
+// close the boot-time base tier's fds.
+let fs_data_root_packs: PackT[] = [];
+
+// closeSync that tolerates an fd another teardown already closed, and marks
+// the pack so it is never closed twice. Search-path teardown can reach the
+// same PackT from more than one direction (a data-root remount and a test's
+// snapshot restore both walk the list), and a double close either throws
+// EBADF or, worse, closes an unrelated fd the runtime has since recycled
+// onto the same number.
+// Every pack currently on the search path. Its own function so the caller's
+// control-flow narrowing of fs_searchpaths (which FS_SetDataRoot sets to
+// null before rebuilding) does not leak into the walk.
+function mountedPacks(): PackT[] {
+  const out: PackT[] = [];
+  for (let node = fs_searchpaths; node; node = node.next) {
+    if (node.kind === "pack") out.push(node.pack);
+  }
+  return out;
+}
+
+function closePackHandle(pack: PackT): void {
+  if (pack.handle < 0) return;
+  const fd = pack.handle;
+  pack.handle = -1;
+  try {
+    closeSync(fd);
+  } catch {
+    // already closed elsewhere
+  }
+}
 
 let fs_links: FileLinkT | null = null;
 
@@ -192,10 +238,20 @@ let fs_base_searchpaths: SearchPathT | null = null; // without gamedirs
 export interface FsSearchPathSnapshotT {
   readonly searchpaths: SearchPathT | null;
   readonly baseSearchpaths: SearchPathT | null;
+  // fs_data_roots is part of the mounted state: a test that calls
+  // FS_SetDataRoot changes which roots every LATER FS_SetGamedir call mounts
+  // against, so restoring the path lists without restoring this would leave
+  // the next test's gamedir mounts pointed at this test's fixture roots.
+  readonly dataRoots: readonly string[];
+  // Likewise part of the mounted state: it is the list FS_SetDataRoot closes
+  // on its next call, so a test that leaves it holding ITS fixture's packs
+  // would have the next test's remount close file descriptors belonging to a
+  // tree it never mounted.
+  readonly dataRootPacks: readonly PackT[];
 }
 
 export function FS_TestSnapshotSearchPaths(): FsSearchPathSnapshotT {
-  return { searchpaths: fs_searchpaths, baseSearchpaths: fs_base_searchpaths };
+  return { searchpaths: fs_searchpaths, baseSearchpaths: fs_base_searchpaths, dataRoots: fs_data_roots, dataRootPacks: fs_data_root_packs };
 }
 
 export function FS_TestRestoreSearchPaths(snapshot: FsSearchPathSnapshotT): void {
@@ -204,10 +260,26 @@ export function FS_TestRestoreSearchPaths(snapshot: FsSearchPathSnapshotT): void
   // nodes -- otherwise they leak open file descriptors for the rest of
   // this test run's process.
   for (let node = fs_searchpaths; node && node !== snapshot.searchpaths; node = node.next) {
-    if (node.kind === "pack") closeSync(node.pack.handle);
+    if (node.kind === "pack") closePackHandle(node.pack);
   }
   fs_searchpaths = snapshot.searchpaths;
   fs_base_searchpaths = snapshot.baseSearchpaths;
+  fs_data_roots = [...snapshot.dataRoots];
+  fs_data_root_packs = [...snapshot.dataRootPacks];
+}
+
+// Read-only view of the mounted search path, head (highest priority) first,
+// for tests that need to assert mount ORDER rather than just "the right file
+// came back". Directory entries report their directory, pack/zip entries
+// their archive path.
+export function FS_TestSearchPathList(): string[] {
+  const out: string[] = [];
+  for (let s = fs_searchpaths; s; s = s.next) {
+    if (s.kind === "dir") out.push(s.filename);
+    else if (s.kind === "pack") out.push(s.pack.filename);
+    else out.push(s.zip.filename);
+  }
+  return out;
 }
 
 function basedirString(): string {
@@ -230,6 +302,69 @@ function homedirValue(): string {
 function writeRoot(): string {
   const home = homedirValue();
   return home.length > 0 ? home : basedirString();
+}
+
+// The content roots a gamedir mount must be laid down against, LOWEST search
+// priority first (FS_AddGameDirectory prepends, so the last one mounted is
+// the one read hits first). Before any `data_root` command has run this is
+// exactly `[basedir]` -- the single root FS_SetGamedir/FS_InitFilesystem
+// always used -- so unswitched boots are unchanged.
+function contentRootsLowToHigh(): string[] {
+  return fs_data_roots.length > 0 ? fs_data_roots : [basedirString()];
+}
+
+// The highest-priority content root: what FS_ExecAutoexec and any other
+// "the tree we are playing out of" question resolves against. Identical to
+// basedirString() until a data-root switch happens.
+function contentRoot(): string {
+  const roots = contentRootsLowToHigh();
+  return roots[roots.length - 1] ?? basedirString();
+}
+
+/*
+================
+FS_RootIsRerelease
+
+The auto-detection rule for telling the two data trees apart without
+hardcoding either install path: a root is the 2023 rerelease tree when its
+baseq2/pak0.pak sits next to a Q2Game.kpf. The classic 3.21 trees have the
+pak but never the kpf (the kpf is a KEX-era archive; verified against both
+of this machine's installs), and no tree has the kpf without the pak.
+================
+*/
+export function FS_RootIsRerelease(root: string): boolean {
+  if (!root.length) return false;
+  return existsSync(`${root}/${BASEDIRNAME}/pak0.pak`) && existsSync(`${root}/Q2Game.kpf`);
+}
+
+/*
+================
+FS_ListPackFileEntries
+
+Every entry name inside a pak file named by LITERAL on-disk path, without
+mounting it -- the unmounted-tree counterpart to FS_ListPakFiles (which can
+only ever see what is presently on fs_searchpaths, per its own header).
+
+The New Game screen needs this to answer "does THIS data tree actually
+contain this campaign's bsp?" for a tree that is not the mounted one, which
+is the whole basis of its per-tree availability column: both of this
+machine's trees keep their campaign maps inside pak files, so a directory
+listing alone can never see them. Opens, reads the directory, and closes
+immediately -- it never touches fs_searchpaths, so it cannot perturb the
+mounted state the caller is browsing away from.
+================
+*/
+export function FS_ListPackFileEntries(packfile: string): string[] | null {
+  let pak: PackT | null;
+  try {
+    pak = FS_LoadPackFile(packfile);
+  } catch {
+    return null;
+  }
+  if (!pak) return null;
+  const names = pak.files.map((f) => f.name);
+  closeSync(pak.handle);
+  return names;
 }
 
 //=============================================================================
@@ -857,7 +992,10 @@ FS_ExecAutoexec
 */
 export function FS_ExecAutoexec(): void {
   const dir = cvarMod().Cvar_VariableString("gamedir");
-  const name = dir.length ? `${basedirString()}/${dir}/autoexec.cfg` : `${basedirString()}/${BASEDIRNAME}/autoexec.cfg`;
+  // contentRoot(), not basedirString(): after a data-root switch the tree
+  // being played out of is the one whose autoexec.cfg should run. Identical
+  // to basedirString() until such a switch happens.
+  const name = dir.length ? `${contentRoot()}/${dir}/autoexec.cfg` : `${contentRoot()}/${BASEDIRNAME}/autoexec.cfg`;
 
   // Sys_FindFirst/Sys_FindClose (see header comment) reduce to a plain
   // existence check here: this call site always passes a literal filename,
@@ -885,7 +1023,7 @@ export function FS_SetGamedir(dir: string): void {
     const current = fs_searchpaths;
     if (current === fs_base_searchpaths || !current) break;
     if (current.kind === "pack") {
-      closeSync(current.pack.handle);
+      closePackHandle(current.pack);
     }
     fs_searchpaths = current.next;
   }
@@ -909,23 +1047,218 @@ export function FS_SetGamedir(dir: string): void {
     cvarMod().Cvar_FullSet("game", "", CVAR_LATCH | CVAR_SERVERINFO | CVAR_NOARCHIVE);
   } else {
     cvarMod().Cvar_FullSet("gamedir", dir, CVAR_SERVERINFO | CVAR_NOSET);
-    if (fs_cddir && fs_cddir.string.length) {
-      FS_AddGameDirectory(`${fs_cddir.string}/${dir}`);
-    }
-    FS_AddGameDirectory(`${basedirString()}/${dir}`);
-
-    // home paths override system paths (q2repro src/common/files.c:3724-
-    // 3729 setup_game_paths): mounted last, after the basedir mount above,
-    // so FS_AddGameDirectory's head-prepend makes it win both search-order
-    // priority (checked first on read) and fs_gamedir (the write path) --
-    // unconditionally, even if the directory doesn't exist on disk yet
-    // (matches setup_game_paths' add_game_dir(..., skip_if_not_exist=false)
-    // call for the home case; it gets created lazily on first write via
-    // FS_CreatePath).
-    if (homedirValue().length > 0) {
-      FS_AddGameDirectory(`${homedirValue()}/${dir}`);
-    }
+    mountGamedirTier(dir);
   }
+}
+
+/*
+================
+mountGamedirTier
+
+The search-path layer one named gamedir contributes, lowest priority first.
+Split out of FS_SetGamedir so FS_SetDataRoot can lay the same layer back
+down after a whole-tree remount without going through FS_SetGamedir's cvar
+side effects (its "" / BASEDIRNAME branch does Cvar_FullSet("game", ""),
+which would silently drop a latched game value the caller is mid-way
+through applying).
+================
+*/
+function mountGamedirTier(dir: string): void {
+  if (fs_cddir && fs_cddir.string.length) {
+    FS_AddGameDirectory(`${fs_cddir.string}/${dir}`);
+  }
+  // Once in the unswitched case (contentRootsLowToHigh() is just
+  // [basedir]); once per mounted data root, lowest priority first, after a
+  // `data_root` switch -- so a gamedir mounted while the classic tree is
+  // primary and the rerelease tree is the fallback gets BOTH trees' copies
+  // of that gamedir, classic winning, exactly like the baseq2 tier does.
+  for (const root of contentRootsLowToHigh()) {
+    FS_AddGameDirectory(`${root}/${dir}`);
+  }
+
+  // home paths override system paths (q2repro src/common/files.c:3724-
+  // 3729 setup_game_paths): mounted last, after the basedir mount above,
+  // so FS_AddGameDirectory's head-prepend makes it win both search-order
+  // priority (checked first on read) and fs_gamedir (the write path) --
+  // unconditionally, even if the directory doesn't exist on disk yet
+  // (matches setup_game_paths' add_game_dir(..., skip_if_not_exist=false)
+  // call for the home case; it gets created lazily on first write via
+  // FS_CreatePath).
+  if (homedirValue().length > 0) {
+    FS_AddGameDirectory(`${homedirValue()}/${dir}`);
+  }
+}
+
+/*
+================
+mountBaseTier
+
+The baseq2 search-path layer for an explicit ordered set of content roots,
+lowest priority first. Same call order as FS_InitFilesystem's own boot mount
+(cddir, then each root's Q2Game.kpf below its baseq2, then homedir on top),
+just generalized from "exactly one basedir plus an optional content_root" to
+"as many roots as the caller names".
+================
+*/
+function mountBaseTier(roots: readonly string[]): void {
+  if (fs_cddir && fs_cddir.string.length) {
+    FS_AddGameDirectory(`${fs_cddir.string}/${BASEDIRNAME}`);
+  }
+
+  for (const root of roots) {
+    add_game_kpf(root);
+    FS_AddGameDirectory(`${root}/${BASEDIRNAME}`);
+  }
+
+  if (homedirValue().length > 0) {
+    add_game_kpf(homedirValue());
+    FS_AddGameDirectory(`${homedirValue()}/${BASEDIRNAME}`);
+  }
+}
+
+/*
+================
+FS_SetDataRoot
+
+Remount the entire filesystem against a different DATA TREE (or a stack of
+them), lowest search priority first.
+
+WHY THIS EXISTS, AND WHY IT IS NOT content_root
+-----------------------------------------------------------------------
+content_root (see FS_InitFilesystem's own comment) is a boot-time,
+CVAR_NOSET, one-way ADDITION: it layers the rerelease tree UNDER the
+basedir so rerelease-only files (mapdb.json, q64/*) become reachable. It
+cannot express "play out of the OTHER tree", it cannot be changed after
+boot, and its comment explicitly declines to attempt a runtime basedir
+switch ("FS_AddGameDirectory's search-path linked list has no path to
+remove and re-root an existing search root").
+
+The New Game screen's data choice needs exactly that declined operation, so
+this function is the explicit path for it: unlike FS_SetGamedir, which only
+frees back down to fs_base_searchpaths, this tears down EVERY search path
+including the base tier, then rebuilds the base tier from the named roots
+and re-lays the active gamedir's layer on top. basedir itself is untouched
+and stays CVAR_NOSET/faithful -- what changes is which root(s) the mounts
+are built from, tracked in fs_data_roots.
+
+ROOT ORDER IS THE WHOLE POINT. Callers pass lowest priority FIRST, so
+`FS_SetDataRoot([rerelease, classic])` yields the kex-ruleset-on-original-
+data mount: the player's 1997 maps/textures win every name collision
+(classic is mounted last, and FS_AddGameDirectory prepends), while every
+kex-module asset the classic tree simply does not have -- Q2Game.kpf's
+kfonts, pics/damage_indicator.png, pics/i_armor_shard.pcx, the mission-pack
+icon set, mapdb.json -- still resolves out of the rerelease tree beneath.
+A single-element list is the plain "just this tree" case.
+================
+*/
+export function FS_SetDataRoot(roots: readonly string[]): void {
+  const wanted: string[] = [];
+  for (const root of roots) {
+    if (root.length && !wanted.includes(root)) wanted.push(root);
+  }
+  if (!wanted.length) {
+    Com_Printf("FS_SetDataRoot: no data root given\n");
+    return;
+  }
+
+  // Drop EVERY search path, base tier included -- the distinction
+  // FS_SetGamedir draws (stop at fs_base_searchpaths) is exactly what this
+  // function has to cross.
+  //
+  // Only the packs a PREVIOUS FS_SetDataRoot opened get closed, though, not
+  // every pack on the way down. The boot-time base tier's fds are not this
+  // function's to close: nothing tracks who else still holds a reference to
+  // those nodes (the engine itself never unmounts the boot tier, and the
+  // FS_TestSnapshot/Restore seam hands the same nodes back out afterward),
+  // and closing an fd twice either throws EBADF or lands on a number the
+  // runtime has already recycled onto an unrelated file. Closing exactly
+  // what this function opened keeps remounts from leaking -- a session can
+  // switch data roots any number of times -- while leaving the one-time
+  // boot tier exactly as the engine already treats it.
+  for (const pack of fs_data_root_packs) closePackHandle(pack);
+  fs_data_root_packs = [];
+
+  fs_searchpaths = null;
+  fs_base_searchpaths = null;
+
+  fs_data_roots = wanted;
+
+  mountBaseTier(wanted);
+
+  // any set gamedirs will be freed up to here
+  fs_base_searchpaths = fs_searchpaths;
+
+  // Re-lay the active gamedir's layer against the new roots. Read from the
+  // "gamedir" cvar (FS_SetGamedir's own record of what is mounted) rather
+  // than "game", which may be latched to a value that has not been applied
+  // yet -- when it is applied, FS_SetGamedir runs and mounts it against
+  // contentRootsLowToHigh(), which this call has already updated.
+  const gamedir = cvarMod().Cvar_VariableString("gamedir");
+  if (gamedir.length) mountGamedirTier(gamedir);
+
+  // flush all data, so it will be forced to reload -- every cached texture,
+  // model and sound just changed which tree it comes from. Same mechanism
+  // and same reason as FS_SetGamedir's own flush.
+  if (dedicated && !dedicated.value) {
+    cmdMod().Cbuf_AddText("vid_restart\nsnd_restart\n");
+  }
+
+  // Record what this call opened, so the next one closes exactly it.
+  fs_data_root_packs = mountedPacks();
+
+  Com_Printf("Data root: %s\n", wanted.slice().reverse().join(" over "));
+}
+
+// Resolve a data-tree id ("classic"/"rerelease") to its configured root
+// path, or null when the id is not one of the two.
+function dataRootPathFor(id: string): string | null {
+  if (id === "classic") return fs_data_root_classic ? fs_data_root_classic.string : "";
+  if (id === "rerelease") return fs_data_root_rerelease ? fs_data_root_rerelease.string : "";
+  return null;
+}
+
+/*
+================
+FS_DataRoot_f
+
+`data_root <primary> [fallback ...]` -- the console entry point the New Game
+screen's launch sequence uses (menu_content.ts's PerformLaunch queues it
+through Cbuf between "killserver" and "map", so the remount lands with no
+server up and before the map load resolves a single file).
+
+Arguments are given MOST significant first, the way they read out loud
+("classic over rerelease"); FS_SetDataRoot takes lowest-first, so the list
+is reversed on the way in. With no arguments it prints the current mount
+stack.
+================
+*/
+export function FS_DataRoot_f(): void {
+  const cmd = cmdMod();
+
+  if (cmd.Cmd_Argc() < 2) {
+    Com_Printf("usage: data_root <classic|rerelease> [fallback]\n");
+    Com_Printf("current: %s\n", contentRootsLowToHigh().slice().reverse().join(" over "));
+    Com_Printf("data_root_classic: \"%s\"\n", fs_data_root_classic ? fs_data_root_classic.string : "");
+    Com_Printf("data_root_rerelease: \"%s\"\n", fs_data_root_rerelease ? fs_data_root_rerelease.string : "");
+    return;
+  }
+
+  const highToLow: string[] = [];
+  for (let i = 1; i < cmd.Cmd_Argc(); i++) {
+    const id = cmd.Cmd_Argv(i);
+    const path = dataRootPathFor(id);
+    if (path === null) {
+      Com_Printf("data_root: unknown data tree \"%s\" (expected classic or rerelease)\n", id);
+      return;
+    }
+    if (!path.length) {
+      Com_Printf("data_root: no %s data tree configured (set data_root_%s)\n", id, id);
+      return;
+    }
+    highToLow.push(path);
+  }
+
+  FS_SetDataRoot(highToLow.slice().reverse());
 }
 
 /*
@@ -1132,6 +1465,7 @@ export function FS_InitFilesystem(): void {
   cmd.Cmd_AddCommand("path", FS_Path_f);
   cmd.Cmd_AddCommand("link", FS_Link_f);
   cmd.Cmd_AddCommand("dir", FS_Dir_f);
+  cmd.Cmd_AddCommand("data_root", FS_DataRoot_f);
 
   // --- cvar-parity audit: src/common/files.c cvars ---
   // fs_autoexec (files.c:4022, read at files.c:3862) gates whether
@@ -1220,6 +1554,43 @@ export function FS_InitFilesystem(): void {
   if (fs_content_root && fs_content_root.string.length) {
     add_game_kpf(fs_content_root.string);
     FS_AddGameDirectory(`${fs_content_root.string}/${BASEDIRNAME}`);
+  }
+
+  // data_root_classic / data_root_rerelease <path>
+  // The two trees menu_content.ts's "maps/data" choice picks between, and
+  // the only place either install path is ever named -- src/ hardcodes
+  // neither. Both default to "" and are auto-filled just below from the
+  // roots this boot already knows about (basedir and content_root), so a
+  // normal launch needs no configuration at all; a launch that wants an
+  // explicit pair passes `+set data_root_classic <path> +set
+  // data_root_rerelease <path>` and the auto-fill leaves those alone.
+  //
+  // Deliberately NOT CVAR_NOSET (unlike basedir/content_root): the whole
+  // point is that the data tree is switchable after boot, and the
+  // auto-detection below has to be able to write them.
+  fs_data_root_classic = cvar.Cvar_Get("data_root_classic", "", 0);
+  fs_data_root_rerelease = cvar.Cvar_Get("data_root_rerelease", "", 0);
+  {
+    const classicVar = fs_data_root_classic;
+    const rereleaseVar = fs_data_root_rerelease;
+    const contentRootValue = fs_content_root ? fs_content_root.string : "";
+    // basedir first: whichever tree the engine actually booted against is
+    // the better default for its own kind. content_root is the other tree
+    // by construction (see its comment above).
+    const candidates = [basedirString(), contentRootValue].filter((p) => p.length > 0);
+    if (rereleaseVar && !rereleaseVar.string.length) {
+      const found = candidates.find((p) => FS_RootIsRerelease(p));
+      if (found) cvar.Cvar_ForceSet("data_root_rerelease", found);
+    }
+    if (classicVar && !classicVar.string.length) {
+      // A root with a baseq2 but no Q2Game.kpf is a classic tree; fall back
+      // to basedir so the classic id always resolves to something mountable
+      // even on a rerelease-only install (where it names the same tree, and
+      // the New Game screen's per-tree scan will simply report that the
+      // classic column has nothing the rerelease column does not).
+      const found = candidates.find((p) => !FS_RootIsRerelease(p) && existsSync(`${p}/${BASEDIRNAME}`));
+      cvar.Cvar_ForceSet("data_root_classic", found ?? basedirString());
+    }
   }
 
   // start up with baseq2 by default

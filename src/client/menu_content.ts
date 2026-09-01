@@ -251,9 +251,16 @@ avoids that, same as every other menu screen that starts a game).
 `bsp` overrides the LaunchPlan's default map (the unit browser's chosen
 start point, when the caller offers one); pass plan.map to start at the
 default first unit.
+
+`data` is the DATA TREE choice (see this file's DATA TREES section). When
+given, a `data_root` command is queued between "killserver" and "map": the
+remount has to happen with no server up (so the whole search path, base tier
+included, can be torn down and rebuilt) and before the map load resolves its
+first file. Omitted -- the pre-data-tree call shape -- nothing is remounted
+and the launch runs against whatever is already mounted, exactly as before.
 ===============
 */
-export function PerformLaunch(plan: LaunchPlan, bsp: string, skill: number | null, coop = false): void {
+export function PerformLaunch(plan: LaunchPlan, bsp: string, skill: number | null, coop = false, data: DataMountPlan | null = null): void {
   // New Game NEVER starts deathmatch, coop or not. `coop` is the New Game
   // screen's QoL toggle (owner request 2026-08-31); when enabled and
   // maxclients is still the SP default of 1, widen it so the listen
@@ -277,7 +284,10 @@ export function PerformLaunch(plan: LaunchPlan, bsp: string, skill: number | nul
   if (plan.startItems.length) Cvar_Set("g_start_items", plan.startItems);
   else Cvar_Set("g_start_items", "");
 
-  Cbuf_AddText(`loading ; killserver ; wait ; map ${bsp}\n`);
+  // "classic over rerelease" reads most-significant first, which is the
+  // argument order FS_DataRoot_f takes.
+  const mount = data ? ` data_root ${data.primary}${data.fallback ? ` ${data.fallback}` : ""} ; wait ;` : "";
+  Cbuf_AddText(`loading ; killserver ; wait ;${mount} map ${bsp}\n`);
 }
 
 // Re-exported purely so menu.ts's Content screen (and this file's own
@@ -333,6 +343,12 @@ export interface GameFsSeam {
   // Mirrors files.ts's FS_ReadRawFile plus a text decode: whole-file text,
   // or null if the file doesn't exist.
   readTextFile(path: string): string | null;
+  // Mirrors files.ts's FS_ListPackFileEntries: every entry name inside the
+  // pak at a LITERAL path, without mounting it, or null if it isn't a
+  // readable pak. Required by the per-tree availability scan below: both of
+  // this machine's data trees keep their campaign bsps inside pak files, so
+  // a directory listing alone can never tell whether a tree has a campaign.
+  listPakEntries(packfile: string): string[] | null;
 }
 
 function basenameOf(path: string): string {
@@ -600,4 +616,341 @@ export function LaunchPlanForDiscovered(dirname: string, firstMap: string): Laun
 // menu.ts's BeginContentFunc no longer needs its own kind-branch.
 export function ResolveLaunchForGame(game: SelectableGame, ruleset: RulesetId, firstMap: string): LaunchPlan | null {
   return game.kind === "curated" ? ResolveLaunch(game.content.id, ruleset) : LaunchPlanForDiscovered(game.dirname, firstMap);
+}
+
+/*
+=============================================================================
+DATA TREES (Mike's RC ruling, 2026-09-01: "the New Game screen must let the
+player choose WHICH DATA TREE runs the content -- original 1997 data vs
+re-release data")
+
+This is a THIRD axis, independent of the two above:
+
+  ruleset  = which game MODULE runs (classic 3.21 binding vs the kex one)
+  content  = which campaign/mapset
+  DATA TREE = which on-disk install the maps, textures, sounds and pics are
+              read out of -- the original 1997 data, or the 2023 rerelease's
+              re-authored version of the same campaigns
+
+The engine side is qcommon/files.ts's `data_root` command / FS_SetDataRoot;
+this section is the model half, same split as the rest of this file.
+
+THE TWO MOUNT RULES (Mike, 2026-09-01, as amended the same morning)
+---------------------------------------------------------------------
+(a) The KEX ruleset ALWAYS has the rerelease tree mounted, because the kex
+    module hard-requires assets that exist nowhere in a 1997 install:
+    Q2Game.kpf's kfonts, pics/damage_indicator.png, pics/i_armor_shard.pcx,
+    the mission-pack icon set, mapdb.json. Without it the client prints
+    hundreds of "Can't find pic" lines and attempts a download per missing
+    file (his 2026-09-01 finding 2).
+
+    AMENDED: "always mounts the rerelease tree" does NOT mean "always plays
+    the rerelease maps". When the player picks kex + original data he wants
+    HIS 1997 map files, not the re-authored ones -- so the classic tree is
+    mounted as the PRIMARY content source and the rerelease tree goes
+    BENEATH it as an asset fallback. Every name present in both trees
+    (maps/base1.bsp, textures, sounds) resolves to the classic copy; every
+    kex-only asset still resolves out of the rerelease tree below. That is
+    what makes the spam structurally impossible WITHOUT swapping his maps.
+
+(b) The CLASSIC ruleset runs whichever tree the player picked, alone -- a
+    classic 3.21 module has no rerelease asset requirements to satisfy, and
+    mounting the other tree underneath would only invite silent
+    cross-tree resolution the player never asked for.
+
+AVAILABILITY IS SCANNED, NEVER ASSUMED. What each tree actually holds is a
+property of THIS MACHINE'S installs, not of the content table above, so
+every per-tree question below is answered from ScanDataTree's real reading
+of the trees (loose maps/*.bsp plus the contents of every pak, which is
+where both trees in fact keep their campaign maps).
+=============================================================================
+*/
+
+export type DataTreeId = "classic" | "rerelease";
+
+export const DATA_TREES: ReadonlyArray<{ id: DataTreeId; name: string }> = [
+  { id: "classic", name: "original" },
+  { id: "rerelease", name: "re-release" },
+];
+
+export function DataTreeDisplayName(id: DataTreeId): string {
+  return DATA_TREES.find((t) => t.id === id)?.name ?? id;
+}
+
+// What FS_SetDataRoot must be told for one (ruleset, tree) choice: which
+// tree wins name collisions, and which (if any) sits beneath it as the
+// asset fallback. See rules (a)/(b) above.
+export interface DataMountPlan {
+  readonly primary: DataTreeId;
+  readonly fallback: DataTreeId | null;
+}
+
+export function DataMountPlanFor(ruleset: RulesetId, tree: DataTreeId): DataMountPlan {
+  if (ruleset !== "rerelease") return { primary: tree, fallback: null };
+  return tree === "classic" ? { primary: "classic", fallback: "rerelease" } : { primary: "rerelease", fallback: null };
+}
+
+/*
+===============
+DataTreeScan
+
+One data tree's real contents: which gamedirs it has, and which map names
+are reachable inside each of them. Map names are stored exactly as a
+LaunchPlan.map spells them -- "maps/" prefix and ".bsp" suffix stripped,
+subdirectories kept ("q64/rtest") -- so availability is a plain set lookup.
+===============
+*/
+export interface DataTreeScan {
+  readonly id: DataTreeId;
+  readonly root: string;
+  // Empty root string, or a root with no baseq2 at all: nothing about this
+  // tree is selectable, and the kex ruleset cannot run at all without the
+  // rerelease one.
+  readonly present: boolean;
+  // Gamedir name -> the map names reachable when that gamedir is mounted
+  // over baseq2. Always carries a BASEDIRNAME entry when present.
+  readonly mapsByGamedir: ReadonlyMap<string, ReadonlySet<string>>;
+  // Sibling gamedirs that qualify (GameDirQualifies), excluding baseq2.
+  readonly gamedirs: readonly string[];
+}
+
+function mapNameFrom(entry: string): string | null {
+  const lower = entry.toLowerCase().replace(/\\/g, "/");
+  if (!lower.startsWith("maps/") || !lower.endsWith(".bsp")) return null;
+  return lower.slice("maps/".length, -".bsp".length);
+}
+
+// Every map name reachable in one gamedir directory: the loose maps/ tree
+// plus the contents of every pak in it. Both of this machine's trees keep
+// their campaign maps in paks, so the pak half is the load-bearing one.
+function MapsInGamedir(seam: GameFsSeam, gamedirPath: string): Set<string> {
+  const names = new Set<string>();
+
+  for (const loose of seam.listFiles(`${gamedirPath}/maps/*.bsp`) ?? []) {
+    const name = mapNameFrom(`maps/${basenameOf(loose)}`);
+    if (name !== null) names.add(name);
+  }
+
+  for (const pak of seam.listFiles(`${gamedirPath}/*.pak`) ?? []) {
+    for (const entry of seam.listPakEntries(pak) ?? []) {
+      const name = mapNameFrom(entry);
+      if (name !== null) names.add(name);
+    }
+  }
+
+  return names;
+}
+
+/*
+===============
+ScanDataTree
+
+Read one data root. Cheap enough to run on menu open (it parses pak
+DIRECTORIES only, never file bodies), and cached by root path below since a
+tree's contents cannot change during a session.
+===============
+*/
+export function ScanDataTree(seam: GameFsSeam, id: DataTreeId, root: string): DataTreeScan {
+  const mapsByGamedir = new Map<string, ReadonlySet<string>>();
+
+  if (!root.length) {
+    return { id, root, present: false, mapsByGamedir, gamedirs: [] };
+  }
+
+  const baseMaps = MapsInGamedir(seam, `${root}/${BASEDIRNAME}`);
+  const baseListing = seam.listFiles(`${root}/${BASEDIRNAME}/*`);
+  const present = baseListing !== null || baseMaps.size > 0;
+  if (!present) {
+    return { id, root, present: false, mapsByGamedir, gamedirs: [] };
+  }
+  mapsByGamedir.set(BASEDIRNAME, baseMaps);
+
+  const gamedirs: string[] = [];
+  for (const path of seam.listFiles(`${root}/*`) ?? []) {
+    const dirname = basenameOf(path);
+    if (dirname === BASEDIRNAME) continue;
+    if (!GameDirQualifies(seam, path)) continue;
+    gamedirs.push(dirname);
+    mapsByGamedir.set(dirname, MapsInGamedir(seam, path));
+  }
+  gamedirs.sort();
+
+  return { id, root, present: true, mapsByGamedir, gamedirs };
+}
+
+// Scans are keyed by root path and reused across menu opens -- a data tree's
+// on-disk contents do not change while the client runs, and re-parsing the
+// rerelease pak's 14k-entry directory on every open would be pure waste.
+const data_tree_scan_cache = new Map<string, DataTreeScan>();
+
+export function CachedScanDataTree(seam: GameFsSeam, id: DataTreeId, root: string): DataTreeScan {
+  const key = `${id} ${root}`;
+  const hit = data_tree_scan_cache.get(key);
+  if (hit) return hit;
+  const scan = ScanDataTree(seam, id, root);
+  data_tree_scan_cache.set(key, scan);
+  return scan;
+}
+
+// Tests that build fixture trees per case must not see an earlier case's
+// answer for a reused temp path.
+export function ResetDataTreeScanCache(): void {
+  data_tree_scan_cache.clear();
+}
+
+/*
+===============
+LaunchPlanRunsInTree
+
+Can this launch plan's map actually be loaded out of this tree? The plan's
+gamedir layer is searched first, then baseq2 underneath it -- exactly the
+search order FS_SetGamedir lays down, so this answers the real question
+("would `map <plan.map>` find a bsp?") rather than a naming convention.
+
+The kex ruleset's plans all name game "kex", whose directory carries no
+maps in either tree (all rerelease content lives in the rerelease baseq2
+pak); those fall through to the baseq2 lookup, which is correct.
+===============
+*/
+export function LaunchPlanRunsInTree(plan: LaunchPlan, scan: DataTreeScan): boolean {
+  if (!scan.present) return false;
+  const dir = plan.game.length ? plan.game : BASEDIRNAME;
+  if (scan.mapsByGamedir.get(dir)?.has(plan.map)) return true;
+  return scan.mapsByGamedir.get(BASEDIRNAME)?.has(plan.map) === true;
+}
+
+export type DataTreeScans = Readonly<Record<DataTreeId, DataTreeScan>>;
+
+function scanFor(scans: DataTreeScans, id: DataTreeId): DataTreeScan {
+  return scans[id];
+}
+
+/*
+===============
+AvailableDataTreesFor
+
+Which data trees a (game, ruleset) selection can actually run out of, in
+DATA_TREES' fixed display order.
+
+Rule (a) is enforced here as a PRECONDITION rather than as a forced choice:
+the kex ruleset needs the rerelease tree mounted either way (primary, or
+beneath the classic tree as the asset fallback), so if there is no rerelease
+tree on this machine at all, the kex ruleset offers no data trees -- and
+AvailableRulesetsForGameInTrees below therefore drops the ruleset entirely,
+instead of letting the player pick a combination that would reproduce
+finding 2's spam.
+===============
+*/
+export function AvailableDataTreesFor(game: SelectableGame, ruleset: RulesetId, scans: DataTreeScans): DataTreeId[] {
+  if (ruleset === "rerelease" && !scanFor(scans, "rerelease").present) return [];
+
+  return DATA_TREES.map((t) => t.id).filter((treeId) => {
+    const scan = scanFor(scans, treeId);
+    if (!scan.present) return false;
+    if (game.kind === "discovered") {
+      // A discovered mod is only offered for the trees that actually hold
+      // its directory -- a mod installed in the classic tree only must not
+      // appear as a rerelease-data option.
+      return scan.gamedirs.includes(game.dirname);
+    }
+    const plan = ResolveLaunch(game.content.id, ruleset);
+    return plan !== null && LaunchPlanRunsInTree(plan, scan);
+  });
+}
+
+/*
+===============
+AvailableRulesetsForGameInTrees
+
+AvailableRulesetsForGame with rule (a)'s ONE precondition applied: the kex
+ruleset needs a rerelease tree to exist, because it is mounted either way
+(primary, or beneath the classic tree as the asset fallback). On a
+classic-only install there is nothing to mount, so the ruleset is not
+offered -- which is precisely the combination that produced Mike's finding-2
+asset spam.
+
+Deliberately NOT narrowed any further than that. An earlier revision also
+dropped any ruleset whose content the scan could not find in either tree;
+that made the whole screen depend on the scan being right about every
+install layout, and an unconfigured data_root_classic/data_root_rerelease
+pair (both scans "not present") left the player with no selectable ruleset
+at all and a "begin" that silently did nothing. The scan drives the DATA
+row, where being wrong costs a greyed spincontrol; it does not get to veto
+the ruleset row, where being wrong costs the ability to start a game.
+===============
+*/
+export function AvailableRulesetsForGameInTrees(game: SelectableGame, scans: DataTreeScans): RulesetId[] {
+  return AvailableRulesetsForGame(game).filter((ruleset) => ruleset !== "rerelease" || scanFor(scans, "rerelease").present);
+}
+
+/*
+===============
+EffectiveDataTreeFor
+
+Which tree a launch actually uses, given the scan's answer and the tree the
+engine booted against.
+
+The empty-`available` case is the one that matters: it means the scan could
+not place this selection in either tree (unconfigured data_root_* cvars, or
+an install layout the scan does not recognize). For the CLASSIC ruleset the
+answer is null -- no remount is queued and the launch runs against whatever
+is already mounted, exactly as it did before this feature existed. For the
+KEX ruleset the answer is "rerelease" regardless, because rule (a) is not
+negotiable: a kex launch that skipped the remount could end up on a
+classic-only mount, which is the spam Mike reported.
+
+`booted` (the tree the engine's own basedir is) wins over list order when it
+is available, so a normal launch keeps playing out of the tree it started
+from and the data row is a genuine choice rather than a silent switch.
+===============
+*/
+export function EffectiveDataTreeFor(ruleset: RulesetId, available: readonly DataTreeId[], booted: DataTreeId): DataTreeId | null {
+  if (!available.length) return ruleset === "rerelease" ? "rerelease" : null;
+  if (available.includes(booted)) return booted;
+  return available[0] ?? null;
+}
+
+/*
+===============
+DiscoverGameDirsInTrees
+
+The discovered-mod list across BOTH trees, deduped by name and sorted --
+the per-tree replacement for DiscoverGameDirs' single root list. A mod that
+exists in both trees appears once; AvailableDataTreesFor reports which trees
+it can be played from, and GameListDisplayNameInTrees labels the
+single-tree case.
+===============
+*/
+export function DiscoverGameDirsInTrees(scans: DataTreeScans): string[] {
+  const excluded = CuratedGameDirnames();
+  const found: string[] = [];
+  for (const { id } of DATA_TREES) {
+    for (const dirname of scanFor(scans, id).gamedirs) {
+      if (dirname === BASEDIRNAME || excluded.has(dirname) || found.includes(dirname)) continue;
+      found.push(dirname);
+    }
+  }
+  return found.sort();
+}
+
+/*
+===============
+GameListDisplayNameInTrees
+
+The menu row's label, with a tree tag when the game exists in only one of
+the two trees ("lmctf (original)") so the player can tell at a glance which
+data a discovered mod belongs to. Games present in both trees keep their
+plain name -- the "maps/data" spincontrol is where that choice is made.
+===============
+*/
+export function GameListDisplayNameInTrees(game: SelectableGame, scans: DataTreeScans): string {
+  const name = GameListDisplayName(game);
+  const trees = new Set<DataTreeId>();
+  for (const ruleset of AvailableRulesetsForGame(game)) {
+    for (const treeId of AvailableDataTreesFor(game, ruleset, scans)) trees.add(treeId);
+  }
+  if (trees.size !== 1) return name;
+  const only = [...trees][0];
+  if (only === undefined) return name;
+  return `${name} (${DataTreeDisplayName(only)})`;
 }
