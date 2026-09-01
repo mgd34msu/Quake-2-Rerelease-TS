@@ -1395,7 +1395,69 @@ export function R_Init(hInstance: unknown, wndProc: unknown): boolean {
   if (gl_config.allow_cds) ri.Con_Printf(PRINT_ALL, "...allowing CDS\n");
   else ri.Con_Printf(PRINT_ALL, "...disabling CDS\n");
 
-  // #ifdef WIN32 extension-pointer probing dropped -- see file header comment.
+  // Vanilla gl_rmain.c:1247-1321's extension gate, previously dropped here
+  // as "#ifdef WIN32 probing". Dropping it was a REAL porting bug, found
+  // live 2026-08-31: vanilla only keeps an extension pointer when the
+  // driver ADVERTISES the extension in GL_EXTENSIONS (strstr) AND the
+  // matching cvar allows it; this port's loadQGLFromSystem resolves every
+  // symbol unconditionally, and modern NVIDIA exports glColorTableEXT
+  // without supporting GL_EXT_paletted_texture -- so once bc99622 made
+  // first-context resolution actually work, the never-advertised paletted
+  // upload path activated and every world texture rendered WHITE
+  // (headless screenshot forensics: 95% white -> 0.2% with the path off).
+  // The gate below nulls exactly the pointers vanilla would never have
+  // set, with vanilla's own console lines. WGL_EXT_swap_control stays
+  // dropped (Windows-only, no member in this port's QGL).
+  {
+    const ext = gl_config.extensions_string;
+    if (ext.includes("GL_EXT_compiled_vertex_array") || ext.includes("GL_SGI_compiled_vertex_array")) {
+      ri.Con_Printf(PRINT_ALL, "...enabling GL_EXT_compiled_vertex_array\n");
+    } else {
+      ri.Con_Printf(PRINT_ALL, "...GL_EXT_compiled_vertex_array not found\n");
+      qgl.qglLockArraysEXT = null;
+      qgl.qglUnlockArraysEXT = null;
+    }
+
+    if (ext.includes("GL_EXT_point_parameters")) {
+      if (glCvars.gl_ext_pointparameters && glCvars.gl_ext_pointparameters.value) {
+        ri.Con_Printf(PRINT_ALL, "...using GL_EXT_point_parameters\n");
+      } else {
+        ri.Con_Printf(PRINT_ALL, "...ignoring GL_EXT_point_parameters\n");
+        qgl.qglPointParameterfEXT = null;
+        qgl.qglPointParameterfvEXT = null;
+      }
+    } else {
+      ri.Con_Printf(PRINT_ALL, "...GL_EXT_point_parameters not found\n");
+      qgl.qglPointParameterfEXT = null;
+      qgl.qglPointParameterfvEXT = null;
+    }
+
+    if (ext.includes("GL_EXT_paletted_texture") && ext.includes("GL_EXT_shared_texture_palette")) {
+      if (glCvars.gl_ext_palettedtexture && glCvars.gl_ext_palettedtexture.value) {
+        ri.Con_Printf(PRINT_ALL, "...using GL_EXT_shared_texture_palette\n");
+      } else {
+        ri.Con_Printf(PRINT_ALL, "...ignoring GL_EXT_shared_texture_palette\n");
+        qgl.qglColorTableEXT = null;
+      }
+    } else {
+      ri.Con_Printf(PRINT_ALL, "...GL_EXT_shared_texture_palette not found\n");
+      qgl.qglColorTableEXT = null;
+    }
+
+    if (ext.includes("GL_SGIS_multitexture")) {
+      if (glCvars.gl_ext_multitexture && glCvars.gl_ext_multitexture.value) {
+        ri.Con_Printf(PRINT_ALL, "...using GL_SGIS_multitexture\n");
+      } else {
+        ri.Con_Printf(PRINT_ALL, "...ignoring GL_SGIS_multitexture\n");
+        qgl.qglMTexCoord2fSGIS = null;
+        qgl.qglSelectTextureSGIS = null;
+      }
+    } else {
+      ri.Con_Printf(PRINT_ALL, "...GL_SGIS_multitexture not found\n");
+      qgl.qglMTexCoord2fSGIS = null;
+      qgl.qglSelectTextureSGIS = null;
+    }
+  }
 
   GL_SetDefaultState();
 
