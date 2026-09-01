@@ -157,6 +157,31 @@ function cvarNum(c: { value: number } | null): number {
 // compiler-warning silencer on the field-type switch -- both no-ops here).
 // -------------------------------------------------------------------------
 
+// Unknown-field / unknown-classname spawn noise, gated behind the
+// "developer" cvar. Mike's ruling (2026-08-31): "quiet it" -- see
+// .orch/followups.md finding 14, extended to every LEGACY-family module
+// (coordinator follow-up, same day: the ruling covers the family, and
+// LM-CTF loads rerelease-authored maps through the New Game selector the
+// same way baseq2 does). Identical mechanism to src/game/g_spawn.ts's
+// ED_ParseField/ED_CallSpawn/SpawnEntities: the frozen LM-CTF game DLL
+// dprintfs "<field> is not a field" / "<classname> doesn't have a spawn
+// function" for every KEX-era key/entity a rerelease map carries; that
+// per-line output is faithful, but at developer 0 it is unusable console
+// flooding on rerelease data. Both message classes are counted instead of
+// printed and rolled into one summary line at spawn completion (see
+// SpawnEntities below); developer 1 restores the byte-identical vanilla
+// per-line output. This module's own counter state (not shared with
+// src/game/g_spawn.ts or any other sibling). Not added to gameCvars
+// (g_local.ts) because that table mirrors only the cvar_t* externs the
+// real game DLL declares in g_local.h/game.h, and vanilla has no such
+// extern -- resolved dynamically here instead.
+const unknownFieldKeys = new Set<string>();
+const unknownClassnames = new Set<string>();
+
+function developerMode(): boolean {
+  return cvarNum(gi.cvar("developer", "0", 0)) !== 0;
+}
+
 function C_atoi(value: string): number {
   const n = Number.parseInt(value, 10);
   return Number.isNaN(n) ? 0 : n;
@@ -233,7 +258,15 @@ export function ED_ParseField(key: string, value: string, ent: EdictT): void {
     }
     return;
   }
-  gi.dprintf(`${key} is not a field\n`);
+  // Mike's ruling (2026-08-31): "quiet it" -- see the deviation comment on
+  // unknownFieldKeys/developerMode above C_atoi. developer 1 keeps the
+  // byte-identical vanilla line; developer 0 counts it silently and
+  // SpawnEntities prints one summary line instead.
+  if (developerMode()) {
+    gi.dprintf(`${key} is not a field\n`);
+  } else {
+    unknownFieldKeys.add(key);
+  }
 }
 
 function firstChar(token: string): string {
@@ -447,7 +480,15 @@ export function ED_CallSpawn(ent: EdictT): void {
       return;
     }
   }
-  gi.dprintf(`${classname} doesn't have a spawn function\n`);
+  // Mike's ruling (2026-08-31): "quiet it" -- see the deviation comment on
+  // unknownFieldKeys/developerMode above C_atoi (same rationale, same
+  // gate). developer 1 keeps the byte-identical vanilla line; developer 0
+  // counts it silently and SpawnEntities prints one summary line instead.
+  if (developerMode()) {
+    gi.dprintf(`${classname} doesn't have a spawn function\n`);
+  } else {
+    unknownClassnames.add(classname);
+  }
 }
 
 // Lazy require, not a static import, for SpawnItem specifically: g_items.ts
@@ -546,6 +587,12 @@ export function SpawnEntities(mapname: string, entities: string, spawnpoint: str
   let ent: EdictT | null = null;
   let inhibit = 0;
 
+  // Mike's ruling (2026-08-31): "quiet it" -- reset the unknown-field/
+  // unknown-classname counters (see the deviation comment above C_atoi) for
+  // this map's parse pass before ED_ParseEdict/ED_CallSpawn can add to them.
+  unknownFieldKeys.clear();
+  unknownClassnames.clear();
+
   const state: ComParseState = { data: entities, index: 0 };
 
   for (;;) {
@@ -603,6 +650,18 @@ export function SpawnEntities(mapname: string, entities: string, spawnpoint: str
   }
 
   gi.dprintf(`${inhibit} entities inhibited\n`);
+
+  // Mike's ruling (2026-08-31): "quiet it" -- see the deviation comment on
+  // unknownFieldKeys/developerMode above C_atoi. developer 0 rolls up every
+  // "<field> is not a field" / "<classname> doesn't have a spawn function"
+  // ED_ParseField/ED_CallSpawn suppressed during this parse pass into one
+  // line; developer 1 already printed each one and skips this line entirely
+  // (byte-identical to vanilla otherwise).
+  if (!developerMode()) {
+    gi.dprintf(
+      `SpawnEntities: ${unknownFieldKeys.size} unknown fields, ${unknownClassnames.size} unknown classnames suppressed (developer 1 for detail)\n`,
+    );
+  }
 
   G_FindTeams();
 
