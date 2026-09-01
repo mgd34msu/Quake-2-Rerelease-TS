@@ -508,12 +508,28 @@ export function R_RenderBrushPoly(fa: MsurfaceT): void {
     enteredDynamicBlock = true;
   }
 
+  // q2repro's per-face NOLM mask (gl_static.nolm_mask, applied at every
+  // lightmap-chain admission point in surf.c's build_surface_light) is the
+  // closest analog here. Vanilla's R_RenderBrushPoly assumed this function
+  // is never reached for a SURF_SKY face -- a world-tree sky face is
+  // diverted to R_AddSkySurface before ever reaching a texture chain (see
+  // R_RecursiveWorldNode) -- so the plain (non-dynamic) branch below never
+  // gated on texinfo flags at all. That assumption breaks for a kex
+  // rerelease bmodel entity textured with a sky shader (reproduced live:
+  // maps/mguhub.bsp carries a func_wall using textures/kd/kd_sky_001.wal).
+  // R_DrawInlineBModel has no SURF_SKY special case (matching vanilla), so
+  // such a surface reaches here and, without this guard, falls through to
+  // the final else and chains itself into gl_lms.lightmap_surfaces[0] via
+  // its never-assigned (default 0) lightmaptexturenum -- the same slot
+  // R_BlendLightmaps' dynamic pass walks and unconditionally rebuilds via
+  // R_BuildLightMap, which then trips that function's own "non-lit
+  // surface" guard ("ERROR: R_BuildLightMap called for non-lit surface").
+  const noLightmap = !fa.texinfo || (fa.texinfo.flags & (SURF_SKY | SURF_TRANS33 | SURF_TRANS66 | SURF_WARP)) !== 0;
+
   let isDynamic = false;
-  if (enteredDynamicBlock) {
+  if (enteredDynamicBlock && !noLightmap) {
     if (glCvars.gl_dynamic && glCvars.gl_dynamic.value) {
-      if (fa.texinfo && !(fa.texinfo.flags & (SURF_SKY | SURF_TRANS33 | SURF_TRANS66 | SURF_WARP))) {
-        isDynamic = true;
-      }
+      isDynamic = true;
     }
   }
 
@@ -548,7 +564,7 @@ export function R_RenderBrushPoly(fa: MsurfaceT): void {
       fa.lightmapchain = gl_lms.lightmap_surfaces[0];
       gl_lms.lightmap_surfaces[0] = fa;
     }
-  } else {
+  } else if (!noLightmap) {
     fa.lightmapchain = gl_lms.lightmap_surfaces[fa.lightmaptexturenum];
     gl_lms.lightmap_surfaces[fa.lightmaptexturenum] = fa;
   }
@@ -764,8 +780,13 @@ function R_DrawInlineBModel(): void {
     if (((psurf.flags & SURF_PLANEBACK) !== 0 && dot < -BACKFACE_EPSILON) || ((psurf.flags & SURF_PLANEBACK) === 0 && dot > BACKFACE_EPSILON)) {
       if (psurf.texinfo && psurf.texinfo.flags & (SURF_TRANS33 | SURF_TRANS66)) {
         // add to the translucent chain
-        psurf.texturechain = r_alpha_surfaces;
-        r_alpha_surfaces = psurf;
+        // See MsurfaceT's alphaframe comment (gl_model.ts): one push per
+        // surface per frame, or the chain self-cycles.
+        if (psurf.alphaframe !== r_framecount) {
+          psurf.alphaframe = r_framecount;
+          psurf.texturechain = r_alpha_surfaces;
+          r_alpha_surfaces = psurf;
+        }
       } else if (Boolean(qgl.qglMTexCoord2fSGIS) && !(psurf.flags & SURF_DRAWTURB)) {
         GL_RenderLightmappedPoly(psurf);
       } else {
@@ -936,8 +957,13 @@ export function R_RecursiveWorldNode(node: MnodeOrLeaf): void {
         R_AddSkySurface(surf);
       } else if (surf.texinfo && surf.texinfo.flags & (SURF_TRANS33 | SURF_TRANS66)) {
         // add to the translucent chain
-        surf.texturechain = r_alpha_surfaces;
-        r_alpha_surfaces = surf;
+        // See R_DrawInlineBModel's identical guard and MsurfaceT's
+        // alphaframe comment.
+        if (surf.alphaframe !== r_framecount) {
+          surf.alphaframe = r_framecount;
+          surf.texturechain = r_alpha_surfaces;
+          r_alpha_surfaces = surf;
+        }
       } else {
         if (Boolean(qgl.qglMTexCoord2fSGIS) && !(surf.flags & SURF_DRAWTURB)) {
           GL_RenderLightmappedPoly(surf);
