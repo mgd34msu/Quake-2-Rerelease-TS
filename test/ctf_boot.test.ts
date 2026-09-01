@@ -6,7 +6,7 @@
 // SV_InitGameProgs builds its GameImports from the real Cvar_Get/Cvar_Set,
 // not an injectable fake.
 
-import { afterAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { CplaneT, CvarT } from "../src/shared/q_shared";
 import { vec3 } from "../src/shared/math";
 import type { GameImports as CtfGameImports, GTraceT as CtfGTraceT } from "../src/ctf/game";
@@ -152,7 +152,40 @@ describe("ctf GetGameAPI", () => {
 // ---------------------------------------------------------------------------
 
 describe("SV_InitGameProgs runtime game-track selection", () => {
-  const savedCvars = new Map(cvar_vars);
+  // rule 13/21 (regate hygiene, found 2026-09-01 chasing the cgame/host.ts
+  // kfont-dispatch trio's in-suite-only failures): this used to capture
+  // `savedCvars` inline in the describe body, which bun:test evaluates
+  // during COLLECTION -- before any file's own beforeEach/test bodies have
+  // run, i.e. essentially at the start of the whole `bun test` process. Any
+  // cvar a DIFFERENT module registers later, during real test execution
+  // (e.g. src/client/cgame/host.ts's `cl_kfont_source`/`cl_kfont_ttf_size`,
+  // cached in a module-level `let` the first time any cgame test touches
+  // them), was invisible to that too-early snapshot. This describe's own
+  // afterAll then did `cvar_vars.clear()` followed by re-inserting ONLY the
+  // snapshotted entries -- permanently dropping any cvar registered after
+  // collection but before this suite ran, even though host.ts's cached
+  // reference to that now-orphaned CvarT object lives on: Cvar_ForceSet
+  // against the NEW object bun creates on next use never reaches it again,
+  // so ensureActiveKfont() keeps reading whatever `.string` the orphaned
+  // object had at the moment of the wipe, forever. Confirmed as the root
+  // cause of test/cgame_host_kfont_source.test.ts's "classic"/"switching"/
+  // "ttf:<name> missing" cases all reading back the stale already-loaded
+  // "kfont" width (10) instead of their own just-forced source, but ONLY in
+  // full-suite runs where this file executes first (isolated/small-group
+  // runs never hit it, since nothing else had registered those cvars yet
+  // to be dropped). Restoring the SAME object references (this file's
+  // Map(cvar_vars) copy is a copy of the MAP, not the CvarT values inside
+  // it) is correct and sufficient -- the only bug was snapshotting too
+  // early. Moving the snapshot into beforeAll (real execution time for
+  // this describe, not collection time) fixes it: everything any
+  // earlier-executing file already registered by the time these
+  // destructive tests actually start is now captured and correctly
+  // restored, object identity intact, for whichever module cached it.
+  let savedCvars: Map<string, CvarT>;
+
+  beforeAll(() => {
+    savedCvars = new Map(cvar_vars);
+  });
 
   beforeEach(() => {
     cvar_vars.clear();

@@ -180,6 +180,23 @@ const modelorg: Vec3 = vec3();
 
 export let r_alpha_surfaces: MsurfaceT | null = null;
 
+// Test-only: gl_lms.lightmap_surfaces is a module-private singleton chain
+// array, populated by GL_BuildPolygonFromSurface (this file) and only ever
+// cleared by R_DrawWorld/R_DrawBrushModel at the top of a real per-frame
+// draw (both call `.fill(null)` before rebuilding it fresh) -- a real
+// engine frame always runs one of those before R_BlendLightmaps, so this
+// leftover-chain state can never reach it in practice. A unit test calling
+// R_BlendLightmaps directly (skipping the per-frame draw that would have
+// cleared it first) has no such guarantee: a leftover surface reference
+// from an earlier test/file that populated the chain produces a spurious
+// GL_Bind (one qglBindTexture call, no vertex output) order-dependently.
+// Mirrors r_bsp.ts's setWorldModelForTesting/gl_warp.ts's
+// setWarpfaceForTesting precedent for reaching into this module's private
+// state from a test.
+export function resetLightmapSurfacesForTesting(): void {
+  gl_lms.lightmap_surfaces.fill(null);
+}
+
 /*
 =============================================================
 

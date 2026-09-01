@@ -37,13 +37,13 @@ change to the real engine's search-path state), matching every other
 retail-gated test's "skip if the install isn't present" convention.
 */
 
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, afterAll } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import type { RefImports } from "../src/client/ref";
 import { SetRefImports, SetNoTexture, ImageT, r_worldmodel } from "../src/ref_gl/gl_local";
 import { SetQGL } from "../src/ref_gl/gl_image";
 import { QGLRecording } from "../src/ref_gl/qgl";
-import { Mod_Init, R_BeginRegistration, R_EndRegistration } from "../src/ref_gl/gl_model";
+import { Mod_Init, R_BeginRegistration, R_EndRegistration, Mod_FreeAll, Mod_Free, mod_known } from "../src/ref_gl/gl_model";
 
 const RETAIL_BASEDIR = "/home/buzzkill/q2rets/rerelease";
 const PAK_PATH = `${RETAIL_BASEDIR}/baseq2/pak0.pak`;
@@ -107,6 +107,21 @@ function makeFakeRi(): RefImports {
 }
 
 describe("gl_model.ts -- QBSP dual-format sweep over all 28 real retail mgu*.bsp maps (skipped if the retail install isn't present)", () => {
+  // rule 13/21 (regate hygiene, found 2026-09-01 chasing a full-suite crash):
+  // unlike EVERY other model-loader test file in this codebase (test/
+  // gl_model_qbsp.test.ts, test/r_model_qbsp.test.ts, test/gl_model.test.ts,
+  // test/ref_model.test.ts, test/lightgrid_q64.test.ts, test/bspx_renderer
+  // .test.ts), this file never freed what it loaded. mod_known (this file's
+  // own src/ref_gl/gl_model.ts) is a process-wide singleton cache; see
+  // test/r_model_retail_qbsp_sweep.test.ts's identical fix and citation for
+  // the full measured crash (RSS past 110GB, killed by SIGTRAP/exit 133
+  // partway through a from-scratch full-suite run, well before this test's
+  // own 180000ms timeout).
+  afterAll(() => {
+    Mod_FreeAll();
+    Mod_Free(mod_known[0]); // world model: Mod_FreeAll only frees entries with a nonzero extradatasize
+  });
+
   test.skipIf(!havePak)(
     "all 28 mgu*.bsp maps: report pass/fail through Mod_ForName (real retail data, GL loader)",
     () => {
@@ -139,6 +154,12 @@ describe("gl_model.ts -- QBSP dual-format sweep over all 28 real retail mgu*.bsp
         } catch (err) {
           results.push({ name: entry.name, ok: false, reason: err instanceof Error ? err.message : String(err) });
         }
+        // rule 21 (regate hygiene, 2026-09-01): same GC-checkpoint fix as
+        // test/r_model_retail_qbsp_sweep.test.ts's identical loop -- see its
+        // comment for the full measured crash (RSS past 100GB, SIGTRAP/exit
+        // 133) this avoids by not letting 28 maps' worth of freed-but-
+        // uncollected garbage stack up across one long synchronous loop.
+        if (typeof Bun !== "undefined") Bun.gc(true);
       }
 
       const passing = results.filter((r) => r.ok);
@@ -156,6 +177,9 @@ describe("gl_model.ts -- QBSP dual-format sweep over all 28 real retail mgu*.bsp
       // header comment for the 13 that used to fail and why they're fixed).
       expect(passing.length).toBe(28);
     },
-    180000,
+    // Bumped from 180000 (2026-09-01): see test/r_model_retail_qbsp_sweep
+    // .test.ts's identical comment -- the per-map Bun.gc(true) checkpoint
+    // costs real wall-clock time on top of the load itself.
+    300000,
   );
 });

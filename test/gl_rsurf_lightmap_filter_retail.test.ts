@@ -32,14 +32,14 @@ user's local retail install (skips itself if absent), matching every other
 retail-gated test's convention (see test/gl_model_retail_qbsp_sweep.test.ts).
 */
 
-import { describe, test, expect, beforeEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, afterAll } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import type { RefImports } from "../src/client/ref";
 import { EntityT } from "../src/client/ref";
 import { SetRefImports, SetNoTexture, ImageT, r_worldmodel, glCvars, r_newrefdef, SetCurrentModel, SetViewClusters } from "../src/ref_gl/gl_local";
 import { SetQGL } from "../src/ref_gl/gl_image";
 import { QGLRecording } from "../src/ref_gl/qgl";
-import { Mod_Init, R_BeginRegistration, R_EndRegistration, mod_inline } from "../src/ref_gl/gl_model";
+import { Mod_Init, R_BeginRegistration, R_EndRegistration, mod_inline, Mod_FreeAll, Mod_Free, mod_known } from "../src/ref_gl/gl_model";
 import { R_DrawWorld, R_DrawBrushModel, R_MarkLeaves } from "../src/ref_gl/gl_rsurf";
 import { CvarT, SURF_SKY, SURF_WARP, SURF_TRANS33, SURF_TRANS66 } from "../src/shared/q_shared";
 
@@ -149,6 +149,31 @@ function renderFromEveryAngle(): void {
 }
 
 describe("gl_rsurf.ts + gl_light.ts -- R_BuildLightMap's non-lit-surface guard under real render dispatch (retail mgu*.bsp, skipped if the retail install isn't present)", () => {
+  // rule 13 (leak found at regate hygiene pass): glCvars is a module-private
+  // singleton (src/ref_gl/gl_local.ts) shared by every ref_gl test file in
+  // this process -- the fields below were being overwritten with test-only
+  // truthyCvar(...) objects (and nulls) and never restored, so whichever
+  // cvar values this file's LAST test run happened to leave behind (most
+  // notably gl_dynamic truthy) silently became every LATER file's ambient
+  // default for the rest of the `bun test` process. Confirmed: gl_dynamic
+  // left truthy here made test/gl_rsurf.test.ts's own R_BlendLightmaps
+  // depth/blend-state test (which never touches gl_dynamic itself) take the
+  // "render dynamic lightmaps" branch and issue one extra, unexpected
+  // GL_Bind -- reproducing exactly the "spurious GL_Bind, no vertex output"
+  // symptom resetLightmapSurfacesForTesting's own header describes, but from
+  // this file's cvar leak rather than a leftover lightmap_surfaces chain.
+  const savedCvars = {
+    r_drawworld: glCvars.r_drawworld,
+    gl_drawworld: glCvars.gl_drawworld,
+    r_nocull: glCvars.r_nocull,
+    gl_cull_nodes: glCvars.gl_cull_nodes,
+    r_novis: glCvars.r_novis,
+    gl_novis: glCvars.gl_novis,
+    gl_lockpvs: glCvars.gl_lockpvs,
+    gl_dynamic: glCvars.gl_dynamic,
+    gl_lightmap: glCvars.gl_lightmap,
+  };
+
   beforeEach(() => {
     SetRefImports(makeFakeRi());
     const fakeTex = new ImageT();
@@ -176,6 +201,33 @@ describe("gl_rsurf.ts + gl_light.ts -- R_BuildLightMap's non-lit-surface guard u
     SetViewClusters(0, 0, -2, -2); // force R_MarkLeaves's cluster-changed check to re-run every call
   });
 
+  afterEach(() => {
+    glCvars.r_drawworld = savedCvars.r_drawworld;
+    glCvars.gl_drawworld = savedCvars.gl_drawworld;
+    glCvars.r_nocull = savedCvars.r_nocull;
+    glCvars.gl_cull_nodes = savedCvars.gl_cull_nodes;
+    glCvars.r_novis = savedCvars.r_novis;
+    glCvars.gl_novis = savedCvars.gl_novis;
+    glCvars.gl_lockpvs = savedCvars.gl_lockpvs;
+    glCvars.gl_dynamic = savedCvars.gl_dynamic;
+    glCvars.gl_lightmap = savedCvars.gl_lightmap;
+  });
+
+  // rule 13/21 (regate hygiene, found 2026-09-01 chasing a full-suite
+  // crash): this loads all 28 real retail maps (world + every inline
+  // submodel) through gl_model.ts's real Mod_Init/R_BeginRegistration and
+  // never freed any of it -- unlike every other model-loader test file in
+  // this codebase. See test/r_model_retail_qbsp_sweep.test.ts's identical
+  // fix and citation for the full measured crash (RSS past 110GB, killed
+  // by SIGTRAP/exit 133 partway through a from-scratch full-suite run).
+  // This file additionally RENDERS every map from six viewpoints (not just
+  // loads it), so its own retained footprint is the largest of the three
+  // retail sweep files fixed in that same pass.
+  afterAll(() => {
+    Mod_FreeAll();
+    Mod_Free(mod_known[0]); // world model: Mod_FreeAll only frees entries with a nonzero extradatasize
+  });
+
   test.skipIf(!havePak)("every real retail mgu*.bsp: full render dispatch (world + every submodel, six viewpoints) never throws", () => {
     Mod_Init();
 
@@ -190,6 +242,12 @@ describe("gl_rsurf.ts + gl_light.ts -- R_BuildLightMap's non-lit-surface guard u
       } catch (err) {
         results.push({ name: entry.name, ok: false, reason: err instanceof Error ? err.message : String(err) });
       }
+      // rule 21 (regate hygiene, 2026-09-01): same GC-checkpoint fix as
+      // test/r_model_retail_qbsp_sweep.test.ts's identical loop (see its
+      // comment for the full measured crash this avoids) -- this loop is
+      // the heaviest of the three retail sweeps fixed in that pass, since it
+      // also renders every map from six viewpoints on top of loading it.
+      if (typeof Bun !== "undefined") Bun.gc(true);
     }
 
     const failures = results.filter((r) => !r.ok);
@@ -197,7 +255,20 @@ describe("gl_rsurf.ts + gl_light.ts -- R_BuildLightMap's non-lit-surface guard u
       console.log("gl_rsurf_lightmap_filter_retail failures:", JSON.stringify(failures, null, 2));
     }
     expect(failures).toEqual([]);
-  }, 120000);
+  },
+  // rule 13/21 (regate hygiene, measured 2026-09-01): this loads and fully
+  // renders all 28 real retail mgu*.bsp maps synchronously (no awaits), so
+  // bun:test's timeout can only be DETECTED after the call returns, never
+  // used to preempt it mid-flight -- a slow host doesn't fail fast here, it
+  // just reports a late failure. Measured 226976ms in a full-suite run on a
+  // host under real, unrelated heavy CPU load (unrelated processes pinning
+  // several cores for hours; see this session's own load-average finding),
+  // well past the previous 120000ms budget, with zero actual assertion
+  // failures once it finished -- a contention artifact, not a defect in
+  // this test or the code it exercises. Generous fixed budget instead of
+  // chasing a moving contention target (same philosophy as test/jpg_retail
+  // .test.ts's own per-test timeout comment).
+  400000);
 
   test.skipIf(!havePak)("mguhub.bsp specifically: sky/warp surfaces carry no lightmap allocation after a full render pass, ordinary lit surfaces do", () => {
     const entry = mguMaps.find((e) => e.name === "maps/mguhub.bsp");
@@ -241,5 +312,5 @@ describe("gl_rsurf.ts + gl_light.ts -- R_BuildLightMap's non-lit-surface guard u
     expect(skyWarpTransCount).toBeGreaterThan(0);
     expect(litCount).toBeGreaterThan(0);
     expect(litWithRealAllocation).toBeGreaterThan(0);
-  }, 60000);
+  }, 120000); // same contention headroom rationale as the sweep test above, one map instead of 28
 });

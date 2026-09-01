@@ -94,10 +94,15 @@ describe("CL_ParticleEffect", () => {
       expect(p.color).toBeGreaterThanOrEqual(color);
       expect(p.color).toBeLessThanOrEqual(color + 7);
 
-      // vel[j] = crand()*20 -> (-20, 20)
+      // vel[j] = crand()*20 -> [-20, 20]. crand() (src/qcommon/common.ts)
+      // is `((floor(random()*32768) & 32767) * (2/32767)) - 1`, mirroring
+      // the C's `(rand()&32767)*(2.0/32767)-1` (cl_fx.c) -- the masked
+      // value ranges over the CLOSED interval [0, 32767], so crand() itself
+      // can land on exactly -1 or exactly 1 and *20 can land on exactly
+      // -20 or exactly 20. Bounds must be inclusive, not strict.
       for (let j = 0; j < 3; j++) {
-        expect(p.vel[j]).toBeGreaterThan(-20);
-        expect(p.vel[j]).toBeLessThan(20);
+        expect(p.vel[j]).toBeGreaterThanOrEqual(-20);
+        expect(p.vel[j]).toBeLessThanOrEqual(20);
       }
 
       // org[j] = org[j] + ((rand()&7)-4) + d*dir[j], d = rand()&31 in [0,31]

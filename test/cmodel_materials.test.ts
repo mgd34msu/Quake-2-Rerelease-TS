@@ -29,7 +29,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Cvar_ForceSet } from "../src/qcommon/cvar";
-import { FS_InitFilesystem } from "../src/qcommon/files";
+import { FS_InitFilesystem, FS_TestSnapshotSearchPaths, FS_TestRestoreSearchPaths, type FsSearchPathSnapshotT } from "../src/qcommon/files";
 import { CM_LoadMap, CM_NumTexinfo, CM_TexinfoName, CM_TexinfoMaterial } from "../src/qcommon/cmodel";
 import { TEXINFO_T_SIZE, LUMP_TEXINFO } from "../src/qcommon/qfiles";
 import { buildBoxRoomBsp } from "./support/bsp_builder";
@@ -173,6 +173,13 @@ describe("cmodel.ts -- CMod_LoadMaterials against REAL retail data (skipped if t
 
   test.skipIf(!havePak)("maps/base1.bsp: a texinfo whose texture is 'ctf/grate3_1' resolves material 'mech' through the real engine's own load path", () => {
     const tmpRoot = mkdtempSync(join(tmpdir(), "q2cm-mat-retail-"));
+    // rule 13: src/qcommon/files.ts's fs_searchpaths is a process-wide
+    // singleton that only ever accumulates -- an unmounted retail basedir
+    // here permanently shadows every later file's "missing file" fixture
+    // (found leaking into test/menu_content.test.ts's mapdb.json
+    // missing-file case, which falls through search-path layers to this
+    // mount's real mapdb.json once its own tmp-root copy is deleted).
+    const fsSnapshot: FsSearchPathSnapshotT = FS_TestSnapshotSearchPaths();
     try {
       Cvar_ForceSet("basedir", RETAIL_BASEDIR);
       FS_InitFilesystem();
@@ -199,6 +206,7 @@ describe("cmodel.ts -- CMod_LoadMaterials against REAL retail data (skipped if t
         }
       }
     } finally {
+      FS_TestRestoreSearchPaths(fsSnapshot);
       rmSync(tmpRoot, { recursive: true, force: true });
     }
   });

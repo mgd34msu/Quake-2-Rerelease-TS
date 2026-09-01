@@ -72,7 +72,7 @@ built-in unit-test harness, which this port does not replicate).
 
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { tmpdir, homedir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
@@ -837,9 +837,15 @@ describe("cvar parity audit -- full engine boot", () => {
     expect(cvar_vars.get("net_clientport")?.default_string).toBe(String(PORT_ANY));
 
     // q2repro src/unix/system.c:210: `homedir = Cvar_Get("homedir", homedir, CVAR_NOSET);`
-    // (the C `homedir` local is a getpwuid-derived path; this port uses the
-    // real OS home directory, see src/qcommon/files.ts's own comment).
-    expect(cvar_vars.get("homedir")?.default_string).toBe(homedir());
+    // -- but this expectation predates the homedir landing's actual,
+    // deliberate registration. src/platform/sys.ts's Sys_GetDefaultHomedir
+    // (cited there at length) establishes that BOTH reference platforms
+    // resolve their HOMEDIR macro to "" for this port's deployment shape
+    // (no `-Dsystem-wide` build variant, no packaged-install detection), so
+    // files.ts's FS_InitFilesystem registers "homedir" CVAR_NOSET with an
+    // empty default_string, matching q2repro's own ordinary (non-packaged)
+    // build on both of its platforms -- not the real OS home directory.
+    expect(cvar_vars.get("homedir")?.default_string).toBe("");
     expect(cvar_vars.get("homedir")?.flags).toBe(CVAR_NOSET);
 
     // q2repro src/server/main.c:2178: COM_DEDICATED ? "0" : "1". Unlike

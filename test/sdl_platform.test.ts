@@ -235,7 +235,18 @@ describe("src/main.ts -- windowed client boot with dedicated 0", () => {
     await NET_Shutdown();
     setRe(null);
     SDL_ResetBackendForTests();
-    restoreCvars(cvarSnapshot);
+    // rule 13/21 (regate hygiene, 2026-09-01): this describe block is a
+    // REAL windowed client boot (dedicated 0) -- unlike this file's other,
+    // narrower fixtures, real client subsystems run here and can lazily
+    // register a cvar the first time some code path is reached, caching
+    // the resulting CvarT reference in a module-level variable (src/client/
+    // cgame/host.ts's cl_kfont_source/cl_kfont_ttf_size, the confirmed
+    // case -- see test/support/cvar_snapshot.ts's own header comment for
+    // the full story). Preserve those specific names from the general
+    // delete-newly-registered sweep below (still needed for THIS boot's
+    // own throwaway allow_download/s_initsound overrides) so host.ts's
+    // cache never points at an orphaned, deleted CvarT object.
+    restoreCvars(cvarSnapshot, true, ["cl_kfont_source", "cl_kfont_ttf_size"]);
     rmSync(tmpRoot, { recursive: true, force: true });
   });
 

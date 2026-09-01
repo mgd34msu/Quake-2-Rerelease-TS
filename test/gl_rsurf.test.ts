@@ -11,11 +11,11 @@ import { vec3 } from "../src/shared/math";
 import { CplaneT, SURF_TRANS33 } from "../src/shared/q_shared";
 import { PLANE_X } from "../src/qcommon/qfiles";
 import { MsurfaceT, MtexinfoT, GlpolyT, MnodeT, MleafT, ModelT, VERTEXSIZE, CONTENTS_NODE } from "../src/ref_gl/gl_model";
-import { SetWorldModel, SetVisFrameCount, SetFrameCount, r_newrefdef } from "../src/ref_gl/gl_local";
+import { SetWorldModel, SetVisFrameCount, SetFrameCount, r_newrefdef, glCvars } from "../src/ref_gl/gl_local";
 import { QGLRecording } from "../src/ref_gl/qgl";
 import { SetQGL } from "../src/ref_gl/gl_image";
 import { SubdividePolygon, setWarpfaceForTesting, EmitWaterPolys, ClipSkyPolygon, R_ClearSkyBox, skymins, skymaxs } from "../src/ref_gl/gl_warp";
-import { LM_InitBlock, LM_AllocBlock, R_RecursiveWorldNode, R_DrawAlphaSurfaces, R_BlendLightmaps, r_alpha_surfaces } from "../src/ref_gl/gl_rsurf";
+import { LM_InitBlock, LM_AllocBlock, R_RecursiveWorldNode, R_DrawAlphaSurfaces, R_BlendLightmaps, r_alpha_surfaces, resetLightmapSurfacesForTesting } from "../src/ref_gl/gl_rsurf";
 import { GL_ShutdownShaderPath } from "../src/ref_gl/gl_shader";
 
 beforeEach(() => {
@@ -65,6 +65,29 @@ describe("gl_rsurf.ts -- R_BlendLightmaps depth/blend state (vanilla gl_rsurf.c:
     // qglUniform1i calls here depending on file order. Force the
     // fixed-function path so this pin is order-independent.
     GL_ShutdownShaderPath();
+    // rule 13 (leak found at regate hygiene pass): gl_lms.lightmap_surfaces
+    // (gl_rsurf.ts) is a module-private chain array only ever cleared by a
+    // real R_DrawWorld/R_DrawBrushModel frame -- calling R_BlendLightmaps
+    // directly, as this fixture does, has no such guarantee and can pick up
+    // a leftover surface chained by an earlier test/file's own
+    // GL_BuildPolygonFromSurface call, producing a spurious GL_Bind (see
+    // resetLightmapSurfacesForTesting's own header comment).
+    resetLightmapSurfacesForTesting();
+    // rule 13 (leak found at regate hygiene pass): glCvars.gl_dynamic is
+    // ANOTHER module-private singleton (src/ref_gl/gl_local.ts) that
+    // R_BlendLightmaps reads directly -- test/gl_rsurf_lightmap_filter_
+    // retail.test.ts sets it truthy to exercise the dynamic-lightmap path
+    // and (before its own fix) never restored it, which left it truthy for
+    // whatever file ran next. R_BlendLightmaps's "render dynamic lightmaps"
+    // branch issues an unconditional GL_Bind whenever gl_dynamic is truthy,
+    // regardless of whether there's anything queued to draw -- a second
+    // source of the exact same "spurious GL_Bind, no vertex output" symptom
+    // resetLightmapSurfacesForTesting's own header describes, independent
+    // of the lightmap_surfaces chain leak that function fixes. This pin is
+    // about the STATIC lightmap path only, so force the dynamic branch off
+    // regardless of what an earlier file in this process left behind.
+    const savedGlDynamic = glCvars.gl_dynamic;
+    glCvars.gl_dynamic = null;
     const rec = new QGLRecording();
     SetQGL(rec);
     const world = new ModelT();
@@ -72,6 +95,7 @@ describe("gl_rsurf.ts -- R_BlendLightmaps depth/blend state (vanilla gl_rsurf.c:
     SetWorldModel(world);
     R_BlendLightmaps();
     SetWorldModel(null);
+    glCvars.gl_dynamic = savedGlDynamic;
     return rec;
   }
 

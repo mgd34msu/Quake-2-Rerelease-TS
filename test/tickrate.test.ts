@@ -23,7 +23,7 @@ left over from elsewhere, except the one test that explicitly re-derives
 the true registration default by deleting the cvar first).
 */
 
-import { describe, test, expect, beforeAll } from "bun:test";
+import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -31,7 +31,7 @@ import { sv, svs, maxclients } from "../src/server/server";
 import { SV_Init, SV_Frame } from "../src/server/sv_main";
 import { SV_ComputeFramerate } from "../src/server/sv_init";
 import { geHolder, currentGameFamily } from "../src/server/sv_game";
-import { Cvar_ForceSet, Cvar_Get, cvar_vars } from "../src/qcommon/cvar";
+import { Cvar_ForceSet, Cvar_Get, Cvar_VariableString, cvar_vars } from "../src/qcommon/cvar";
 import { CVAR_LATCH } from "../src/shared/q_shared";
 import { FS_InitFilesystem } from "../src/qcommon/files";
 import { BuildKexImports } from "../src/server/bindings/kex";
@@ -69,6 +69,7 @@ function makeCountingGameExports(): GameExports & { runFrameCount: number } {
 
 describe("variable tick -- family dispatch", () => {
   let tmpRoot: string;
+  let preTestGame: string;
 
   beforeAll(() => {
     // FS_InitFilesystem is what registers the "game" cvar in this codebase
@@ -82,6 +83,23 @@ describe("variable tick -- family dispatch", () => {
     // SV_Init registers sv_tick_rate (and maxclients, etc) if not already
     // registered by another test file in this same process.
     SV_Init();
+
+    // rule 13 (leak found at regate hygiene pass): the tests below
+    // Cvar_ForceSet("game", ...) repeatedly, ending on "rogue" (the last
+    // test in this describe leaves it there) -- "game" is a process-wide
+    // cvar_vars singleton, so an unrestored override here permanently
+    // pointed test/sv_game.test.ts's own SV_InitGameProgs() at the rogue
+    // game module for the rest of the `bun test` process whenever this
+    // file ran first (pairwise-proven: tickrate+sv_game fails,
+    // ctf_boot+sv_game passes). Capture whatever this process's ambient
+    // "game" value is right now (post-registration, pre-mutation) and
+    // restore it in afterAll, matching test/lmctf_kex_boot.test.ts's own
+    // afterAll precedent for the same class of leak.
+    preTestGame = Cvar_VariableString("game");
+  });
+
+  afterAll(() => {
+    Cvar_ForceSet("game", preTestGame);
   });
 
   test("currentGameFamily() reads 'kex' when the game cvar names it", () => {

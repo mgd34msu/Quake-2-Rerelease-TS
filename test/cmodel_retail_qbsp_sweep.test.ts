@@ -15,10 +15,10 @@ retail-gated test in this suite's "skip if the install isn't present"
 convention.
 */
 
-import { describe, test, expect, beforeAll } from "bun:test";
+import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { Cvar_ForceSet } from "../src/qcommon/cvar";
-import { FS_InitFilesystem } from "../src/qcommon/files";
+import { FS_InitFilesystem, FS_TestSnapshotSearchPaths, FS_TestRestoreSearchPaths, type FsSearchPathSnapshotT } from "../src/qcommon/files";
 import { CM_LoadMap, CM_NumTexinfo, CM_TexinfoMaterial } from "../src/qcommon/cmodel";
 
 const RETAIL_BASEDIR = "/home/buzzkill/q2rets/rerelease";
@@ -46,10 +46,24 @@ function listMguMaps(pakPath: string): string[] {
 const mguMaps = havePak ? listMguMaps(PAK_PATH) : [];
 
 describe("cmodel.ts -- QBSP dual-format sweep over all 28 real retail mgu*.bsp maps (skipped if the retail install isn't present)", () => {
+  let fsSnapshot: FsSearchPathSnapshotT;
+
   beforeAll(() => {
     if (!havePak) return;
+    // rule 13: src/qcommon/files.ts's fs_searchpaths is a process-wide
+    // singleton that only ever accumulates -- an unmounted retail basedir
+    // here permanently shadows every later file's "missing file" fixture
+    // (found leaking into test/menu_content.test.ts's mapdb.json
+    // missing-file case, which falls through search-path layers to this
+    // mount's real mapdb.json once its own tmp-root copy is deleted).
+    fsSnapshot = FS_TestSnapshotSearchPaths();
     Cvar_ForceSet("basedir", RETAIL_BASEDIR);
     FS_InitFilesystem();
+  });
+
+  afterAll(() => {
+    if (!havePak) return;
+    FS_TestRestoreSearchPaths(fsSnapshot);
   });
 
   test.skipIf(!havePak)("this port's own retail-data survey: exactly 28 maps/mgu*.bsp entries in pak0.pak", () => {

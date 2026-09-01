@@ -23,11 +23,11 @@ loader. Fixed by dropping the check (not growing it to a new numeric bound);
 now 28/28.
 */
 
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, afterAll } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import type { RefImports } from "../src/client/ref";
 import { SetRefImports, r_worldmodel } from "../src/ref_soft/r_local";
-import { Mod_Init, R_BeginRegistration, R_EndRegistration } from "../src/ref_soft/r_model";
+import { Mod_Init, R_BeginRegistration, R_EndRegistration, Mod_FreeAll, Mod_Free, mod_known } from "../src/ref_soft/r_model";
 
 const RETAIL_BASEDIR = "/home/buzzkill/q2rets/rerelease";
 const PAK_PATH = `${RETAIL_BASEDIR}/baseq2/pak0.pak`;
@@ -91,6 +91,29 @@ function makeFakeRi(): RefImports {
 }
 
 describe("r_model.ts -- QBSP dual-format sweep over all 28 real retail mgu*.bsp maps (skipped if the retail install isn't present)", () => {
+  // rule 13/21 (regate hygiene, found 2026-09-01 chasing a full-suite crash):
+  // unlike EVERY other model-loader test file in this codebase (test/
+  // r_model_qbsp.test.ts, test/gl_model_qbsp.test.ts, test/gl_model.test.ts,
+  // test/ref_model.test.ts, test/lightgrid_q64.test.ts, test/bspx_renderer
+  // .test.ts -- all of which call Mod_FreeAll()/Mod_Free(mod_known[0]) in
+  // their own setup or teardown), this file never freed what it loaded.
+  // mod_known (src/ref_soft/r_model.ts) is a process-wide singleton cache
+  // that only ever grows a slot's occupancy, never shrinks on its own -- 28
+  // real, large retail maps' full geometry (tens of thousands of
+  // verts/faces/edges each per this file's own header comment) stayed
+  // resident for the rest of the ENTIRE `bun test` process once this file
+  // ran. Measured: RSS climbed past 110GB and the whole-suite process was
+  // killed by the runtime (SIGTRAP, exit 133, no final pass/fail summary)
+  // partway through a from-scratch full-suite run on this host, well before
+  // reaching this test's own already-generous 180000ms timeout -- a crash,
+  // not a slow test. test/gl_model_retail_qbsp_sweep.test.ts and test/
+  // gl_rsurf_lightmap_filter_retail.test.ts (which also load all 28 real
+  // maps) get the identical fix.
+  afterAll(() => {
+    Mod_FreeAll();
+    Mod_Free(mod_known[0]); // world model: Mod_FreeAll only frees entries with a nonzero extradatasize (see test/r_model_qbsp.test.ts's own citation of this same quirk)
+  });
+
   test.skipIf(!havePak)(
     "all 28 mgu*.bsp maps: report pass/fail through R_BeginRegistration (real retail data, software loader)",
     () => {
@@ -107,6 +130,20 @@ describe("r_model.ts -- QBSP dual-format sweep over all 28 real retail mgu*.bsp 
         } catch (err) {
           results.push({ name: entry.name, ok: false, reason: err instanceof Error ? err.message : String(err) });
         }
+        // rule 21 (regate hygiene, 2026-09-01): R_BeginRegistration's own
+        // Mod_Free of the previous world model (see that function's "free
+        // the old map if different" comment) correctly drops every
+        // reference to the outgoing map's geometry, but this loop is one
+        // long synchronous call stack with no yield point -- bun's
+        // JavaScriptCore GC never gets a chance to actually reclaim any of
+        // it until the WHOLE 28-map loop finishes (or memory pressure forces
+        // an emergency collection), so peak RSS during this test measured
+        // over 100GB and crashed the whole-suite process (SIGTRAP, exit
+        // 133) on this host before this fix. Forcing a real collection
+        // after each map's own Mod_Free bounds the peak to roughly one map's
+        // garbage instead of all 28 maps' worth stacked up ungathered.
+        // Zero effect on what's being tested -- GC timing, not correctness.
+        if (typeof Bun !== "undefined") Bun.gc(true);
       }
 
       const passing = results.filter((r) => r.ok);
@@ -126,6 +163,11 @@ describe("r_model.ts -- QBSP dual-format sweep over all 28 real retail mgu*.bsp 
       // header comment for the two that used to fail and why they're fixed).
       expect(passing.length).toBe(28);
     },
-    180000,
+    // Bumped from 180000 (2026-09-01): the per-map Bun.gc(true) checkpoint
+    // added above (memory-safety fix, see this file's other comment) costs
+    // real wall-clock time on top of the load itself -- generous headroom
+    // rather than a tight budget that trades a crash for a manufactured
+    // timeout failure.
+    300000,
   );
 });

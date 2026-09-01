@@ -157,7 +157,13 @@ describe("decodeJPG -- real retail .jpg data (baseq2/pak0.pak's vault/ artwork, 
     },
     // Decoding all 198 files (including several ~2000x2000 concept-art
     // originals) takes several seconds -- past bun:test's default 5000ms
-    // per-test timeout.
-    30000,
+    // per-test timeout. Bumped from 30000 (regate hygiene, 2026-09-01):
+    // measured 34896ms in a full-suite run on a host under real, unrelated
+    // heavy CPU load (see gl_rsurf_lightmap_filter_retail.test.ts's own
+    // timeout comment for the same finding) -- a contention artifact past
+    // the previous budget, not a decode failure. This is fully synchronous
+    // work, so bun can only report a timeout after the fact; more headroom
+    // is the only real mitigation short of chasing a moving target.
+    90000,
   );
 });
