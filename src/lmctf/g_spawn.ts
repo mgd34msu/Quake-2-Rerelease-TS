@@ -658,7 +658,9 @@ export function SpawnEntities(mapname: string, entities: string, spawnpoint: str
   // line; developer 1 already printed each one and skips this line entirely
   // (byte-identical to vanilla otherwise).
   if (!developerMode()) {
-    gi.dprintf(
+    // Only when something was actually suppressed -- a 0/0 summary is noise.
+    if (unknownFieldKeys.size + unknownClassnames.size > 0)
+      gi.dprintf(
       `SpawnEntities: ${unknownFieldKeys.size} unknown fields, ${unknownClassnames.size} unknown classnames suppressed (developer 1 for detail)\n`,
     );
   }
