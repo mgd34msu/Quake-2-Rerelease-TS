@@ -18,7 +18,8 @@ import { SZ_Init, MSG_BeginReading, MSG_ReadByte, MSG_ReadShort, MSG_ReadLong, M
 import { net_message } from "../../qcommon/net_chan";
 import { U_REMOVE } from "../../qcommon/qcommon";
 import { VANILLA_CODEC } from "../../qcommon/protocol/vanilla";
-import { EntityStateT, MAX_EDICTS } from "../../shared/q_shared";
+import { EntityStateT } from "../../shared/q_shared";
+import { CS_REMAP_OLD, CS_REMAP_RERELEASE } from "../../shared/cs_remap";
 import {
   MVD_MAGIC,
   mvd_serverdata,
@@ -84,7 +85,15 @@ function readEntitiesSection(channel: MvdChannelT): void {
   for (;;) {
     const { number, bits } = VANILLA_CODEC.readEntityBits();
     if (number === 0) break;
-    if (number < 0 || number >= MAX_EDICTS) {
+    // Bounded by the channel's OWN negotiated csr (set in parseGamestate from
+    // the gamestate's protocol-version field), not a compile-time MAX_EDICTS
+    // -- mirrors q2repro's parse.c:649 `if (number < 0 || number >=
+    // mvd->csr->max_edicts)`, not a fixed constant. A rerelease/kex stream's
+    // entity numbers run up to 8191 (CS_REMAP_RERELEASE.max_edicts); a
+    // classic stream is still bounded at 1024 via CS_REMAP_OLD, so this is
+    // strictly narrower than before for legacy streams and wider for kex
+    // ones, matching q2repro's own per-family bound exactly either way.
+    if (number < 0 || number >= channel.csr.max_edicts) {
       throw new Error(`MVD_ParseMessage: bad entity number ${number}`);
     }
 
@@ -120,11 +129,25 @@ function parseGamestate(channel: MvdChannelT): void {
   const version = MSG_ReadShort(net_message);
   if (version === PROTOCOL_VERSION_MVD_RERELEASE) {
     channel.rerelease = true;
+    channel.csr = CS_REMAP_RERELEASE;
   } else if (version === PROTOCOL_VERSION_MVD_DEFAULT) {
     channel.rerelease = false;
+    channel.csr = CS_REMAP_OLD;
   } else {
     throw new Error(`MVD_ParseMessage: unsupported MVD sub-version ${version}`);
   }
+  // Mirrors q2repro's MVD_ParseServerData settling `mvd->csr` right here
+  // (parse.c:912-921, `mvd->csr = &cs_remap_old;` then overridden to
+  // `&cs_remap_rerelease` under PROTOCOL_VERSION_MVD_RERELEASE) -- this is
+  // the ONE place a GTV relay client learns which family the stream it just
+  // connected to actually uses; nothing upstream of this parse can know it
+  // in advance. Re-sizes the two arrays that are compile-time-constant-sized
+  // (MAX_EDICTS-classic) at construction/MVD_ClearState time so a
+  // rerelease/kex stream's wider entity numbers and configstring indices
+  // both fit -- see client.ts's `entities` field doc comment for why this
+  // port resizes dynamically instead of q2repro's fixed already-8192 array.
+  channel.entities = new Array(channel.csr.max_edicts).fill(null);
+  channel.configstrings = new Array(channel.csr.end).fill("");
 
   channel.servercount = MSG_ReadLong(net_message);
   channel.gamedir = MSG_ReadString(net_message);

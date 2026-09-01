@@ -21,8 +21,8 @@ import { FS_InitFilesystem, FS_Gamedir } from "../src/qcommon/files";
 import { SizeBuf, SZ_Init, MSG_WriteByte, MSG_WriteLong, MSG_WriteShort, MSG_WriteString } from "../src/qcommon/sizebuf";
 import { net_message, net_message_buffer } from "../src/qcommon/net_chan";
 import { VANILLA_CODEC } from "../src/qcommon/protocol/vanilla";
-import { SvcOpsT } from "../src/qcommon/qcommon";
-import { CS_REMAP_OLD } from "../src/shared/cs_remap";
+import { SvcOpsT, U_MOREBITS1, U_NUMBER16, U_MODEL } from "../src/qcommon/qcommon";
+import { CS_REMAP_OLD, CS_REMAP_RERELEASE } from "../src/shared/cs_remap";
 import { EntityStateT, PlayerStateT, PmTypeT, MAX_EDICTS, STAT_HEALTH, STAT_FRAGS, MulticastT, PRINT_HIGH, CVAR_LATCH, CVAR_SERVERINFO, CVAR_NOARCHIVE } from "../src/shared/q_shared";
 import { vec3, VectorCopy } from "../src/shared/math";
 import { type Edict, LinkT, MAX_ENT_CLUSTERS, SolidT, type GameExports } from "../src/game/game";
@@ -33,6 +33,7 @@ import {
   CLIENTNUM_NONE,
   PROTOCOL_VERSION_MVD,
   PROTOCOL_VERSION_MVD_DEFAULT,
+  PROTOCOL_VERSION_MVD_RERELEASE,
   mvd_serverdata,
   MSG_WriteDeltaMvdPlayerstate,
   MSG_ReadDeltaMvdPlayerstate,
@@ -346,6 +347,121 @@ describe("MVD_LoadFile / MVD_ParseMessage -- hand-built .mvd2 buffers", () => {
     MVD_ClearState(channel);
     expect(channel.state).toBe(MvdChannelStateT.MVD_DEAD);
     expect(channel.entities[5]).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B2. server/mvd/{client,parse}.ts -- entity storage/bounds sized off the
+// GTV relay's OWN negotiated csr (.orch/followups.md "mvd/client.ts +
+// mvd/parse.ts narrow MAX_EDICTS pattern"), not a compile-time MAX_EDICTS.
+//
+// MSG_WriteDeltaEntity (sizebuf.ts) has its own, untouched `to.number >=
+// MAX_EDICTS` guard (MAX_EDICTS here being q_shared.ts's classic-only 1024),
+// so it cannot be used to synthesize an entity number above 1024 regardless
+// of which MVD sub-protocol is in play -- same limitation test/
+// cl_wide_entities.test.ts already documented and worked around for the
+// client-side widening unit. The rerelease-side positive case below is
+// therefore built from the port's own named wire-format bit constants
+// (U_MOREBITS1/U_NUMBER16/U_MODEL, qcommon.ts) exactly the way that file's
+// "hand-built from named wire-format bits" test does, not an arbitrary byte
+// sequence -- this IS "the port's own writer" at the primitive level, one
+// layer below the capped high-level MSG_WriteDeltaEntity.
+// ---------------------------------------------------------------------------
+
+describe("MVD_ParseMessage -- entity storage/bounds follow the negotiated csr, not MAX_EDICTS", () => {
+  const WIDE_ENTITY = 2000; // > CS_REMAP_OLD.max_edicts (1024), < CS_REMAP_RERELEASE.max_edicts (8192)
+
+  // Builds a minimal single-message .mvd2 file whose gamestate carries
+  // `version` and, if `entityNumber` is given, one entity in the baseline
+  // frame at that number (hand-encoded bits, see the block comment above).
+  // `csrEnd` is the configstring terminator this test writes -- it must
+  // match the csr the given `version` will settle to (parseGamestate sets
+  // channel.csr from `version` before the configstrings loop runs), or the
+  // reader would misparse the terminator as a real configstring index.
+  function buildGamestateBytes(version: number, csrEnd: number, entityNumber: number | null): Uint8Array {
+    const body = new SizeBuf();
+    const bodyData = new Uint8Array(4096);
+    SZ_Init(body, bodyData, bodyData.length);
+
+    MSG_WriteByte(body, mvd_serverdata);
+    MSG_WriteLong(body, PROTOCOL_VERSION_MVD);
+    MSG_WriteShort(body, version);
+    MSG_WriteLong(body, 7); // servercount
+    MSG_WriteString(body, "baseq2");
+    MSG_WriteShort(body, -1); // no dummy client
+
+    MSG_WriteShort(body, csrEnd); // no configstrings -> immediate terminator
+
+    MSG_WriteByte(body, 0); // zero portal bytes
+
+    MSG_WriteMvdPlayersEnd(body); // no active players
+
+    if (entityNumber !== null) {
+      // total bits = U_MOREBITS1 | U_NUMBER16 | U_MODEL (0x980): byte1 is
+      // U_MOREBITS1 alone (bits 0-7), byte2 is (U_NUMBER16|U_MODEL) shifted
+      // down by 8 -- exactly what MSG_WriteDeltaEntity would itself compute
+      // and emit for a force=true/newentity=true write whose only real
+      // delta is modelindex, if its MAX_EDICTS guard didn't block number
+      // 2000 first (see sizebuf.ts:259-260).
+      MSG_WriteByte(body, U_MOREBITS1 & 0xff);
+      MSG_WriteByte(body, (U_NUMBER16 | U_MODEL) >> 8);
+      MSG_WriteShort(body, entityNumber);
+      MSG_WriteByte(body, 111); // modelindex
+    }
+    VANILLA_CODEC.writePacketEntitiesEnd(body);
+
+    const magic = new Uint8Array(4);
+    new DataView(magic.buffer).setUint32(0, MVD_MAGIC, true);
+
+    const lenPrefix = new Uint8Array(2);
+    new DataView(lenPrefix.buffer).setUint16(0, body.cursize, true);
+
+    const eof = new Uint8Array(2); // zero -- EOF marker
+
+    const out = new Uint8Array(magic.length + lenPrefix.length + body.cursize + eof.length);
+    out.set(magic, 0);
+    out.set(lenPrefix, magic.length);
+    out.set(body.data.subarray(0, body.cursize), magic.length + lenPrefix.length);
+    out.set(eof, magic.length + lenPrefix.length + body.cursize);
+    return out;
+  }
+
+  test("a rerelease/kex gamestate (PROTOCOL_VERSION_MVD_RERELEASE) settles channel.csr to CS_REMAP_RERELEASE and accepts/stores entity 2000", () => {
+    const bytes = buildGamestateBytes(PROTOCOL_VERSION_MVD_RERELEASE, CS_REMAP_RERELEASE.end, WIDE_ENTITY);
+
+    const channel = MVD_LoadFile(bytes);
+
+    expect(channel.state).toBe(MvdChannelStateT.MVD_READING);
+    expect(channel.rerelease).toBe(true);
+    expect(channel.csr).toBe(CS_REMAP_RERELEASE);
+    expect(channel.entities.length).toBeGreaterThanOrEqual(CS_REMAP_RERELEASE.max_edicts);
+    expect(channel.entities[WIDE_ENTITY]).not.toBeNull();
+    expect(channel.entities[WIDE_ENTITY]?.modelindex).toBe(111);
+  });
+
+  test("a classic gamestate (PROTOCOL_VERSION_MVD_DEFAULT) settles channel.csr to CS_REMAP_OLD and still rejects entity 2000", () => {
+    const bytes = buildGamestateBytes(PROTOCOL_VERSION_MVD_DEFAULT, CS_REMAP_OLD.end, WIDE_ENTITY);
+
+    expect(() => MVD_LoadFile(bytes)).toThrow(/bad entity number 2000/);
+  });
+
+  test("the classic boundary is exactly MAX_EDICTS (1024): entity 1023 round-trips, entity 1024 is the first rejected value", () => {
+    const okBytes = buildGamestateBytes(PROTOCOL_VERSION_MVD_DEFAULT, CS_REMAP_OLD.end, MAX_EDICTS - 1);
+    const channel = MVD_LoadFile(okBytes);
+    expect(channel.entities[MAX_EDICTS - 1]).not.toBeNull();
+    expect(channel.entities.length).toBe(MAX_EDICTS);
+
+    const badBytes = buildGamestateBytes(PROTOCOL_VERSION_MVD_DEFAULT, CS_REMAP_OLD.end, MAX_EDICTS);
+    expect(() => MVD_LoadFile(badBytes)).toThrow(/bad entity number 1024/);
+  });
+
+  test("a channel with no entities ever parsed still defaults its own storage off CS_REMAP_OLD (MVD_NewChannel/MVD_ClearState, no gamestate involved)", () => {
+    const channel = MVD_NewChannel();
+    expect(channel.csr).toBe(CS_REMAP_OLD);
+    expect(channel.entities.length).toBe(CS_REMAP_OLD.max_edicts);
+
+    MVD_ClearState(channel);
+    expect(channel.entities.length).toBe(CS_REMAP_OLD.max_edicts);
   });
 });
 
@@ -936,6 +1052,19 @@ describe("Kex/rerelease MVD sub-protocol", () => {
     // pollution class the order-independence pass closed).
     Cvar_Get("game", "", CVAR_LATCH | CVAR_SERVERINFO | CVAR_NOARCHIVE);
     Cvar_ForceSet("game", "kex");
+    // Real server startup settles svs.csr from the same "game" cvar at
+    // SV_InitGameProgs time (sv_game.ts:477, `svs.csr = family === "kex" ...
+    // ? CS_REMAP_RERELEASE : CS_REMAP_OLD`); this test drives the recording
+    // path directly without going through a full SV_SpawnServer, so it has
+    // to settle svs.csr itself or the recorder (sv_mvd.ts's buildGamestate/
+    // emitGamestateInto, both keyed off svs.csr) and the reader (parse.ts's
+    // parseGamestate, keyed off the wire protocol-version field) disagree on
+    // the configstring-terminator/max_edicts family -- which used to be
+    // silently masked when parse.ts always assumed CS_REMAP_OLD regardless
+    // of the wire version, but is a real mismatch (and, via the
+    // configstring-terminator misparse, an infinite read loop once EOF is
+    // reached) now that parse.ts trusts the wire version.
+    svs.csr = CS_REMAP_RERELEASE;
     FS_InitFilesystem();
 
     const maxclients = Cvar_Get("maxclients", "1", 0);
@@ -959,6 +1088,7 @@ describe("Kex/rerelease MVD sub-protocol", () => {
     geHolder.ge = null;
     svs.clients = [];
     Cvar_ForceSet("game", "");
+    svs.csr = CS_REMAP_OLD; // restore the default family so later describe blocks aren't polluted
   });
 
   test("mvdrecord no longer refuses under game=kex, and rerelease playerstate fields round-trip", () => {
