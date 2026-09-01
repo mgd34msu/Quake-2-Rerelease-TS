@@ -54,6 +54,7 @@ import {
   RF_SHELL_DOUBLE,
   RF_SHELL_HALF_DAM,
   RF_CUSTOM_LIGHT,
+  RF_CUSTOMSKIN,
   RF_FLARE,
   Q_strcasecmp,
   PM_TypeIsAlive,
@@ -83,7 +84,7 @@ import {
   CL_AddLightStyles,
 } from "./cl_fx";
 import { CL_TrackerTrail, CL_Tracker_Shell, CL_TagTrail, CL_BlasterTrail2 } from "./cl_newfx";
-import { CL_AddTEnts } from "./cl_tent";
+import { CL_AddTEnts, cl_img_flare } from "./cl_tent";
 import { CL_CheckPredictionError } from "./cl_pred";
 import { V_AddEntity, V_AddLight } from "./cl_view";
 import { SCR_EndLoadingPlaque } from "./cl_scrn";
@@ -605,6 +606,11 @@ function CL_AddPacketEntities(frame: FrameT): void {
     ent.skinnum = 0;
     ent.alpha = 0;
     ent.flags = 0;
+    // ref.ts's flare fields, reset for the same reason: the RF_FLARE branch
+    // below is the only writer, and the C's single pre-loop memset leaves a
+    // zeroed scale/white rgba for every entity that isn't one.
+    ent.scale[0] = ent.scale[1] = ent.scale[2] = 0;
+    ent.rgba.r = ent.rgba.g = ent.rgba.b = ent.rgba.a = 255;
 
     // set frame
     if (effects & EF_ANIM01) ent.frame = autoanim & 1;
@@ -669,11 +675,67 @@ function CL_AddPacketEntities(frame: FrameT): void {
       // re-queues world surfaces that are already on the translucent chain,
       // which turns that chain into a cycle and hangs R_DrawAlphaSurfaces.
       if (renderfx & RF_FLARE) {
-        // DEVIATION: q2repro draws the flare here as a scaled, RGBA-tinted
-        // sprite (ent.scale/ent.rgba, cl_img_flare); EntityT carries neither
-        // field yet, so this port takes the same branch's `cl_flares 0`
-        // outcome -- the flare is consumed, not drawn -- rather than the
-        // world model. Full flare rendering is a follow-up.
+        // q2repro src/client/entities.c:710-736, line for line. The flare is
+        // never a model: SP_misc_flare's `s.modelindex = 1` is only there so
+        // the entity survives the server's "has a model" visibility checks,
+        // and everything the renderer needs travels in the entity state --
+        // modelindex2/modelindex3 as the fade distances, skinnum as a packed
+        // big-endian RGBA tint, `scale` as the flare's size multiplier, and
+        // `frame` as an image_precache index when RF_CUSTOMSKIN is set
+        // (kexgame/g_misc.ts's SP_misc_flare writes all five).
+        // `if (!cl_flares->integer) goto skip;` -- fetched through Cvar_Get
+        // the same way this file's cl_beginmapcmd consumer above does (the
+        // cvar itself is registered in cl_main.ts's cvar table).
+        if (!Cvar_Get("cl_flares", "1", 0)?.value) {
+          VectorCopy(ent.origin, cent.lerp_origin);
+          continue;
+        }
+        const fade_start = s1.modelindex2;
+        const fade_end = s1.modelindex3;
+        const dx = cl.refdef.vieworg[0] - ent.origin[0];
+        const dy = cl.refdef.vieworg[1] - ent.origin[1];
+        const dz = cl.refdef.vieworg[2] - ent.origin[2];
+        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (d < fade_start) {
+          // closer than fade_start: not drawn at all
+          VectorCopy(ent.origin, cent.lerp_origin);
+          continue;
+        }
+        // fades IN with distance (misc_flare's default keys are
+        // fade_start_dist 96 / fade_end_dist 384, kexgame/g_local_types.ts)
+        if (d > fade_end) ent.alpha = 1;
+        else ent.alpha = (d - fade_start) / (fade_end - fade_start);
+
+        ent.skin = null;
+        if (renderfx & RF_CUSTOMSKIN && s1.frame >= 0 && s1.frame < cls.csr.max_images) {
+          ent.skin = cl.image_precache[s1.frame];
+        }
+        // `if (!ent.skin) ent.skin = cl_img_flare` -- the default flare
+        // image (baseq2/pak0.pak's misc/flare.tga), registered by
+        // cl_tent.ts's CL_RegisterTEntModels the same place tent.c:322 does.
+        if (!ent.skin) ent.skin = cl_img_flare;
+
+        const s = s1.scale ? s1.scale : 1;
+        ent.scale[0] = ent.scale[1] = ent.scale[2] = s;
+        ent.flags = renderfx | RF_TRANSLUCENT;
+        if (!s1.skinnum) {
+          ent.rgba.r = ent.rgba.g = ent.rgba.b = ent.rgba.a = 255; // COLOR_WHITE
+        } else {
+          // `ent.rgba.u32 = BigLong(s1->skinnum)`: the same big-endian read
+          // of a packed color the RF_CUSTOM_LIGHT branch below does, kept in
+          // unpacked bytes here (ref.ts's EntityT.rgba is not a u32 union).
+          // BigLong-then-read-color_t.r/g/b/a on a little-endian host is
+          // exactly "take the value's bytes most-significant first", which
+          // is what the shifts below do without a second swap.
+          ent.rgba.r = (s1.skinnum >>> 24) & 0xff;
+          ent.rgba.g = (s1.skinnum >>> 16) & 0xff;
+          ent.rgba.b = (s1.skinnum >>> 8) & 0xff;
+          ent.rgba.a = s1.skinnum & 0xff;
+        }
+        // the renderer keys its per-flare state off this (q2repro hashes it
+        // for the occlusion query); it is the entity number, not a skin.
+        ent.skinnum = s1.number;
+        V_AddEntity(ent);
         VectorCopy(ent.origin, cent.lerp_origin);
         continue;
       }

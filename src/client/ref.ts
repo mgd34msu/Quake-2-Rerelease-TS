@@ -77,6 +77,24 @@ export class EntityT {
 
   skin: ImageS | null = null; // NULL for inline skin
   flags = 0;
+
+  // Additive fields for RF_FLARE rendering (misc_flare, kexgame/g_misc.ts's
+  // SP_misc_flare). q2repro's entity_t carries both natively
+  // (inc/refresh/refresh.h:63 `color_t rgba`, :68 `vec3_t scale`); classic
+  // ref.h has neither, so every pre-existing caller leaves them at the
+  // defaults below and nothing but the flare path reads them.
+  //
+  // `rgba` is the entity's tint, 0-255 per channel (DrawColorT's shape is
+  // reused rather than re-declared -- same field names, same range). The C
+  // is a color_t union written whole from `BigLong(s1->skinnum)`; the port
+  // stores the unpacked bytes instead, since nothing here needs the u32
+  // aliasing. Default is COLOR_WHITE (q2repro's `if (!s1->skinnum) ent.rgba
+  // = COLOR_WHITE`).
+  rgba: DrawColorT = { r: 255, g: 255, b: 255, a: 255 };
+  // Per-axis model scale. 0 means "unscaled" exactly as in the C, which
+  // reads it as `e->scale[0] ? e->scale[0] : 1.0f` (q2repro
+  // src/refresh/main.c:347) -- so a zeroed entity keeps vanilla behavior.
+  scale: Vec3 = vec3();
 }
 
 export const ENTITY_FLAGS = 68;

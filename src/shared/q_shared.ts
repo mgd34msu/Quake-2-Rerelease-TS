@@ -479,6 +479,12 @@ export const RF_USE_DISGUISE = 0x00040000;
 // CL_AddPacketEntities.
 export const RF_CUSTOM_LIGHT = 0x00100000; // s.frame is radius, s.skinnum is packed RGB
 export const RF_FLARE = 0x00200000;
+// q2repro inc/shared/shared.h:1244 -- `#define RF_FLARE_LOCK_ANGLE
+// RF_MINLIGHT`: on an RF_FLARE entity the viewmodel-only RF_MINLIGHT bit is
+// reused to mean "billboard against the view axes instead of the direction
+// to the viewer" (kexgame/g_misc.ts's SPAWNFLAG_FLARE_LOCK_ANGLE sets it).
+// Read by ref_gl/gl_rmain.ts's R_DrawFlare.
+export const RF_FLARE_LOCK_ANGLE = RF_MINLIGHT;
 
 // player_state_t->refdef flags
 export const RDF_UNDERWATER = 1; // warp the screen as apropriate

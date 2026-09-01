@@ -97,6 +97,16 @@ export function V_AddEntity(ent: EntityT): void {
   dst.alpha = ent.alpha;
   dst.skin = ent.skin;
   dst.flags = ent.flags;
+  // ref.ts's additive RF_FLARE fields (q2repro entity_t.rgba/.scale). The C
+  // copies the whole struct (`clr.refdef.entities[clr.fd.num_entities++] =
+  // *ent`), so these travel with everything else; this port's field-by-field
+  // copy has to name them or a flare would reach the renderer with the
+  // scene entity's stale tint/scale.
+  dst.rgba.r = ent.rgba.r;
+  dst.rgba.g = ent.rgba.g;
+  dst.rgba.b = ent.rgba.b;
+  dst.rgba.a = ent.rgba.a;
+  dst.scale.set(ent.scale);
 }
 
 /*

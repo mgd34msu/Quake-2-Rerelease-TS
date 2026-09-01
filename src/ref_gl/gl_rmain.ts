@@ -72,7 +72,7 @@ import { CString } from "bun:ffi";
 import type { RefExports, RefImports, EntityT, RefdefT, ParticleT, DrawColorT } from "../client/ref";
 import { API_VERSION } from "../client/ref";
 import { type Vec3, vec3, DotProduct, VectorCopy, VectorScale, VectorMA, VectorNormalize, AngleVectors, RotatePointAroundVector, PerpendicularVector, BOX_ON_PLANE_SIDE } from "../shared/math";
-import { CplaneT, CONTENTS_SOLID, RDF_NOWORLDMODEL, RF_BEAM, RF_FULLBRIGHT, RF_TRANSLUCENT, ERR_DROP, PRINT_ALL, PRINT_DEVELOPER, CVAR_ARCHIVE, CVAR_USERINFO, CVAR_CHEAT, CVAR_FILES, Q_stricmp, Q_ftol } from "../shared/q_shared";
+import { CplaneT, CONTENTS_SOLID, RDF_NOWORLDMODEL, RF_BEAM, RF_FLARE, RF_FLARE_LOCK_ANGLE, RF_SHELL_RED, RF_SHELL_GREEN, RF_SHELL_BLUE, RF_FULLBRIGHT, RF_TRANSLUCENT, ERR_DROP, PRINT_ALL, PRINT_DEVELOPER, CVAR_ARCHIVE, CVAR_USERINFO, CVAR_CHEAT, CVAR_FILES, Q_stricmp, Q_ftol } from "../shared/q_shared";
 import { PLANE_ANYZ } from "../qcommon/qfiles";
 import {
   ri,
@@ -124,6 +124,7 @@ import {
   REF_VERSION,
   r_particletexture,
   ImagetypeT,
+  ImageT,
 } from "./gl_local";
 import { R_BeginRegistration, R_EndRegistration, R_RegisterModel, Mod_PointInLeaf, Mod_Init, Mod_FreeAll, Mod_Modellist_f, ModtypeT, ModelT, ParsedSp2T } from "./gl_model";
 import { GL_InitShaderPath, GL_ShutdownShaderPath, GL_UsingShaderPath } from "./gl_shader";
@@ -182,6 +183,11 @@ const GL_TRIANGLE_STRIP = 0x0005;
 const GL_TRIANGLES = 0x0004;
 const GL_POINTS = 0x0000;
 const GL_MODULATE = 0x2100;
+const GL_ONE = 1;
+const GL_SRC_ALPHA = 0x0302;
+const GL_ONE_MINUS_SRC_ALPHA = 0x0303;
+const GL_SMOOTH = 0x1d01;
+const GL_FLAT = 0x1d00;
 
 // float v_blend[4] -- final blending color; file-scope global read/written
 // only within this file (R_SetupFrame writes it, R_PolyBlend reads it).
@@ -351,6 +357,201 @@ export function R_DrawSpriteModel(e: EntityT): void {
   qgl.qglColor4f(1, 1, 1, 1);
 }
 
+/*
+=============================================================
+
+  FLARES (misc_flare, RF_FLARE)
+
+=============================================================
+*/
+
+/*
+=================
+GL_MakeNormalVectors
+
+q2repro src/common/math.c's MakeNormalVectors (vanilla q_shared.c has the
+same function; this port's shared/math.ts never needed it, so it lives here
+next to its one caller). Builds an arbitrary orthonormal pair around
+`forward` -- the flare's non-LOCK_ANGLE billboard basis.
+=================
+*/
+function GL_MakeNormalVectors(forward: Vec3, right: Vec3, up: Vec3): void {
+  // this rotate and negate guarantees a vector not colinear with the original
+  right[1] = -forward[0];
+  right[2] = forward[1];
+  right[0] = forward[2];
+
+  const d = DotProduct(right, forward);
+  VectorMA(right, -d, forward, right);
+  VectorNormalize(right);
+
+  // CrossProduct(right, forward, up)
+  up[0] = right[1] * forward[2] - right[2] * forward[1];
+  up[1] = right[2] * forward[0] - right[0] * forward[2];
+  up[2] = right[0] * forward[1] - right[1] * forward[0];
+}
+
+/*
+=================
+GL_IsDefaultFlareImage
+
+q2repro tags two image names with IF_DEFAULT_FLARE at registration time --
+"misc/flare.tga" (src/client/tent.c:322, the built-in flare) and any
+"sprites/psx_flare*" (src/client/precache.c:406) -- and its flare draw reads
+that flag back for two things: a doubled quad size (`25 << def`) and a
+brighter alpha (`128 + def * 32`). This port's RefExports has no
+image-type/flags argument to carry the tag through registration (see
+cl_tent.ts's cl_img_flare comment), so the same two names are recognized
+here, at the one place the flag is ever read. Same inputs, same answer.
+=================
+*/
+function GL_IsDefaultFlareImage(name: string): boolean {
+  const n = name.toLowerCase();
+  return n === "misc/flare.tga" || n.startsWith("sprites/psx_flare");
+}
+
+/*
+=================
+R_DrawFlare
+
+q2repro src/refresh/tess.c:366-489 (GL_DrawFlares), one entity at a time.
+
+Two deviations, both forced by what this renderer is:
+
+ 1. No occlusion queries. q2repro draws each flare's bounding quad into an
+    occlusion query with color writes off (src/refresh/main.c:441-518
+    GL_OccludeFlares), then ramps a per-flare visibility fraction `q->frac`
+    toward the query result at gl_flarespeed and multiplies both the quad
+    size and the alpha by it -- which is also why its draw pass runs with
+    GLS_DEPTHTEST_DISABLE (the query, not the depth buffer, decides whether
+    a flare behind a wall is visible). qgl.ts binds no query entry points,
+    so this port draws with the depth test LEFT ON: geometry in front of the
+    flare occludes it directly, and `frac` is a constant 1 (a flare that is
+    visible at all is drawn at full size, with no fade-in ramp).
+ 2. No fragment shader. q2repro's IF_DEFAULT_FLARE path adds
+    `diffuse.rgb *= luminance(diffuse.rgb); diffuse.rgb *= v_color.a;`
+    (src/refresh/shader.c:689-692) before the usual `diffuse *= color`,
+    against a GLS_BLEND_ADD (GL_SRC_ALPHA, GL_ONE) blend. misc/flare.tga is
+    a 49x49 24-bit grayscale radial glow with no alpha channel, so under
+    fixed-function GL the equivalent is an additive GL_MODULATE draw with
+    the alpha term folded into the color's rgb as well as its alpha -- that
+    keeps the C's quadratic (alpha squared) response to the distance fade,
+    and the texture's own black surround still adds nothing.
+
+Everything else -- the 5-vertex fan and its texcoords, the `25 << def` /
+`128 + def * 32` size and alpha constants, the LOCK_ANGLE view-axis basis vs
+MakeNormalVectors basis, and the shell-color outer ring -- is the C's.
+=================
+*/
+const flareTcoords: readonly (readonly [number, number])[] = [
+  [0.5, 0.5],
+  [0, 1],
+  [0, 0],
+  [1, 0],
+  [1, 1],
+];
+
+export function R_DrawFlare(e: EntityT): void {
+  const image = e.skin instanceof ImageT ? e.skin : null;
+  if (!image) return; // no flare image registered (missing misc/flare.tga)
+
+  const def = GL_IsDefaultFlareImage(image.name) ? 1 : 0;
+  const scale = (25 << def) * e.scale[0];
+
+  const left = vec3();
+  const right = vec3();
+  const down = vec3();
+  const up = vec3();
+
+  if (e.flags & RF_FLARE_LOCK_ANGLE) {
+    // view-axis aligned: q2repro's viewaxis[1] is LEFT and [2] is UP, which
+    // are this renderer's -vright and vup.
+    VectorScale(vright, -scale, left);
+    VectorScale(vright, scale, right);
+    VectorScale(vup, -scale, down);
+    VectorScale(vup, scale, up);
+  } else {
+    const dir = vec3();
+    const r = vec3();
+    const u = vec3();
+    dir[0] = e.origin[0] - r_newrefdef.vieworg[0];
+    dir[1] = e.origin[1] - r_newrefdef.vieworg[1];
+    dir[2] = e.origin[2] - r_newrefdef.vieworg[2];
+    VectorNormalize(dir);
+    GL_MakeNormalVectors(dir, r, u);
+    VectorScale(r, -scale, left);
+    VectorScale(r, scale, right);
+    VectorScale(u, -scale, down);
+    VectorScale(u, scale, up);
+  }
+
+  // inner.a = (128 + def * 32) * (ent->alpha * q->frac), as a 0-255 byte
+  const a = ((128 + def * 32) * e.alpha) / 255;
+
+  // inner is the entity's own tint; outer matches it unless a shell color is
+  // set, in which case the rim goes to the pure shell channel(s) and the
+  // fan is smooth-shaded between the two (tess.c:459-472).
+  const innerR = (e.rgba.r / 255) * a;
+  const innerG = (e.rgba.g / 255) * a;
+  const innerB = (e.rgba.b / 255) * a;
+  let outerR = innerR;
+  let outerG = innerG;
+  let outerB = innerB;
+  const shaded = (e.flags & (RF_SHELL_RED | RF_SHELL_GREEN | RF_SHELL_BLUE)) !== 0;
+  if (shaded) {
+    outerR = e.flags & RF_SHELL_RED ? a : 0;
+    outerG = e.flags & RF_SHELL_GREEN ? a : 0;
+    outerB = e.flags & RF_SHELL_BLUE ? a : 0;
+  }
+
+  const verts: Vec3[] = [
+    vec3(e.origin[0], e.origin[1], e.origin[2]),
+    vec3(e.origin[0] + down[0] + left[0], e.origin[1] + down[1] + left[1], e.origin[2] + down[2] + left[2]),
+    vec3(e.origin[0] + up[0] + left[0], e.origin[1] + up[1] + left[1], e.origin[2] + up[2] + left[2]),
+    vec3(e.origin[0] + up[0] + right[0], e.origin[1] + up[1] + right[1], e.origin[2] + up[2] + right[2]),
+    vec3(e.origin[0] + down[0] + right[0], e.origin[1] + down[1] + right[1], e.origin[2] + down[2] + right[2]),
+  ];
+
+  GL_Bind(image.texnum);
+  GL_TexEnv(GL_MODULATE);
+  qgl.qglDisable(GL_ALPHA_TEST); // GL_SetDefaultState leaves it at GREATER 0.666, which would discard a faded flare outright
+  qgl.qglEnable(GL_BLEND);
+  qgl.qglBlendFunc(GL_SRC_ALPHA, GL_ONE); // GLS_BLEND_ADD
+  // GLS_SHADE_SMOOTH is set only for the shell case in the C (tess.c:471);
+  // without a shell every vertex carries the same color, so flat shading
+  // (this renderer's default, GL_SetDefaultState) draws the same pixels.
+  if (shaded) qgl.qglShadeModel(GL_SMOOTH);
+
+  // indices { 0,2,3, 0,3,4, 0,4,1, 0,1,2 } == a fan around the center
+  qgl.qglBegin(GL_TRIANGLE_FAN);
+  for (const i of [0, 2, 3, 4, 1, 2]) {
+    const tc = flareTcoords[i];
+    if (i === 0) qgl.qglColor4f(innerR, innerG, innerB, a);
+    else qgl.qglColor4f(outerR, outerG, outerB, a);
+    qgl.qglTexCoord2f(tc[0], tc[1]);
+    qgl.qglVertex3fv(verts[i]);
+  }
+  qgl.qglEnd();
+
+  if (shaded) qgl.qglShadeModel(GL_FLAT);
+  qgl.qglBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  qgl.qglDisable(GL_BLEND);
+  // leave the alpha test OFF, exactly as R_DrawSpriteModel above does. Its
+  // threshold is GL_GREATER 0.666 (GL_SetDefaultState), and R_DrawAlphaSurfaces
+  // -- which runs after the entity list, and never touches the alpha test
+  // itself -- draws SURF_TRANS33/TRANS66 surfaces at alpha 0.33/0.66. Both
+  // are below the threshold, so re-enabling here erased every translucent
+  // world surface in the frame (seen live on maps/q64/cargo.bsp: the grated
+  // floor and wall panels vanished the moment a flare was on screen).
+  qgl.qglDisable(GL_ALPHA_TEST);
+  qgl.qglColor4f(1, 1, 1, 1);
+  GL_TexEnv(GL_REPLACE);
+  // depth writes are already off: cl_ents.ts stamps RF_TRANSLUCENT on every
+  // flare, so this only ever runs inside R_DrawEntitiesOnList's translucent
+  // pass, which brackets itself with qglDepthMask(false)/(true) --
+  // q2repro's own GLS_DEPTHMASK_FALSE, arrived at from the other side.
+}
+
 //==================================================================================
 
 /*
@@ -400,6 +601,16 @@ function narrowModel(model: unknown): ModelT | null {
 function drawOneEntity(ent: EntityT): void {
   if (ent.flags & RF_BEAM) {
     R_DrawBeam(ent);
+    return;
+  }
+
+  // q2repro's GL_ClassifyEntities (src/refresh/main.c:543-548) pulls flares
+  // out of the entity list into their own chain before anything looks at
+  // `ent->model`; a flare has no model at all (cl_ents.ts leaves it null),
+  // so this has to come before the model lookup below or every flare would
+  // draw as R_DrawNullModel's diamond.
+  if (ent.flags & RF_FLARE) {
+    R_DrawFlare(ent);
     return;
   }
 

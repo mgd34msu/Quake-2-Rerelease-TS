@@ -77,7 +77,7 @@ import {
   vec3,
   vec3_origin,
 } from "../shared/math";
-import { CONTENTS_SOLID, CVAR_ARCHIVE, CVAR_USERINFO, Com_sprintf, ERR_FATAL, PRINT_ALL, RDF_NOWORLDMODEL, RF_BEAM, RF_TRANSLUCENT, type CvarT } from "../shared/q_shared";
+import { CONTENTS_SOLID, CVAR_ARCHIVE, CVAR_USERINFO, Com_sprintf, ERR_FATAL, PRINT_ALL, RDF_NOWORLDMODEL, RF_BEAM, RF_FLARE, RF_TRANSLUCENT, type CvarT } from "../shared/q_shared";
 import { fixedLength } from "../shared/fixed";
 import type { RefExports, RefImports, EntityT, RefdefT, DrawColorT } from "../client/ref";
 import { API_VERSION } from "../client/ref";
@@ -512,6 +512,18 @@ function drawOneEntity(ent: EntityT): void {
     R_DrawBeam(ent);
     return;
   }
+
+  // RF_FLARE (misc_flare) is skipped outright in this renderer. The flare is
+  // a modelless, image-only additive billboard (cl_ents.ts's RF_FLARE branch
+  // sets ent.skin/ent.rgba/ent.scale and no model at all); ref_gl draws it in
+  // gl_rmain.ts's R_DrawFlare with a GL_SRC_ALPHA/GL_ONE blend, and this
+  // renderer's 8-bit paletted span pipeline (r_sprite.ts/r_polyse.ts) has no
+  // additive-blend primitive and no way to draw a bare image handle as a
+  // world billboard -- R_DrawSprite needs an SP2 model. Falling through would
+  // reach R_DrawNullModel (empty here), so behavior is unchanged either way;
+  // this makes the skip explicit and stops a future null-model implementation
+  // from drawing diamonds where the flares are. Reported deviation.
+  if (ent.flags & RF_FLARE) return;
 
   const handle = ent.model;
   if (handle === null || !(handle instanceof ModelT)) {

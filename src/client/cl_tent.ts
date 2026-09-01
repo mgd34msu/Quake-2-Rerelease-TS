@@ -39,7 +39,7 @@ import { Com_Printf } from "../qcommon/common";
 import { ComError, UPDATE_MASK } from "../qcommon/qcommon";
 import { MSG_ReadByte, MSG_ReadShort, MSG_ReadLong, MSG_ReadPos, MSG_ReadDir } from "../qcommon/sizebuf";
 import { cl, net_message, re, cl_entities, clCvars, ClSustainT, MAX_SUSTAINS } from "./client";
-import { type ModelS, EntityT, MAX_ENTITIES } from "./ref";
+import { type ModelS, type ImageS, EntityT, MAX_ENTITIES } from "./ref";
 import { V_AddEntity, V_AddLight } from "./cl_view";
 import { S_StartSound, S_RegisterSound } from "./snd_dma";
 import type { SfxT } from "./snd_loc";
@@ -224,6 +224,13 @@ export let cl_mod_heatbeam: ModelS | null = null;
 export let cl_mod_monster_heatbeam: ModelS | null = null;
 export let cl_mod_explo4_big: ModelS | null = null;
 // ROGUE
+
+// [Sam-KEX] q2repro src/client/tent.c:51 `qhandle_t cl_img_flare` -- the
+// default misc_flare billboard image (baseq2/pak0.pak's misc/flare.tga),
+// used by cl_ents.ts's RF_FLARE branch for every flare that does not carry
+// its own RF_CUSTOMSKIN image. Registered in CL_RegisterTEntModels below,
+// exactly where tent.c:322 registers it.
+export let cl_img_flare: ImageS | null = null;
 
 // [Paril-KEX] q2repro src/client/client.h:956-970's cl_muzzlefx_t -- which
 // retail models/weapons/v_*/flash/tris.md2 model a given weapon's
@@ -598,6 +605,17 @@ export function CL_RegisterTEntModels(): void {
   for (let i = 0; i < MFLASH_TOTAL; i++) {
     cl_mod_muzzles[i] = re.RegisterModel(`models/weapons/${muzzlenames[i]}/flash/tris.md2`);
   }
+
+  // q2repro tent.c:322 -- `cl_img_flare = R_RegisterImage("misc/flare.tga",
+  // IT_SPRITE, IF_DEFAULT_FLARE)`. This port has no R_RegisterImage with an
+  // image-type/flags pair; RegisterSkin is the primitive that loads a name
+  // exactly as given (no "pics/" prefix, no forced ".pcx"), which is the one
+  // property that matters here -- the same reasoning cl_parse.ts's
+  // CL_RegisterImage header comment already spells out for the
+  // RF_CUSTOMSKIN flare images. The IF_DEFAULT_FLARE half of the C call is
+  // recovered at draw time from the image's own name (ref_gl/gl_rmain.ts's
+  // R_DrawFlare).
+  cl_img_flare = re.RegisterSkin("misc/flare.tga");
 }
 
 /*
