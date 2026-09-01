@@ -16,7 +16,7 @@ than relying on defaults left over from module load order.
 */
 
 import { describe, test, expect, beforeEach } from "bun:test";
-import { Cvar_Get, Cvar_SetValue } from "../src/qcommon/cvar";
+import { Cvar_Get, Cvar_SetValue, Cvar_ForceSet } from "../src/qcommon/cvar";
 import {
   VID_MenuInit,
   s_mode_list,
@@ -226,7 +226,24 @@ describe("vid_menu.ts formatter value tables", () => {
 });
 
 describe("s_scale_fit_box -- \"scale to fullscreen\" toggle (defect: postage-stamp fullscreen)", () => {
-  test("defaults to curvalue 1 (\"fit screen\") on a fresh VID_MenuInit", () => {
+  test("vid_scale_fit is registered ON by default, and a fresh VID_MenuInit shows it as curvalue 1 (\"fit screen\")", () => {
+    // Both halves of the contract, asserted explicitly rather than inferred
+    // from whatever the process-global cvar table happens to hold:
+    //   1. the product registers vid_scale_fit with a default of "1"
+    //      (vid.ts's VID_GetScaleFit / VID_Init, CVAR_ARCHIVE) -- the
+    //      "default on" claim this defect fix rests on, and
+    //   2. VID_MenuInit maps that value onto the spinner.
+    // VID_MenuInit reads the LIVE value via Cvar_VariableValue, so asserting
+    // (2) alone silently depended on nothing else having written the cvar
+    // first -- test/vid_persistence.test.ts deliberately sets it to 0 as one
+    // of its seven archive round-trip values and leaves it there, which
+    // turned this into an ordering dependency (rule 13: a suite initializes
+    // what it touches and does not depend on -- or impose -- an ordering).
+    // primeCvars' Cvar_Get already registers the cvar; it never set a value.
+    const cv = Cvar_Get("vid_scale_fit", "1", 0);
+    expect(cv?.default_string).toBe("1");
+    Cvar_ForceSet("vid_scale_fit", cv?.default_string ?? "1");
+
     VID_MenuInit();
 
     expect(s_scale_fit_box[SOFTWARE_MENU]?.curvalue).toBe(1);

@@ -91,9 +91,23 @@ describe("cl_input.ts -- kbutton_t state bits", () => {
     // in_back was never pressed in this test group (state 0, msec 0)
     expect(CL_KeyState(in_back)).toBe(0);
 
-    // press and release in_forward with a huge synthetic hold time
-    Cmd_ExecuteString("+forward 1 0");
-    Cmd_ExecuteString("-forward 1 100000"); // msec = 100000 - 0
+    // Press and release in_forward with a huge synthetic hold time.
+    //
+    // The press timestamp must be non-zero. KeyDown (cl_input.ts) treats a
+    // zero Cmd_Argv(2) as "typed manually at the console" and substitutes
+    // `sys_frame_time - 100`; sys_frame_time is platform/sys.ts's
+    // Sys_Milliseconds, which counts milliseconds since the FIRST call in
+    // the process, not since this test. KeyUp then only accumulates when
+    // `uptime > b.downtime` (q2repro input.c:314-321's stale-timestamp
+    // guard), so once the surrounding `bun test` process had been alive for
+    // more than 100 seconds -- the full suite runs ~146s and this file sits
+    // near the end of it -- the substituted downtime overtook the literal
+    // 100000 uptime, nothing accumulated, and this assertion read 0. That
+    // was a wall-clock dependency in the setup, not a leak from another
+    // file: the behavior under test (CL_KeyState clamping a hold longer
+    // than the frame to exactly 1) was always correct.
+    Cmd_ExecuteString("+forward 1 1"); // explicit downtime=1, no sys_frame_time fallback
+    Cmd_ExecuteString("-forward 1 100001"); // msec = 100001 - 1
     expect(CL_KeyState(in_forward)).toBe(1); // clamped: 100000 / frame_msec(<=200) > 1
   });
 

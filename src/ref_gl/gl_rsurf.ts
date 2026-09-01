@@ -197,6 +197,26 @@ export function resetLightmapSurfacesForTesting(): void {
   gl_lms.lightmap_surfaces.fill(null);
 }
 
+// Test-only: BLOCK_WIDTH/BLOCK_HEIGHT are module-private and MUTABLE --
+// GL_BeginBuildingLightmaps (below) recomputes them per map load, 1<<7
+// (128) for a classic map and 1<<10 (1024) for one carrying a BSPX
+// DECOUPLED_LM lump, and reallocates gl_lms.allocated/lightmap_buffer to
+// match. In the engine that is always followed by a full map load, so no
+// caller ever observes a stale size. A unit test calling LM_InitBlock/
+// LM_AllocBlock directly has no such guarantee: LM_InitBlock only zeroes
+// the existing `allocated` array, so a suite that previously loaded a
+// decoupled-lightmap map left the atlas 1024x1024 and every later
+// suite's packing arithmetic silently changed shape. Restores the
+// classic (non-decoupled) atlas this module loads at, matching
+// GL_BeginBuildingLightmaps' own non-decoupled branch. Mirrors
+// resetLightmapSurfacesForTesting's precedent directly above.
+export function resetLightmapBlockSizeForTesting(): void {
+  BLOCK_WIDTH = 128;
+  BLOCK_HEIGHT = 128;
+  gl_lms.allocated = new Array(BLOCK_WIDTH).fill(0);
+  gl_lms.lightmap_buffer = new Uint8Array(LIGHTMAP_BYTES * BLOCK_WIDTH * BLOCK_HEIGHT);
+}
+
 /*
 =============================================================
 

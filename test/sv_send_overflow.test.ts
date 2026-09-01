@@ -148,6 +148,17 @@ afterEach(() => {
 // fixture (test/cmodel_qbsp.test.ts's own established choice for
 // area-lookup coverage) emits the 2-entry AREAS lump area-based code
 // actually needs.
+//
+// The fixture name is unique to THIS suite on purpose (rule 13: a suite
+// must not depend on -- or impose -- an ordering). CM_LoadMap's
+// same-map early-out (cmodel.ts: `if (map_name === name && ...)`, faithful
+// to vanilla) keys on the map NAME alone, with no checksum or search-path
+// check. Five other suites (cmodel_map, nav, sv_framediv,
+// sv_clip_debugdraw, sv_world) build a "maps/testroom.bsp" from the
+// CLASSIC buildBoxRoomBsp fixture, whose 1-entry AREAS lump has no
+// map_areas[1] at all; whichever suite reached that name first in the
+// shared process won, and when it was a classic one this suite's
+// CM_WriteAreaBits(area 1) read `map_areas[1].floodnum` off undefined.
 let tmpRoot: string;
 
 beforeAll(() => {
@@ -156,12 +167,12 @@ beforeAll(() => {
   const mapsDir = join(baseq2Dir, "maps");
   mkdirSync(baseq2Dir);
   mkdirSync(mapsDir);
-  writeFileSync(join(mapsDir, "testroom.bsp"), buildBoxRoomBspQbsp());
+  writeFileSync(join(mapsDir, "sv_send_overflow_room.bsp"), buildBoxRoomBspQbsp());
 
   Cvar_ForceSet("basedir", tmpRoot);
   FS_InitFilesystem();
 
-  const { model } = CM_LoadMap("maps/testroom.bsp", false);
+  const { model } = CM_LoadMap("maps/sv_send_overflow_room.bsp", false);
   sv.models[1] = model;
 });
 

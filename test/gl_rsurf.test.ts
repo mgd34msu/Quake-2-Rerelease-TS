@@ -15,13 +15,23 @@ import { SetWorldModel, SetVisFrameCount, SetFrameCount, r_newrefdef, glCvars } 
 import { QGLRecording } from "../src/ref_gl/qgl";
 import { SetQGL } from "../src/ref_gl/gl_image";
 import { SubdividePolygon, setWarpfaceForTesting, EmitWaterPolys, ClipSkyPolygon, R_ClearSkyBox, skymins, skymaxs } from "../src/ref_gl/gl_warp";
-import { LM_InitBlock, LM_AllocBlock, R_RecursiveWorldNode, R_DrawAlphaSurfaces, R_BlendLightmaps, r_alpha_surfaces, resetLightmapSurfacesForTesting } from "../src/ref_gl/gl_rsurf";
+import { LM_InitBlock, LM_AllocBlock, R_RecursiveWorldNode, R_DrawAlphaSurfaces, R_BlendLightmaps, r_alpha_surfaces, resetLightmapSurfacesForTesting, resetLightmapBlockSizeForTesting } from "../src/ref_gl/gl_rsurf";
 import { GL_ShutdownShaderPath } from "../src/ref_gl/gl_shader";
 
 beforeEach(() => {
   setWarpfaceForTesting(null);
   r_newrefdef.time = 0;
   SetQGL(new QGLRecording());
+  // gl_rsurf.ts's BLOCK_WIDTH/BLOCK_HEIGHT are module-private and mutable:
+  // GL_BeginBuildingLightmaps resizes the lightmap atlas to 1024x1024 for
+  // any map carrying a BSPX DECOUPLED_LM lump (128x128 otherwise), and
+  // LM_InitBlock only zeroes the existing array rather than restoring the
+  // size. test/bspx_renderer.test.ts loads exactly such a map, so without
+  // this the LM_AllocBlock expectations below silently measured a
+  // 1024-wide atlas whenever that suite happened to run first (rule 13:
+  // a suite initializes what it touches and does not depend on -- or
+  // impose -- an ordering).
+  resetLightmapBlockSizeForTesting();
 });
 
 describe("gl_rsurf.ts -- LM_AllocBlock", () => {

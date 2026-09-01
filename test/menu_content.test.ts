@@ -47,7 +47,8 @@ import { describe, test, expect, beforeEach, afterAll } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Cvar_ForceSet, Cvar_VariableString } from "../src/qcommon/cvar";
+import { Cvar_ForceSet, Cvar_Get, Cvar_VariableString } from "../src/qcommon/cvar";
+import { CVAR_LATCH } from "../src/shared/q_shared";
 import { Com_SetServerState } from "../src/qcommon/common";
 import { FS_InitFilesystem } from "../src/qcommon/files";
 import { MapDB_Init, MapDB_Get, MapDB_Shutdown, MapDB_ResolveBsp, MapDB_UnitsForEpisode } from "../src/qcommon/mapdb";
@@ -283,6 +284,24 @@ describe("PerformLaunch -- game-mode cvars (New Game never starts deathmatch)", 
   // SP default of 1, vanilla m_menu.c StartServerActionFunc precedent)
   // without ever enabling deathmatch.
   const plan: LaunchPlan = { game: "", map: "base1", startItems: "" };
+
+  beforeEach(() => {
+    // Register through the product's OWN default before anything forces a
+    // value: PerformLaunch (src/client/menu_content.ts) does
+    // Cvar_ForceSet("skill", ...), and Cvar_ForceSet on a name nothing has
+    // registered yet CREATES the cvar with the forced value as its
+    // default_string. In a real session src/server/sv_main.ts's SV_Init has
+    // always run Cvar_Get("skill", "1", CVAR_LATCH) long before any menu
+    // exists, so the ForceSet only ever assigns a value. Under `bun test`
+    // the cvar table is one process-global and SV_Init may not have run
+    // yet, so this suite could stamp a default_string of "0" and make
+    // test/cvar_parity.test.ts's "skill: default 1" row fail whenever this
+    // file happened to run first (PORTING.md rule 13: a suite initializes
+    // what it touches and does not depend on -- or impose -- an ordering).
+    // Same idiom as test/cl_scrn_bind_hint.test.ts and
+    // test/cgame_host_hud_scale.test.ts use for cl_kfont_source.
+    Cvar_Get("skill", "1", CVAR_LATCH);
+  });
 
   test("coop=false forces deathmatch 0 and coop 0 over stale values", () => {
     Cvar_ForceSet("deathmatch", "1");

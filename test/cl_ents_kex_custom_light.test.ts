@@ -21,6 +21,8 @@ import { EntityStateT, RF_CUSTOM_LIGHT, RF_FLARE, RF_IR_VISIBLE } from "../src/s
 import { CS_REMAP_OLD, CS_REMAP_RERELEASE } from "../src/shared/cs_remap";
 import { cl, cls, ConnstateT, clCvars, cl_entities, cl_parse_entities, setRe } from "../src/client/client";
 import { CL_AddEntities } from "../src/client/cl_ents";
+import { CL_ClearEffects } from "../src/client/cl_fx";
+import { CL_ClearTEnts } from "../src/client/cl_tent";
 import { V_ClearScene, r_entities, r_numentities, r_dlights, r_numdlights } from "../src/client/cl_view";
 
 // SP_target_light writes `(b << 8) | (g << 16) | (r << 24)`; the client reads
@@ -70,6 +72,20 @@ beforeEach(() => {
   clCvars.cl_vwep = null;
   cls.state = ConnstateT.ca_active;
   cl.model_draw[1] = WORLD_MODEL;
+  // cl_fx.ts's cl_dlights[]/particle pool and cl_tent.ts's explosion pool are
+  // module-level singletons separate from the render scene, and
+  // cl.clear()/V_ClearScene() do not touch any of them -- V_ClearScene only
+  // resets r_numdlights, the OUTPUT counter. CL_AddEntities then runs
+  // CL_AddTEnts and CL_AddDLights, which re-emit every still-live pooled
+  // explosion/dlight into the scene, so leftovers from an earlier suite
+  // (test/cl_fx.test.ts, which runs immediately before this file) landed in
+  // r_dlights ahead of this suite's own and made the r_numdlights
+  // assertions count 2 instead of 1. CL_ClearEffects + CL_ClearTEnts are the
+  // product's own resets for exactly this -- the pair CL_ClearState runs on
+  // disconnect (rule 13: a suite initializes what it touches and does not
+  // depend on an ordering).
+  CL_ClearEffects();
+  CL_ClearTEnts();
   V_ClearScene();
 });
 

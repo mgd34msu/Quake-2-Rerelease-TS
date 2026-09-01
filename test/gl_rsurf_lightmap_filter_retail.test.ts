@@ -40,7 +40,7 @@ import { SetRefImports, SetNoTexture, ImageT, r_worldmodel, glCvars, r_newrefdef
 import { SetQGL } from "../src/ref_gl/gl_image";
 import { QGLRecording } from "../src/ref_gl/qgl";
 import { Mod_Init, R_BeginRegistration, R_EndRegistration, mod_inline, Mod_FreeAll, Mod_Free, mod_known } from "../src/ref_gl/gl_model";
-import { R_DrawWorld, R_DrawBrushModel, R_MarkLeaves } from "../src/ref_gl/gl_rsurf";
+import { R_DrawWorld, R_DrawBrushModel, R_MarkLeaves, resetLightmapBlockSizeForTesting } from "../src/ref_gl/gl_rsurf";
 import { CvarT, SURF_SKY, SURF_WARP, SURF_TRANS33, SURF_TRANS66 } from "../src/shared/q_shared";
 
 const RETAIL_BASEDIR = "/home/buzzkill/q2rets/rerelease";
@@ -226,6 +226,15 @@ describe("gl_rsurf.ts + gl_light.ts -- R_BuildLightMap's non-lit-surface guard u
   afterAll(() => {
     Mod_FreeAll();
     Mod_Free(mod_known[0]); // world model: Mod_FreeAll only frees entries with a nonzero extradatasize
+    // Rule 13's second half: don't IMPOSE an ordering either. Loading these
+    // retail mgu*.bsp maps runs GL_BeginBuildingLightmaps, which resizes
+    // gl_rsurf.ts's module-private lightmap atlas to 1024x1024 for any map
+    // carrying a BSPX DECOUPLED_LM lump and leaves it there -- LM_InitBlock
+    // only zeroes the array, it does not restore the size. That silently
+    // changed the packing arithmetic test/gl_rsurf.test.ts's LM_AllocBlock
+    // case measures (it got x=64,y=0 instead of x=0,y=64), since that file
+    // runs right after this one.
+    resetLightmapBlockSizeForTesting();
   });
 
   test.skipIf(!havePak)("every real retail mgu*.bsp: full render dispatch (world + every submodel, six viewpoints) never throws", () => {

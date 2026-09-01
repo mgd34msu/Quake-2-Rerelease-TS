@@ -168,7 +168,11 @@ afterEach(() => {
 // SV_BuildClientFrame (called inside SV_SendClientDatagram) needs a real
 // loaded map -- test/sv_send_overflow.test.ts's own precedent (see that
 // file's comment for why the Qbsp fixture specifically, over the classic
-// buildBoxRoomBsp one).
+// buildBoxRoomBsp one). The fixture name is unique to THIS suite for the
+// same reason sv_send_overflow.test.ts's is -- see that file's comment:
+// CM_LoadMap's same-map early-out keys on the map NAME alone, so sharing
+// "maps/testroom.bsp" with the classic-fixture suites let whichever ran
+// first in the shared process decide which BSP every later suite got.
 let tmpRoot: string;
 
 beforeAll(() => {
@@ -177,12 +181,12 @@ beforeAll(() => {
   const mapsDir = join(baseq2Dir, "maps");
   mkdirSync(baseq2Dir);
   mkdirSync(mapsDir);
-  writeFileSync(join(mapsDir, "testroom.bsp"), buildBoxRoomBspQbsp());
+  writeFileSync(join(mapsDir, "sv_send_overflow_kex_room.bsp"), buildBoxRoomBspQbsp());
 
   Cvar_FullSet("basedir", tmpRoot, 0);
   FS_InitFilesystem();
 
-  const { model } = CM_LoadMap("maps/testroom.bsp", false);
+  const { model } = CM_LoadMap("maps/sv_send_overflow_kex_room.bsp", false);
   sv.models[1] = model;
 });
 

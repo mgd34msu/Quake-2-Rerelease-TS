@@ -23,11 +23,11 @@ just resets the shared command-text buffer), so calling them here is safe
 regardless of what other test files in the same process already did.
 */
 
-import { describe, test, expect, afterEach } from "bun:test";
+import { describe, test, expect, afterEach, afterAll } from "bun:test";
 import { readFileSync, unlinkSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Cvar_Init, Cvar_SetValue, Cvar_VariableValue, Cvar_WriteVariables } from "../src/qcommon/cvar";
+import { Cvar_Init, Cvar_Get, Cvar_ForceSet, Cvar_SetValue, Cvar_VariableValue, Cvar_WriteVariables } from "../src/qcommon/cvar";
 import { Cbuf_Init, Cbuf_AddText, Cbuf_Execute, Cmd_Init } from "../src/qcommon/cmd";
 import { VID_GetModeInfo, VID_GetScale, VID_GetScaleFit } from "../src/platform/vid";
 import { VID_MenuInit, s_shadows_box, s_shadow_quality_slider } from "../src/platform/vid_menu";
@@ -235,4 +235,20 @@ describe("video cvar archive round trip (Part G: does fullscreen/scale survive a
 
     assertValues(MODIFIED);
   });
+});
+
+// Rule 13's second half -- a suite must not IMPOSE an ordering either. This
+// file's whole point is driving all nine video cvars to non-default values,
+// and cvar_vars (qcommon/cvar.ts) is a process-wide singleton shared with
+// every other file in the same `bun test` run, so whatever the last test
+// here wrote used to stay written for the rest of the process.
+// test/vid_menu.test.ts's "vid_scale_fit is registered ON by default" case
+// read back the 0 in MODIFIED and failed, order-dependently. Hand each cvar
+// back the default_string it was actually registered with (Cvar_Get with a
+// null value returns the existing cvar and never creates one).
+afterAll(() => {
+  for (const name of [...CVAR_NAMES, ...SHADOW_CVAR_NAMES]) {
+    const cv = Cvar_Get(name, null, 0);
+    if (cv) Cvar_ForceSet(name, cv.default_string);
+  }
 });
