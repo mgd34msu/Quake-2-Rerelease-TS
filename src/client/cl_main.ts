@@ -85,7 +85,17 @@ import {
   MAX_MSGLEN,
 } from "../qcommon/qcommon";
 import { NET_StringToAdr, NET_AdrToString, NET_CompareAdr, NET_IsLocalAddress, NET_SendPacket, NET_GetPacket, NET_Config } from "../platform/net_udp";
-import { Netchan_OutOfBandPrint, Netchan_Setup, Netchan_Transmit, Netchan_Process, net_from, net_message, NETCHAN_OLD, NETCHAN_NEW } from "../qcommon/net_chan";
+import {
+  Netchan_OutOfBandPrint,
+  Netchan_Setup,
+  Netchan_Transmit,
+  Netchan_Process,
+  net_from,
+  net_message,
+  NETCHAN_OLD,
+  NETCHAN_NEW,
+  MAX_PACKETLEN_WRITABLE,
+} from "../qcommon/net_chan";
 import { SizeBuf, SZ_Init, SZ_Clear, SZ_Print, MSG_WriteByte, MSG_WriteChar, MSG_WriteShort, MSG_WriteLong, MSG_WriteString, MSG_ReadString, MSG_ReadStringLine, MSG_BeginReading, MSG_ReadLong } from "../qcommon/sizebuf";
 import { FS_Gamedir, FS_CreatePath, FS_FOpenFileWrite, FS_Write, FS_FCloseFile, FS_ExecAutoexec, FS_LoadFile } from "../qcommon/files";
 import { CM_LoadMap, CM_NumTexinfo, CM_TexinfoName } from "../qcommon/cmodel";
@@ -511,13 +521,20 @@ export function CL_SendConnectPacket(): void {
     const usable = challenge_protocols.filter((p) => SUPPORTED_CONNECT_PROTOCOLS.includes(p));
     if (usable.length > 0) protocol = Math.max(...usable);
   }
-  // A packet_length token both families send but this port's netchan
-  // (qcommon/net_chan.ts) never acts on -- we only ever implement the
-  // classic/"old" (unfragmented) netchan framing, so any value a real
-  // server would accept as "no larger than mine" is fine here. MAX_MSGLEN
-  // (1400) documents that ceiling honestly rather than inventing a fake
-  // larger-than-we-support capability.
-  const packetLength = MAX_MSGLEN;
+  // q2repro's own client-side packet_length request (client/main.c:458-462
+  // CL_CheckForResend): "use maximum allowed msglen for loopback" --
+  // MAX_PACKETLEN_WRITABLE (4086) for a loopback destination, or the
+  // net_maxmsglen cvar (default 1390, chan.c:130) for a real network one.
+  // All three negotiating families carry this as the FIRST tail token
+  // (q2proto_proto_r1q2.c:55, q2proto_proto_q2pro.c:77,
+  // q2proto_proto_q2repro.c:54); vanilla (34) has no such field, and the
+  // `tail` assembly below leaves it out entirely for that protocol.
+  // Cvar_Get (not a cached module var) so this is correct regardless of
+  // whether CL_InitLocal's own registration below has run yet -- Cvar_Get
+  // is idempotent by name.
+  const netMaxmsglenCvar = Cvar_Get("net_maxmsglen", "1390", 0);
+  const netMaxmsglen = netMaxmsglenCvar ? netMaxmsglenCvar.value : MAX_MSGLEN - 10;
+  const packetLength = NET_IsLocalAddress(adr) ? MAX_PACKETLEN_WRITABLE : netMaxmsglen;
   let tail = "";
   if (protocol === PROTOCOL_VERSION_R1Q2) {
     tail = ` ${packetLength} ${PROTOCOL_VERSION_R1Q2_CURRENT}`;
@@ -1620,6 +1637,11 @@ export function CL_InitLocal(): void {
   // comment). Registered, consumer unported -- see audit report.
   Cvar_Get("cl_demosnaps", "10", 0);
   Cvar_Get("cl_demomsglen", "1390", 0); // MAX_PACKETLEN_WRITABLE_DEFAULT (inc/common/net/net.h:31-34)
+  // chan.c:130 -- the SAME global cvar net_chan.ts's Netchan_Init registers
+  // (this call is idempotent with that one, whichever runs first wins); the
+  // client reads it here to build CL_SendConnectPacket's packet_length
+  // request (client/main.c:459).
+  Cvar_Get("net_maxmsglen", "1390", 0);
   Cvar_Get("cl_demowait", "0", 0);
   Cvar_Get("cl_demosuspendtoggle", "1", 0);
   Cvar_Get("cl_demo_protocol_kex", "1", 0);

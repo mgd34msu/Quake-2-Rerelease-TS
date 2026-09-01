@@ -80,6 +80,15 @@ export const MAX_PACKETLEN = 4096; // max length of a single packet
 export const PACKET_HEADER = 10; // two ints and a short (worst case)
 export const MAX_PACKETLEN_DEFAULT = 1400; // default quake2 limit
 export const MAX_PACKETLEN_WRITABLE_DEFAULT = MAX_PACKETLEN_DEFAULT - PACKET_HEADER;
+// net.h:33-34's other two ladder rungs, needed once packet_length actually
+// gets negotiated (sv_main.ts's SVC_DirectConnect / cl_main.ts's
+// CL_SendConnectPacket): MAX_PACKETLEN_WRITABLE (4086) is the hard ceiling a
+// client may ever request (server/main.c:749's `p->maxlength >
+// MAX_PACKETLEN_WRITABLE` reject, and cl_main's own loopback request value,
+// client/main.c:461); MIN_PACKETLEN (512) is the floor a negotiated value is
+// clamped up to (server/main.c:763-764).
+export const MAX_PACKETLEN_WRITABLE = MAX_PACKETLEN - PACKET_HEADER;
+export const MIN_PACKETLEN = 512; // don't allow smaller packets (net.h:29)
 
 // q2repro's MAX_MSGLEN (inc/common/protocol.h:25, 0x8000) -- the capacity its
 // Netchan_Setup gives fragment_in/fragment_out, and the size of the
@@ -505,8 +514,15 @@ export function Netchan_Transmit(chan: NetchanT, length: number, data: Uint8Arra
     return;
   }
 
-  // write the packet header
-  const send_buf = new Uint8Array(MAX_MSGLEN);
+  // write the packet header. Sized to MAX_PACKETLEN (4096), not MAX_MSGLEN
+  // (1400): chan.c's NetchanOld_Transmit and NetchanNew_Transmit both
+  // declare `byte send_buf[MAX_PACKETLEN]` (chan.c:177, chan.c:449) --
+  // exactly what Netchan_TransmitNextFragment above already uses. A fixed
+  // MAX_MSGLEN buffer here silently truncated (via the "dumped unreliable"
+  // branch below) any connection that negotiated a packet_length above 1390
+  // (e.g. a loopback kex client's MAX_PACKETLEN_WRITABLE request, 4086 --
+  // see sv_main.ts's SVC_DirectConnect / cl_main.ts's CL_SendConnectPacket).
+  const send_buf = new Uint8Array(MAX_PACKETLEN);
   const send = new SizeBuf();
   SZ_Init(send, send_buf, send_buf.length);
 

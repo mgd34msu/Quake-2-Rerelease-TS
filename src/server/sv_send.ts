@@ -1,7 +1,7 @@
 // sv_send.c -- server message sending
 
 import { NetsrcT, NetadrtypeT, SysError, SvcOpsT, MAX_MSGLEN } from "../qcommon/qcommon";
-import { Netchan_OutOfBandPrint, Netchan_Transmit, net_from } from "../qcommon/net_chan";
+import { Netchan_OutOfBandPrint, Netchan_Transmit, net_from, PACKET_HEADER } from "../qcommon/net_chan";
 import { SizeBuf, SZ_Init, SZ_Clear, SZ_Write, MSG_WriteByte, MSG_WriteShort, MSG_WriteString, MSG_WritePos } from "../qcommon/sizebuf";
 import { Com_Printf, Com_Error, dedicated } from "../qcommon/common";
 import { FS_ReadRaw, FS_FCloseFile, FS_Read } from "../qcommon/files";
@@ -315,7 +315,16 @@ FRAME UPDATES
 */
 
 export function SV_SendClientDatagram(client: ClientT): boolean {
-  const msg_buf = new Uint8Array(MAX_MSGLEN);
+  // Sized to this CLIENT's own negotiated per-packet budget
+  // (client.netchan.maxpacketlen, set by sv_main.ts's SVC_DirectConnect from
+  // the connect string's packet_length field), not a flat MAX_MSGLEN --
+  // otherwise a connection that negotiated a larger budget (e.g. a loopback
+  // kex client's MAX_PACKETLEN_WRITABLE, 4086) would still have its frame
+  // truncated here before Netchan_Transmit ever got a chance to send it. For
+  // every connection that did NOT negotiate a larger budget (maxpacketlen
+  // stays MAX_PACKETLEN_WRITABLE_DEFAULT, 1390), this is exactly MAX_MSGLEN
+  // (1390 + PACKET_HEADER's 10 = 1400) -- unchanged from before this unit.
+  const msg_buf = new Uint8Array(Math.max(MAX_MSGLEN, client.netchan.maxpacketlen + PACKET_HEADER));
   const msg = new SizeBuf();
 
   SV_BuildClientFrame(client);

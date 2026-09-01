@@ -23,7 +23,19 @@ import { Q2REPRO_CODEC } from "../qcommon/protocol/q2repro";
 import { createR1Q2Codec } from "../qcommon/protocol/r1q2";
 import { createQ2ProCodec } from "../qcommon/protocol/q2pro";
 import { CS_REMAP_RERELEASE } from "../shared/cs_remap";
-import { Netchan_OutOfBandPrint, Netchan_Setup, Netchan_Process, Netchan_Transmit, net_message_buffer, NETCHAN_OLD, NETCHAN_NEW } from "../qcommon/net_chan";
+import {
+  Netchan_OutOfBandPrint,
+  Netchan_Setup,
+  Netchan_Process,
+  Netchan_Transmit,
+  net_message_buffer,
+  NETCHAN_OLD,
+  NETCHAN_NEW,
+  MAX_PACKETLEN_WRITABLE,
+  MAX_PACKETLEN_WRITABLE_DEFAULT,
+  MIN_PACKETLEN,
+  PACKET_HEADER,
+} from "../qcommon/net_chan";
 import { NET_CompareBaseAdr, NET_AdrToString, NET_IsLocalAddress, NET_GetPacket } from "../platform/net_udp";
 import { MSG_BeginReading, MSG_ReadLong, MSG_ReadStringLine, MSG_WriteByte, MSG_WriteString, SZ_Init, SZ_Clear } from "../qcommon/sizebuf";
 import { Cmd_TokenizeString, Cmd_Argv, Cmd_Argc, Cmd_ExecuteString } from "../qcommon/cmd";
@@ -338,6 +350,49 @@ export function SVC_GetChallenge(): void {
   Netchan_OutOfBandPrint(NetsrcT.NS_SERVER, net_from, "challenge %i %s", svs.challenges[i].challenge, protocolExtras);
 }
 
+// server/main.c:746-767's parse_packet_length. Only the three negotiating
+// families (R1Q2/Q2PRO/kex-q2repro) ever call this -- vanilla's connect verb
+// carries no packet_length field at all (q2proto_server.c:159's `if
+// (parsed_connect->protocol >= Q2P_PROTOCOL_R1Q2)` guard), so it stays at
+// MAX_PACKETLEN_WRITABLE_DEFAULT (1390) unconditionally in SVC_DirectConnect
+// below. `rawToken` is the tail's first field (Cmd_Argv(5) for every
+// negotiating family, per q2proto_proto_r1q2.c:55, q2proto_proto_q2pro.c:77,
+// q2proto_proto_q2repro.c:54 all putting packet_length first); an empty
+// string (missing/short connect string, this port's Cmd_Argv convention for
+// "not present") is treated the same as an explicit 0 -- "highest available"
+// -- matching q2proto_server.c:158's `packet_length_value =
+// server_info->default_packet_length` fallback used when the token is
+// present but empty. Returns null to signal the connection must be rejected
+// ("Invalid maximum message length.", main.c:750).
+function SV_ParsePacketLength(rawToken: string, isLocal: boolean): number | null {
+  let maxlength = rawToken === "" ? 0 : atoi(rawToken);
+  if (maxlength < 0 || maxlength > MAX_PACKETLEN_WRITABLE) return null;
+
+  // 0 means highest available
+  if (!maxlength) maxlength = MAX_PACKETLEN_WRITABLE;
+
+  // chan.c:130's global cvar, default MAX_PACKETLEN_WRITABLE_DEFAULT (1390).
+  // Looked up (not cached) so this works regardless of whether net_chan.ts's
+  // Netchan_Init has run yet in this process -- Cvar_Get is idempotent by
+  // name, so whichever of Netchan_Init/this call runs first wins and the
+  // other just gets the same CvarT back.
+  const netMaxmsglenCvar = Cvar_Get("net_maxmsglen", "1390", 0);
+  const netMaxmsglen = netMaxmsglenCvar ? netMaxmsglenCvar.value : MAX_PACKETLEN_WRITABLE_DEFAULT;
+
+  if (!isLocal && netMaxmsglen > 0) {
+    // cap to server defined maximum value -- but NOT for local (loopback)
+    // connections, main.c:756's `!NET_IsLocalAddress(&net_from) &&
+    // net_maxmsglen->integer > 0` -- a loopback client's request is honored
+    // up to MAX_PACKETLEN_WRITABLE regardless of the server's own cvar.
+    if (maxlength > netMaxmsglen) maxlength = netMaxmsglen;
+  }
+
+  // don't allow too small packets
+  if (maxlength < MIN_PACKETLEN) maxlength = MIN_PACKETLEN;
+
+  return maxlength;
+}
+
 /*
 ==================
 SVC_DirectConnect
@@ -377,9 +432,18 @@ export function SVC_DirectConnect(): void {
   // NETCHAN_OLD, matching q2repro's own client/main.c CL_CheckForResend.
   const chanType = isKexFamily || version === PROTOCOL_VERSION_Q2PRO ? NETCHAN_NEW : NETCHAN_OLD;
 
+  // main.c:756's `NET_IsLocalAddress(&net_from)` -- computed once, read by
+  // SV_ParsePacketLength for every negotiating family below.
+  const isLocalAdr = NET_IsLocalAddress(adr);
+
   let negotiatedCodec: ProtocolCodec;
   let negotiatedMinorVersion = 0;
   let negotiatedCompress = false;
+  // Vanilla (34) has no packet_length field to negotiate (q2proto_server.c:159
+  // gates the token read on `protocol >= Q2P_PROTOCOL_R1Q2`), so it always
+  // gets the plain default -- same value every family got before this unit,
+  // and the only value vanilla can ever get.
+  let negotiatedPacketLength: number = MAX_PACKETLEN_WRITABLE_DEFAULT;
 
   if (isKexFamily) {
     if (version !== PROTOCOL_VERSION_RERELEASE) {
@@ -388,14 +452,30 @@ export function SVC_DirectConnect(): void {
       return;
     }
     negotiatedCodec = Q2REPRO_CODEC;
+    // Connect-string tail (q2proto_q2repro_connect_tail): "<packet_length>
+    // <has_zlib>" after the four standard fields (Cmd_Argv(5)/(6)).
+    // has_zlib stays unread here -- out of scope for this unit (compression
+    // negotiation for the kex family is a separate finding); only
+    // packet_length (Cmd_Argv(5)) is parsed.
+    const packetLength = SV_ParsePacketLength(Cmd_Argv(5), isLocalAdr);
+    if (packetLength === null) {
+      Netchan_OutOfBandPrint(NetsrcT.NS_SERVER, adr, "print\nInvalid maximum message length.\n");
+      Com_DPrintf("    rejected connect from invalid packet_length\n");
+      return;
+    }
+    negotiatedPacketLength = packetLength;
   } else if (version === PROTOCOL_VERSION) {
     negotiatedCodec = VANILLA_CODEC;
   } else if (version === PROTOCOL_VERSION_R1Q2) {
     // Connect-string tail (q2proto_r1q2_connect_tail): "<packet_length>
     // <minor version>" after the four standard fields (Cmd_Argv(5)/(6)).
-    // packet_length is read-and-ignored -- this port's netchan
-    // (qcommon/net_chan.ts) never implements R1Q2's alternate fragmentation,
-    // only the classic/unfragmented framing every protocol here shares.
+    const packetLength = SV_ParsePacketLength(Cmd_Argv(5), isLocalAdr);
+    if (packetLength === null) {
+      Netchan_OutOfBandPrint(NetsrcT.NS_SERVER, adr, "print\nInvalid maximum message length.\n");
+      Com_DPrintf("    rejected connect from invalid packet_length\n");
+      return;
+    }
+    negotiatedPacketLength = packetLength;
     const rawVersion = Cmd_Argv(6);
     let minor = rawVersion === "" ? PROTOCOL_VERSION_R1Q2_MINIMUM : atoi(rawVersion);
     if (minor < PROTOCOL_VERSION_R1Q2_MINIMUM) minor = PROTOCOL_VERSION_R1Q2_MINIMUM;
@@ -409,12 +489,20 @@ export function SVC_DirectConnect(): void {
   } else if (version === PROTOCOL_VERSION_Q2PRO) {
     // Connect-string tail (q2proto_q2pro_connect_tail): "<packet_length>
     // <netchan_type> <has_zlib> <minor version>" (Cmd_Argv(5)..(8)).
-    // netchan_type is read-and-ignored for the same reason packet_length is
-    // above (this port only ever runs the classic netchan framing --
-    // requesting NETCHAN_OLD is the honest ask, but this server does not
-    // actually branch on what the client requested here, matching the
-    // client-side symmetric scope cut documented in cl_main.ts's
-    // CL_SendConnectPacket).
+    // netchan_type (Cmd_Argv(6)) is read-and-ignored -- this port only ever
+    // runs the classic netchan framing (requesting NETCHAN_OLD is the honest
+    // ask, but this server does not actually branch on what the client
+    // requested here, matching the client-side symmetric scope cut
+    // documented in cl_main.ts's CL_SendConnectPacket). packet_length
+    // (Cmd_Argv(5)) IS now parsed -- that field's negotiation is this unit's
+    // whole point and applies uniformly across families, unlike netchan_type.
+    const packetLength = SV_ParsePacketLength(Cmd_Argv(5), isLocalAdr);
+    if (packetLength === null) {
+      Netchan_OutOfBandPrint(NetsrcT.NS_SERVER, adr, "print\nInvalid maximum message length.\n");
+      Com_DPrintf("    rejected connect from invalid packet_length\n");
+      return;
+    }
+    negotiatedPacketLength = packetLength;
     const zlibRaw = Cmd_Argv(7);
     negotiatedCompress = zlibRaw !== "" && atoi(zlibRaw) !== 0;
     const rawVersion = Cmd_Argv(8);
@@ -544,7 +632,11 @@ export function SVC_DirectConnect(): void {
   // connections, and R1Q2/35 is NETCHAN_OLD with a one-byte qport -- see
   // net_chan.ts's NETCHAN_NEW doc comment for the live capture that proved
   // it, and why protocol 35 never spawned before this was threaded through.
-  Netchan_Setup(NetsrcT.NS_SERVER, newcl.netchan, adr, qport, chanType, version);
+  // `negotiatedPacketLength` is this unit's own addition: the per-connection
+  // maxpacketlen this SVC_DirectConnect call just negotiated above (chan.c's
+  // own Netchan_Setup signature takes this exact `maxpacketlen` parameter,
+  // chan.h:79).
+  Netchan_Setup(NetsrcT.NS_SERVER, newcl.netchan, adr, qport, chanType, version, negotiatedPacketLength);
   // svc_zpacket eligibility for this connection (qcommon/protocol/
   // zpacket.ts) -- set after Netchan_Setup since that call replaces
   // newcl.netchan wholesale via Netchan_Setup's own chan mutation (not a
@@ -554,6 +646,24 @@ export function SVC_DirectConnect(): void {
 
   newcl.state = ClientStateT.cs_connected;
 
+  // client.datagram's capacity must be able to hold up to one full
+  // negotiated-size datagram (+ the packet header) -- otherwise a client
+  // that negotiated a larger-than-default packet_length (e.g. a loopback
+  // kex connection's MAX_PACKETLEN_WRITABLE, 4086) would still have its
+  // per-frame payload truncated by this port's own fixed MAX_MSGLEN (1400)
+  // scratch buffer before Netchan_Transmit ever saw the bigger budget. This
+  // port has no reference client_t.datagram field to cite a size formula
+  // from directly (q2repro's own server.h dropped the per-client datagram
+  // buffer entirely in favor of a linked message-list architecture --
+  // sv_send.ts's own doc comments already track that divergence), so this
+  // sizes it the same way sv_send.ts's SV_SendClientDatagram sizes its own
+  // per-call `msg` scratch buffer: MAX_MSGLEN by default (unchanged
+  // behavior for every family before this unit), growing only when the
+  // negotiated packet_length actually calls for more room.
+  const requiredDatagramCapacity = negotiatedPacketLength + PACKET_HEADER;
+  if (newcl.datagram_buf.length < requiredDatagramCapacity) {
+    newcl.datagram_buf = new Uint8Array(requiredDatagramCapacity);
+  }
   SZ_Init(newcl.datagram, newcl.datagram_buf, newcl.datagram_buf.length);
   newcl.datagram.allowoverflow = true;
   newcl.lastmessage = svs.realtime; // don't timeout
@@ -1118,6 +1228,13 @@ export function SV_Init(): void {
   Cvar_Get("sv_novis", "0", 0);
   // main.c:2153
   Cvar_Get("sv_redirect_address", "", 0);
+  // chan.c:130 -- the SAME global cvar net_chan.ts's Netchan_Init and
+  // cl_main.ts's CL_InitLocal register (idempotent by name; whichever call
+  // runs first wins). Registered here too so it shows up under `cvarlist`
+  // on a dedicated server that never runs client Init. SV_ParsePacketLength
+  // (this file) reads it directly rather than caching it, so this
+  // registration is not load-bearing for correctness -- only for listing.
+  Cvar_Get("net_maxmsglen", "1390", 0);
   // main.c:2156, :2157 -- USE_DEBUG-gated upstream; registered unconditionally
   // here (this port has no separate debug/release build split for cvars).
   Cvar_Get("sv_debug", "0", 0);
