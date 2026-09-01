@@ -532,7 +532,11 @@ export function WritePCX(data: Uint8Array, width: number, height: number, rowbyt
   out[13] = (width >> 8) & 0xff;
   out[14] = height & 0xff; // vres
   out[15] = (height >> 8) & 0xff;
-  out[64] = 1; // color_planes
+  // offset 64 is pcx_t's `reserved` byte (stays 0); color_planes lives at
+  // offset 65 -- this was written one byte early, producing planes=0
+  // headers every standard decoder rejects (caught by the regate's
+  // screenshot oracle trying to read our own soft-renderer screenshot).
+  out[65] = 1; // color_planes
   out[66] = width & 0xff; // bytes_per_line
   out[67] = (width >> 8) & 0xff;
   out[68] = 2; // palette_type (not a grey scale)
