@@ -1335,10 +1335,14 @@ is set to NA_LOOPBACK only in CL_CheckForResend's listen-server branch
 This port has no cls.serverAddress field, and neither obvious substitute
 works alone:
 
-  - net_udp.ts's NET_IsLocalAddress is VANILLA's version, `NET_CompareAdr(adr,
-    net_local_adr)` against a net_local_adr its own comment says nothing in
-    this port ever assigns -- a different question entirely from q2repro's
-    `type == NA_LOOPBACK` macro.
+  - net_udp.ts's NET_IsLocalAddress now IS q2repro's own `type == NA_LOOPBACK`
+    macro (fixed post-1.0 -- it used to delegate to vanilla's own
+    NET_CompareAdr(adr, net_local_adr), a value compare against a
+    never-assigned zeroed global that could misclassify an all-zero NA_IP
+    address as local; see net_udp.ts's own NET_IsLocalAddress comment). Using
+    it here directly would still work today, but this function keeps its own
+    explicit `.type` check below rather than importing it, for the second
+    reason:
 
   - the NA_LOOPBACK type test alone is unsafe here because NetadrT.type
     DEFAULTS to NA_LOOPBACK (qcommon.ts's NetadrT initializer), so a netchan

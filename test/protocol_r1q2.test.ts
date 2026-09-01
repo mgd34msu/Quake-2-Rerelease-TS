@@ -13,7 +13,7 @@ import { describe, test, expect, beforeEach } from "bun:test";
 import { SizeBuf, SZ_Init, SZ_Clear, MSG_BeginReading, SZ_Write, MSG_ReadByte, MSG_ReadShort, MSG_ReadLong } from "../src/qcommon/sizebuf";
 import { net_message } from "../src/qcommon/net_chan";
 import { EntityStateT, PlayerStateT, UsercmdT } from "../src/shared/q_shared";
-import { SvcOpsT, U_SOLID } from "../src/qcommon/qcommon";
+import { SvcOpsT, U_SOLID, U_SKIN8, U_SKIN16, U_EFFECTS8, U_EFFECTS16, U_RENDERFX8, U_RENDERFX16 } from "../src/qcommon/qcommon";
 import { R1Q2_CODEC, createR1Q2Codec, setR1Q2FrameExtrabits } from "../src/qcommon/protocol/r1q2";
 import type { FrameWriteParamsT } from "../src/qcommon/protocol/codec";
 
@@ -397,5 +397,70 @@ describe("R1Q2 clc_move has no sequence-checksum byte", () => {
   test("createR1Q2Codec at any minor version agrees", () => {
     expect(createR1Q2Codec(1903).clcMoveHasChecksum).toBeUndefined();
     expect(createR1Q2Codec(1905).clcMoveHasChecksum).toBeUndefined();
+  });
+});
+
+// =============================================================================
+// skinnum/effects/renderfx 16-bit-only write gate -- .orch/followups.md
+// post-1.0 follow-up. q2proto_proto_r1q2.c:975/985/990 all call
+// q2proto_common_choose_width_flags(value, flag8, flag16,
+// /*uint16_safe=*/false), which q2proto_internal_common.h documents as
+// gating the 16-bit-only path at < 0x8000 (not < 0x10000) -- UNIFORMLY for
+// skinnum/effects/renderfx alike. This port used to special-case skinnum at
+// < 0x10000, an asymmetry with effects/renderfx's already-correct < 0x8000
+// that had no basis in R1Q2's own reference (it matched original vanilla's
+// id-software-authored asymmetry instead, which is a DIFFERENT protocol
+// this file does not implement). A skinnum in [0x8000, 0xffff) must now take
+// the same 32-bit combined escape hatch effects/renderfx already used.
+// =============================================================================
+
+describe("R1Q2 entity delta -- skinnum/effects/renderfx width gate (post-1.0 follow-up)", () => {
+  function deltaWith(mutate: (to: EntityStateT) => void): { bits: number; out: EntityStateT } {
+    const from = new EntityStateT();
+    from.number = 7;
+    const to = new EntityStateT();
+    to.number = 7;
+    mutate(to);
+
+    loadIntoNetMessage(bufOf((msg) => R1Q2_CODEC.writeDeltaEntity(msg, from, to, false, false)));
+    const { number, bits } = R1Q2_CODEC.readEntityBits();
+    expect(number).toBe(7);
+    const out = new EntityStateT();
+    R1Q2_CODEC.readDeltaEntity(from, out, number, bits);
+    return { bits, out };
+  }
+
+  test("skinnum just under 0x8000 still takes the 16-bit-only path (U_SKIN16, no U_SKIN8)", () => {
+    const { bits, out } = deltaWith((to) => (to.skinnum = 0x7fff));
+    expect((bits & U_SKIN8) !== 0).toBe(false);
+    expect((bits & U_SKIN16) !== 0).toBe(true);
+    expect(out.skinnum).toBe(0x7fff);
+  });
+
+  test("skinnum at 0x8000 now takes the 32-bit combined path (U_SKIN8|U_SKIN16), matching effects/renderfx's own gate -- pre-fix this stayed U_SKIN16-only and round-tripped through a signed read", () => {
+    const { bits, out } = deltaWith((to) => (to.skinnum = 0x8000));
+    expect((bits & U_SKIN8) !== 0).toBe(true);
+    expect((bits & U_SKIN16) !== 0).toBe(true);
+    expect(out.skinnum >>> 0).toBe(0x8000);
+  });
+
+  test("skinnum at 0xf000 (well inside the old buggy [0x8000,0xffff) band) round-trips exactly, unsigned", () => {
+    const { out } = deltaWith((to) => (to.skinnum = 0xf000));
+    expect(out.skinnum >>> 0).toBe(0xf000);
+  });
+
+  test("effects/renderfx gate is unchanged (already < 0x8000) and stays symmetric with skinnum's new gate", () => {
+    const { bits: effBits, out: effOut } = deltaWith((to) => (to.effects = 0x8000));
+    expect((effBits & U_EFFECTS8) !== 0 && (effBits & U_EFFECTS16) !== 0).toBe(true);
+    expect(effOut.effects >>> 0).toBe(0x8000);
+
+    const { bits: rfxBits, out: rfxOut } = deltaWith((to) => (to.renderfx = 0x8000));
+    expect((rfxBits & U_RENDERFX8) !== 0 && (rfxBits & U_RENDERFX16) !== 0).toBe(true);
+    expect(rfxOut.renderfx >>> 0).toBe(0x8000);
+  });
+
+  test("frame >= 0x8000 (no 32-bit escape exists for frame at all) round-trips unsigned via the now-fixed MSG_ReadWord read", () => {
+    const { out } = deltaWith((to) => (to.frame = 0x9000));
+    expect(out.frame).toBe(0x9000);
   });
 });

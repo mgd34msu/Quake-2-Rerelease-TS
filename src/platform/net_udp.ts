@@ -119,10 +119,36 @@ export function NET_StringToAdr(s: string, a: NetadrT): boolean {
 // Never set by anything in this port (the vanilla engine only ever assigns it
 // on Windows/Solaris/Irix builds via a NET_GetLocalAddress this file's linux
 // counterpart does not have either), so this stays zeroed like the C global.
+// Still consumed by NET_GetLoopPacket below (populates a received loopback
+// packet's `from` address) -- just no longer by NET_IsLocalAddress itself,
+// see that function's own comment.
 export const net_local_adr: NetadrT = new NetadrT();
 
+// FIXED (.orch/followups.md post-1.0 follow-up): this used to be vanilla's
+// own `NET_CompareAdr(adr, net_local_adr)` (linux/net_udp.c:205-208) --
+// vanilla's NET_CompareAdr (net_udp.c:74-79) compares only ip[]+port,
+// never `.type`, and net_local_adr is a zeroed NetadrT (ip 0.0.0.0, port 0)
+// that is never assigned on this platform. That makes ANY address whose
+// ip/port both happen to be zero read as "local" regardless of its actual
+// `.type` -- most of the time harmless (every genuine loopback-ring address
+// this port produces IS all-zero, see NET_GetLoopPacket below), but a
+// concretely wrong answer for a real NA_IP address that happens to be
+// 0.0.0.0:0 (documented as a live quirk by cl_main.ts's CL_ServerIsOurOwn
+// comment and test/net_chan_maxpacketlen_parity.test.ts's own driveConnect
+// test, both of which had to construct a non-zero network address to avoid
+// tripping over it).
+//
+// q2repro's own reference (inc/common/net/net.h:105) does not carry this
+// quirk at all -- q2repro dropped the net_local_adr/NET_CompareAdr pattern
+// entirely and replaced it with the plain macro `#define
+// NET_IsLocalAddress(adr) ((adr)->type == NA_LOOPBACK)`. Every call site in
+// this port that receives `adr` from a real packet (NET_GetPacket below
+// always stamps a genuine network sender NA_IP, and a loopback-ring sender
+// NA_LOOPBACK) already gets an identical answer either way; only the
+// pathological all-zero-NA_IP case changes, from a false "yes" to the
+// correct "no". Matches q2repro's macro exactly now.
 export function NET_IsLocalAddress(adr: NetadrT): boolean {
-  return NET_CompareAdr(adr, net_local_adr);
+  return adr.type === NetadrtypeT.NA_LOOPBACK;
 }
 
 //=============================================================================

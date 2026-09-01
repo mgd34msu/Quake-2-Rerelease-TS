@@ -259,15 +259,28 @@ function writeDeltaEntityQ2Pro(from: EntityStateT, to: EntityStateT, msg: SizeBu
     else bits |= U_FRAME16;
   }
 
+  // FIXED (.orch/followups.md post-1.0 follow-up): effects/renderfx used to
+  // gate their 16-bit-only path at `< 0x8000`, asymmetric with skinnum's
+  // `< 0x10000` above. Q2PRO's OWN reference
+  // (q2proto_proto_q2pro.c:1596/1606/1617, all three calling
+  // q2proto_common_choose_width_flags(..., /*uint16_safe=*/true)) treats
+  // skinnum/effects/renderfx UNIFORMLY -- uint16_safe=true means the
+  // 16-bit-only path is safe up to 0xffff (q2proto_internal_common.h's
+  // helper), not just 0x7fff. This port's readDeltaEntity below already
+  // reads effects/renderfx's 16-bit path as MSG_ReadWord (unsigned), so
+  // raising the gate to match is a pure wire-format correctness fix, not a
+  // read-side risk: a value in [0x8000, 0xffff) now goes out 2 bytes
+  // shorter (U_EFFECTS16/U_RENDERFX16 alone) instead of the 4-byte 32-bit
+  // combined form, matching what a real Q2PRO server would send.
   if (to.effects !== from.effects) {
     if (to.effects < 256) bits |= U_EFFECTS8;
-    else if (to.effects < 0x8000) bits |= U_EFFECTS16;
+    else if (to.effects < 0x10000) bits |= U_EFFECTS16;
     else bits |= U_EFFECTS8 | U_EFFECTS16;
   }
 
   if (to.renderfx !== from.renderfx) {
     if (to.renderfx < 256) bits |= U_RENDERFX8;
-    else if (to.renderfx < 0x8000) bits |= U_RENDERFX16;
+    else if (to.renderfx < 0x10000) bits |= U_RENDERFX16;
     else bits |= U_RENDERFX8 | U_RENDERFX16;
   }
 

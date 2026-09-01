@@ -97,13 +97,33 @@ describe("NET_CompareAdr / NET_CompareBaseAdr / NET_IsLocalAddress", () => {
     expect(NET_CompareBaseAdr(loop, loopbackAdr())).toBe(true); // NA_LOOPBACK always matches itself
   });
 
-  test("NET_IsLocalAddress compares against the zeroed net_local_adr (never set on this port)", () => {
-    const zero = new NetadrT(); // NA_LOOPBACK, ip/port all 0 -- matches net_local_adr's default
+  test("NET_IsLocalAddress checks .type === NA_LOOPBACK (q2repro net.h:105's macro), not a value compare", () => {
+    const zero = new NetadrT(); // NA_LOOPBACK by default, ip/port all 0
     expect(NET_IsLocalAddress(zero)).toBe(true);
 
     const notLocal = new NetadrT();
     NET_StringToAdr("10.0.0.1:100", notLocal);
     expect(NET_IsLocalAddress(notLocal)).toBe(false);
+  });
+
+  // FIXED (.orch/followups.md post-1.0 follow-up): NET_IsLocalAddress used
+  // to delegate to vanilla's own NET_CompareAdr(adr, net_local_adr), which
+  // compares only ip[]+port and ignores `.type` entirely -- so a NA_IP
+  // address that happened to be 0.0.0.0:0 matched the zeroed, never-set
+  // net_local_adr global and was misclassified as local. Real q2repro
+  // (inc/common/net/net.h:105) never had this quirk: its own
+  // NET_IsLocalAddress is the plain macro `(adr)->type == NA_LOOPBACK`,
+  // which this port's fixed implementation now matches exactly.
+  test("an all-zero NA_IP address is NOT local (the pre-fix quirk this port used to have)", () => {
+    const zeroButNotLoopback = new NetadrT();
+    zeroButNotLoopback.type = NetadrtypeT.NA_IP; // ip/port stay the class default: 0.0.0.0:0
+    expect(NET_IsLocalAddress(zeroButNotLoopback)).toBe(false);
+
+    // sanity: the SAME zero ip/port bytes, but genuinely typed NA_LOOPBACK,
+    // is still local -- this is a `.type` distinction, not an ip/port one.
+    const zeroAndLoopback = new NetadrT();
+    zeroAndLoopback.type = NetadrtypeT.NA_LOOPBACK;
+    expect(NET_IsLocalAddress(zeroAndLoopback)).toBe(true);
   });
 });
 

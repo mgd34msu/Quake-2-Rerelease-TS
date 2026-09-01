@@ -288,14 +288,12 @@ describe("per-family per-packet budget parity (kex/1038 vs vanilla/34, R1Q2/35, 
     expect(loopbackClient.netchan.maxpacketlen).toBe(4086);
 
     setupServer();
-    // NOT netAdr(NA_IP)'s all-zero default: platform/net_udp.ts's
-    // NET_IsLocalAddress delegates to NET_CompareAdr, which compares IP
-    // bytes + port and (unlike the reference's `adr->type == NA_LOOPBACK`,
-    // net.h:105) never actually checks `.type` -- an all-zero NA_IP address
-    // matches net_local_adr's own all-zero default and would be
-    // misclassified as local. A concrete non-zero address sidesteps that
-    // pre-existing net_udp.ts quirk (out of this unit's territory) rather
-    // than tripping over it.
+    // A concrete non-zero address (not strictly required anymore -- FIXED
+    // post-1.0: platform/net_udp.ts's NET_IsLocalAddress now checks
+    // `.type === NA_LOOPBACK` directly, matching the reference's
+    // `adr->type == NA_LOOPBACK` macro exactly, net.h:105 -- an all-zero
+    // NA_IP address is no longer misclassified as local. Left non-zero
+    // anyway since that's what a real network sender's address looks like).
     const networkAdr = netAdr(NetadrtypeT.NA_IP);
     networkAdr.ip.set([203, 0, 113, 5]);
     networkAdr.port = 27910;

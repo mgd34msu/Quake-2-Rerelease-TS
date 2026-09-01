@@ -26,10 +26,14 @@
 // readPlayersSection pick whichever codec matches the recording's
 // negotiated sub-version (`mvd.rerelease`/`channel.rerelease`). See that
 // codec's own header comment (below, right before MAX_STATS_NEW) for the
-// exact field-by-field citations, what's deliberately NOT ported (gunrate --
-// verified absent from the actual MVD packet writer despite the task
-// brief's summary saying otherwise -- and rerelease entity-delta
-// extensions), and the PlayerStateT.stats=32 truncation gap.
+// exact field-by-field citations and what's deliberately NOT ported
+// (gunrate -- verified absent from the actual MVD packet writer despite the
+// task brief's summary saying otherwise -- and rerelease entity-delta
+// extensions). STALE CLAIM REMOVED (post-1.0 follow-up): this comment used
+// to also cite a "PlayerStateT.stats=32 truncation gap" here -- the wide-
+// core stats lift landed since (q_shared.ts's MAX_STATS_STORAGE=64; see the
+// STATS WIDTH note right before MAX_STATS_NEW below), so no truncation gap
+// remains.
 //
 // ENTITY DELTA REUSE (no separate "packed" entity format is ported here):
 // msg.c's MSG_PackEntity/MSG_WriteDeltaEntity(entity_packed_t) operate on a

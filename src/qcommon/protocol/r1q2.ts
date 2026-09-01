@@ -51,6 +51,7 @@ import {
   MSG_ReadDeltaUsercmd,
   MSG_ReadByte,
   MSG_ReadShort,
+  MSG_ReadWord,
   MSG_ReadLong,
   MSG_ReadString,
   MSG_ReadChar,
@@ -198,9 +199,26 @@ function makeEntityDeltaCodec(minorVersion: number) {
     if (to.angles[1] !== from.angles[1]) bits |= U_ANGLE2;
     if (to.angles[2] !== from.angles[2]) bits |= U_ANGLE3;
 
+    // FIXED (.orch/followups.md post-1.0 follow-up): this used to gate
+    // skinnum's 16-bit-only path at `< 0x10000`, asymmetric with effects'/
+    // renderfx's `< 0x8000` below. That asymmetry IS genuine, verified
+    // vanilla (id software's own original quake-2-c/qcommon/common.c:503-511
+    // MSG_WriteDeltaEntity) -- correctly preserved as-is in vanilla.ts /
+    // sizebuf.ts's shared MSG_WriteDeltaEntity, which protocol 34 uses.
+    // R1Q2's OWN reference (q2proto_proto_r1q2.c:975,
+    // `q2proto_common_choose_width_flags(skinnum, U_SKIN8, U_SKIN16,
+    // /*uint16_safe=*/false)`) does NOT carry that asymmetry forward --
+    // q2proto_internal_common.h's helper treats uint16_safe=false as
+    // "clamp the 16-bit-only path to < 0x8000", and R1Q2 passes `false` for
+    // skinnum/effects/renderfx alike (all three uniform). A skinnum in
+    // [0x8000, 0xffff) under the old `< 0x10000` gate would go out as
+    // U_SKIN16-only and come back through readDeltaEntity's now-unsigned
+    // MSG_ReadWord below correctly on THIS engine, but a real R1Q2 client/
+    // server pair (whose historical wire behavior this codec is emulating)
+    // would not agree on that byte count -- match the reference exactly.
     if (to.skinnum !== from.skinnum) {
       if ((to.skinnum >>> 0) < 256) bits |= U_SKIN8;
-      else if ((to.skinnum >>> 0) < 0x10000) bits |= U_SKIN16;
+      else if ((to.skinnum >>> 0) < 0x8000) bits |= U_SKIN16;
       else bits |= U_SKIN8 | U_SKIN16;
     }
 
@@ -327,20 +345,27 @@ function makeEntityDeltaCodec(minorVersion: number) {
     if (bits & U_MODEL3) to.modelindex3 = MSG_ReadByte(net_message);
     if (bits & U_MODEL4) to.modelindex4 = MSG_ReadByte(net_message);
 
+    // RULE-17 FIX (same class as q2pro.ts's own, and this file's writeDeltaEntity
+    // skinnum-gate fix above): q2proto_proto_r1q2.c reads frame/skinnum/
+    // effects/renderfx's 16-bit-only path as `u16` (unsigned) -- lines
+    // 320/326/335/344 (READ_CHECKED(..., u16)). frame's write-side gate has
+    // no 32-bit escape at all (any value >= 256 goes out via U_FRAME16
+    // alone, uncapped), so a signed MSG_ReadShort here would sign-extend a
+    // real frame count >= 0x8000 into a negative number.
     if (bits & U_FRAME8) to.frame = MSG_ReadByte(net_message);
-    if (bits & U_FRAME16) to.frame = MSG_ReadShort(net_message);
+    if (bits & U_FRAME16) to.frame = MSG_ReadWord(net_message);
 
     if (bits & U_SKIN8 && bits & U_SKIN16) to.skinnum = MSG_ReadLong(net_message);
     else if (bits & U_SKIN8) to.skinnum = MSG_ReadByte(net_message);
-    else if (bits & U_SKIN16) to.skinnum = MSG_ReadShort(net_message);
+    else if (bits & U_SKIN16) to.skinnum = MSG_ReadWord(net_message);
 
     if ((bits & (U_EFFECTS8 | U_EFFECTS16)) === (U_EFFECTS8 | U_EFFECTS16)) to.effects = MSG_ReadLong(net_message);
     else if (bits & U_EFFECTS8) to.effects = MSG_ReadByte(net_message);
-    else if (bits & U_EFFECTS16) to.effects = MSG_ReadShort(net_message);
+    else if (bits & U_EFFECTS16) to.effects = MSG_ReadWord(net_message);
 
     if ((bits & (U_RENDERFX8 | U_RENDERFX16)) === (U_RENDERFX8 | U_RENDERFX16)) to.renderfx = MSG_ReadLong(net_message);
     else if (bits & U_RENDERFX8) to.renderfx = MSG_ReadByte(net_message);
-    else if (bits & U_RENDERFX16) to.renderfx = MSG_ReadShort(net_message);
+    else if (bits & U_RENDERFX16) to.renderfx = MSG_ReadWord(net_message);
 
     if (bits & U_ORIGIN1) to.origin[0] = MSG_ReadCoord(net_message);
     if (bits & U_ORIGIN2) to.origin[1] = MSG_ReadCoord(net_message);

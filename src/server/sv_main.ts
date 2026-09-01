@@ -455,9 +455,27 @@ export function SVC_DirectConnect(): void {
     negotiatedCodec = Q2REPRO_CODEC;
     // Connect-string tail (q2proto_q2repro_connect_tail): "<packet_length>
     // <has_zlib>" after the four standard fields (Cmd_Argv(5)/(6)).
-    // has_zlib stays unread here -- out of scope for this unit (compression
-    // negotiation for the kex family is a separate finding); only
-    // packet_length (Cmd_Argv(5)) is parsed.
+    // has_zlib (Cmd_Argv(6)) IS now parsed (q2proto_q2repro_parse_connect:
+    // `parsed_connect->has_zlib = q2pstol(&zlib_token, 10) != 0`) instead of
+    // silently skipped -- but deliberately NOT wired into negotiatedCompress/
+    // ClientT.netchan.compress the way R1Q2/Q2PRO's has_zlib is below: the
+    // real q2repro server gates this on its OWN opcode, svc_q2repro_zpacket
+    // (q2proto_proto_q2repro.c:1357 `enable_deflate = connect_info->has_zlib`,
+    // then `context->zpacket_cmd = svc_q2repro_zpacket`), a distinct byte
+    // value from the shared svc_r1q2_zpacket/SVC_ZPACKET(21) this port's
+    // qcommon/protocol/zpacket.ts implements for the R1Q2/Q2PRO families
+    // only. Flipping netchan.compress true here with no svc_q2repro_zpacket
+    // write-side would make net_chan.ts's Netchan_Transmit choke point wrap
+    // large kex-family reliable bursts in the WRONG opcode for a real
+    // q2repro client to decode -- worse than never compressing at all. So a
+    // client requesting has_zlib=1 gets an honest diagnostic that this
+    // server will not compress its traffic (both values now genuinely read
+    // and acted on -- "acted on" meaning "correctly never engages
+    // compression for this family", not "ignored").
+    const kexHasZlib = atoi(Cmd_Argv(6)) !== 0;
+    if (kexHasZlib) {
+      Com_DPrintf("    kex-family connect requested has_zlib=1; svc_q2repro_zpacket is not implemented, traffic will not be compressed\n");
+    }
     const packetLength = SV_ParsePacketLength(Cmd_Argv(5), isLocalAdr);
     if (packetLength === null) {
       Netchan_OutOfBandPrint(NetsrcT.NS_SERVER, adr, "print\nInvalid maximum message length.\n");

@@ -450,14 +450,50 @@ describe("entity delta: frame/skinnum/effects/renderfx 16-bit reads are unsigned
     expect(out.skinnum).toBe(0xabcd);
   });
 
-  // effects/renderfx: this port's own encoder is conservative (gates the
-  // 16-bit-only path at < 0x8000, matching vanilla/r1q2 rather than real
-  // q2pro's < 0x10000 -- a documented, benign divergence since both ends of
-  // THIS port's own round trip agree; not touched here, see q2pro.ts's own
-  // encoder comment). A real q2pro peer can still send U_EFFECTS16/
-  // U_RENDERFX16 alone for a value >= 0x8000, so the read side is tested
-  // directly against hand-built bits instead of this port's own encoder.
-  test("effects: U_EFFECTS16 alone with a wire value >= 0x8000 reads as unsigned", () => {
+  // effects/renderfx: FIXED (.orch/followups.md post-1.0 follow-up) -- this
+  // port's own encoder used to be conservative here (gated the 16-bit-only
+  // path at < 0x8000, matching vanilla/r1q2 rather than real q2pro's
+  // < 0x10000). q2proto_proto_q2pro.c:1606/1617 both pass
+  // /*uint16_safe=*/true to q2proto_common_choose_width_flags for effects
+  // and renderfx, exactly like skinnum's own call at line 1596 (test above)
+  // -- there is no asymmetry in the real reference, so the encoder now
+  // matches it exactly for all three fields. The read side already handled
+  // an externally-supplied wire value >= 0x8000 correctly before this fix
+  // (still tested directly against hand-built bits below, since that
+  // remains the more precise way to pin the read alone); what changed is
+  // that THIS port's own encoder now actually emits that 16-bit-only form
+  // instead of silently upgrading to the 32-bit combined one.
+  test("effects: this port's own encoder now emits U_EFFECTS16 alone (not the 32-bit combined form) for a value in [0x8000, 0x10000)", () => {
+    const from = baseEntity(2);
+    const to = baseEntity(2);
+    to.effects = 0x9c40;
+
+    const bytes = bufOf((msg) => Q2PRO_CODEC.writeDeltaEntity(msg, from, to, false, false));
+    loadIntoNetMessage(bytes);
+
+    const { number, bits } = Q2PRO_CODEC.readEntityBits();
+    expect((bits & U_EFFECTS16) !== 0).toBe(true);
+    const out = new EntityStateT();
+    Q2PRO_CODEC.readDeltaEntity(from, out, number, bits);
+    expect(out.effects).toBe(0x9c40);
+  });
+
+  test("renderfx: this port's own encoder now emits U_RENDERFX16 alone (not the 32-bit combined form) for a value in [0x8000, 0x10000)", () => {
+    const from = baseEntity(2);
+    const to = baseEntity(2);
+    to.renderfx = 0xfffe; // stays < 0x10000, so it must NOT combine into U_RENDERFX8|U_RENDERFX16
+
+    const bytes = bufOf((msg) => Q2PRO_CODEC.writeDeltaEntity(msg, from, to, false, false));
+    loadIntoNetMessage(bytes);
+
+    const { number, bits } = Q2PRO_CODEC.readEntityBits();
+    expect((bits & U_RENDERFX16) !== 0).toBe(true);
+    const out = new EntityStateT();
+    Q2PRO_CODEC.readDeltaEntity(from, out, number, bits);
+    expect(out.renderfx).toBe(0xfffe);
+  });
+
+  test("effects: U_EFFECTS16 alone with a wire value >= 0x8000 reads as unsigned (read side, unchanged by this fix)", () => {
     loadIntoNetMessage([0x40, 0x9c]); // 0x9c40, little-endian u16
     const from = baseEntity(2);
     const out = new EntityStateT();
@@ -465,7 +501,7 @@ describe("entity delta: frame/skinnum/effects/renderfx 16-bit reads are unsigned
     expect(out.effects).toBe(0x9c40);
   });
 
-  test("renderfx: U_RENDERFX16 alone with a wire value >= 0x8000 reads as unsigned", () => {
+  test("renderfx: U_RENDERFX16 alone with a wire value >= 0x8000 reads as unsigned (read side, unchanged by this fix)", () => {
     loadIntoNetMessage([0xff, 0xff]); // 0xffff, little-endian u16
     const from = baseEntity(2);
     const out = new EntityStateT();
