@@ -26,15 +26,13 @@ GL_BuildPolygonFromSurface / GL_CreateSurfaceLightmap / GL_BeginBuildingLightmap
 and merely forward-declared inside gl_model.c so Mod_LoadFaces can call
 them. gl_rsurf.ts landed for real (concurrently with this unit) and exports
 all four, so Mod_LoadFaces below imports and calls them directly rather than
-duplicating them here. gl_rsurf.ts's own GL_CreateSurfaceLightmap still
-called local stand-ins for gl_light.c's R_SetCacheState/
-R_BuildLightMap (its own header comment notes this as a follow-up: "Replace
-with real imports once gl_light.ts lands" -- this unit is that gl_light.ts,
-but wiring gl_rsurf.ts's call sites to it is that other unit's file to edit,
-out of this unit's SCOPE). Until that follow-up lands, `safeCreateSurfaceLightmap`
-below tolerated that the same way `safeFindImage` did
-GL_FindImage's, so the rest of Mod_LoadFaces (and Mod_LoadBrushModel's
-later lump loaders) still runs to completion.
+duplicating them here. gl_rsurf.ts's own GL_CreateSurfaceLightmap now imports
+the real gl_light.ts pair (R_SetCacheState/R_BuildLightMap) directly --
+the follow-up its header once flagged ("Replace with real imports once
+gl_light.ts lands") has landed, so `safeCreateSurfaceLightmap` below is now
+a thin passthrough rather than a tolerance wrapper; kept as its own function
+(rather than calling GL_CreateSurfaceLightmap directly at the two call
+sites below) so Mod_LoadFaces reads the same either way.
 
 GL_FindImage (gl_image.ts) is fully implemented now (landed concurrently
 with this unit), so `safeFindImage` below is mostly a defensive no-op in

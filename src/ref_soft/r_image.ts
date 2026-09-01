@@ -39,9 +39,14 @@ palette-indexed 8-bit, unlike ref_gl's RGBA8 textures, so simply decoding
 the PNG (qcommon/png.ts's decodePNG, already used by gl_image.ts's LoadPNG
 for the identical rerelease-only-asset problem on the GL side) is not
 enough -- each decoded RGBA8 texel is quantized down to the nearest
-d_8to24table palette entry, mirroring gl_image.ts's GL_FindImage ".pcx"-miss
-fallback (probe the requested name first, then retry as the other supported
-truecolor extension) and its GL_Upload8's existing index-255-is-transparent
+d_8to24table palette entry. This was originally a PNG-only two-extension
+retry (probe the requested name, then retry once as the other supported
+truecolor extension); since 9ad6d01 (universal extension fallback) both
+renderers instead run the shared imageExtCandidates() chain (qcommon/
+img_resolve.ts) over every SOFT_SUPPORTED_EXTS entry (pcx/wal/png/jpg/jpeg/
+bmp/gif) below, so the quantize-to-8-bit step described here applies to
+JPG/BMP/GIF truecolor decodes too, not just PNG. The quantization mirrors
+gl_image.ts's GL_Upload8's existing index-255-is-transparent
 convention (r_local.ts's TRANSPARENT_COLOR = 0xff, also see
 Draw_GetPalette's own d_8to24table population above): pixels below the
 alpha threshold become index 255 instead of participating in the nearest-
