@@ -33,6 +33,15 @@ Two describe blocks exercise this from two altitudes:
     path entirely (cl_main.ts's CL_Init returns immediately when
     dedicated.value is set, before ever reaching VID_Init), so this only
     exercises qcommon/cmd/cvar/files -- the areas this task is scoped to.
+    It runs in a SPAWNED bun subprocess, not this test process: a full
+    engine init is a one-per-process affair (src/main.ts's own catch turns
+    any ComError during init into Sys_Error, i.e. process exit), and an
+    earlier suite in the same process -- test/boot.test.ts under some file
+    orderings -- has already spent this process's init. A subprocess makes
+    the test immune to suite file ordering AND makes an init failure a
+    plain test failure instead of aborting the whole bun test run (which
+    is exactly what happened at the first clean-worktree landing gate that
+    ran this file after boot.test.ts).
 
   - the bottom one drives Cbuf_AddEarlyCommands/Cbuf_Execute directly with no
     filesystem involved at all, as a pure-mechanism unit test, and includes a
@@ -45,13 +54,10 @@ import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Cvar_ForceSet, Cvar_VariableString } from "../src/qcommon/cvar";
+import { Cvar_VariableString } from "../src/qcommon/cvar";
 import { COM_InitArgv } from "../src/qcommon/common";
 import { Cbuf_Init, Cbuf_AddText, Cbuf_Execute, Cmd_Init, Cbuf_AddEarlyCommands } from "../src/qcommon/cmd";
 import { Cvar_Init } from "../src/qcommon/cvar";
-import { NET_Shutdown } from "../src/platform/net_udp";
-import { Qcommon_Init } from "../src/main";
-import { SV_Shutdown } from "../src/server/sv_main";
 
 describe("src/main.ts -- Qcommon_Init: command-line +set survives config.cfg (vanilla common.c parity)", () => {
   let tmpRoot: string;
@@ -62,30 +68,33 @@ describe("src/main.ts -- Qcommon_Init: command-line +set survives config.cfg (va
     mkdirSync(baseq2Dir, { recursive: true });
     writeFileSync(join(baseq2Dir, "default.cfg"), "");
     writeFileSync(join(baseq2Dir, "config.cfg"), "set vid_ref soft\n");
-
-    // Preempt CVAR_NOSET/CVAR_LATCH flags an earlier test file's own boot in
-    // this same bun process may already have stamped onto these names
-    // (test/boot.test.ts's own comment explains why this is needed): the
-    // equivalent "+set ..." argv below still runs for real through
-    // Qcommon_Init's own Cbuf_AddEarlyCommands, this just unblocks it.
-    Cvar_ForceSet("basedir", tmpRoot);
-    Cvar_ForceSet("game", "");
-    Cvar_ForceSet("port", "0");
-    Cvar_ForceSet("dedicated", "1");
-    Cvar_ForceSet("coop", "1");
-    Cvar_ForceSet("deathmatch", "0");
-
-    Qcommon_Init(["quake2", "+set", "basedir", tmpRoot, "+set", "dedicated", "1", "+set", "port", "0", "+set", "vid_ref", "gl"]);
   });
 
-  afterAll(async () => {
-    SV_Shutdown("qcommon_init_early_set test finished\n", false);
-    await NET_Shutdown();
+  afterAll(() => {
     rmSync(tmpRoot, { recursive: true, force: true });
   });
 
-  test('vid_ref ends up "gl" even though config.cfg sets it to "soft"', () => {
-    expect(Cvar_VariableString("vid_ref")).toBe("gl");
+  test('vid_ref ends up "gl" even though config.cfg sets it to "soft"', async () => {
+    // The driver boots the real engine (dedicated, port 0, synthetic
+    // basedir) and prints the post-init vid_ref value on a marker line.
+    // import.meta.dir is this test file's directory, so the src/ path
+    // works from any cwd.
+    const driver = join(tmpRoot, "earlyset_driver.ts");
+    writeFileSync(
+      driver,
+      `import { Qcommon_Init } from ${JSON.stringify(join(import.meta.dir, "../src/main.ts"))};
+import { Cvar_VariableString } from ${JSON.stringify(join(import.meta.dir, "../src/qcommon/cvar.ts"))};
+Qcommon_Init(["quake2", "+set", "basedir", ${JSON.stringify(tmpRoot)}, "+set", "dedicated", "1", "+set", "port", "0", "+set", "vid_ref", "gl"]);
+console.log("EARLYSET_RESULT vid_ref=" + Cvar_VariableString("vid_ref"));
+process.exit(0);
+`,
+    );
+    const proc = Bun.spawn(["bun", "run", driver], { stdout: "pipe", stderr: "pipe", timeout: 60_000 });
+    const out = await new Response(proc.stdout).text();
+    const err = await new Response(proc.stderr).text();
+    const code = await proc.exited;
+    const marker = out.split("\n").find((l) => l.startsWith("EARLYSET_RESULT "));
+    expect(`exit=${code} ${marker ?? `NO_MARKER stderr=${err.slice(0, 400)}`}`).toBe("exit=0 EARLYSET_RESULT vid_ref=gl");
   });
 });
 
