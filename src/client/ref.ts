@@ -95,6 +95,13 @@ export class DlightT {
   // unaffected either way.
   lightScale = 1;
   cone: { direction: Vec3; cosHalfAngle: number } | null = null;
+  // v1.1.0 shadow maps: the entity's `shadowlightresolution`, in texels.
+  // q2repro carries this field on cl_shadow_light_t and then drops it at the
+  // dlight_t boundary (its dlight_t has no such member) because it has no
+  // shadow-map target to size; this renderer does, so it survives the
+  // handoff. 0 means the map's entity omitted the key -- gl_shadowmap.ts's
+  // shadowMapResolution reads that as "use the default", not "no shadow".
+  resolution = 0;
 }
 
 export class ParticleT {

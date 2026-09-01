@@ -478,10 +478,19 @@ function unpackShadowLightColor(skinnum: number, light: ShadowLightT): void {
     light.color[2] = 1;
     return;
   }
+  // q2repro effects.c:1873 is `color.u32 = BigLong(ent->current.skinnum)`,
+  // and color_t (shared.h:184-190) is `struct { uint8_t r, g, b, a; }` in
+  // MEMORY order. On a little-endian host BigLong reverses the word first,
+  // so r lands on skinnum's most significant byte, not its least:
+  // r=bits 24-31, g=16-23, b=8-15 (a=0-7, unused downstream).
+  // Verified against real data -- base1's dynamic_light at (244 -256 56)
+  // carries `_color "1 1 0.501961"`, i.e. skinnum 0xFFFF80FF, which this
+  // reads as (1.00, 1.00, 0.50); reading it the other way round produced
+  // (1.00, 0.50, 1.00) and painted the level magenta.
   const u = skinnum >>> 0;
-  light.color[0] = (u & 0xff) / 255;
-  light.color[1] = ((u >>> 8) & 0xff) / 255;
-  light.color[2] = ((u >>> 16) & 0xff) / 255;
+  light.color[0] = ((u >>> 24) & 0xff) / 255;
+  light.color[1] = ((u >>> 16) & 0xff) / 255;
+  light.color[2] = ((u >>> 8) & 0xff) / 255;
 }
 
 export function CL_AddLightStyles(): void {

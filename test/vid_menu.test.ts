@@ -34,8 +34,18 @@ import {
   ScreenSizeFormatter,
   BrightnessFormatter,
   TextureQualityFormatter,
+  ShadowQualityFormatter,
+  ShadowUnavailableFormatter,
+  SHADOW_UNAVAILABLE,
+  ShadowQualityIndexFor,
+  SHADOW_QUALITY_RES,
+  s_shadows_box,
+  s_shadow_quality_slider,
+  s_defaults_action,
+  s_apply_action,
   modeLabel,
 } from "../src/platform/vid_menu";
+import { QMF_GRAYED } from "../src/client/qmenu";
 
 // A table mode a few rows into resolutions[] (see vid_menu.ts's own list):
 // index 5 is "[960 720]".
@@ -247,5 +257,122 @@ describe("modeLabel -- colloquial + aspect-ratio mode labels (defect: no referen
     [640, 480, "640x480 (4:3)"],
   ])("modeLabel(%p, %p) -> %p", (w, h, expected) => {
     expect(modeLabel(w, h)).toBe(expected);
+  });
+});
+
+
+// v1.1.0 shadow mapping rows (ref_gl/gl_shadowmap.ts). OpenGL-submenu only,
+// greyed with a statusbar note when gl_shaders is 0.
+describe("vid_menu.ts -- shadow mapping rows", () => {
+  test("the two rows continue the flat 10-unit rhythm below the 8-bit-textures row", () => {
+    Cvar_SetValue("gl_shaders", 1);
+    VID_MenuInit();
+    expect(s_shadow_quality_slider.generic.y - s_shadows_box.generic.y).toBe(10);
+  });
+
+  test("the toggle tracks gl_shadowmaps", () => {
+    Cvar_Get("gl_shadowmaps", "1", 0);
+    Cvar_SetValue("gl_shadowmaps", 0);
+    VID_MenuInit();
+    expect(s_shadows_box.curvalue).toBe(0);
+
+    Cvar_SetValue("gl_shadowmaps", 1);
+    VID_MenuInit();
+    expect(s_shadows_box.curvalue).toBe(1);
+  });
+
+  test("the quality slider tracks gl_shadowmap_res, snapping a console-set value to the nearest step", () => {
+    Cvar_Get("gl_shadowmap_res", "512", 0);
+    for (const [res, expected] of [
+      [256, 0],
+      [512, 1],
+      [1024, 2],
+      [300, 0], // nearest step, not a snap back to 0-by-accident
+      [4096, 2],
+    ] as const) {
+      Cvar_SetValue("gl_shadowmap_res", res);
+      VID_MenuInit();
+      expect(s_shadow_quality_slider.curvalue).toBe(expected);
+    }
+  });
+
+  test("the slider spans exactly the three quality steps", () => {
+    VID_MenuInit();
+    expect(s_shadow_quality_slider.minvalue).toBe(0);
+    expect(s_shadow_quality_slider.maxvalue).toBe(SHADOW_QUALITY_RES.length - 1);
+  });
+
+  test("the slider reads out a name AND its texel size -- never a bare number", () => {
+    expect(ShadowQualityFormatter(0)).toBe("low (256px)");
+    expect(ShadowQualityFormatter(1)).toBe("medium (512px)");
+    expect(ShadowQualityFormatter(2)).toBe("high (1024px)");
+    // the readout is wired to the slider, not just exported
+    VID_MenuInit();
+    expect(s_shadow_quality_slider.valueFormatter).toBe(ShadowQualityFormatter);
+  });
+
+  test("ShadowQualityIndexFor never returns an out-of-range step", () => {
+    for (const res of [-100, 0, 1, 255, 256, 400, 512, 900, 1024, 99999]) {
+      const idx = ShadowQualityIndexFor(res);
+      expect(idx).toBeGreaterThanOrEqual(0);
+      expect(idx).toBeLessThan(SHADOW_QUALITY_RES.length);
+    }
+  });
+
+  test("the OpenGL submenu's reset/apply rows moved below the shadow rows instead of overlapping them", () => {
+    Cvar_SetValue("gl_shaders", 1);
+    VID_MenuInit();
+
+    const qualityY = s_shadow_quality_slider.generic.y;
+    const defaultsY = s_defaults_action[OPENGL_MENU]?.generic.y ?? -1;
+    const applyY = s_apply_action[OPENGL_MENU]?.generic.y ?? -1;
+
+    expect(defaultsY).toBeGreaterThan(qualityY);
+    expect(defaultsY - qualityY).toBe(10);
+    expect(applyY - defaultsY).toBe(10);
+
+    // no row in the OpenGL submenu shares a y with another
+    const ys = [s_shadows_box.generic.y, qualityY, defaultsY, applyY];
+    expect(new Set(ys).size).toBe(ys.length);
+  });
+
+  test("the software submenu's reset/apply rows are untouched -- it has no shadow rows to displace them", () => {
+    VID_MenuInit();
+    expect(s_defaults_action[SOFTWARE_MENU]?.generic.y).toBe(134);
+    expect(s_apply_action[SOFTWARE_MENU]?.generic.y).toBe(144);
+  });
+
+  test("with gl_shaders 0 both rows SAY they are unavailable in their own value readout, not just in a flag the drawing code ignores", () => {
+    Cvar_Get("gl_shaders", "1", 0);
+    Cvar_SetValue("gl_shaders", 0);
+    VID_MenuInit();
+
+    // QMF_GRAYED is an MTYPE_ACTION-only visual here, so the value is the
+    // only thing the player actually sees change on a spin control/slider.
+    expect(s_shadows_box.itemnames).toEqual([SHADOW_UNAVAILABLE, SHADOW_UNAVAILABLE]);
+    expect(s_shadow_quality_slider.valueFormatter).toBe(ShadowUnavailableFormatter);
+    expect(ShadowUnavailableFormatter()).toBe(SHADOW_UNAVAILABLE);
+
+    Cvar_SetValue("gl_shaders", 1);
+    VID_MenuInit();
+    expect(s_shadows_box.itemnames).toEqual(["no", "yes"]);
+    expect(s_shadow_quality_slider.valueFormatter).toBe(ShadowQualityFormatter);
+  });
+
+  test("both rows are greyed with a statusbar note when gl_shaders is 0, and live again when it is 1", () => {
+    Cvar_Get("gl_shaders", "1", 0);
+    Cvar_SetValue("gl_shaders", 0);
+    VID_MenuInit();
+    for (const row of [s_shadows_box.generic, s_shadow_quality_slider.generic]) {
+      expect(row.flags & QMF_GRAYED).toBe(QMF_GRAYED);
+      expect(row.statusbar).toBe("requires gl_shaders 1");
+    }
+
+    Cvar_SetValue("gl_shaders", 1);
+    VID_MenuInit();
+    for (const row of [s_shadows_box.generic, s_shadow_quality_slider.generic]) {
+      expect(row.flags & QMF_GRAYED).toBe(0);
+      expect(row.statusbar).toBeNull();
+    }
   });
 });

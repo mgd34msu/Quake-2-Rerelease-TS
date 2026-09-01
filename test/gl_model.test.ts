@@ -453,7 +453,7 @@ describe("R_MarkLights: radius marking on fabricated nodes", () => {
     fakeModel.nodes = [rootNode, childNode];
     SetWorldModel(fakeModel);
 
-    const light = { origin: vec3(1000, 10, 0), color: vec3(1, 1, 1), intensity: 200, lightScale: 1, cone: null };
+    const light = { origin: vec3(1000, 10, 0), color: vec3(1, 1, 1), intensity: 200, lightScale: 1, cone: null, resolution: 0 };
     const bit = 1 << 3;
 
     R_MarkLights(light, bit, rootNode);

@@ -79,6 +79,7 @@ export interface QGL {
   qglGenTextures(n: number, textures: GLPointer): void;
   qglGetError(): number;
   qglGetFloatv(pname: number, params: GLPointer): void;
+  qglGetIntegerv(pname: number, params: GLPointer): void;
   qglGetString(name: number): Pointer | null;
   qglLoadIdentity(): void;
   qglLoadMatrixf(m: GLPointer): void;
@@ -98,8 +99,10 @@ export interface QGL {
   qglPointParameterfvEXT: ((param: number, value: GLPointer) => void) | null;
   qglPointSize(size: number): void;
   qglPolygonMode(face: number, mode: number): void;
+  qglPolygonOffset(factor: number, units: number): void;
   qglPopMatrix(): void;
   qglPushMatrix(): void;
+  qglReadBuffer(mode: number): void;
   qglReadPixels(x: number, y: number, width: number, height: number, format: number, type: number, pixels: GLPointer): void;
   qglRotatef(angle: number, x: number, y: number, z: number): void;
   qglScalef(x: number, y: number, z: number): void;
@@ -112,6 +115,7 @@ export interface QGL {
   qglTexEnvf(target: number, pname: number, param: number): void;
   qglTexImage2D(target: number, level: number, internalformat: number, width: number, height: number, border: number, format: number, type: number, pixels: GLPointer): void;
   qglTexParameterf(target: number, pname: number, param: number): void;
+  qglTexParameteri(target: number, pname: number, param: number): void;
   qglTexSubImage2D(target: number, level: number, xoffset: number, yoffset: number, width: number, height: number, format: number, type: number, pixels: GLPointer): void;
   qglTranslatef(x: number, y: number, z: number): void;
   qglNormal3f(nx: number, ny: number, nz: number): void;
@@ -169,6 +173,16 @@ export interface QGL {
   qglUniform3f: ((location: number, v0: number, v1: number, v2: number) => void) | null;
   qglUniform3fv: ((location: number, count: number, value: GLPointer) => void) | null;
   qglUniform4f: ((location: number, v0: number, v1: number, v2: number, v3: number) => void) | null;
+  qglUniformMatrix4fv: ((location: number, count: number, transpose: boolean, value: GLPointer) => void) | null;
+  // GL1.3 core, not GL2 -- but grouped with the program-object members
+  // because that is exactly when this renderer needs it. The classic path
+  // reaches its second TMU through qglSelectTextureSGIS above, and
+  // GL_SGIS_multitexture is a 1990s extension no current driver still
+  // exports (this host's NVIDIA 4.6 context reports it absent), so the
+  // shader path -- which must put a shadow atlas on unit 1 -- cannot use it.
+  // A context with GL2 program objects always has glActiveTexture, so it
+  // resolves in the same all-or-nothing group.
+  qglActiveTexture: ((texture: number) => void) | null;
 
   // --- ARB_framebuffer_object / GL3.0 core (resolution-scaling render
   // target: src/platform/glimp.ts renders the frame into a texture sized to
@@ -301,6 +315,30 @@ export class QGLRecording implements QGL {
     this.record("qglGetError", []);
     return 0; // GL_NO_ERROR
   }
+  qglGetIntegerv(pname: number, params: GLPointer): void {
+    this.record("qglGetIntegerv", [pname, params]);
+  }
+
+  qglPolygonOffset(factor: number, units: number): void {
+    this.record("qglPolygonOffset", [factor, units]);
+  }
+
+  qglReadBuffer(mode: number): void {
+    this.record("qglReadBuffer", [mode]);
+  }
+
+  qglTexParameteri(target: number, pname: number, param: number): void {
+    this.record("qglTexParameteri", [target, pname, param]);
+  }
+
+  qglUniformMatrix4fv = (location: number, count: number, transpose: boolean, value: GLPointer): void => {
+    this.record("qglUniformMatrix4fv", [location, count, transpose, value]);
+  };
+
+  qglActiveTexture = (texture: number): void => {
+    this.record("qglActiveTexture", [texture]);
+  };
+
   qglGetFloatv(pname: number, params: GLPointer): void {
     this.record("qglGetFloatv", [pname, params]);
   }
@@ -585,6 +623,7 @@ const glSymbols = {
   glGenTextures: { args: [i32, ptr], returns: voidType },
   glGetError: { args: [], returns: u32 },
   glGetFloatv: { args: [u32, ptr], returns: voidType },
+  glGetIntegerv: { args: [u32, ptr], returns: voidType },
   glGetString: { args: [u32], returns: ptr },
   glLoadIdentity: { args: [], returns: voidType },
   glLoadMatrixf: { args: [ptr], returns: voidType },
@@ -592,8 +631,10 @@ const glSymbols = {
   glOrtho: { args: [f64, f64, f64, f64, f64, f64], returns: voidType },
   glPointSize: { args: [f32], returns: voidType },
   glPolygonMode: { args: [u32, u32], returns: voidType },
+  glPolygonOffset: { args: [f32, f32], returns: voidType },
   glPopMatrix: { args: [], returns: voidType },
   glPushMatrix: { args: [], returns: voidType },
+  glReadBuffer: { args: [u32], returns: voidType },
   glReadPixels: { args: [i32, i32, i32, i32, u32, u32, ptr], returns: voidType },
   glRotatef: { args: [f32, f32, f32, f32], returns: voidType },
   glScalef: { args: [f32, f32, f32], returns: voidType },
@@ -603,6 +644,7 @@ const glSymbols = {
   glTexEnvf: { args: [u32, u32, f32], returns: voidType },
   glTexImage2D: { args: [u32, i32, i32, i32, i32, i32, u32, u32, ptr], returns: voidType },
   glTexParameterf: { args: [u32, u32, f32], returns: voidType },
+  glTexParameteri: { args: [u32, u32, i32], returns: voidType },
   glTexSubImage2D: { args: [u32, i32, i32, i32, i32, i32, u32, u32, ptr], returns: voidType },
   glTranslatef: { args: [f32, f32, f32], returns: voidType },
   glNormal3f: { args: [f32, f32, f32], returns: voidType },
@@ -756,6 +798,8 @@ const glShaderSymbols = {
   glUniform3f: { args: [i32, f32, f32, f32], returns: voidType },
   glUniform3fv: { args: [i32, i32, ptr], returns: voidType },
   glUniform4f: { args: [i32, f32, f32, f32, f32], returns: voidType },
+  glUniformMatrix4fv: { args: [i32, i32, bool, ptr], returns: voidType },
+  glActiveTexture: { args: [u32], returns: voidType },
 } as const;
 
 // A resolved-but-still-raw-signature copy of `glShaderSymbols`' functions --
@@ -784,6 +828,8 @@ interface GLShaderRawSymbols {
   glUniform3f(location: number, v0: number, v1: number, v2: number): void;
   glUniform3fv(location: number, count: number, value: GLPointer): void;
   glUniform4f(location: number, v0: number, v1: number, v2: number, v3: number): void;
+  glUniformMatrix4fv(location: number, count: number, transpose: boolean, value: GLPointer): void;
+  glActiveTexture(texture: number): void;
 }
 
 // Resolves every GL2 program-object entry point as one all-or-nothing
@@ -832,6 +878,10 @@ function resolveGLShaderAPI(libraryPath: string, getProcAddress: GLGetProcAddres
     if (pUniform3fv === null) return null;
     const pUniform4f = getProcAddress("glUniform4f");
     if (pUniform4f === null) return null;
+    const pUniformMatrix4fv = getProcAddress("glUniformMatrix4fv");
+    if (pUniformMatrix4fv === null) return null;
+    const pActiveTexture = getProcAddress("glActiveTexture");
+    if (pActiveTexture === null) return null;
 
     return linkSymbols({
       glCreateShader: { args: [u32], returns: u32, ptr: pCreateShader },
@@ -853,6 +903,8 @@ function resolveGLShaderAPI(libraryPath: string, getProcAddress: GLGetProcAddres
       glUniform3f: { args: [i32, f32, f32, f32], returns: voidType, ptr: pUniform3f },
       glUniform3fv: { args: [i32, i32, ptr], returns: voidType, ptr: pUniform3fv },
       glUniform4f: { args: [i32, f32, f32, f32, f32], returns: voidType, ptr: pUniform4f },
+      glUniformMatrix4fv: { args: [i32, i32, bool, ptr], returns: voidType, ptr: pUniformMatrix4fv },
+      glActiveTexture: { args: [u32], returns: voidType, ptr: pActiveTexture },
     }).symbols;
   }
   try {
@@ -1026,6 +1078,7 @@ export function loadQGLFromSystem(getProcAddress?: GLGetProcAddressFn): QGL {
     qglGenTextures: (n, textures) => s.glGenTextures(n, textures),
     qglGetError: () => s.glGetError(),
     qglGetFloatv: (pname, params) => s.glGetFloatv(pname, params),
+    qglGetIntegerv: (pname, params) => s.glGetIntegerv(pname, params),
     qglGetString: (name) => {
       // FFIType.ptr's return type is `Pointer | bigint | null`; glGetString
       // never actually returns a bigint (bun:ffi only produces one for a
@@ -1045,6 +1098,8 @@ export function loadQGLFromSystem(getProcAddress?: GLGetProcAddressFn): QGL {
     qglPointParameterfvEXT: glPointParameterfvEXT ? (param, value) => glPointParameterfvEXT(param, value) : null,
     qglPointSize: (size) => s.glPointSize(size),
     qglPolygonMode: (face, mode) => s.glPolygonMode(face, mode),
+    qglPolygonOffset: (factor, units) => s.glPolygonOffset(factor, units),
+    qglReadBuffer: (mode) => s.glReadBuffer(mode),
     qglPopMatrix: () => s.glPopMatrix(),
     qglPushMatrix: () => s.glPushMatrix(),
     qglReadPixels: (x, y, width, height, format, type, pixels) => s.glReadPixels(x, y, width, height, format, type, pixels),
@@ -1058,6 +1113,7 @@ export function loadQGLFromSystem(getProcAddress?: GLGetProcAddressFn): QGL {
     qglTexImage2D: (target, level, internalformat, width, height, border, format, type, pixels) =>
       s.glTexImage2D(target, level, internalformat, width, height, border, format, type, pixels),
     qglTexParameterf: (target, pname, param) => s.glTexParameterf(target, pname, param),
+    qglTexParameteri: (target, pname, param) => s.glTexParameteri(target, pname, param),
     qglTexSubImage2D: (target, level, xoffset, yoffset, width, height, format, type, pixels) =>
       s.glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, pixels),
     qglTranslatef: (x, y, z) => s.glTranslatef(x, y, z),
@@ -1094,6 +1150,8 @@ export function loadQGLFromSystem(getProcAddress?: GLGetProcAddressFn): QGL {
     qglUniform3f: glShader ? (location, v0, v1, v2) => glShader.glUniform3f(location, v0, v1, v2) : null,
     qglUniform3fv: glShader ? (location, count, value) => glShader.glUniform3fv(location, count, value) : null,
     qglUniform4f: glShader ? (location, v0, v1, v2, v3) => glShader.glUniform4f(location, v0, v1, v2, v3) : null,
+    qglUniformMatrix4fv: glShader ? (location, count, transpose, value) => glShader.glUniformMatrix4fv(location, count, transpose, value) : null,
+    qglActiveTexture: glShader ? (texture) => glShader.glActiveTexture(texture) : null,
 
     qglGenFramebuffers: glFramebuffer ? (n, framebuffers) => glFramebuffer.glGenFramebuffers(n, framebuffers) : null,
     qglBindFramebuffer: glFramebuffer ? (target, framebuffer) => glFramebuffer.glBindFramebuffer(target, framebuffer) : null,

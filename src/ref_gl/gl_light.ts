@@ -26,6 +26,7 @@ import { ri, glCvars, r_newrefdef, r_framecount, currententity, vpn, vright, vup
 import { qgl } from "./gl_image";
 import { type MnodeOrLeaf, type MsurfaceT, type MplaneT, MAXLIGHTMAPS, isMleaf, SURF_DRAWTURB, SURF_DRAWSKY, surfaceLightmapDims } from "./gl_model";
 import { type LightgridT, lookupLightgrid } from "../qcommon/bspx";
+import { GL_UsingPerPixelLighting, MAX_SHADER_LIGHTS } from "./gl_shader";
 
 // OpenGL 1.1 enum values gl_light.c's R_RenderDlight/R_RenderDlights need;
 // no shared GL-enum module exists yet across gl_*.ts (every other landed
@@ -533,7 +534,27 @@ function R_AddDynamicLights(surf: MsurfaceT): void {
   const plane = surf.plane;
   if (!tex || !plane) return;
 
+  // A dynamic light must be applied exactly once. When the per-pixel
+  // lighting shader is live it already applies the first MAX_SHADER_LIGHTS
+  // dlights per fragment (gl_shader.ts's calc_dynamic_lights), so baking
+  // those same lights into the lightmap here would double them -- and
+  // because the classic path only touches surfaces R_MarkLights flagged,
+  // the doubling stops at surface boundaries and paints hard-edged
+  // polygon-shaped brightness steps across otherwise flat walls (reproduced
+  // live on base1's dyn_target_01 cone light; `gl_dynamic 0` made them
+  // vanish while the per-pixel lighting stayed).
+  //
+  // q2repro guards the equivalent call with a blanket
+  // `!gl_backend->use_per_pixel_lighting()` (surf.c:243). This port skips
+  // only the light INDICES the shader actually covers instead: q2repro's
+  // GLSL array is sized to its full MAX_DLIGHTS, whereas MAX_SHADER_LIGHTS
+  // here is 8, so a blanket skip would silently drop the 9th and later
+  // dlights from world surfaces entirely rather than merely un-doubling
+  // them. Documented departure, strictly narrower than the reference's.
+  const perPixelHandled = GL_UsingPerPixelLighting() ? Math.min(r_newrefdef.num_dlights, MAX_SHADER_LIGHTS) : 0;
+
   for (let lnum = 0; lnum < r_newrefdef.num_dlights; lnum++) {
+    if (lnum < perPixelHandled) continue; // already applied per-fragment by the shader
     if (!(surf.dlightbits & (1 << lnum))) continue; // not lit by this light
 
     const dl = r_newrefdef.dlights[lnum];

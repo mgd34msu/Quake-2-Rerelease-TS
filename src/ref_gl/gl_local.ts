@@ -272,6 +272,18 @@ export const glCvars: {
   gl_shaders: CvarT | null;
   gl_per_pixel_lighting: CvarT | null;
 
+  // v1.1.0 shadow maps (gl_shadowmap.ts). No q2repro counterpart to name it
+  // after -- q2repro has no shadow mapping at all (see that file's reference
+  // ruling), so this is a new toggle, defaulted on and subordinate to
+  // gl_shaders: at gl_shaders 0 there is no lighting shader to sample a
+  // depth map from, so the whole pass is skipped regardless of this value.
+  gl_shadowmaps: CvarT | null;
+  // Per-light shadow-map resolution CAP, in texels (256/512/1024 -- the
+  // video menu's low/medium/high). A light's own shadowlightresolution is
+  // still honoured; this only clamps how high it may go, so a player on
+  // weak hardware can turn every map down without editing entities.
+  gl_shadowmap_res: CvarT | null;
+
   vid_fullscreen: CvarT | null;
   vid_gamma: CvarT | null;
   // v1.0.0 RC resolution scaling (src/platform/vid_scale.ts/glimp.ts): no
@@ -371,6 +383,8 @@ export const glCvars: {
   gl_lightgrid: null,
 
   gl_shaders: null,
+  gl_shadowmaps: null,
+  gl_shadowmap_res: null,
   gl_per_pixel_lighting: null,
 
   vid_fullscreen: null,

@@ -30,7 +30,7 @@ import { join } from "node:path";
 import { Cvar_Init, Cvar_SetValue, Cvar_VariableValue, Cvar_WriteVariables } from "../src/qcommon/cvar";
 import { Cbuf_Init, Cbuf_AddText, Cbuf_Execute, Cmd_Init } from "../src/qcommon/cmd";
 import { VID_GetModeInfo, VID_GetScale, VID_GetScaleFit } from "../src/platform/vid";
-import { VID_MenuInit } from "../src/platform/vid_menu";
+import { VID_MenuInit, s_shadows_box, s_shadow_quality_slider } from "../src/platform/vid_menu";
 
 const CVAR_NAMES = ["vid_fullscreen", "gl_mode", "sw_mode", "r_customwidth", "r_customheight", "vid_scale", "vid_scale_fit"] as const;
 
@@ -98,6 +98,98 @@ let tmpPath: string | null = null;
 afterEach(() => {
   if (tmpPath && existsSync(tmpPath)) unlinkSync(tmpPath);
   tmpPath = null;
+});
+
+// v1.1.0 shadow mapping: the two video-menu rows (vid_menu.ts's
+// s_shadows_box / s_shadow_quality_slider) must survive a restart the same
+// way the seven above do. Registered with CVAR_ARCHIVE by ref_gl's
+// R_Register and, for a session where the GL renderer never started, lazily
+// by VID_MenuInit -- which is what this suite exercises, since it never
+// boots a renderer.
+const SHADOW_CVAR_NAMES = ["gl_shadowmaps", "gl_shadowmap_res"] as const;
+
+describe("shadow-mapping video cvars survive a restart (v1.1.0)", () => {
+  test("both are registered with CVAR_ARCHIVE, so Cvar_WriteVariables emits a set line for each", () => {
+    Cbuf_Init();
+    Cmd_Init();
+    Cvar_Init();
+    VID_MenuInit();
+
+    // non-defaults (defaults are "1" and "512")
+    Cvar_SetValue("gl_shadowmaps", 0);
+    Cvar_SetValue("gl_shadowmap_res", 1024);
+
+    tmpPath = join(tmpdir(), `q2rets-shadow-persistence-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.cfg`);
+    Cvar_WriteVariables(tmpPath);
+
+    const written = readFileSync(tmpPath, "utf8");
+    expect(written).toContain('set gl_shadowmaps "0"');
+    expect(written).toContain('set gl_shadowmap_res "1024"');
+  });
+
+  test("re-execing the archived file restores both values after they are clobbered", () => {
+    Cbuf_Init();
+    Cmd_Init();
+    Cvar_Init();
+    VID_MenuInit();
+
+    Cvar_SetValue("gl_shadowmaps", 0);
+    Cvar_SetValue("gl_shadowmap_res", 256);
+
+    tmpPath = join(tmpdir(), `q2rets-shadow-persistence-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.cfg`);
+    Cvar_WriteVariables(tmpPath);
+    const written = readFileSync(tmpPath, "utf8");
+
+    // third, distinct values -- proves the restore is real
+    Cvar_SetValue("gl_shadowmaps", 1);
+    Cvar_SetValue("gl_shadowmap_res", 1024);
+    expect(Cvar_VariableValue("gl_shadowmaps")).toBe(1);
+    expect(Cvar_VariableValue("gl_shadowmap_res")).toBe(1024);
+
+    Cbuf_AddText(written);
+    Cbuf_Execute();
+
+    expect(Cvar_VariableValue("gl_shadowmaps")).toBe(0);
+    expect(Cvar_VariableValue("gl_shadowmap_res")).toBe(256);
+  });
+
+  test("the menu rows pick the restored values back up on the next VID_MenuInit", () => {
+    Cbuf_Init();
+    Cmd_Init();
+    Cvar_Init();
+    VID_MenuInit();
+
+    Cvar_SetValue("gl_shaders", 1);
+    Cvar_SetValue("gl_shadowmaps", 0);
+    Cvar_SetValue("gl_shadowmap_res", 1024);
+
+    tmpPath = join(tmpdir(), `q2rets-shadow-persistence-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.cfg`);
+    Cvar_WriteVariables(tmpPath);
+    const written = readFileSync(tmpPath, "utf8");
+
+    Cvar_SetValue("gl_shadowmaps", 1);
+    Cvar_SetValue("gl_shadowmap_res", 256);
+
+    Cbuf_AddText(written);
+    Cbuf_Execute();
+    VID_MenuInit();
+
+    expect(s_shadows_box.curvalue).toBe(0);
+    expect(s_shadow_quality_slider.curvalue).toBe(2); // 1024 -> "high"
+  });
+
+  for (const name of SHADOW_CVAR_NAMES) {
+    test(`${name} is not silently dropped from the archive when left at its default`, () => {
+      Cbuf_Init();
+      Cmd_Init();
+      Cvar_Init();
+      VID_MenuInit();
+
+      tmpPath = join(tmpdir(), `q2rets-shadow-default-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.cfg`);
+      Cvar_WriteVariables(tmpPath);
+      expect(readFileSync(tmpPath, "utf8")).toContain(`set ${name} "`);
+    });
+  }
 });
 
 describe("video cvar archive round trip (Part G: does fullscreen/scale survive a restart)", () => {

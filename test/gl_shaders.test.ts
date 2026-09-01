@@ -24,6 +24,7 @@ import { SetQGL } from "../src/ref_gl/gl_image";
 import { glCvars, SetRefImports } from "../src/ref_gl/gl_local";
 import {
   GLS_WORLD_SURFACE,
+  GLS_WORLD_SURFACE_SHADOWED,
   GLS_ENTITY_MESH,
   GLS_LIGHTMAP,
   GLS_DYNAMIC_LIGHTS,
@@ -101,6 +102,8 @@ function makeNoShaderQGL(): QGL {
   rec.qglUniform3f = null;
   rec.qglUniform3fv = null;
   rec.qglUniform4f = null;
+  rec.qglUniformMatrix4fv = null;
+  rec.qglActiveTexture = null;
   return rec;
 }
 
@@ -172,24 +175,44 @@ describe("gl_shader.ts -- GLSL source assembly", () => {
 
   // v_world_pos is an eye-space position used only by the lighting math, not
   // by gl_Position, so it may keep its own explicit matrix multiply.
-  test("the ftransform() rule constrains gl_Position only -- v_world_pos still uses gl_ModelViewMatrix", () => {
+  test("the ftransform() rule constrains gl_Position only -- v_world_pos still goes through gl_ModelViewMatrix", () => {
     const src = buildVertexShaderSource(GLS_WORLD_SURFACE);
-    expect(src).toContain("v_world_pos = vec3(gl_ModelViewMatrix * gl_Vertex);");
+    // v1.1.0: the eye-space result is then carried back to WORLD space,
+    // which is the space the light uniforms and shadow matrices live in.
+    expect(src).toContain("v_world_pos = vec3(u_eye_to_world * (gl_ModelViewMatrix * gl_Vertex));");
   });
 
-  test("uniform-binding table matches the fragment source's actual `uniform` declarations (world surface)", () => {
-    const src = buildFragmentShaderSource(GLS_WORLD_SURFACE);
-    const declared = new Set(extractUniformNames(src));
-    const tabled = new Set(uniformBindingsFor(GLS_WORLD_SURFACE).map((b) => b.name));
-    expect(declared).toEqual(tabled);
+  test("v_world_pos is genuinely world space -- the eye-to-world uniform is declared and applied in every permutation", () => {
+    for (const bits of [GLS_WORLD_SURFACE, GLS_ENTITY_MESH, GLS_WORLD_SURFACE_SHADOWED]) {
+      const src = buildVertexShaderSource(bits);
+      expect(src).toContain("uniform mat4 u_eye_to_world;");
+      expect(src).toContain("u_eye_to_world * (gl_ModelViewMatrix * gl_Vertex)");
+      expect(uniformBindingsFor(bits).map((b) => b.name)).toContain("u_eye_to_world");
+    }
   });
 
-  test("uniform-binding table matches the fragment source's actual `uniform` declarations (entity mesh)", () => {
-    const src = buildFragmentShaderSource(GLS_ENTITY_MESH);
-    const declared = new Set(extractUniformNames(src));
-    const tabled = new Set(uniformBindingsFor(GLS_ENTITY_MESH).map((b) => b.name));
-    expect(declared).toEqual(tabled);
+  test("the world-space normal is a round trip, so a rotated brush model keeps its rotation", () => {
+    const src = buildVertexShaderSource(GLS_WORLD_SURFACE);
+    // mat3(vec3,vec3,vec3) is GLSL 1.10; mat3(mat4) would need 1.20
+    expect(src).toContain("mat3 rot = mat3(u_eye_to_world[0].xyz, u_eye_to_world[1].xyz, u_eye_to_world[2].xyz);");
+    expect(src).toContain("v_normal = normalize(rot * (gl_NormalMatrix * gl_Normal));");
+    expect(src).not.toContain("mat3(u_eye_to_world)");
   });
+
+  // The table is what createProgram calls glGetUniformLocation for, so it has
+  // to match the union of BOTH stages' declarations -- u_eye_to_world is
+  // declared in the vertex stage, every other uniform in the fragment stage.
+  for (const [label, bits] of [
+    ["world surface", GLS_WORLD_SURFACE],
+    ["entity mesh", GLS_ENTITY_MESH],
+    ["world surface + shadow maps", GLS_WORLD_SURFACE_SHADOWED],
+  ] as const) {
+    test(`uniform-binding table matches the shader sources' actual \`uniform\` declarations (${label})`, () => {
+      const declared = new Set([...extractUniformNames(buildVertexShaderSource(bits)), ...extractUniformNames(buildFragmentShaderSource(bits))]);
+      const tabled = new Set(uniformBindingsFor(bits).map((b) => b.name));
+      expect(declared).toEqual(tabled);
+    });
+  }
 
   test("light-uniform arrays are sized to MAX_SHADER_LIGHTS", () => {
     const src = buildFragmentShaderSource(GLS_WORLD_SURFACE);

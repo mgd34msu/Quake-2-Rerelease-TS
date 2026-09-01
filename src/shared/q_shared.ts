@@ -459,6 +459,14 @@ export const RF_SHELL_BLUE = 4096;
 // CL_AddMuzzleFX (cl_tent.ts) sets this on the rerelease's muzzle-flash
 // model explosions.
 export const RF_NOSHADOW = 8192;
+// [Sam-KEX] q2repro inc/shared/shared.h:1224 (`BIT(14), used by KEX`).
+// setup_dynamic_light (kexgame/g_misc.ts) stamps this on every shadow-light
+// entity, and the server's HAS_EFFECTS test (server.h:754, sv_ents.ts) keeps
+// such an entity in the client's frame even though it has no model, no
+// effects, no sound and no event -- without that clause the entity is culled
+// and CL_AddShadowLights never finds it, so no shadow light ever reaches the
+// renderer.
+export const RF_CASTSHADOW = 16384;
 export const RF_IR_VISIBLE = 0x00008000; // 32768
 export const RF_SHELL_DOUBLE = 0x00010000; // 65536
 export const RF_SHELL_HALF_DAM = 0x00020000;

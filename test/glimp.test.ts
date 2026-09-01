@@ -100,6 +100,8 @@ const SHADER_SYMBOL_NAMES = [
   "glUniform3f",
   "glUniform3fv",
   "glUniform4f",
+  "glUniformMatrix4fv",
+  "glActiveTexture",
 ];
 
 // v1.0.0 RC vid_scale (resolution-scaling render target, src/platform/glimp.ts):

@@ -5,7 +5,7 @@
 
 import { FS_Write } from "../qcommon/files";
 import { type Vec3, vec3, VectorSubtract, VectorLength } from "../shared/math";
-import { EntityStateT, PlayerStateT, RF_BEAM } from "../shared/q_shared";
+import { EntityStateT, PlayerStateT, RF_BEAM, RF_CASTSHADOW } from "../shared/q_shared";
 import { SizeBuf, SZ_Init, SZ_Write, SZ_Clear, MSG_WriteByte, MSG_WriteLong } from "../qcommon/sizebuf";
 import { SvcOpsT, UPDATE_MASK, UPDATE_BACKUP, ERR_FATAL } from "../qcommon/qcommon";
 import { MAX_MAP_LEAFS } from "../qcommon/qfiles";
@@ -341,7 +341,7 @@ export function SV_BuildClientFrame(client: ClientT): void {
     if (ent.svflags & SVF_NOCLIENT) continue;
 
     // ignore ents without visible models unless they have an effect
-    if (!ent.s.modelindex && !ent.s.effects && !ent.s.sound && !ent.s.event) continue;
+    if (!ent.s.modelindex && !ent.s.effects && !ent.s.sound && !ent.s.event && !(ent.s.renderfx & RF_CASTSHADOW)) continue;
 
     // ignore if not touching a PV leaf
     if (ent !== clent) {
@@ -453,7 +453,7 @@ export function SV_RecordDemoMessage(): void {
     for (let e = 1; e < ge.num_edicts; e++) {
       const ent = ge.edicts[e];
       // ignore ents without visible models unless they have an effect
-      if (ent.inuse && ent.s.number && (ent.s.modelindex || ent.s.effects || ent.s.sound || ent.s.event) && !(ent.svflags & SVF_NOCLIENT)) {
+      if (ent.inuse && ent.s.number && (ent.s.modelindex || ent.s.effects || ent.s.sound || ent.s.event || ent.s.renderfx & RF_CASTSHADOW) && !(ent.svflags & SVF_NOCLIENT)) {
         svs.codec.writeDeltaEntity(buf, nostate, ent.s, false, true);
       }
     }

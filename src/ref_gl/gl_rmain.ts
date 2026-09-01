@@ -127,6 +127,7 @@ import {
 } from "./gl_local";
 import { R_BeginRegistration, R_EndRegistration, R_RegisterModel, Mod_PointInLeaf, Mod_Init, Mod_FreeAll, Mod_Modellist_f, ModtypeT, ModelT, ParsedSp2T } from "./gl_model";
 import { GL_InitShaderPath, GL_ShutdownShaderPath, GL_UsingShaderPath } from "./gl_shader";
+import { GL_InitShadowMaps, GL_ShutdownShadowMaps, GL_ShadowMapsNewMap, R_RenderShadowMaps } from "./gl_shadowmap";
 import {
   R_RegisterSkin,
   GL_InitImages,
@@ -816,6 +817,14 @@ export function R_RenderView(fd: RefdefT): void {
 
   R_MarkLeaves(); // done here so we know if we're in water
 
+  // v1.1.0 shadow maps: build/refresh the cone lights' depth atlas. Must sit
+  // between R_SetupGL and R_DrawWorld -- it takes over the viewport and both
+  // matrices, and nothing between here and the world draw depends on them
+  // except R_DrawWorld itself, which is why R_SetupGL is re-run below rather
+  // than the pass trying to restore the scene's matrices by hand.
+  R_RenderShadowMaps(r_worldmodel, r_newrefdef.dlights, r_newrefdef.num_dlights);
+  R_SetupGL();
+
   R_DrawWorld();
 
   R_DrawEntitiesOnList();
@@ -911,6 +920,11 @@ export function R_Register(): void {
   // q2repro flags this CVAR_FILES (src/refresh/main.c:1119, cvar-parity fix).
   glCvars.gl_shaders = ri.Cvar_Get("gl_shaders", "1", CVAR_FILES);
   glCvars.gl_per_pixel_lighting = ri.Cvar_Get("gl_per_pixel_lighting", "1", 0);
+  // v1.1.0 shadow maps (gl_shadowmap.ts). CVAR_ARCHIVE rather than
+  // gl_shaders' CVAR_FILES: toggling it needs no vid restart, since the
+  // shadow permutation is selected per frame from the live value.
+  glCvars.gl_shadowmaps = ri.Cvar_Get("gl_shadowmaps", "1", CVAR_ARCHIVE);
+  glCvars.gl_shadowmap_res = ri.Cvar_Get("gl_shadowmap_res", "512", CVAR_ARCHIVE);
 
   glCvars.gl_nosubimage = ri.Cvar_Get("gl_nosubimage", "0", 0);
   // gl_allow_software: registered for its console side effect only -- the C
@@ -1475,6 +1489,12 @@ export function R_Init(hInstance: unknown, wndProc: unknown): boolean {
   // its outcome.
   GL_InitShaderPath();
 
+  // v1.1.0 shadow maps -- strictly after GL_InitShaderPath, because a
+  // context that fell back to fixed-function has no lighting shader to
+  // sample a depth atlas from and should not be handed a 2048x2048 depth
+  // texture it will never read. Same never-fails-R_Init contract.
+  if (GL_UsingShaderPath()) GL_InitShadowMaps();
+
   const err = qgl.qglGetError();
   if (err !== GL_NO_ERROR) {
     ri.Con_Printf(PRINT_ALL, `glGetError() = 0x${err.toString(16)}\n`);
@@ -1494,6 +1514,7 @@ export function R_Shutdown(): void {
   ri.Cmd_RemoveCommand("imagelist");
   ri.Cmd_RemoveCommand("gl_strings");
 
+  GL_ShutdownShadowMaps();
   GL_ShutdownShaderPath();
 
   Mod_FreeAll();
@@ -1721,7 +1742,16 @@ export function GetRefAPI(imp: RefImports): RefExports {
     Init: (hinstance: unknown, wndproc: unknown) => R_Init(hinstance, wndproc),
     Shutdown: () => R_Shutdown(),
 
-    BeginRegistration: (map: string) => R_BeginRegistration(map),
+    BeginRegistration: (map: string) => {
+      // Drop every cached depth map before the new world's surfaces load:
+      // the cache is keyed on light parameters only, so two maps whose
+      // lights happen to match would otherwise share stale depth texels.
+      // Hooked here rather than inside gl_model.ts's R_BeginRegistration
+      // because gl_shadowmap.ts already imports gl_model.ts for MsurfaceT/
+      // GlpolyT, and the reverse import would close a cycle.
+      GL_ShadowMapsNewMap();
+      R_BeginRegistration(map);
+    },
     RegisterModel: (name: string) => R_RegisterModel(name),
     RegisterSkin: (name: string) => R_RegisterSkin(name),
     RegisterPic: (name: string) => Draw_FindPic(name),

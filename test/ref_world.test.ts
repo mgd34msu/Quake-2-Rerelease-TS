@@ -114,7 +114,7 @@ describe("r_light.ts -- R_MarkLights", () => {
     setWorldModelForTesting(fakeWorldModel);
 
     // dist = DotProduct(origin, normal) - planeDist = 50; within intensity 100.
-    const nearLight: DlightT = { origin: vec3(0, 0, 50), color: vec3(1, 1, 1), intensity: 100, lightScale: 1, cone: null };
+    const nearLight: DlightT = { origin: vec3(0, 0, 50), color: vec3(1, 1, 1), intensity: 100, lightScale: 1, cone: null, resolution: 0 };
     R_MarkLights(nearLight, 1, root);
 
     expect(surf0.dlightbits & 1).toBe(1);
@@ -122,7 +122,7 @@ describe("r_light.ts -- R_MarkLights", () => {
 
     // dist = 500, well beyond intensity 100 -> this node's surfaces must
     // not pick up bit 2 (R_MarkLights recurses into the near child only).
-    const farLight: DlightT = { origin: vec3(0, 0, 500), color: vec3(1, 1, 1), intensity: 100, lightScale: 1, cone: null };
+    const farLight: DlightT = { origin: vec3(0, 0, 500), color: vec3(1, 1, 1), intensity: 100, lightScale: 1, cone: null, resolution: 0 };
     R_MarkLights(farLight, 2, root);
 
     expect(surf0.dlightbits & 2).toBe(0);

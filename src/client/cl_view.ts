@@ -212,8 +212,18 @@ export function V_AddLightEx(light: ShadowLightT): void {
   dl.color[1] = light.color[1];
   dl.color[2] = light.color[2];
 
-  const styleScale = light.lightstyle === -1 ? 1 : r_lightstyles[light.lightstyle].white;
+  // q2repro view.c:166 multiplies by `r_lightstyles[...].white`, but its own
+  // V_AddLightStyle (view.c:217-224) takes ONE float and stores `ls->white =
+  // value`. Vanilla's V_AddLightStyle -- which this port keeps faithfully,
+  // cl_view.c:130-142 -- takes r,g,b and stores `ls->white = r+g+b`. Reading
+  // `white` here would therefore apply q2repro's scale THREE times over
+  // (CL_SetLightstyle gives all three channels the same value), which showed
+  // up live as scale 6.0 on a light whose intensity is 2.0. rgb[0] is the
+  // per-channel value, i.e. exactly q2repro's `white`, so it reconciles the
+  // two conventions without disturbing either function's own fidelity.
+  const styleScale = light.lightstyle === -1 ? 1 : r_lightstyles[light.lightstyle].rgb[0];
   dl.lightScale = light.intensity * styleScale * fade;
+  dl.resolution = light.resolution;
 
   if (light.coneangle) {
     const rad = (light.coneangle * Math.PI) / 180;

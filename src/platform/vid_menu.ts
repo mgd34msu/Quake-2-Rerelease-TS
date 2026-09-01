@@ -30,6 +30,7 @@ Deviations:
 */
 
 import {
+  QMF_GRAYED,
   MenuframeworkS,
   MenufieldS,
   MenulistS,
@@ -71,6 +72,13 @@ let scr_viewsize: CvarT | null = null;
 let gl_mode: CvarT | null = null;
 let gl_driver: CvarT | null = null;
 let gl_picmip: CvarT | null = null;
+// v1.1.0 shadow mapping. ref_gl's R_Register owns the canonical
+// registration; these holders exist so the video menu still works in a
+// session where the GL renderer never started (same reason gl_mode/sw_mode
+// are lazily registered here).
+let gl_shadowmaps: CvarT | null = null;
+let gl_shadowmap_res: CvarT | null = null;
+let gl_shaders: CvarT | null = null;
 let gl_ext_palettedtexture: CvarT | null = null;
 
 let sw_mode: CvarT | null = null;
@@ -123,8 +131,18 @@ export const s_scale_slider: MenusliderS[] = [new MenusliderS(), new MenusliderS
 // friends already are: test/vid_menu.test.ts drives this module's widgets
 // directly.
 export const s_scale_fit_box: MenulistS[] = [new MenulistS(), new MenulistS()];
-const s_apply_action: MenuactionS[] = [new MenuactionS(), new MenuactionS()];
-const s_defaults_action: MenuactionS[] = [new MenuactionS(), new MenuactionS()];
+// v1.1.0 shadow mapping (ref_gl/gl_shadowmap.ts): an on/off toggle plus a
+// per-light resolution cap. OpenGL-submenu only, exactly like s_tq_slider
+// and s_paletted_texture_box -- the software renderer has no shader path to
+// hang a depth map off, so the rows simply do not exist there rather than
+// appearing greyed for a renderer that can never satisfy them. Within the
+// OpenGL submenu they ARE greyed (with a statusbar note) when gl_shaders is
+// 0, since that is a state the player can get back out of. Exported for
+// test/vid_menu.test.ts, same precedent as the widgets above.
+export const s_shadows_box = new MenulistS();
+export const s_shadow_quality_slider = new MenusliderS();
+export const s_apply_action: MenuactionS[] = [new MenuactionS(), new MenuactionS()];
+export const s_defaults_action: MenuactionS[] = [new MenuactionS(), new MenuactionS()];
 
 function DriverCallback(): void {
   const other = s_current_menu_index === 0 ? 1 : 0;
@@ -261,6 +279,46 @@ export function BrightnessFormatter(curvalue: number): string {
   return (1.8 - curvalue / 10).toFixed(2);
 }
 
+// gl_shadowmap.ts's per-light resolution cap, as the three steps the menu
+// offers. Index is the slider's curvalue; the value is texels per edge.
+export const SHADOW_QUALITY_RES = [256, 512, 1024];
+const SHADOW_QUALITY_LABELS = ["low", "medium", "high"];
+
+// Same "never a bare number" rule as the other formatters in this block: the
+// player sees the quality name AND the texel size it actually buys.
+export function ShadowQualityFormatter(curvalue: number): string {
+  const idx = Math.max(0, Math.min(SHADOW_QUALITY_RES.length - 1, Math.round(curvalue)));
+  return `${SHADOW_QUALITY_LABELS[idx]} (${SHADOW_QUALITY_RES[idx]}px)`;
+}
+
+// Maps a live gl_shadowmap_res value onto the nearest slider step, so a
+// value set from the console (or an older config) still shows up on a real
+// step instead of snapping the slider to 0.
+export function ShadowQualityIndexFor(resolution: number): number {
+  let best = 0;
+  let bestDelta = Infinity;
+  for (let i = 0; i < SHADOW_QUALITY_RES.length; i++) {
+    const step = SHADOW_QUALITY_RES[i];
+    if (step === undefined) continue;
+    const delta = Math.abs(step - resolution);
+    if (delta < bestDelta) {
+      bestDelta = delta;
+      best = i;
+    }
+  }
+  return best;
+}
+
+// Shown in place of the quality readout when gl_shaders is 0. QMF_GRAYED is
+// an MTYPE_ACTION-only visual in this codebase (see menu.ts's own note at
+// s_content_skill_list) -- on a spin control or slider it is an honest
+// marker the drawing code ignores -- so the row has to say so in the one
+// place the player is actually looking: its value.
+export const SHADOW_UNAVAILABLE = "unavailable";
+export function ShadowUnavailableFormatter(): string {
+  return SHADOW_UNAVAILABLE;
+}
+
 const TQ_LABELS = ["lowest", "low", "medium", "high"];
 export function TextureQualityFormatter(curvalue: number): string {
   const idx = Math.max(0, Math.min(TQ_LABELS.length - 1, Math.round(curvalue)));
@@ -310,6 +368,8 @@ function ApplyChanges(): void {
   Cvar_SetValue("vid_scale", VID_ClampScale(s_scale_slider[s_current_menu_index].curvalue / 10));
   Cvar_SetValue("vid_scale_fit", s_scale_fit_box[s_current_menu_index].curvalue);
   Cvar_SetValue("_windowed_mouse", s_windowed_mouse.curvalue);
+  Cvar_SetValue("gl_shadowmaps", s_shadows_box.curvalue);
+  Cvar_SetValue("gl_shadowmap_res", SHADOW_QUALITY_RES[Math.max(0, Math.min(SHADOW_QUALITY_RES.length - 1, Math.round(s_shadow_quality_slider.curvalue)))] ?? 512);
 
   switch (s_ref_list[s_current_menu_index].curvalue) {
     case REF_SOFT:
@@ -547,6 +607,64 @@ export function VID_MenuInit(): void {
   s_paletted_texture_box.itemnames = yesno_names;
   s_paletted_texture_box.curvalue = glPalC.value | 0;
 
+  // v1.1.0 shadow mapping rows. gl_shadowmaps/gl_shadowmap_res are
+  // registered by ref_gl's R_Register with CVAR_ARCHIVE, but the video menu
+  // can be opened in a session where the GL renderer never initialized (the
+  // same situation gl_mode/sw_mode are lazily registered for above), so
+  // register them here too if they are missing -- identical flags, so
+  // whichever call lands first wins and the value still archives.
+  if (!gl_shadowmaps) gl_shadowmaps = Cvar_Get("gl_shadowmaps", "1", CVAR_ARCHIVE);
+  if (!gl_shadowmap_res) gl_shadowmap_res = Cvar_Get("gl_shadowmap_res", "512", CVAR_ARCHIVE);
+  if (!gl_shaders) gl_shaders = Cvar_Get("gl_shaders", "1", CVAR_FILES);
+  // Read defensively rather than bailing out: an early return here would
+  // abort the whole menu build below and leave the player an empty video
+  // menu. The defaults used on a null cvar are the same ones registered
+  // just above.
+  const shadowsOn = gl_shadowmaps ? gl_shadowmaps.value !== 0 : true;
+  const shadowRes = gl_shadowmap_res ? gl_shadowmap_res.value : 512;
+  // Shadow maps are sampled by the per-pixel lighting shader, so with
+  // gl_shaders 0 there is nothing for these rows to drive.
+  const shadersOff = gl_shaders ? !gl_shaders.value : false;
+
+  s_shadows_box.generic.type = MTYPE_SPINCONTROL;
+  s_shadows_box.generic.x = 0;
+  s_shadows_box.generic.y = 134;
+  s_shadows_box.generic.name = "shadow mapping";
+  s_shadows_box.itemnames = shadersOff ? [SHADOW_UNAVAILABLE, SHADOW_UNAVAILABLE] : yesno_names;
+  s_shadows_box.curvalue = shadowsOn ? 1 : 0;
+
+  s_shadow_quality_slider.generic.type = MTYPE_SLIDER;
+  s_shadow_quality_slider.generic.x = 0;
+  s_shadow_quality_slider.generic.y = 144;
+  s_shadow_quality_slider.generic.name = "shadow quality";
+  s_shadow_quality_slider.minvalue = 0;
+  s_shadow_quality_slider.maxvalue = SHADOW_QUALITY_RES.length - 1;
+  s_shadow_quality_slider.curvalue = ShadowQualityIndexFor(shadowRes);
+  s_shadow_quality_slider.valueFormatter = shadersOff ? ShadowUnavailableFormatter : ShadowQualityFormatter;
+
+  // Shadow maps are sampled by the per-pixel lighting shader, so with
+  // gl_shaders 0 there is nothing for these rows to drive. Grey them and say
+  // why, rather than letting the player set a value that silently does
+  // nothing.
+  for (const row of [s_shadows_box.generic, s_shadow_quality_slider.generic]) {
+    if (shadersOff) {
+      row.flags |= QMF_GRAYED;
+      row.statusbar = "requires gl_shaders 1";
+    } else {
+      row.flags &= ~QMF_GRAYED;
+      row.statusbar = null;
+    }
+  }
+
+  // The two shadow rows above sit where the shared reset/apply pair was
+  // (134/144), so the OpenGL submenu's own copies move down past them --
+  // keeping the same flat 10-unit rhythm. The software submenu's copies stay
+  // put: it has no shadow rows, so nothing displaced them there.
+  const openglDefaults = s_defaults_action[OPENGL_MENU];
+  const openglApply = s_apply_action[OPENGL_MENU];
+  if (openglDefaults) openglDefaults.generic.y = 154;
+  if (openglApply) openglApply.generic.y = 164;
+
   Menu_AddItem(s_software_menu, s_ref_list[SOFTWARE_MENU]);
   Menu_AddItem(s_software_menu, s_mode_list[SOFTWARE_MENU]);
   Menu_AddItem(s_software_menu, s_customwidth_field[SOFTWARE_MENU]);
@@ -570,6 +688,8 @@ export function VID_MenuInit(): void {
   Menu_AddItem(s_opengl_menu, s_fs_box[OPENGL_MENU]);
   Menu_AddItem(s_opengl_menu, s_tq_slider);
   Menu_AddItem(s_opengl_menu, s_paletted_texture_box);
+  Menu_AddItem(s_opengl_menu, s_shadows_box);
+  Menu_AddItem(s_opengl_menu, s_shadow_quality_slider);
 
   Menu_AddItem(s_software_menu, s_defaults_action[SOFTWARE_MENU]);
   Menu_AddItem(s_software_menu, s_apply_action[SOFTWARE_MENU]);

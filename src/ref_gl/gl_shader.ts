@@ -76,6 +76,11 @@ import { ri, glCvars } from "./gl_local";
 import { type Vec3, vec3 } from "../shared/math";
 import { PRINT_ALL } from "../shared/q_shared";
 import { type DlightT } from "../client/ref";
+import { type ShadowMapBindingT, GL_ShadowMapBindings, GL_ShadowMapsReady, GL_ShadowMapTexture, GL_EyeToWorldMatrix, SHADOW_ATLAS_SIZE } from "./gl_shadowmap";
+
+const GL_TEXTURE0 = 0x84c0;
+const GL_TEXTURE1 = 0x84c1;
+const GL_TEXTURE_2D = 0x0de1;
 
 // Same well-known falloff-cutoff constant as gl_light.ts's private
 // DLIGHT_CUTOFF (not exported there -- duplicated here rather than
@@ -103,11 +108,24 @@ export const MAX_SHADER_LIGHTS = 8;
 // exactly the two combinations layers 1-2 actually use.
 export const GLS_LIGHTMAP = 1 << 0;
 export const GLS_DYNAMIC_LIGHTS = 1 << 1;
+// v1.1.0: sample gl_shadowmap.ts's depth atlas to occlude each cone light.
+// A separate bit rather than a change to GLS_DYNAMIC_LIGHTS so the
+// unshadowed permutation stays compiled and available as the fallback when
+// the shadow permutation won't build on a given context.
+export const GLS_SHADOWMAP = 1 << 2;
 
 export type GlShaderBits = number;
 
 export const GLS_WORLD_SURFACE: GlShaderBits = GLS_LIGHTMAP | GLS_DYNAMIC_LIGHTS;
+export const GLS_WORLD_SURFACE_SHADOWED: GlShaderBits = GLS_LIGHTMAP | GLS_DYNAMIC_LIGHTS | GLS_SHADOWMAP;
 export const GLS_ENTITY_MESH: GlShaderBits = GLS_DYNAMIC_LIGHTS;
+
+// Constant depth bias applied on top of the depth pass's own glPolygonOffset,
+// in the [0,1] window-depth space the atlas stores. Small on purpose:
+// polygon offset already does the slope-dependent work, and a large constant
+// bias here is what produces peter-panning (shadows detaching from their
+// caster's base).
+export const SHADOW_DEPTH_BIAS = 0.0005;
 
 // --- uniform-binding table (pure data) ---------------------------------
 //
@@ -118,11 +136,17 @@ export const GLS_ENTITY_MESH: GlShaderBits = GLS_DYNAMIC_LIGHTS;
 // (real compilation can't run without a GPU context; this can).
 export interface UniformBindingT {
   readonly name: string;
-  readonly kind: "sampler2D" | "vec3[]" | "float[]" | "int";
+  readonly kind: "sampler2D" | "vec3[]" | "float[]" | "vec4[]" | "mat4[]" | "mat4" | "float" | "int";
 }
 
 export function uniformBindingsFor(bits: GlShaderBits): UniformBindingT[] {
-  const bindings: UniformBindingT[] = [{ name: bits & GLS_LIGHTMAP ? "u_lightmap" : "u_texture", kind: "sampler2D" }];
+  const bindings: UniformBindingT[] = [
+    { name: bits & GLS_LIGHTMAP ? "u_lightmap" : "u_texture", kind: "sampler2D" },
+    // Every permutation needs it: the fixed-function pipeline hands the
+    // vertex stage an EYE-space position, and all of this file's light math
+    // is in world space (see buildVertexShaderSource).
+    { name: "u_eye_to_world", kind: "mat4" },
+  ];
   if (bits & GLS_DYNAMIC_LIGHTS) {
     bindings.push(
       { name: "u_light_count", kind: "int" },
@@ -134,17 +158,44 @@ export function uniformBindingsFor(bits: GlShaderBits): UniformBindingT[] {
       { name: "u_light_cone_cos", kind: "float[]" },
     );
   }
+  if (bits & GLS_SHADOWMAP) {
+    bindings.push(
+      { name: "u_shadow_map", kind: "sampler2D" },
+      { name: "u_shadow_texel", kind: "float" },
+      { name: "u_light_matrix", kind: "mat4[]" },
+      { name: "u_light_atlas", kind: "vec4[]" },
+      { name: "u_light_shadow", kind: "float[]" },
+    );
+  }
   return bindings;
 }
 
 // --- pure GLSL source assembly ------------------------------------------
 
 export function buildVertexShaderSource(bits: GlShaderBits): string {
-  const lines: string[] = ["#version 110", "varying vec3 v_world_pos;"];
+  const lines: string[] = ["#version 110", "uniform mat4 u_eye_to_world;", "varying vec3 v_world_pos;"];
   if (bits & GLS_DYNAMIC_LIGHTS) lines.push("varying vec3 v_normal;");
   lines.push("void main() {");
-  lines.push("  v_world_pos = vec3(gl_ModelViewMatrix * gl_Vertex);");
-  if (bits & GLS_DYNAMIC_LIGHTS) lines.push("  v_normal = normalize(gl_NormalMatrix * gl_Normal);");
+  // gl_ModelViewMatrix * gl_Vertex is an EYE-space position, but every light
+  // uniform below (and every shadow matrix) is in WORLD space -- the light
+  // origins come straight from the entity's s.origin. Multiplying the eye
+  // position by the inverse of the frame's view matrix puts the fragment
+  // back in the space the lights live in. Doing this rather than
+  // pre-transforming the lights into eye space CPU-side keeps the shadow
+  // matrices independent of the camera, so they survive frame to frame in
+  // gl_shadowmap.ts's depth-map cache.
+  lines.push("  v_world_pos = vec3(u_eye_to_world * (gl_ModelViewMatrix * gl_Vertex));");
+  if (bits & GLS_DYNAMIC_LIGHTS) {
+    // Same round trip for the normal: gl_NormalMatrix takes it to eye space,
+    // the rotation part of u_eye_to_world brings it back. For world surfaces
+    // this returns the plane normal qglNormal3f supplied; for a ROTATED
+    // brush model it correctly keeps the entity's rotation, which is why
+    // this is a round trip rather than just `normalize(gl_Normal)`.
+    // mat3(vec3,vec3,vec3) (column constructor) is GLSL 1.10; mat3(mat4) is
+    // 1.20 and deliberately avoided.
+    lines.push("  mat3 rot = mat3(u_eye_to_world[0].xyz, u_eye_to_world[1].xyz, u_eye_to_world[2].xyz);");
+    lines.push("  v_normal = normalize(rot * (gl_NormalMatrix * gl_Normal));");
+  }
   lines.push("  gl_TexCoord[0] = gl_MultiTexCoord0;");
   lines.push("  gl_FrontColor = gl_Color;");
   // ftransform(), NOT `gl_ModelViewProjectionMatrix * gl_Vertex`. The world
@@ -172,6 +223,22 @@ export function buildFragmentShaderSource(bits: GlShaderBits): string {
   const lines: string[] = ["#version 110", "varying vec3 v_world_pos;"];
   if (bits & GLS_DYNAMIC_LIGHTS) lines.push("varying vec3 v_normal;");
   lines.push(`uniform sampler2D ${bits & GLS_LIGHTMAP ? "u_lightmap" : "u_texture"};`);
+
+  if (bits & GLS_SHADOWMAP) {
+    lines.push(
+      `uniform sampler2D u_shadow_map;`,
+      `uniform float u_shadow_texel;`,
+      `uniform mat4 u_light_matrix[${MAX_SHADER_LIGHTS}];`,
+      // xy = this light's atlas rectangle origin, zw = its size, both already
+      // normalized to [0,1] atlas UV by the caller
+      `uniform vec4 u_light_atlas[${MAX_SHADER_LIGHTS}];`,
+      // 1.0 when this light owns an atlas rectangle, 0.0 when it does not
+      // (point lights, and cone lights the atlas had no room for) -- those
+      // keep the unoccluded contribution rather than being wrongly shadowed
+      `uniform float u_light_shadow[${MAX_SHADER_LIGHTS}];`,
+      `#define SHADOW_DEPTH_BIAS ${SHADOW_DEPTH_BIAS}`,
+    );
+  }
 
   if (bits & GLS_DYNAMIC_LIGHTS) {
     lines.push(
@@ -201,6 +268,43 @@ export function buildFragmentShaderSource(bits: GlShaderBits): string {
       `      float mag = -dot(dir, u_light_cone_dir[i]);`,
       `      result *= max(1.0 - (1.0 - mag) * (1.0 / (1.0 - light_cone)), 0.0);`,
       `    }`,
+    );
+
+    if (bits & GLS_SHADOWMAP) {
+      // Inlined rather than factored into a `float shadow_factor(int i)`
+      // helper on purpose: GLSL 1.10 only promises array indexing by a
+      // constant-index-expression, and a loop counter passed through a
+      // function parameter is no longer one on every compiler. Kept in the
+      // loop body it is the same expression form the light-uniform reads
+      // above already rely on.
+      lines.push(
+        `    if (u_light_shadow[i] != 0.0) {`,
+        `      vec4 lpos = u_light_matrix[i] * vec4(v_world_pos, 1.0);`,
+        `      if (lpos.w > 0.0) {`,
+        `        vec3 lproj = lpos.xyz / lpos.w;`,
+        // outside the light's own frustum there is no depth data to consult;
+        // leave the fragment lit rather than guessing (a wrong guess here is
+        // what paints hard black rectangles at shadow-map edges)
+        `        if (lproj.x >= 0.0 && lproj.x <= 1.0 && lproj.y >= 0.0 && lproj.y <= 1.0 && lproj.z <= 1.0) {`,
+        `          vec2 base = lproj.xy * u_light_atlas[i].zw + u_light_atlas[i].xy;`,
+        `          float lit = 0.0;`,
+        // 2x2 percentage-closer filter. Cheap, and enough to break up the
+        // stair-stepped edge a single tap gives at these map sizes.
+        `          for (int sy = 0; sy < 2; sy++) {`,
+        `            for (int sx = 0; sx < 2; sx++) {`,
+        `              vec2 off = (vec2(float(sx), float(sy)) - 0.5) * u_shadow_texel;`,
+        `              float d = texture2D(u_shadow_map, base + off).r;`,
+        `              lit += (lproj.z - SHADOW_DEPTH_BIAS) > d ? 0.0 : 1.0;`,
+        `            }`,
+        `          }`,
+        `          result *= lit * 0.25;`,
+        `        }`,
+        `      }`,
+        `    }`,
+      );
+    }
+
+    lines.push(
       `    shade += result;`,
       `  }`,
       `  return shade;`,
@@ -341,8 +445,22 @@ function createProgram(bits: GlShaderBits): CompiledProgram | null {
   }
 
   const uniforms = new Map<string, number>();
+  const getLocation = qgl.qglGetUniformLocation;
   for (const binding of uniformBindingsFor(bits)) {
-    uniforms.set(binding.name, qgl.qglGetUniformLocation(program, binding.name));
+    uniforms.set(binding.name, getLocation(program, binding.name));
+    // Array uniforms get every ELEMENT looked up by its own indexed name.
+    // The previous approach -- one lookup of the bare array name plus
+    // `baseLocation + i` arithmetic -- happens to work on the drivers that
+    // lay consecutive elements out at consecutive locations, but the stride
+    // is not 1 for every base type (this host's NVIDIA driver spaces a mat4
+    // array's elements 4 locations apart, not 1), and nothing in the GL spec
+    // requires callers to guess it. glGetUniformLocation accepts
+    // "name[i]" directly, so ask for exactly what will be set.
+    if (binding.kind.endsWith("[]")) {
+      for (let i = 0; i < MAX_SHADER_LIGHTS; i++) {
+        uniforms.set(`${binding.name}[${i}]`, getLocation(program, `${binding.name}[${i}]`));
+      }
+    }
   }
   return { program, uniforms };
 }
@@ -357,6 +475,28 @@ function getProgram(bits: GlShaderBits): CompiledProgram | null {
 
 export function GL_UsingShaderPath(): boolean {
   return shaderPathActive;
+}
+
+/*
+====================
+GL_UsingPerPixelLighting
+
+q2repro's gl_backend->use_per_pixel_lighting() -- shader.c:1273-1275
+(`return !!gl_per_pixel_lighting->integer`) for the GLSL backend, versus
+legacy.c:237's constant false for the fixed-function one, i.e. "the shader
+backend is live AND the user hasn't turned per-pixel lighting off".
+
+The reason this predicate exists at all is that a dynamic light must be
+applied ONCE. q2repro gates the classic bake-the-dlight-into-the-lightmap
+path on it in three places (surf.c:243, surf.c:277, world.c:309); without
+that gate a light lands both in the lightmap AND in the fragment shader, and
+the seam between surfaces the classic path marked and surfaces it didn't
+shows up as hard-edged polygon-shaped brightness steps across a flat wall.
+====================
+*/
+export function GL_UsingPerPixelLighting(): boolean {
+  if (!shaderPathActive) return false;
+  return !glCvars.gl_per_pixel_lighting || glCvars.gl_per_pixel_lighting.value !== 0;
 }
 
 /*
@@ -406,38 +546,37 @@ export function GL_ShutdownShaderPath(): void {
   shaderPathActive = false;
 }
 
-// Addresses array element i as `baseLocation + i` -- glGetUniformLocation
-// was called once per array uniform (see uniformBindingsFor/createProgram),
-// against the bare array name, which resolves to element 0's location;
-// every desktop GL driver in practice lays consecutive array elements out
-// at consecutive locations from there (the same technique many UBO-less
-// GL2 engines use), but this is only checkable on a real context -- flagged
-// in this unit's RC checklist for Mike's real-GPU run.
+// Each array element is addressed by the location createProgram looked up
+// for its own indexed name ("u_light_pos[3]"), never by arithmetic on the
+// bare array's location. That arithmetic was this unit's predecessor's
+// approach and was flagged in the RC checklist as unverifiable headlessly;
+// it is now retired, because the stride is genuinely not always 1 -- this
+// host's NVIDIA driver spaces a mat4 array's elements 4 locations apart.
 function uploadLightUniforms(prog: CompiledProgram, lights: readonly DlightT[], numLights: number): void {
   const countLoc = prog.uniforms.get("u_light_count");
   const count = Math.min(numLights, MAX_SHADER_LIGHTS, lights.length);
   if (countLoc !== undefined && qgl.qglUniform1i) qgl.qglUniform1i(countLoc, count);
 
-  const posLoc = prog.uniforms.get("u_light_pos");
-  const radiusLoc = prog.uniforms.get("u_light_radius");
-  const colorLoc = prog.uniforms.get("u_light_color");
-  const scaleLoc = prog.uniforms.get("u_light_scale");
-  const coneDirLoc = prog.uniforms.get("u_light_cone_dir");
-  const coneCosLoc = prog.uniforms.get("u_light_cone_cos");
-
   for (let i = 0; i < count; i++) {
     const dl = lights[i];
     if (!dl) break;
-    if (posLoc !== undefined && qgl.qglUniform3f) qgl.qglUniform3f(posLoc + i, dl.origin[0], dl.origin[1], dl.origin[2]);
-    if (radiusLoc !== undefined && qgl.qglUniform1f) qgl.qglUniform1f(radiusLoc + i, dl.intensity);
-    if (colorLoc !== undefined && qgl.qglUniform3f) qgl.qglUniform3f(colorLoc + i, dl.color[0], dl.color[1], dl.color[2]);
-    if (scaleLoc !== undefined && qgl.qglUniform1f) qgl.qglUniform1f(scaleLoc + i, dl.lightScale);
+    const posLoc = prog.uniforms.get(`u_light_pos[${i}]`);
+    const radiusLoc = prog.uniforms.get(`u_light_radius[${i}]`);
+    const colorLoc = prog.uniforms.get(`u_light_color[${i}]`);
+    const scaleLoc = prog.uniforms.get(`u_light_scale[${i}]`);
+    const coneDirLoc = prog.uniforms.get(`u_light_cone_dir[${i}]`);
+    const coneCosLoc = prog.uniforms.get(`u_light_cone_cos[${i}]`);
+
+    if (posLoc !== undefined && qgl.qglUniform3f) qgl.qglUniform3f(posLoc, dl.origin[0], dl.origin[1], dl.origin[2]);
+    if (radiusLoc !== undefined && qgl.qglUniform1f) qgl.qglUniform1f(radiusLoc, dl.intensity);
+    if (colorLoc !== undefined && qgl.qglUniform3f) qgl.qglUniform3f(colorLoc, dl.color[0], dl.color[1], dl.color[2]);
+    if (scaleLoc !== undefined && qgl.qglUniform1f) qgl.qglUniform1f(scaleLoc, dl.lightScale);
     const cone = dl.cone;
     if (cone) {
-      if (coneDirLoc !== undefined && qgl.qglUniform3f) qgl.qglUniform3f(coneDirLoc + i, cone.direction[0], cone.direction[1], cone.direction[2]);
-      if (coneCosLoc !== undefined && qgl.qglUniform1f) qgl.qglUniform1f(coneCosLoc + i, cone.cosHalfAngle);
+      if (coneDirLoc !== undefined && qgl.qglUniform3f) qgl.qglUniform3f(coneDirLoc, cone.direction[0], cone.direction[1], cone.direction[2]);
+      if (coneCosLoc !== undefined && qgl.qglUniform1f) qgl.qglUniform1f(coneCosLoc, cone.cosHalfAngle);
     } else {
-      if (coneCosLoc !== undefined && qgl.qglUniform1f) qgl.qglUniform1f(coneCosLoc + i, 0);
+      if (coneCosLoc !== undefined && qgl.qglUniform1f) qgl.qglUniform1f(coneCosLoc, 0);
     }
   }
 }
@@ -459,13 +598,81 @@ back to the existing fixed-function draw, which is untouched either way.
 */
 export function GL_UseWorldSurfaceProgram(lights: readonly DlightT[], numLights: number): boolean {
   if (!shaderPathActive) return false;
-  const prog = getProgram(GLS_WORLD_SURFACE);
+
+  // Prefer the shadowed permutation, but only when there is actually a depth
+  // map to sample and the permutation builds on this context; otherwise fall
+  // straight back to task #25's unshadowed one, which is byte-identical to
+  // what shipped before this unit.
+  const bindings = GL_ShadowMapBindings();
+  const wantShadows = GL_ShadowMapsReady() && bindings.length > 0 && GL_ShadowMapTexture() !== 0;
+  let shadowed = false;
+  let prog: CompiledProgram | null = null;
+  if (wantShadows) {
+    prog = getProgram(GLS_WORLD_SURFACE_SHADOWED);
+    shadowed = prog !== null;
+  }
+  if (!prog) prog = getProgram(GLS_WORLD_SURFACE);
   if (!prog || !qgl.qglUseProgram) return false;
+
   qgl.qglUseProgram(prog.program);
   const lmLoc = prog.uniforms.get("u_lightmap");
   if (lmLoc !== undefined && qgl.qglUniform1i) qgl.qglUniform1i(lmLoc, 0);
+
+  const eyeToWorldLoc = prog.uniforms.get("u_eye_to_world");
+  if (eyeToWorldLoc !== undefined && qgl.qglUniformMatrix4fv) {
+    qgl.qglUniformMatrix4fv(eyeToWorldLoc, 1, false, GL_EyeToWorldMatrix());
+  }
+
   uploadLightUniforms(prog, lights, numLights);
+  if (shadowed) uploadShadowUniforms(prog, bindings);
   return true;
+}
+
+/*
+====================
+uploadShadowUniforms
+
+Binds the depth atlas to TMU 1 and fills the per-light shadow arrays. Every
+slot is written every frame, including the zeroed `u_light_shadow` entries
+for lights with no map -- leaving a stale 1.0 behind from a previous frame
+would shadow a light against another light's depth rectangle.
+
+TMU 1 via qglActiveTexture rather than gl_image.ts's GL_SelectTexture: that
+helper drives qglSelectTextureSGIS, and GL_SGIS_multitexture is absent from
+every current driver (see qgl.ts's note on qglActiveTexture). The active unit
+is put back to 0 before returning, so gl_image.ts's own GL_Bind cache -- which
+is never told about any of this -- stays correct.
+====================
+*/
+function uploadShadowUniforms(prog: CompiledProgram, bindings: readonly ShadowMapBindingT[]): void {
+  const activeTexture = qgl.qglActiveTexture;
+  if (activeTexture) {
+    activeTexture(GL_TEXTURE1);
+    qgl.qglBindTexture(GL_TEXTURE_2D, GL_ShadowMapTexture());
+    activeTexture(GL_TEXTURE0);
+  }
+
+  const mapLoc = prog.uniforms.get("u_shadow_map");
+  if (mapLoc !== undefined && qgl.qglUniform1i) qgl.qglUniform1i(mapLoc, 1);
+  const texelLoc = prog.uniforms.get("u_shadow_texel");
+  if (texelLoc !== undefined && qgl.qglUniform1f) qgl.qglUniform1f(texelLoc, 1 / SHADOW_ATLAS_SIZE);
+
+  const shadowed = new Map<number, ShadowMapBindingT>();
+  for (const binding of bindings) shadowed.set(binding.lightIndex, binding);
+
+  for (let i = 0; i < MAX_SHADER_LIGHTS; i++) {
+    const binding = shadowed.get(i);
+    const flagLoc = prog.uniforms.get(`u_light_shadow[${i}]`);
+    if (flagLoc !== undefined && qgl.qglUniform1f) qgl.qglUniform1f(flagLoc, binding ? 1 : 0);
+    if (!binding) continue;
+    const matrixLoc = prog.uniforms.get(`u_light_matrix[${i}]`);
+    const atlasLoc = prog.uniforms.get(`u_light_atlas[${i}]`);
+    if (matrixLoc !== undefined && qgl.qglUniformMatrix4fv) qgl.qglUniformMatrix4fv(matrixLoc, 1, false, binding.matrix);
+    if (atlasLoc !== undefined && qgl.qglUniform4f) {
+      const scale = binding.slot.size / SHADOW_ATLAS_SIZE;
+      qgl.qglUniform4f(atlasLoc, binding.slot.x / SHADOW_ATLAS_SIZE, binding.slot.y / SHADOW_ATLAS_SIZE, scale, scale);
+    }
+  }
 }
 
 export function GL_RestoreFixedFunction(): void {
