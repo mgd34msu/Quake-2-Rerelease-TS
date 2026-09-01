@@ -66,6 +66,55 @@ function atoi(s: string): number {
 }
 
 //=============================================================================
+// HUD PANE -- the rectangle this HUD pass draws inside.
+//
+// COMPAT ADDITION (Mike's v1.1.0 ruling: "it's all the same engine now, why
+// would we not be able to play with the legacy ruleset in split screen?"),
+// NOT a port of anything: q2repro's CGC_DrawHUD opens with "Note: isplit is
+// ignored, due to missing split screen support" and derives every coordinate
+// below from the full screen. This port renders one HUD pass per local seat
+// (cl_scrn.ts's SCR_DrawSeatViews), so each pass needs its own rectangle,
+// exactly the way the kex cgame receives a hud_vrect.
+//
+// EXACT IDENTITY FOR THE SINGLE-VIEWPORT CASE: the full-screen pane is
+// {0, 0, viddef.width, viddef.height}, so every formula below reduces to the
+// arithmetic it had before this parameter existed (pane.x is 0 and
+// pane.width is viddef.width) -- which is what keeps
+// test/cgame_classic_extraction.test.ts's pixel-identity contract intact.
+//
+// NO SCALE TERM, deliberately. The v3.19 status bar is a fixed 320x240
+// virtual layout drawn at native atlas pixel size (Draw_Pic draws a pic at
+// its own size; SCR_DrawChar draws 8x8), and the engine has never scaled it
+// -- at 320x240 fullscreen it exactly fills the screen and at 1920x1080 it
+// stays a small 320x240 island anchored by the xl/xr/xv/yt/yb/yv tokens.
+// Handing it a pane just re-anchors that same unscaled island inside the
+// pane, which gives a seat's HUD exactly the geometry a single-viewport
+// session at the pane's resolution would have. (The kex HUD does carry a
+// scale, because cg_screen.ts multiplies every coordinate by one; nothing in
+// this file has a term to multiply.)
+//
+// pane.x/pane.y are the pane's ORIGIN, added to left/top-anchored tokens and
+// used as the base for right/bottom-anchored ones (`pane.x + pane.width + n`
+// for `xr`, `pane.y + pane.height + n` for `yb`). There is no separate
+// safe-area INSET here -- see host.ts's kexSeatHudSafe for why the kex path
+// keeps those two concepts apart, and note that this file never conflates
+// them: the origin is only ever ADDED, never subtracted.
+//=============================================================================
+
+export interface HudPaneT {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** The whole display, i.e. what every coordinate below was implicitly
+ *  relative to before panes existed. */
+export function fullScreenHudPane(): HudPaneT {
+  return { x: 0, y: 0, width: viddef.width, height: viddef.height };
+}
+
+//=============================================================================
 // SCR_DrawField / sb_nums -- the digit-icon status bar numbers. sb_nums is
 // exported so cl_scrn.ts's SCR_TouchPics (stays there -- see that file's own
 // note on why TouchPics as a whole doesn't move) can still precache the same
@@ -159,12 +208,25 @@ function DrawHUDString(imports: CgameImports, str: string, xIn: number, yIn: num
   }
 }
 
-function SCR_ExecuteLayoutString(imports: CgameImports, ps: PlayerStateT, playernum: number, s: string): void {
+function SCR_ExecuteLayoutString(imports: CgameImports, ps: PlayerStateT, playernum: number, s: string, pane: HudPaneT): void {
   if (!imports.CL_FrameValid()) return;
   if (!s || s.length === 0) return;
 
-  let x = 0;
-  let y = 0;
+  // Every one of these six anchors used to read viddef directly; each is now
+  // the same expression against the pane (see the HUD PANE note above for why
+  // the full-screen pane reproduces the original arithmetic exactly).
+  const xl = (n: number): number => pane.x + n;
+  const xr = (n: number): number => pane.x + pane.width + n;
+  const xv = (n: number): number => pane.x + Math.trunc(pane.width / 2) - 160 + n;
+  const yt = (n: number): number => pane.y + n;
+  const yb = (n: number): number => pane.y + pane.height + n;
+  const yv = (n: number): number => pane.y + Math.trunc(pane.height / 2) - 120 + n;
+
+  // Pane-relative, not 0,0: a layout that draws before setting an anchor put
+  // its first element at the top-left of the SCREEN, which for a seat means
+  // the top-left of that seat's pane. Identical for the full-screen pane.
+  let x = pane.x;
+  let y = pane.y;
   let width = 3;
 
   const state: ComParseState = { data: s, index: 0 };
@@ -174,28 +236,28 @@ function SCR_ExecuteLayoutString(imports: CgameImports, ps: PlayerStateT, player
     if (done) break;
 
     if (token === "xl") {
-      x = atoi(nextLayoutToken(state).token);
+      x = xl(atoi(nextLayoutToken(state).token));
       continue;
     }
     if (token === "xr") {
-      x = viddef.width + atoi(nextLayoutToken(state).token);
+      x = xr(atoi(nextLayoutToken(state).token));
       continue;
     }
     if (token === "xv") {
-      x = Math.trunc(viddef.width / 2) - 160 + atoi(nextLayoutToken(state).token);
+      x = xv(atoi(nextLayoutToken(state).token));
       continue;
     }
 
     if (token === "yt") {
-      y = atoi(nextLayoutToken(state).token);
+      y = yt(atoi(nextLayoutToken(state).token));
       continue;
     }
     if (token === "yb") {
-      y = viddef.height + atoi(nextLayoutToken(state).token);
+      y = yb(atoi(nextLayoutToken(state).token));
       continue;
     }
     if (token === "yv") {
-      y = Math.trunc(viddef.height / 2) - 120 + atoi(nextLayoutToken(state).token);
+      y = yv(atoi(nextLayoutToken(state).token));
       continue;
     }
 
@@ -217,8 +279,8 @@ function SCR_ExecuteLayoutString(imports: CgameImports, ps: PlayerStateT, player
 
     if (token === "client") {
       // draw a deathmatch client block
-      x = Math.trunc(viddef.width / 2) - 160 + atoi(nextLayoutToken(state).token);
-      y = Math.trunc(viddef.height / 2) - 120 + atoi(nextLayoutToken(state).token);
+      x = xv(atoi(nextLayoutToken(state).token));
+      y = yv(atoi(nextLayoutToken(state).token));
       SCR_AddDirtyPoint(x, y);
       SCR_AddDirtyPoint(x + 159, y + 31);
 
@@ -245,8 +307,8 @@ function SCR_ExecuteLayoutString(imports: CgameImports, ps: PlayerStateT, player
 
     if (token === "ctf") {
       // draw a ctf client block
-      x = Math.trunc(viddef.width / 2) - 160 + atoi(nextLayoutToken(state).token);
-      y = Math.trunc(viddef.height / 2) - 120 + atoi(nextLayoutToken(state).token);
+      x = xv(atoi(nextLayoutToken(state).token));
+      y = yv(atoi(nextLayoutToken(state).token));
       SCR_AddDirtyPoint(x, y);
       SCR_AddDirtyPoint(x + 159, y + 31);
 
@@ -393,8 +455,8 @@ The status bar is a small layout program that
 is based on the stats array
 ================
 */
-export function SCR_DrawStats(imports: CgameImports, ps: PlayerStateT, playernum: number): void {
-  SCR_ExecuteLayoutString(imports, ps, playernum, imports.get_configstring(CS_STATUSBAR));
+export function SCR_DrawStats(imports: CgameImports, ps: PlayerStateT, playernum: number, pane: HudPaneT = fullScreenHudPane()): void {
+  SCR_ExecuteLayoutString(imports, ps, playernum, imports.get_configstring(CS_STATUSBAR), pane);
 }
 
 /*
@@ -402,9 +464,9 @@ export function SCR_DrawStats(imports: CgameImports, ps: PlayerStateT, playernum
 SCR_DrawLayout
 ================
 */
-export function SCR_DrawLayout(imports: CgameImports, ps: PlayerStateT, playernum: number, layout: string): void {
+export function SCR_DrawLayout(imports: CgameImports, ps: PlayerStateT, playernum: number, layout: string, pane: HudPaneT = fullScreenHudPane()): void {
   if (!ps.stats[STAT_LAYOUTS]) return;
-  SCR_ExecuteLayoutString(imports, ps, playernum, layout);
+  SCR_ExecuteLayoutString(imports, ps, playernum, layout, pane);
 }
 
 //=============================================================================
@@ -434,7 +496,7 @@ const DISPLAY_ITEMS = 17;
 CL_DrawInventory
 ================
 */
-export function CL_DrawInventory(imports: CgameImports, ps: PlayerStateT, inventory: Int32Array): void {
+export function CL_DrawInventory(imports: CgameImports, ps: PlayerStateT, inventory: Int32Array, pane: HudPaneT = fullScreenHudPane()): void {
   const selected = ps.stats[STAT_SELECTED_ITEM];
 
   let num = 0;
@@ -453,8 +515,10 @@ export function CL_DrawInventory(imports: CgameImports, ps: PlayerStateT, invent
   if (num - top < DISPLAY_ITEMS) top = num - DISPLAY_ITEMS;
   if (top < 0) top = 0;
 
-  let x = Math.floor((viddef.width - 256) / 2);
-  let y = Math.floor((viddef.height - 240) / 2);
+  // The 256x240 inventory panel, centered in the PANE rather than on the
+  // display -- same expression, pane-relative (see the HUD PANE note).
+  let x = pane.x + Math.floor((pane.width - 256) / 2);
+  let y = pane.y + Math.floor((pane.height - 240) / 2);
 
   // repaint everything next frame
   SCR_DirtyScreen();

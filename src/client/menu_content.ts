@@ -260,7 +260,15 @@ first file. Omitted -- the pre-data-tree call shape -- nothing is remounted
 and the launch runs against whatever is already mounted, exactly as before.
 ===============
 */
-export function PerformLaunch(plan: LaunchPlan, bsp: string, skill: number | null, coop = false, data: DataMountPlan | null = null): void {
+export function PerformLaunch(plan: LaunchPlan, bsp: string, skill: number | null, coop = false, data: DataMountPlan | null = null, seats = 1): void {
+  // LOCAL SPLITSCREEN (src/client/cl_seats.ts): every extra seat is a real
+  // additional player in the same game, so more than one seat IS a coop
+  // session -- the campaign has to run its coop spawn/respawn rules or the
+  // extra seats have nowhere to spawn. maxclients must have room for them
+  // too, the same widening the coop toggle already does.
+  const splitscreen = seats > 1;
+  const wantCoop = coop || splitscreen;
+
   // New Game NEVER starts deathmatch, coop or not. `coop` is the New Game
   // screen's QoL toggle (owner request 2026-08-31); when enabled and
   // maxclients is still the SP default of 1, widen it so the listen
@@ -268,8 +276,12 @@ export function PerformLaunch(plan: LaunchPlan, bsp: string, skill: number | nul
   // start-server screen applies (m_menu.c StartServerActionFunc: coop
   // with maxclients <= 1 gets 4).
   Cvar_Set("deathmatch", "0");
-  Cvar_Set("coop", coop ? "1" : "0");
-  if (coop && Cvar_VariableValue("maxclients") <= 1) Cvar_Set("maxclients", "4");
+  Cvar_Set("coop", wantCoop ? "1" : "0");
+  if (wantCoop && Cvar_VariableValue("maxclients") <= 1) Cvar_Set("maxclients", "4");
+  if (splitscreen && Cvar_VariableValue("maxclients") < seats) Cvar_Set("maxclients", String(seats));
+  // Read once per frame by CL_Seats_Reconcile, which does the actual seating
+  // after the map has loaded and the primary client is active.
+  Cvar_Set("cl_seats", String(Math.max(1, Math.trunc(seats))));
   Cvar_Set("gamerules", "0");
   // Clear (or set, for kex CTF) the mode-forcing cvars the game modules'
   // ZOID init blocks read -- see LaunchPlan.ctf's doc comment. Without
@@ -803,7 +815,7 @@ export function ScanDataTree(seam: GameFsSeam, id: DataTreeId, root: string): Da
 const data_tree_scan_cache = new Map<string, DataTreeScan>();
 
 export function CachedScanDataTree(seam: GameFsSeam, id: DataTreeId, root: string): DataTreeScan {
-  const key = `${id} ${root}`;
+  const key = `${id}\0${root}`;
   const hit = data_tree_scan_cache.get(key);
   if (hit) return hit;
   const scan = ScanDataTree(seam, id, root);

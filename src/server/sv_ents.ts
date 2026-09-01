@@ -27,6 +27,12 @@ import { geHolder } from "./sv_game";
 import { SVF_NOCLIENT } from "../game/game";
 import { Com_DPrintf, Com_Error } from "../qcommon/common";
 import { cloneEntityStateInto, clonePlayerState } from "../shared/state_copy";
+import { SV_LocalSeatViewOrigins } from "./sv_seats";
+
+function areasConnectedToAny(areas: readonly number[], areanum: number): boolean {
+  for (const area of areas) if (CM_AreasConnected(area, areanum)) return true;
+  return false;
+}
 
 /*
 =============================================================================
@@ -197,6 +203,20 @@ so we can't use a single PVS point
 ===========
 */
 function SV_FatPVS(org: Vec3): void {
+  SV_FatPVSInto(org, fatpvs, false);
+}
+
+/*
+The body of SV_FatPVS, with the destination buffer and an OR-in-place flag
+lifted out. `accumulate` is what makes local splitscreen work: seats 1..N-1
+render out of the PRIMARY connection's single entity list (see
+sv_seats.ts's header for why there is only one connection), so that list has
+to hold the union of every seat's PVS or a seat looking somewhere the
+primary player is not would see holes where entities should be. With one
+seat this is called exactly once with accumulate=false and produces the same
+bytes the pre-splitscreen SV_FatPVS produced.
+*/
+function SV_FatPVSInto(org: Vec3, dest: Uint8Array, accumulate: boolean): void {
   const mins = vec3(org[0] - 8, org[1] - 8, org[2] - 8);
   const maxs = vec3(org[0] + 8, org[1] + 8, org[2] + 8);
 
@@ -213,7 +233,11 @@ function SV_FatPVS(org: Vec3): void {
   for (let i = 0; i < count; i++) clusters[i] = CM_LeafCluster(leafs[i]);
 
   const firstPvs = CM_ClusterPVS(clusters[0]);
-  for (let j = 0; j < byteLen; j++) fatpvs[j] = firstPvs[j];
+  if (accumulate) {
+    for (let j = 0; j < byteLen; j++) dest[j] |= firstPvs[j];
+  } else {
+    for (let j = 0; j < byteLen; j++) dest[j] = firstPvs[j];
+  }
 
   // or in all the other leaf bits
   for (let i = 1; i < count; i++) {
@@ -222,7 +246,7 @@ function SV_FatPVS(org: Vec3): void {
     if (j !== i) continue; // already have the cluster we want
 
     const src = CM_ClusterPVS(clusters[i]);
-    for (j = 0; j < byteLen; j++) fatpvs[j] |= src[j];
+    for (j = 0; j < byteLen; j++) dest[j] |= src[j];
   }
 }
 
@@ -263,6 +287,15 @@ export function SV_BuildClientFrame(client: ClientT): void {
   const clientarea = CM_LeafArea(leafnum);
   const clientcluster = CM_LeafCluster(leafnum);
 
+  // LOCAL SPLITSCREEN (sv_seats.ts): the extra local seats ride this one
+  // connection's entity list, so everything visibility-related below widens
+  // to the UNION over the primary client plus every seated seat. Seats only
+  // ever exist on a local server and only for the client that owns them, so
+  // this list is empty -- and every union below collapses to exactly the
+  // pre-splitscreen single-origin computation -- for a normal connection.
+  const seatOrigins = client.isLocalSeat ? [] : SV_LocalSeatViewOrigins();
+  const viewAreas: number[] = [clientarea];
+
   // calculate the visible areas
   frame.areabytes = CM_WriteAreaBits(frame.areabits, clientarea);
 
@@ -270,7 +303,29 @@ export function SV_BuildClientFrame(client: ClientT): void {
   frame.ps = clonePlayerState(clientPs);
 
   SV_FatPVS(org);
-  const clientphs = CM_ClusterPHS(clientcluster);
+  let clientphs = CM_ClusterPHS(clientcluster);
+
+  if (seatOrigins.length) {
+    const seatAreaBits = new Uint8Array(frame.areabits.length);
+    // CM_ClusterPHS hands back a buffer the collision model owns and reuses;
+    // OR-ing seats into it would corrupt it for every later reader, so the
+    // union is accumulated into a copy.
+    const phsUnion = new Uint8Array(clientphs);
+    for (const seatOrg of seatOrigins) {
+      SV_FatPVSInto(seatOrg, fatpvs, true);
+
+      const seatLeaf = CM_PointLeafnum(seatOrg);
+      const seatArea = CM_LeafArea(seatLeaf);
+      if (!viewAreas.includes(seatArea)) viewAreas.push(seatArea);
+      const seatBytes = CM_WriteAreaBits(seatAreaBits, seatArea);
+      if (seatBytes > frame.areabytes) frame.areabytes = seatBytes;
+      for (let i = 0; i < seatBytes; i++) frame.areabits[i] |= seatAreaBits[i];
+
+      const seatPhs = CM_ClusterPHS(CM_LeafCluster(seatLeaf));
+      for (let i = 0; i < phsUnion.length && i < seatPhs.length; i++) phsUnion[i] |= seatPhs[i];
+    }
+    clientphs = phsUnion;
+  }
 
   // build up the list of visible entities
   frame.num_entities = 0;
@@ -291,10 +346,13 @@ export function SV_BuildClientFrame(client: ClientT): void {
     // ignore if not touching a PV leaf
     if (ent !== clent) {
       // check area
-      if (!CM_AreasConnected(clientarea, ent.areanum)) {
+      // `viewAreas` is [clientarea] for every ordinary connection, so this
+      // is the original two-line check with one iteration; a splitscreen
+      // primary carries one entry per seat (see the union block above).
+      if (!areasConnectedToAny(viewAreas, ent.areanum)) {
         // doors can legally straddle two areas, so
         // we may need to check another one
-        if (!ent.areanum2 || !CM_AreasConnected(clientarea, ent.areanum2)) continue; // blocked by a door
+        if (!ent.areanum2 || !areasConnectedToAny(viewAreas, ent.areanum2)) continue; // blocked by a door
       }
 
       // beams just check one point for PHS
@@ -321,9 +379,19 @@ export function SV_BuildClientFrame(client: ClientT): void {
 
         if (!ent.s.modelindex) {
           // don't send sounds if they will be attenuated away
+          //
+          // Measured from the NEAREST view origin: a sound that is audible
+          // to seat 1 has to survive this cull even when the primary player
+          // is out of range, or that seat goes silent. With no seats this
+          // is the original single `org` distance test.
           const delta = vec3();
           VectorSubtract(org, ent.s.origin, delta);
-          const len = VectorLength(delta);
+          let len = VectorLength(delta);
+          for (const seatOrg of seatOrigins) {
+            VectorSubtract(seatOrg, ent.s.origin, delta);
+            const seatLen = VectorLength(delta);
+            if (seatLen < len) len = seatLen;
+          }
           if (len > 400) continue;
         }
       }

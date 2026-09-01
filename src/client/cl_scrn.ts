@@ -48,7 +48,7 @@ import { fixedLength } from "../shared/fixed";
 import { viddef } from "./vid";
 import { Cvar_Get, Cvar_Set, Cvar_SetValue } from "../qcommon/cvar";
 import { Cmd_AddCommand, Cmd_Argc, Cmd_Argv } from "../qcommon/cmd";
-import { Com_Printf, developer } from "../qcommon/common";
+import { Com_Printf, Com_DPrintf, developer } from "../qcommon/common";
 import { Com_sprintf, CVAR_ARCHIVE, YAW, type CvarT } from "../shared/q_shared";
 import { type Vec3, vec3, DotProduct, VectorAdd, VectorCopy, VectorNormalize, VectorSubtract, AngleVectors } from "../shared/math";
 import { Sys_Milliseconds } from "../platform/sys";
@@ -58,7 +58,9 @@ import { SCR_DrawCinematic } from "./cl_cin";
 import { V_RenderView } from "./cl_view";
 import { M_Draw } from "./menu";
 import type { EntityT, DrawColorT } from "./ref";
-import { CG_DrawHUD, CG_TouchPics, CG_GetActiveCgame } from "./cgame/host";
+import { CG_DrawHUD, CG_DrawHUDForSeat, CG_TouchPics, CG_GetActiveCgame } from "./cgame/host";
+import { CL_Seats_Active, CL_Seats_Count, CL_Seats_Viewports, CL_Seats_PlayerState, CL_Seats_Playernum } from "./cl_seats";
+import { CL_SetSeatView } from "./cl_ents";
 import { CL_Carousel_Draw, CL_Wheel_Draw } from "./cl_wheel";
 import { CDAudio_Play } from "../platform/cd_ogg";
 // Palette lookup for svc_poi's `color` field (a classic 8-bit palette
@@ -435,17 +437,36 @@ export function SCR_CenterPrint(str: string, instant = true): void {
   center.lineCount = 0;
 }
 
+/** The rectangle the engine centerprint centers itself in.
+ *
+ *  Ordinarily the whole display, which is what every coordinate here was
+ *  implicitly relative to. Under LOCAL SPLITSCREEN it is SEAT 0's pane: this
+ *  queue is fed by SCR_CenterPrint off the one connection this session has,
+ *  which is seat 0's, and the kex path already puts a centerprint inside the
+ *  pane of the seat that owns it (its cgame draws them from hud_data[isplit]
+ *  against that seat's hud_vrect). Seats 1..N-1 have no centerprint of their
+ *  own to draw at all -- their server-directed messages are written and
+ *  discarded, which sv_seats.ts documents as a known limitation of both
+ *  rulesets, not something this changes. */
+function centerPrintPane(): { x: number; y: number; width: number; height: number } {
+  if (!CL_Seats_Active()) return { x: 0, y: 0, width: viddef.width, height: viddef.height };
+  const seat0 = CL_Seats_Viewports()[0];
+  return seat0 ? seat0 : { x: 0, y: 0, width: viddef.width, height: viddef.height };
+}
+
 function SCR_DrawCenterStringSlot(center: CenterPrintSlot): void {
   if (!re) return;
 
+  const pane = centerPrintPane();
+
   let y: number;
-  if (center.lines.length <= 4) y = Math.trunc(viddef.height * 0.35);
-  else y = 48;
+  if (center.lines.length <= 4) y = pane.y + Math.trunc(pane.height * 0.35);
+  else y = pane.y + 48;
 
   if (center.instant) {
     for (const line of center.lines) {
       const l = Math.min(line.length, 40);
-      let x = Math.trunc((viddef.width - l * 8) / 2);
+      let x = pane.x + Math.trunc((pane.width - l * 8) / 2);
       SCR_AddDirtyPoint(x, y);
       for (let j = 0; j < l; j++, x += 8) re.DrawChar(x, y, line.charCodeAt(j));
       SCR_AddDirtyPoint(x, y + 8);
@@ -484,7 +505,7 @@ function SCR_DrawCenterStringSlot(center: CenterPrintSlot): void {
     const buffer = center.finished || i !== center.currentLine ? line : line.slice(0, center.lineCount);
 
     const l = Math.min(buffer.length, 40);
-    let x = Math.trunc((viddef.width - l * 8) / 2);
+    let x = pane.x + Math.trunc((pane.width - l * 8) / 2);
     SCR_AddDirtyPoint(x, y);
     for (let j = 0; j < l; j++, x += 8) re.DrawChar(x, y, buffer.charCodeAt(j));
 
@@ -1502,6 +1523,85 @@ export function SCR_GetHelpPathMarkers(): readonly ScrHelpPathMarkerT[] {
   return scr_help_path_markers;
 }
 
+/*
+=================
+SCR_DrawSeatViews
+
+The local-splitscreen replacement for the single
+SCR_CalcVrect/SCR_TileClear/V_RenderView/CG_DrawHUD sequence: one 3D pass and
+one HUD pass per seat, each into its own sub-rect of the frame.
+
+`cl.refdef.x/y/width/height` is already a sub-rect descriptor -- it is how
+`viewsize` below 100 has always worked, and both renderers honor it
+(ref_gl's R_SetupGL issues the matching glViewport/glScissor, gl_rmain.ts:
+685-693; ref_soft derives its span rasterizer's vrect from the same fields).
+Splitting the screen therefore needs no renderer change at all: it needs the
+right rect per pass, the right playerstate per pass, and the background
+cleared once so the gutters between panes do not hold last frame's pixels.
+
+WHAT IS PER-SEAT AND WHAT IS NOT
+  per-seat: the 3D view (rect, origin, angles, fov, blend, view weapon,
+    which body is hidden) and the cgame HUD (its own hud_vrect, its own
+    isplit HUD-state slot, its own playernum's stats).
+  once per frame, seat 0's: the carousel/weapon wheel, the net icon, the
+    engine centerprint, the debug graphs and the pause pic. These are
+    connection-level or input-level chrome, and the reference API agrees
+    about the direction -- the 2023 cgame gates its own chat input line on
+    `if (isplit == 0)` ("only the main player can really chat anyways",
+    cg_screen.cpp:202).
+=================
+*/
+function SCR_DrawSeatViews(separation: number): void {
+  if (!re) return;
+
+  const seats = CL_Seats_Viewports();
+
+  // The panes tile the display except for the few pixels each one gives up
+  // to SCR_CalcVrect's own width/height alignment (see cl_seats.ts's
+  // alignRect). Those gutters are never drawn into by any pass, so without
+  // this they would hold whatever was in the framebuffer last frame. Filling
+  // once, before any pane renders, also gives the split a visible divider.
+  re.DrawFill(0, 0, viddef.width, viddef.height, 0);
+
+  let drawn = 0;
+  for (let seat = 0; seat < seats.length && seat < CL_Seats_Count(); seat++) {
+    const rect = seats[seat];
+    const ps = CL_Seats_PlayerState(seat);
+    if (!ps) continue;
+    drawn++;
+
+    scr_vrect.x = rect.x;
+    scr_vrect.y = rect.y;
+    scr_vrect.width = rect.width;
+    scr_vrect.height = rect.height;
+
+    // Seat 0 renders through the ordinary predicted/interpolated path (a
+    // null override); every other seat renders from its live server
+    // playerstate -- see cl_ents.ts's CL_SetSeatView.
+    CL_SetSeatView(seat === 0 ? null : { ps, playernum: CL_Seats_Playernum(seat) });
+    V_RenderView(separation);
+
+    re.SetGifBeatSeconds(cl.time / 1000);
+    CG_DrawHUDForSeat(CL_Seats_Playernum(seat), ps, { isplit: seat, x: rect.x, y: rect.y, width: rect.width, height: rect.height });
+  }
+
+  // Never leave the override installed: every other consumer of
+  // CL_CalcViewValues/CL_AddPacketEntities in this process (sound
+  // spatialization, the next frame's seat 0 pass) must see the ordinary
+  // client again.
+  CL_SetSeatView(null);
+
+  // A pane that never drew is a seat whose playerstate the server is not
+  // providing -- worth a one-shot report rather than a silently black
+  // quarter of the screen.
+  if (drawn !== reported_drawn_seats) {
+    reported_drawn_seats = drawn;
+    Com_DPrintf("splitscreen: %i of %i viewports drawn (state %i, prepped %i)\n", drawn, CL_Seats_Count(), cls.state, cl.refresh_prepped ? 1 : 0);
+  }
+}
+
+let reported_drawn_seats = -1;
+
 //=======================================================
 
 /*
@@ -1614,26 +1714,37 @@ export function SCR_UpdateScreen(): void {
         cl.cinematicpalette_active = false;
       }
 
-      // do 3D refresh drawing, and then update the screen
-      SCR_CalcVrect();
+      if (CL_Seats_Active()) {
+        // LOCAL SPLITSCREEN (src/client/cl_seats.ts): one refdef pass and one
+        // HUD pass per seat, inside the SAME BeginFrame/EndFrame pair the
+        // single-viewport path already uses -- the identical shape the
+        // stereo branch above this loop uses for its two passes, which is
+        // the only precedent this engine has for more than one RenderFrame
+        // per screen update (no reference engine renders a split at all;
+        // see cl_seats.ts's header).
+        SCR_DrawSeatViews(separation[i]);
+      } else {
+        // do 3D refresh drawing, and then update the screen
+        SCR_CalcVrect();
 
-      // clear any dirty part of the background
-      SCR_TileClear();
+        // clear any dirty part of the background
+        SCR_TileClear();
 
-      V_RenderView(separation[i]);
+        V_RenderView(separation[i]);
 
-      // In-game 2D draws (HUD/carousel/wheel/net/center-string/pause) use
-      // cl.time-derived seconds -- see this function's own BeginFrame-side
-      // comment above.
-      re.SetGifBeatSeconds(cl.time / 1000);
+        // In-game 2D draws (HUD/carousel/wheel/net/center-string/pause) use
+        // cl.time-derived seconds -- see this function's own BeginFrame-side
+        // comment above.
+        re.SetGifBeatSeconds(cl.time / 1000);
 
-      // Routed through the cgame host (src/client/cgame/host.ts) rather
-      // than calling SCR_DrawStats/SCR_DrawLayout/CL_DrawInventory directly
-      // -- the active cgame's DrawHUD (classic.ts + classic_hud.ts, today)
-      // makes those same three calls under the same conditions; see those
-      // files for the (now real, no longer pass-through) implementation.
-      // ARCHITECTURE.md phase 4 ("cgame host, two built-in cgames").
-      CG_DrawHUD();
+        // Routed through the cgame host (src/client/cgame/host.ts) rather
+        // than calling SCR_DrawStats/SCR_DrawLayout/CL_DrawInventory directly
+        // -- the active cgame's DrawHUD (classic.ts + classic_hud.ts, today)
+        // makes those same three calls under the same conditions; see those
+        // files for the (now real, no longer pass-through) implementation.
+        // ARCHITECTURE.md phase 4 ("cgame host, two built-in cgames").
+        CG_DrawHUD();
+      }
 
       // q2repro's screen.c:2019-2023 draws the carousel/wheel right after
       // cgame->DrawHUD, before SCR_DrawNet -- same placement here (see

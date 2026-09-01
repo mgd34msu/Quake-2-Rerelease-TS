@@ -1,6 +1,21 @@
 /*
 Splitscreen scope-ruling tests (ARCHITECTURE.md phase 7 "Splitscreen").
 
+AMENDMENT (v1.1.0, local splitscreen landed): the ruling below is still
+accurate about the REFERENCES -- q2repro genuinely implements no local
+splitscreen, and every guarantee this file tests (private local_sound
+delivery, dupe_key accepted-and-ignored, distinct slots for distinct
+callers, split-suffixed userinfo keys inert) is still exactly true. What is
+now superseded is only its SCOPE conclusion, "WITHOUT local split
+rendering": this port implements it. Seats are built on top of the very
+multi-client behavior this file pins -- an extra seat IS "an ordinary
+second client" as described below, just one created in-process instead of
+over a netchan, because the wire cannot carry a second local player at all
+(q2proto's kex codec rejects a splitscreen serverdata outright,
+q2proto_proto_kex.c:56-57). See src/server/sv_seats.ts's header for the
+re-audit and src/client/cl_seats.ts for the client half;
+test/splitscreen_seats.test.ts is the implementation's own suite.
+
 SCOPE RULING (investigated against ~/Projects/qsrc/q2repro and
 ~/Projects/quake2-rerelease-dll/rerelease, cited per-claim below):
 

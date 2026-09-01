@@ -90,6 +90,7 @@ import { Cmd_AddCommand } from "../qcommon/cmd";
 import { Cbuf_AddText, Cbuf_InsertText, Cbuf_Execute } from "../qcommon/cmd";
 import { Cvar_Get, Cvar_Set, Cvar_SetValue, Cvar_VariableValue, Cvar_VariableString, Cvar_ForceSet } from "../qcommon/cvar";
 import { Com_Printf, Com_Error, Com_ServerState } from "../qcommon/common";
+import { CL_Seats_Available } from "./cl_seats";
 import { ERR_DROP } from "../qcommon/qcommon";
 import type { NetadrT } from "../qcommon/qcommon";
 import { NET_AdrToString } from "../platform/net_udp";
@@ -1627,6 +1628,17 @@ const s_content_skill_list = new MenulistS();
 // screen or console cvars). Default off; "begin" always forces
 // deathmatch 0 either way (PerformLaunch).
 const s_content_coop_list = new MenulistS();
+// LOCAL SPLITSCREEN seat selector (src/client/cl_seats.ts). OFFERED UNDER
+// EVERY RULESET as of Mike's v1.1.0 ruling ("it's all the same engine now,
+// why would we not be able to play with the legacy ruleset in split
+// screen?"). This row used to be kex-only because the classic cgame's status
+// bar derived every coordinate from the full screen, so a classic split
+// rendered two 3D panes under one full-screen HUD; cgame/classic.ts's DrawHUD
+// now honors the seat rect (see its own comment and classic_hud.ts's HUD PANE
+// note), so the gate is gone. What is NOT gone is the gamepad cap below --
+// seat 0 is the keyboard/mouse and every seat past it needs its own pad.
+// Rebuilt by RebuildRulesets alongside the other cascading rows.
+const s_content_seats_list = new MenulistS();
 // The DATA TREE choice (Mike's RC ruling, 2026-09-01) -- see
 // menu_content.ts's DATA TREES section. Rebuilt per (game, ruleset)
 // selection: only the trees that actually hold the selection are listed, so
@@ -1768,8 +1780,35 @@ function RebuildRulesets(): void {
   // marker, matching the pre-existing intent without the side effect.
   s_content_skill_list.generic.flags = NeedsSkillSelectForGame(game) ? 0 : QMF_GRAYED;
 
+  RebuildSeats();
   RebuildDataTrees();
   RebuildStartPoints();
+}
+
+/*
+The seat row. Offered under EVERY ruleset (see s_content_seats_list's own
+comment for the removed kex-only gate), and capped at what the machine can
+actually drive: seat 0 is the keyboard/mouse, every seat past it needs its
+own gamepad, so with no second pad plugged in the row shows a single greyed
+"1" instead of offering a choice that would silently come up short. Same
+"forced single value, greyed" idiom the data-tree row already uses when only
+one tree holds the selection. That cap and the greyed-at-"1" behavior are
+UNCHANGED by the gate removal -- only the ruleset condition went away.
+*/
+function RebuildSeats(): void {
+  const available = CL_Seats_Available();
+
+  const names: string[] = [];
+  for (let n = 1; n <= available; n++) names.push(n === 1 ? "1 (no split)" : String(n));
+  s_content_seats_list.itemnames = names;
+  if (s_content_seats_list.curvalue >= names.length) s_content_seats_list.curvalue = 0;
+  s_content_seats_list.generic.flags = names.length > 1 ? 0 : QMF_GRAYED;
+}
+
+/** Seat count the "begin" action should launch with: the row's index plus
+ *  one, since index 0 is "1 (no split)". */
+function currentSeatCount(): number {
+  return s_content_seats_list.curvalue + 1;
 }
 
 // mapdb.json only ever describes rerelease-side campaign structure (see
@@ -1846,7 +1885,13 @@ export function BeginContentFunc(): void {
   const tree = currentDataTree();
   const mount = tree ? DataMountPlanFor(ruleset, tree) : null;
 
-  PerformLaunch(plan, bsp, skill, s_content_coop_list.curvalue === 1, mount);
+  // Splitscreen launches under every ruleset now (see s_content_seats_list).
+  // The row's own gamepad cap is the only limit, and RebuildSeats already
+  // applies it -- with one pad the row is a single greyed "1", so
+  // currentSeatCount() cannot return more than the hardware can drive.
+  const seats = currentSeatCount();
+
+  PerformLaunch(plan, bsp, skill, s_content_coop_list.curvalue === 1, mount, seats);
   M_ForceMenuOff();
 }
 
@@ -1910,10 +1955,15 @@ function Content_MenuInit(): void {
   s_content_coop_list.generic.name = "coop";
   s_content_coop_list.itemnames = ["no", "yes"];
 
+  s_content_seats_list.generic.type = MTYPE_SPINCONTROL;
+  s_content_seats_list.generic.x = 0;
+  s_content_seats_list.generic.y = 120;
+  s_content_seats_list.generic.name = "local players";
+
   s_content_begin_action.generic.type = MTYPE_ACTION;
   s_content_begin_action.generic.flags = QMF_LEFT_JUSTIFY;
   s_content_begin_action.generic.x = 24;
-  s_content_begin_action.generic.y = 120;
+  s_content_begin_action.generic.y = 140;
   s_content_begin_action.generic.name = "begin";
   s_content_begin_action.generic.callback = BeginContentFunc;
 
@@ -1923,6 +1973,7 @@ function Content_MenuInit(): void {
   Menu_AddItem(s_content_menu, s_content_start_list);
   Menu_AddItem(s_content_menu, s_content_skill_list);
   Menu_AddItem(s_content_menu, s_content_coop_list);
+  Menu_AddItem(s_content_menu, s_content_seats_list);
   Menu_AddItem(s_content_menu, s_content_begin_action);
 
   Menu_Center(s_content_menu);

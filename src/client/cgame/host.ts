@@ -916,11 +916,30 @@ export interface ClassicHudDataT {
 // treats their absence as "this cgame doesn't have one" (cl_scrn.ts's
 // SCR_CenterPrint: falls through to its own local implementation when
 // undefined).
+/** One local splitscreen seat's viewport, as handed to a cgame's DrawHUD.
+ *  See CgameExports.DrawHUD for why isplit and playernum are separate. */
+export interface CgameSeatT {
+  isplit: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface CgameExports {
   apiversion: number;
   Init(): void;
   Shutdown(): void;
-  DrawHUD(playernum: number, ps: PlayerStateT, data: ClassicHudDataT): void;
+  // `seat` carries the two per-viewport values the 2023 cgame API keeps
+  // DISTINCT (game.h:2270's DrawHUD takes both an `isplit` and a
+  // `playernum`): `isplit` picks which local HUD-state slot the cgame keeps
+  // its centerprint/notify queues in (cg_screen.cpp:107's
+  // hud_data[MAX_SPLIT_PLAYERS]), while `playernum` picks whose stats get
+  // drawn. `vrect` is the finished screen rectangle the engine is
+  // responsible for computing -- the reference cgame never derives it, it
+  // only reads it. Absent (the single-viewport case) it stays exactly what
+  // it always was: the whole screen, isplit 0.
+  DrawHUD(playernum: number, ps: PlayerStateT, data: ClassicHudDataT, seat?: CgameSeatT): void;
   TouchPics(): void;
   GetOwnedWeaponWheelWeapons(ps: PlayerStateT): number;
   GetWeaponWheelAmmoCount(ps: PlayerStateT, ammoIndex: number): number;
@@ -1359,6 +1378,47 @@ function kexHudVrect(upscale: number): VrectT {
   return { x: 0, y: 0, width: Math.round(viddef.width / upscale), height: Math.round(viddef.height / upscale) };
 }
 
+/*
+The same rect, for one local splitscreen seat instead of the whole display.
+
+Every position formula in cg_screen.ts multiplies its hud_vrect term by the
+`scale` argument (`x = (hud_vrect.x + atoi(t)) * scale`, cg_screen.ts:890,
+and its siblings at :895/:900/:906/:911/:916), so pre-dividing the seat's
+real pixel rect by the same upscale factor lands every HUD element back
+inside that seat's pane in real pixels -- the identical algebra kexHudVrect
+above already relies on for the full screen, with a nonzero origin.
+
+hud_safe is NOT this rect -- see kexSeatHudSafe below.
+*/
+function kexSeatHudVrect(seat: { x: number; y: number; width: number; height: number }, upscale: number): VrectT {
+  return {
+    x: Math.round(seat.x / upscale),
+    y: Math.round(seat.y / upscale),
+    width: Math.round(seat.width / upscale),
+    height: Math.round(seat.height / upscale),
+  };
+}
+
+/** The seat's hud_safe: same size as its hud_vrect, but a ZERO origin,
+ *  because cg_screen.ts treats hud_safe.x/y as a real-pixel INSET added to
+ *  left/top-anchored positions and subtracted from right/bottom-anchored
+ *  ones. This port has no overscan-inset concept, so the inset is zero --
+ *  which is exactly what the full-screen path has always effectively passed,
+ *  its hud_vrect origin being (0,0). */
+function kexSeatHudSafe(hud_vrect: VrectT): VrectT {
+  return { x: 0, y: 0, width: hud_vrect.width, height: hud_vrect.height };
+}
+
+/** hudUpscaleFactor's auto tier against a seat's pane instead of the whole
+ *  display. A user-set scr_scale still wins outright, exactly as it does for
+ *  the full-screen path (R_ClampScale, q2repro src/refresh/draw.c:293-301). */
+function seatHudUpscaleFactor(width: number, height: number): number {
+  const cvar = scr_scale_cvar ?? (scr_scale_cvar = Cvar_Get("scr_scale", "0", CVAR_ARCHIVE));
+  const requested = cvar ? cvar.value : 0;
+  if (requested) return Math.min(Math.max(requested, 1), 10);
+  return autoHudUpscale(width, height);
+}
+
 function GetKexCgameAsClassicShape(kex: KexCgameExports): CgameExports {
   return {
     // This seam's own minimal-shape versioning (see CGAME_API_VERSION's own
@@ -1369,10 +1429,25 @@ function GetKexCgameAsClassicShape(kex: KexCgameExports): CgameExports {
     apiversion: CGAME_API_VERSION,
     Init: kex.Init,
     Shutdown: kex.Shutdown,
-    DrawHUD(playernum, ps, data) {
-      const upscale = hudUpscaleFactor();
-      const hud_vrect = kexHudVrect(upscale);
-      kex.DrawHUD(0, kexServerDataViewFromClassic(data), hud_vrect, hud_vrect, upscale, playernum, kexPlayerStateViewFromClassic(ps));
+    DrawHUD(playernum, ps, data, seat) {
+      // Per-seat auto scale is derived from the SEAT's rect, not the
+      // display's: a quarter-screen pane on a 4K display is 1080p-sized and
+      // should pick the 1080p HUD tier, not the 4K one. With no seat this
+      // is the pre-splitscreen call, unchanged.
+      const upscale = seat ? seatHudUpscaleFactor(seat.width, seat.height) : hudUpscaleFactor();
+      const hud_vrect = seat ? kexSeatHudVrect(seat, upscale) : kexHudVrect(upscale);
+      // hud_safe is an INSET, not a second rectangle: cg_screen.ts adds
+      // hud_safe.x/y to left/top-anchored positions and SUBTRACTS them from
+      // right/bottom-anchored ones (cg_screen.ts:890/895/906/911). Passing
+      // hud_vrect for it is harmless only while hud_vrect's origin is (0,0),
+      // which is why the full-screen call below has always been able to
+      // reuse it. A seat's origin is not (0,0), and passing it as the inset
+      // pushed every bottom-anchored HUD element off the bottom of the
+      // screen -- caught by reading a live 4-way frame, whose two bottom
+      // panes drew no HUD at all. Zero insets, matching this port's "no
+      // console-style overscan concept" precedent (kexHudVrect's own note).
+      const hud_safe = seat ? kexSeatHudSafe(hud_vrect) : hud_vrect;
+      kex.DrawHUD(seat ? seat.isplit : 0, kexServerDataViewFromClassic(data), hud_vrect, hud_safe, upscale, playernum, kexPlayerStateViewFromClassic(ps));
     },
     TouchPics: kex.TouchPics,
     GetOwnedWeaponWheelWeapons: (ps) => kex.GetOwnedWeaponWheelWeapons(kexPlayerStateViewFromClassic(ps)),
@@ -1501,6 +1576,15 @@ export function CG_DrawHUD(): void {
   ensureActiveCgame().exports.DrawHUD(cl.playernum, cl.frame.playerstate, data);
 }
 
+/** CG_DrawHUD for one local splitscreen seat's viewport (cl_scrn.ts's
+ *  per-seat draw loop). `layout`/`inventory` stay the connection's -- they
+ *  arrive over the one wire this session has, and the reference API delivers
+ *  them the same way: DrawHUD's `data` parameter carries no split index. */
+export function CG_DrawHUDForSeat(playernum: number, ps: PlayerStateT, seat: CgameSeatT): void {
+  const data: ClassicHudDataT = { layout: cl.layout, inventory: cl.inventory };
+  ensureActiveCgame().exports.DrawHUD(playernum, ps, data, seat);
+}
+
 // The engine side of CgameExports.TouchPics -- called from cl_scrn.ts's
 // SCR_TouchPics (see that file's own note on why the sb_nums precache moved
 // behind this member while the crosshair precache stayed put) and from
@@ -1531,3 +1615,7 @@ export { kexPlayerStateViewFromClassic, kexServerDataViewFromClassic, kexPmTypeF
 // own doc comment above) against q2repro's real get_auto_scale/
 // R_ClampScale tiering.
 export { autoHudUpscale, hudUpscaleFactor, kexHudVrect };
+// Same reason, for the local-splitscreen per-seat variants: pure functions
+// pinning that a seat's HUD scales to its own pane and lands inside it
+// (test/splitscreen_seats.test.ts).
+export { kexSeatHudVrect, kexSeatHudSafe, seatHudUpscaleFactor };

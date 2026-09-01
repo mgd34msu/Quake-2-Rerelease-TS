@@ -92,6 +92,7 @@ import { SV_RecordDemoMessage } from "./sv_ents";
 import { SV_InitOperatorCommands } from "./sv_ccmds";
 import { Nav_Init, Nav_Unload, Nav_Frame } from "./nav";
 import { SV_MvdRegister, SV_MvdBeginFrame, SV_MvdEndFrame } from "./sv_mvd";
+import { SV_RunLocalSeatThinks } from "./sv_seats";
 
 //============================================================================
 
@@ -1003,6 +1004,13 @@ export function SV_Frame(msec: number): void {
 
   // get packets from clients
   SV_ReadPackets();
+
+  // LOCAL SPLITSCREEN (sv_seats.ts): the extra local seats' moves. Placed
+  // here, immediately after the point where a real client's move is executed
+  // (SV_ReadPackets -> SV_ExecuteClientMessage -> SV_ClientThink), so a
+  // seat's think is inside the same frame that flushes whatever the game
+  // wrote during it -- see SV_RunLocalSeatThinks. No-op with no seats.
+  SV_RunLocalSeatThinks();
 
   // move autonomous things around if enough time has passed
   if (!(sv_timedemo && sv_timedemo.value) && svs.realtime < sv.time) {

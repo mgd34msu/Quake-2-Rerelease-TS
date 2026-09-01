@@ -28,7 +28,7 @@ import {
 import { CL_AddShadowLights } from "./cl_fx";
 import { crosshair, crosshair_height, crosshair_pic, crosshair_width, scr_vrect, setCrosshair } from "./screen";
 import { entitycmpfnc, SCR_AddDirtyPoint, SCR_TouchPics, SCR_UpdateScreen, SCR_DrawPOIs, SCR_DrawDamageDisplays, SCR_GetHelpPathMarkers } from "./cl_scrn";
-import { CL_AddEntities } from "./cl_ents";
+import { CL_AddEntities, CL_ActiveSeatView } from "./cl_ents";
 import { CL_RegisterTEntModels } from "./cl_tent";
 import { CL_LoadClientinfo, CL_ParseClientinfo, CL_RegisterImage } from "./cl_parse";
 import { Sys_SendKeyEvents } from "./cl_input";
@@ -612,7 +612,12 @@ export function V_RenderView(stereo_separation: number): void {
     cl.refdef.dlights = r_dlights;
     cl.refdef.lightstyles = r_lightstyles;
 
-    cl.refdef.rdflags = cl.frame.playerstate.rdflags;
+    // Per-viewport while a local splitscreen seat is being drawn: rdflags
+    // carries RDF_UNDERWATER (the warp) and RDF_IRGOGGLES, which are
+    // properties of where THAT seat's eyes are, not of the connection.
+    // CL_ActiveSeatView() is null for every ordinary frame.
+    const seatView = CL_ActiveSeatView();
+    cl.refdef.rdflags = seatView ? seatView.ps.rdflags : cl.frame.playerstate.rdflags;
 
     // sort entities for better cache locality
     const activeEntities = r_entities.slice(0, r_numentities);

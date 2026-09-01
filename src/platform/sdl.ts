@@ -35,6 +35,7 @@ import {
   SDL_CONTROLLER_AXIS_RIGHTX,
   SDL_CONTROLLER_AXIS_RIGHTY,
   SDL_CONTROLLER_AXIS_TRIGGERLEFT,
+  SDL_CONTROLLER_AXIS_TRIGGERRIGHT,
 } from "./gamepad_map";
 import { Cvar_Get, Cvar_VariableValue } from "../qcommon/cvar";
 import { Cmd_AddCommand } from "../qcommon/cmd";
@@ -193,9 +194,11 @@ const WHEELEVENT_Y = 20;
 // SDL_WindowEvent: event 12.
 const WINDOWEVENT_EVENT = 12;
 // SDL_ControllerAxisEvent: which(Sint32) 8, axis(Uint8) 12, value(Sint16) 16.
+const CAXISEVENT_WHICH = 8;
 const CAXISEVENT_AXIS = 12;
 const CAXISEVENT_VALUE = 16;
 // SDL_ControllerButtonEvent: which(Sint32) 8, button(Uint8) 12, state(Uint8) 13.
+const CBUTTONEVENT_WHICH = 8;
 const CBUTTONEVENT_BUTTON = 12;
 const CBUTTONEVENT_STATE = 13;
 // SDL_ControllerDeviceEvent: which(Sint32) 8 -- device index for ADDED,
@@ -780,6 +783,91 @@ let gpLeftY = 0;
 let gpRightX = 0;
 let gpRightY = 0;
 
+/*
+SECONDARY PADS (local splitscreen seats 1..N-1, src/client/cl_seats.ts).
+
+The primary controller above keeps its exact pre-existing role: it is the
+only pad whose buttons/triggers become Key_Event (so the bind system, the
+menu and seat 0 are driven by it alone) and the only pad IN_JoyMove reads.
+Additional physical pads are opened into these slots and their state is
+LATCHED ONLY -- nothing in the single-screen client reads it, so plugging a
+second pad in changes no observable behavior. cl_seats.ts polls
+SDL_GamepadSeatState(slot) for seats 1..N-1 while splitscreen is running.
+
+Routing is by SDL joystick INSTANCE ID: before this section existed the
+event pump ignored `which` entirely, which was safe only because exactly
+one pad was ever open. Opening more pads makes `which` load-bearing -- an
+unrouted axis event from pad 2 would otherwise overwrite pad 1's stick.
+*/
+const MAX_SECONDARY_PADS = 3;
+
+class SecondaryPadT {
+  handle: Pointer | bigint | null = null;
+  instanceId = -1;
+  leftX = 0;
+  leftY = 0;
+  rightX = 0;
+  rightY = 0;
+  triggerL = 0;
+  triggerR = 0;
+  // SDL_CONTROLLER_BUTTON_* bitmask, bit N = button N held.
+  buttons = 0;
+
+  clear(): void {
+    this.handle = null;
+    this.instanceId = -1;
+    this.leftX = 0;
+    this.leftY = 0;
+    this.rightX = 0;
+    this.rightY = 0;
+    this.triggerL = 0;
+    this.triggerR = 0;
+    this.buttons = 0;
+  }
+}
+
+const gpSecondary: SecondaryPadT[] = Array.from({ length: MAX_SECONDARY_PADS }, () => new SecondaryPadT());
+
+/** Raw latched state of an extra (non-primary) pad. Slot 0 here is the FIRST
+ *  extra pad, i.e. splitscreen seat 1. Returns null when that slot has no
+ *  controller open. */
+export interface GamepadSeatStateT {
+  leftX: number;
+  leftY: number;
+  rightX: number;
+  rightY: number;
+  triggerL: number;
+  triggerR: number;
+  buttons: number;
+}
+
+export function SDL_GamepadSeatState(slot: number): GamepadSeatStateT | null {
+  const pad = gpSecondary[slot];
+  if (!pad || !pad.handle) return null;
+  return {
+    leftX: pad.leftX,
+    leftY: pad.leftY,
+    rightX: pad.rightX,
+    rightY: pad.rightY,
+    triggerL: pad.triggerL,
+    triggerR: pad.triggerR,
+    buttons: pad.buttons,
+  };
+}
+
+/** How many extra (non-primary) pads are currently open -- the number of
+ *  splitscreen seats past seat 0 that a controller can actually drive. */
+export function SDL_GamepadSeatCount(): number {
+  let n = 0;
+  for (const pad of gpSecondary) if (pad.handle) n++;
+  return n;
+}
+
+function gpSecondaryByInstance(which: number): SecondaryPadT | null {
+  for (const pad of gpSecondary) if (pad.handle && pad.instanceId === which) return pad;
+  return null;
+}
+
 let in_joystick: CvarT | null = null;
 let joy_deadzone: CvarT | null = null;
 let joy_forwardsensitivity: CvarT | null = null;
@@ -807,14 +895,48 @@ function gpCloseController(l: SdlLib): void {
   gpControllerInstanceId = -1;
 }
 
+function gpCloseSecondary(l: SdlLib, pad: SecondaryPadT): void {
+  if (pad.handle) l.symbols.SDL_GameControllerClose(pad.handle);
+  pad.clear();
+}
+
+export function SDL_CloseSecondaryGamepads(): void {
+  const l = lib();
+  if (!l) return;
+  for (const pad of gpSecondary) gpCloseSecondary(l, pad);
+}
+
 function gpOpenFirstAvailable(l: SdlLib, deviceIndex: number): void {
-  if (gpController) return; // single-controller policy, matching haptics.ts's own precedent
   if (!l.symbols.SDL_IsGameController(deviceIndex)) return;
+  // The primary slot keeps first refusal (haptics.ts's own precedent: one
+  // shared handle for the rumble sink). Every pad past it goes to a
+  // secondary slot instead of being dropped on the floor, so a splitscreen
+  // session can find it -- see the SECONDARY PADS block above for why that
+  // does not change single-screen behavior.
+  if (!gpController) {
+    const handle = l.symbols.SDL_GameControllerOpen(deviceIndex);
+    if (!handle) return;
+    const joystick = l.symbols.SDL_GameControllerGetJoystick(handle);
+    gpController = handle;
+    gpControllerInstanceId = joystick ? l.symbols.SDL_JoystickInstanceID(joystick) : -1;
+    return;
+  }
+
+  const free = gpSecondary.find((p) => !p.handle);
+  if (!free) return;
   const handle = l.symbols.SDL_GameControllerOpen(deviceIndex);
   if (!handle) return;
   const joystick = l.symbols.SDL_GameControllerGetJoystick(handle);
-  gpController = handle;
-  gpControllerInstanceId = joystick ? l.symbols.SDL_JoystickInstanceID(joystick) : -1;
+  const instanceId = joystick ? l.symbols.SDL_JoystickInstanceID(joystick) : -1;
+  // A pad SDL reports twice (or whose instance id we could not read) would
+  // otherwise alias onto an existing slot's routing; refuse it rather than
+  // corrupt an open seat.
+  if (instanceId < 0 || instanceId === gpControllerInstanceId || gpSecondaryByInstance(instanceId)) {
+    l.symbols.SDL_GameControllerClose(handle);
+    return;
+  }
+  free.handle = handle;
+  free.instanceId = instanceId;
 }
 
 /*
@@ -827,8 +949,16 @@ instance id matches the one we opened, so unplugging some OTHER, never-opened
 second controller can't drop the active one.
 */
 function gpHandleDeviceEvent(l: SdlLib, added: boolean, which: number): void {
-  if (added) gpOpenFirstAvailable(l, which);
-  else if (which === gpControllerInstanceId) gpCloseController(l);
+  if (added) {
+    gpOpenFirstAvailable(l, which);
+    return;
+  }
+  if (which === gpControllerInstanceId) {
+    gpCloseController(l);
+    return;
+  }
+  const pad = gpSecondaryByInstance(which);
+  if (pad) gpCloseSecondary(l, pad);
 }
 
 function IN_MLookDown(): void {
@@ -888,6 +1018,15 @@ export function IN_Init(): void {
   gpRightY = 0;
   gpLeftTriggerDown = false;
   gpRightTriggerDown = false;
+  for (const pad of gpSecondary) {
+    pad.leftX = 0;
+    pad.leftY = 0;
+    pad.rightX = 0;
+    pad.rightY = 0;
+    pad.triggerL = 0;
+    pad.triggerR = 0;
+    pad.buttons = 0;
+  }
   {
     const gl = lib();
     if (gl) initSubsystem(gl, SDL_INIT_GAMECONTROLLER);
@@ -926,6 +1065,7 @@ export function IN_Shutdown(): void {
   mouse_avail = false;
   const l = lib();
   if (l && gpController) gpCloseController(l);
+  if (l) for (const pad of gpSecondary) gpCloseSecondary(l, pad);
 }
 
 function IN_ActivateMouse(): void {
@@ -1160,13 +1300,36 @@ export function SDL_PumpInput(time: number): void {
       case SDL_CONTROLLERBUTTONDOWN:
       case SDL_CONTROLLERBUTTONUP: {
         const down = type === SDL_CONTROLLERBUTTONDOWN;
-        const mapped = SDL_GamepadButtonEventToKey(eventBuf[CBUTTONEVENT_BUTTON], down);
+        const button = eventBuf[CBUTTONEVENT_BUTTON];
+        // Route by instance id: only the PRIMARY pad's buttons become
+        // Key_Event (bind system, menu, seat 0). A secondary pad latches a
+        // raw held-button bitmask for cl_seats.ts instead -- see the
+        // SECONDARY PADS block above.
+        const seatPad = gpSecondaryByInstance(eventView.getInt32(CBUTTONEVENT_WHICH, true));
+        if (seatPad) {
+          if (button >= 0 && button < 31) {
+            if (down) seatPad.buttons |= 1 << button;
+            else seatPad.buttons &= ~(1 << button);
+          }
+          break;
+        }
+        const mapped = SDL_GamepadButtonEventToKey(button, down);
         if (mapped) Key_Event(mapped.key, mapped.down, time);
         break;
       }
       case SDL_CONTROLLERAXISMOTION: {
         const axis = eventBuf[CAXISEVENT_AXIS];
         const value = eventView.getInt16(CAXISEVENT_VALUE, true);
+        const seatPad = gpSecondaryByInstance(eventView.getInt32(CAXISEVENT_WHICH, true));
+        if (seatPad) {
+          if (axis === SDL_CONTROLLER_AXIS_LEFTX) seatPad.leftX = value;
+          else if (axis === SDL_CONTROLLER_AXIS_LEFTY) seatPad.leftY = value;
+          else if (axis === SDL_CONTROLLER_AXIS_RIGHTX) seatPad.rightX = value;
+          else if (axis === SDL_CONTROLLER_AXIS_RIGHTY) seatPad.rightY = value;
+          else if (axis === SDL_CONTROLLER_AXIS_TRIGGERLEFT) seatPad.triggerL = value;
+          else if (axis === SDL_CONTROLLER_AXIS_TRIGGERRIGHT) seatPad.triggerR = value;
+          break;
+        }
         if (axis === SDL_CONTROLLER_AXIS_LEFTX) gpLeftX = value;
         else if (axis === SDL_CONTROLLER_AXIS_LEFTY) gpLeftY = value;
         else if (axis === SDL_CONTROLLER_AXIS_RIGHTX) gpRightX = value;
@@ -1292,6 +1455,10 @@ export function SDL_ResetBackendForTests(): void {
   SDLVID_Shutdown();
   const l = library;
   if (l && gpController) gpCloseController(l);
+  for (const pad of gpSecondary) {
+    if (l && pad.handle) gpCloseSecondary(l, pad);
+    else pad.clear();
+  }
   gpLeftX = 0;
   gpLeftY = 0;
   gpRightX = 0;

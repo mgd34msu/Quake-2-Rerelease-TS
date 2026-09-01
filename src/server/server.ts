@@ -300,8 +300,21 @@ export class ClientT {
   // r1q2Version/q2proVersion fields).
   protocolMinorVersion = 0;
 
+  // LOCAL SPLITSCREEN SEAT (src/server/sv_seats.ts): this client was seated
+  // by SV_AddLocalSeat rather than by SVC_DirectConnect, so it has no
+  // netchan, no remote address and nothing to transmit to -- its usercmds
+  // arrive by direct call and its playerstate is read back out of the game
+  // module in-process. Anything that walks svs.clients expecting a real
+  // connection has to skip it (SV_SendClientMessages does; SV_CheckTimeouts
+  // needs no change because SV_LocalSeatThink refreshes lastmessage every
+  // frame). Not part of the C client_t; no reference field to cite, because
+  // no reference engine implements local splitscreen at all -- see
+  // sv_seats.ts's header for the full audit.
+  isLocalSeat = false;
+
   // mirrors `memset(newcl, 0, sizeof(client_t))` (SVC_DirectConnect's `temp`)
   clear(): void {
+    this.isLocalSeat = false;
     this.state = ClientStateT.cs_free;
     this.userinfo = "";
     this.lastframe = 0;

@@ -433,6 +433,13 @@ export function SV_SendClientMessages(): void {
   for (const c of svs.clients) {
     if (!c.state) continue;
 
+    // Local splitscreen seats (sv_seats.ts) have no netchan and no remote
+    // address: their playerstate is read back in-process by the client that
+    // draws their viewport, so there is no message to build and nothing to
+    // transmit to. Skipped before any buffer/overflow handling below, all of
+    // which would be operating on a NetchanT that was never Netchan_Setup'd.
+    if (c.isLocalSeat) continue;
+
     // if the reliable message overflowed, drop the client
     if (c.netchan.message.overflowed) {
       SZ_Clear(c.netchan.message);

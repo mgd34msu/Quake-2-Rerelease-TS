@@ -27,7 +27,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { SCR_Init, SCR_CenterPrint, SCR_CheckDrawCenterString, SCR_ClearCenterPrint } from "../src/client/cl_scrn";
 import { cl, cls, setRe, ConnstateT } from "../src/client/client";
 import { viddef } from "../src/client/vid";
-import { Cvar_ForceSet } from "../src/qcommon/cvar";
+import { Cvar_ForceSet, Cvar_Get } from "../src/qcommon/cvar";
 import { Key_SetBinding, Key_StringToKeynum } from "../src/client/keys_impl";
 import { CG_SetActiveCgame, CG_SetActiveCgameKind, CG_GetActiveCgame, CG_DrawHUD, type CgameExports } from "../src/client/cgame/host";
 import type { RefExports, ImageS, DrawColorT } from "../src/client/ref";
@@ -83,6 +83,15 @@ beforeEach(() => {
   viddef.height = 240;
   Cvar_ForceSet("scr_centertime", "5.0");
   Cvar_ForceSet("scr_printspeed", "0.04");
+  // Register through the product's OWN default before forcing a value:
+  // Cvar_ForceSet on a name nothing has registered yet CREATES the cvar,
+  // and the created cvar's default_string becomes the forced value. That
+  // leaked a default_string of "classic" into the process-global cvar
+  // table and made test/cgame_host_kfont_source.test.ts's "registers with
+  // their documented defaults" assertion fail whenever this suite happened
+  // to run first (preferences.md rule 13: a suite initializes what it
+  // touches and does not depend on -- or impose -- an ordering).
+  Cvar_Get("cl_kfont_source", "kfont", 0);
   Cvar_ForceSet("cl_kfont_source", "classic"); // force conchars fallback -- see file header
   cls.state = ConnstateT.ca_connected;
   cl.layout = "";

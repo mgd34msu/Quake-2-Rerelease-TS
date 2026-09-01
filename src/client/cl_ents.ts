@@ -763,7 +763,10 @@ function CL_AddPacketEntities(frame: FrameT): void {
       }
     }
 
-    if (s1.number === cl.playernum + 1) {
+    // CL_SeatViewPlayernum() is cl.playernum for every ordinary frame; while
+    // an extra splitscreen seat's viewport is being drawn it is THAT seat's
+    // slot, so each seat hides its own body and sees the other seats'.
+    if (s1.number === CL_SeatViewPlayernum() + 1) {
       ent.flags |= RF_VIEWERMODEL; // only draw from mirrors
       // FIXME: still pass to refresh
 
@@ -1062,12 +1065,79 @@ export function CL_AddViewWeapon(ps: PlayerStateT, ops: PlayerStateT): void {
 
 /*
 ===============
+LOCAL SPLITSCREEN SEAT VIEW (src/client/cl_seats.ts)
+
+While an extra seat's viewport is being rendered, the view is driven by that
+seat's playerstate instead of `cl.frame.playerstate`. `cl` itself is a
+singleton and stays seat 0's -- only the two things that are genuinely
+per-viewport get redirected: where the camera is (CL_CalcViewValues) and
+which entity is "me" and therefore must not be drawn (CL_AddPacketEntities).
+
+The seat playerstate is read live out of the local server's own gclient
+(sv_seats.ts's SV_LocalSeatPlayerState), NOT decoded from a frame, so unlike
+seat 0 it is neither interpolated nor predicted: it is already the current
+authoritative state. cl.lerpfrac still governs the shared ENTITY scene,
+which every seat renders out of.
+===============
+*/
+export interface SeatViewT {
+  ps: PlayerStateT;
+  /** The seat's player slot -- entity `playernum + 1` is the seat's own body. */
+  playernum: number;
+}
+
+let seat_view: SeatViewT | null = null;
+
+export function CL_SetSeatView(view: SeatViewT | null): void {
+  seat_view = view;
+}
+
+export function CL_SeatViewPlayernum(): number {
+  return seat_view ? seat_view.playernum : cl.playernum;
+}
+
+export function CL_ActiveSeatView(): SeatViewT | null {
+  return seat_view;
+}
+
+function CL_CalcSeatViewValues(view: SeatViewT): void {
+  const ps = view.ps;
+
+  for (let i = 0; i < 3; i++) cl.refdef.vieworg[i] = ps.pmove.origin[i] * 0.125 + ps.viewoffset[i];
+  // Same re-release eye-height term the primary path adds below, minus the
+  // 100ms crouch-transition easing: that easing is driven by
+  // cl.current_viewheight/cl.viewheight_change_time, which are seat 0's
+  // singleton state and would be corrupted by a second writer. A seat's
+  // crouch snaps instead of easing -- a real, reported cosmetic gap, not a
+  // silent one.
+  cl.refdef.vieworg[2] += ps.pmove.viewheight;
+
+  for (let i = 0; i < 3; i++) cl.refdef.viewangles[i] = ps.viewangles[i] + ps.kick_angles[i];
+  AngleVectors(cl.refdef.viewangles, cl.v_forward, cl.v_right, cl.v_up);
+
+  cl.refdef.fov_x = ps.fov;
+  for (let i = 0; i < 4; i++) cl.refdef.blend[i] = ps.blend[i];
+
+  // `ops === ps`: there is no previous frame to lerp from on this path, and
+  // every lerp term inside CL_AddViewWeapon collapses to the current value
+  // when both arguments are the same playerstate.
+  CL_AddViewWeapon(ps, ps);
+}
+
+/*
+===============
 CL_CalcViewValues
 
 Sets cl.refdef view values
 ===============
 */
 function CL_CalcViewValues(): void {
+  const seat = seat_view;
+  if (seat) {
+    CL_CalcSeatViewValues(seat);
+    return;
+  }
+
   // find the previous frame to interpolate from
   const ps = cl.frame.playerstate;
   const i = (cl.frame.serverframe - 1) & UPDATE_MASK;

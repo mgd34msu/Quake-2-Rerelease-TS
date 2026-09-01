@@ -119,6 +119,7 @@ import {
 } from "../shared/q_shared";
 import { cl, cls, cl_entities, ConnstateT, CentityT, clCvars } from "./client";
 import { CL_InitInput, CL_SendCmd, IN_Commands, IN_Frame, IN_Init, Sys_SendKeyEvents } from "./cl_input";
+import { CL_Seats_Init, CL_Seats_Reconcile, CL_Seats_SendCmds, CL_Seats_Shutdown } from "./cl_seats";
 import { VID_Shutdown, VID_CheckChanges, VID_Front_f, VID_Init } from "../platform/vid";
 import { CL_PredictMovement } from "./cl_pred";
 import { CL_RunDLights, CL_RunLightStyles, CL_ClearEffects } from "./cl_fx";
@@ -726,6 +727,13 @@ This is also called on Com_Error, so it shouldn't cause any errors
 */
 export function CL_Disconnect(): void {
   if (cls.state === ConnstateT.ca_disconnected) return;
+
+  // Local splitscreen seats are server clients of the game this connection
+  // was playing (src/server/sv_seats.ts); they go with it. CL_Seats_Reconcile
+  // would tear them down on the next frame anyway, but leaving occupied
+  // player slots behind across a disconnect would make the NEXT session
+  // start short of slots.
+  CL_Seats_Shutdown();
 
   // A fresh connection negotiates from its own challenge reply -- never
   // from the previous server's advertised list.
@@ -1720,6 +1728,11 @@ export function CL_InitLocal(): void {
   cls.realtime = Sys_Milliseconds();
 
   CL_InitInput();
+  // cl_seats/cl_splitscreen_layout (src/client/cl_seats.ts) -- registered
+  // beside CL_InitInput because seats are an input concept first: a seat is
+  // a controller and a viewport, and the cvar has to exist before the New
+  // Game screen's seat selector reads it.
+  CL_Seats_Init();
 
   // q2repro src/client/main.c:2724 (CL_InitLocal) calls CL_InitDemos() here
   // (src/client/demo.c:1577-1581); registered inline instead of importing
@@ -2058,6 +2071,14 @@ export function CL_SendCommand(): void {
 
   // send intentions now
   CL_SendCmd();
+
+  // LOCAL SPLITSCREEN (src/client/cl_seats.ts): bring the seat table in line
+  // with cl_seats/the connection state, then run each extra seat's move.
+  // After CL_SendCmd, not before: seat 0's move is the one that goes over
+  // the wire and sets this frame's tempo, and a seat added here must not
+  // change the player slot the primary connection already holds.
+  CL_Seats_Reconcile();
+  CL_Seats_SendCmds();
 
   // resend a connection request if necessary
   CL_CheckForResend();

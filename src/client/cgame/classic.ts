@@ -20,7 +20,7 @@
 // cl_scrn.ts's own note on it.
 
 import { STAT_LAYOUTS } from "../../shared/q_shared";
-import { SCR_DrawStats, SCR_DrawLayout, CL_DrawInventory, sb_nums } from "./classic_hud";
+import { SCR_DrawStats, SCR_DrawLayout, CL_DrawInventory, sb_nums, fullScreenHudPane, type HudPaneT } from "./classic_hud";
 import type { CgameImports, CgameExports } from "./host";
 import { CGAME_API_VERSION } from "./host";
 
@@ -37,10 +37,36 @@ export function GetClassicCgameAPI(imports: CgameImports): CgameExports {
       // TODO(phase 4 continuation): see Init() above.
     },
 
-    DrawHUD(playernum, ps, data) {
-      SCR_DrawStats(imports, ps, playernum);
-      if (ps.stats[STAT_LAYOUTS] & 1) SCR_DrawLayout(imports, ps, playernum, data.layout);
-      if (ps.stats[STAT_LAYOUTS] & 2) CL_DrawInventory(imports, ps, data.inventory);
+    // `seat` IS honored now (Mike's v1.1.0 ruling: local splitscreen works
+    // under the classic ruleset too -- "it's all the same engine now").
+    //
+    // The reference classic cgame ignores this parameter -- q2repro's
+    // CGC_DrawHUD (src/client/cgame_classic.c:856-858) opens with "Note:
+    // isplit is ignored, due to missing split screen support" and never reads
+    // it, because that engine renders exactly one viewport. This port renders
+    // one HUD pass per local seat (cl_scrn.ts's SCR_DrawSeatViews), so
+    // ignoring it is what left two 3D panes under one full-screen status bar.
+    // This is therefore a DOCUMENTED COMPAT ADDITION over the reference, not a
+    // fidelity break: with no seat (every single-viewport frame, which is
+    // every frame the reference engine has) the pane is the whole display and
+    // the arithmetic in classic_hud.ts is bit-identical to what it was.
+    //
+    // Only `seat`'s RECT is used, and only as an origin+size. `isplit` picks
+    // a per-seat HUD-state slot in the kex cgame (hud_data[isplit],
+    // cg_screen.cpp:107); this cgame keeps no such per-seat state -- its
+    // centerprint/notify queues live in cl_scrn.ts and stay seat 0's, matching
+    // what sv_seats.ts already documents about seat-directed server messages
+    // being written and discarded.
+    //
+    // NOT passed as a safe-area inset: see classic_hud.ts's HUD PANE note.
+    // The rect's origin is only ever ADDED to a coordinate. Conflating the two
+    // is what previously pushed the kex path's bottom-anchored HUD elements a
+    // whole pane off the bottom (host.ts's kexSeatHudSafe).
+    DrawHUD(playernum, ps, data, seat) {
+      const pane: HudPaneT = seat ? { x: seat.x, y: seat.y, width: seat.width, height: seat.height } : fullScreenHudPane();
+      SCR_DrawStats(imports, ps, playernum, pane);
+      if (ps.stats[STAT_LAYOUTS] & 1) SCR_DrawLayout(imports, ps, playernum, data.layout, pane);
+      if (ps.stats[STAT_LAYOUTS] & 2) CL_DrawInventory(imports, ps, data.inventory, pane);
     },
 
     // The sb_nums half of cl_scrn.ts's former SCR_TouchPics -- moved behind
