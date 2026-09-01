@@ -65,7 +65,7 @@
 import { SysError } from "../qcommon/qcommon";
 import { Com_DPrintf } from "../qcommon/common";
 import { Cmd_TokenizeString } from "../qcommon/cmd";
-import { SZ_Init, SZ_Clear } from "../qcommon/sizebuf";
+import { SZ_Init, SZ_Clear, type SizeBuf, type SizeBufObserver } from "../qcommon/sizebuf";
 import { UsercmdT, Info_SetValueForKey } from "../shared/q_shared";
 import { vec3, type Vec3 } from "../shared/math";
 import type { PlayerStateT } from "../shared/q_shared";
@@ -195,15 +195,175 @@ connection to drop for a reliable overflow the way SV_SendClientMessages
 would), and drained every frame by SV_RunLocalSeatThinks: nothing ever
 transmits them, so without the drain they would fill up and stay full.
 
-WHAT IS DISCARDED, STATED PLAINLY: server-to-seat messages are written and
-thrown away. A seat's own centerprints, private sounds and layout updates do
-not reach the screen in this deliverable -- the HUD each pane draws comes
-from the seat's PLAYERSTATE (stats, which is where health/ammo/armor live)
-plus the connection's shared layout, which is why a seat's HUD is correct
-while its centerprints are not. Consuming this buffer per-seat is the
-remaining work for full parity.
+WHAT REACHES THE SEAT: the drain no longer throws these bytes away. Every
+write into a seat's two buffers is captured (SEAT MESSAGE CAPTURE below) and
+handed to the client each frame, which decodes the subset it can act on and
+routes it to the owning seat's pane -- centerprints in particular. What the
+client does and does not act on is cl_seats.ts's CL_Seats_DrainServerMessages;
+this side only captures and classifies.
 ==================
 */
+/*
+==================
+SEAT MESSAGE CAPTURE
+
+A seat's server-to-client bytes have to leave this module in a form the client
+can decode. Two things make a raw "copy the buffer once a frame" capture
+insufficient:
+
+ 1. LENGTHS. A seat's buffers carry whatever the game multicast that frame,
+    and svc_temp_entity's payload length is a per-type table (cl_tent.ts's
+    CL_ParseTEnt). A decoder that meets one would lose the rest of the frame
+    -- including a centerprint written after it -- because it could not find
+    the next opcode. So every write is recorded as its own CHUNK, at the
+    boundary the writer itself created (SizeBuf.observer, sizebuf.ts): an
+    opcode the client does not decode costs that chunk and nothing more.
+
+ 2. DUPLICATES. SV_Multicast (sv_send.ts) fans the SAME payload out to every
+    client in the PHS/PVS, seats included, and SV_BroadcastPrintf writes the
+    same print to every client in a loop. Those bytes are not seat-directed:
+    the primary connection already carries them, and the client already acts
+    on them once. A chunk is therefore marked `shared` when a byte-identical
+    chunk was written to a NON-seat client in the same capture window, which
+    is exactly the "same message, same frame, several local players" case the
+    2023 game module's own dupe_key parameter exists to collapse (game.h:
+    1946-1949). Seat-private writes -- PF_centerprintf, PF_LocalSound,
+    SV_ClientPrintf to one client -- have no such twin and stay unshared.
+
+The observer runs BEFORE the bytes it announces are stored, so each watch
+copies the PREVIOUS reservation when the next one arrives (and the drain
+flushes the last one). A reservation the buffer rolled back under it (the
+allowoverflow path in SZ_GetSpace clears the buffer and restarts at 0) is
+dropped by the cursize check in flush().
+==================
+*/
+
+/** One capture window's worth of a seat's server-to-client bytes, one entry
+ *  per write. `shared` marks a payload that also went to the primary
+ *  connection, which has already acted on it. */
+export interface SeatMessageChunkT {
+  readonly bytes: Uint8Array;
+  readonly shared: boolean;
+}
+
+/** Bound on how much unconsumed seat traffic is held. The client drains every
+ *  frame, so this is only reached when it is not running at all (a headless
+ *  server can never have seats -- SV_AddLocalSeat is client-driven); past it
+ *  the oldest capture window is dropped rather than growing without limit. */
+const MAX_PENDING_SEAT_CHUNKS = 1024;
+
+class SeatBufferWatch {
+  private pendingOffset = -1;
+  private pendingLength = 0;
+
+  constructor(
+    private readonly buf: SizeBuf,
+    private readonly client: ClientT,
+  ) {}
+
+  readonly observer: SizeBufObserver = (_buf, offset, length) => {
+    this.flush();
+    this.pendingOffset = offset;
+    this.pendingLength = length;
+  };
+
+  flush(): void {
+    const offset = this.pendingOffset;
+    const length = this.pendingLength;
+    this.pendingOffset = -1;
+    this.pendingLength = 0;
+    if (offset < 0 || length <= 0) return;
+    // The buffer rolled the reservation back (overflow) -- those bytes were
+    // never stored where we were told they would be.
+    if (offset + length > this.buf.cursize) return;
+    SV_CaptureSeatChunk(this.client, this.buf.data.slice(offset, offset + length));
+  }
+}
+
+const capture_watches = new Map<SizeBuf, SeatBufferWatch>();
+/** Captured this window, per seat, still unclassified. */
+const seat_capture: Uint8Array[][] = Array.from({ length: MAX_LOCAL_SEATS }, () => []);
+/** Byte-identical payloads written to a non-seat client this window. */
+const shared_capture = new Set<string>();
+/** Classified and waiting for the client's drain, per seat. */
+const seat_pending: SeatMessageChunkT[][] = Array.from({ length: MAX_LOCAL_SEATS }, () => []);
+
+function chunkKey(bytes: Uint8Array): string {
+  let key = "";
+  for (let i = 0; i < bytes.length; i++) key += String.fromCharCode(bytes[i]);
+  return key;
+}
+
+function SV_CaptureSeatChunk(client: ClientT, bytes: Uint8Array): void {
+  if (bytes.length === 0) return;
+
+  if (!client.isLocalSeat) {
+    shared_capture.add(chunkKey(bytes));
+    return;
+  }
+
+  const seat = local_seats.findIndex((s) => s.client === client);
+  if (seat < 0) return;
+  const list = seat_capture[seat];
+  if (list.length + seat_pending[seat].length >= MAX_PENDING_SEAT_CHUNKS) return;
+  list.push(bytes);
+}
+
+/** Idempotent: re-run every frame so a client that connected (or reconnected,
+ *  which re-Init's its netchan buffer) since the last one is watched too. */
+function SV_InstallSeatCaptureWatches(): void {
+  for (const client of svs.clients) {
+    for (const buf of [client.netchan.message, client.datagram]) {
+      let watch = capture_watches.get(buf);
+      if (!watch) {
+        watch = new SeatBufferWatch(buf, client);
+        capture_watches.set(buf, watch);
+      }
+      buf.observer = watch.observer;
+    }
+  }
+}
+
+function SV_RemoveSeatCaptureWatches(): void {
+  for (const [buf, watch] of capture_watches) {
+    watch.flush();
+    buf.observer = null;
+  }
+  capture_watches.clear();
+  shared_capture.clear();
+  for (const list of seat_capture) list.length = 0;
+  for (const list of seat_pending) list.length = 0;
+}
+
+/** Close the capture window: every recorded chunk is classified against the
+ *  payloads the primary connection got, and moves to the client's queue. */
+function SV_CloseSeatCaptureWindow(): void {
+  for (const watch of capture_watches.values()) watch.flush();
+
+  for (let i = 0; i < MAX_LOCAL_SEATS; i++) {
+    const captured = seat_capture[i];
+    if (captured.length === 0) continue;
+    const pending = seat_pending[i];
+    for (const bytes of captured) {
+      pending.push({ bytes, shared: shared_capture.has(chunkKey(bytes)) });
+    }
+    captured.length = 0;
+    if (pending.length > MAX_PENDING_SEAT_CHUNKS) pending.splice(0, pending.length - MAX_PENDING_SEAT_CHUNKS);
+  }
+
+  shared_capture.clear();
+}
+
+/** Hand the client everything captured for this seat since its last call, and
+ *  clear it. Called once per client frame by cl_seats.ts. */
+export function SV_TakeLocalSeatMessages(seat: number): SeatMessageChunkT[] {
+  const pending = seat_pending[seat];
+  if (!pending || pending.length === 0) return [];
+  const out = pending.slice();
+  pending.length = 0;
+  return out;
+}
+
 function SV_InitLocalSeatBuffers(client: ClientT): void {
   SZ_Init(client.netchan.message, client.netchan.message_buf, client.netchan.message_buf.length);
   client.netchan.message.allowoverflow = true;
@@ -285,11 +445,25 @@ export function SV_AddLocalSeat(userinfo: string): number | null {
 
   SV_InitLocalSeatBuffers(newcl);
 
-  ge.ClientBegin(ent);
-
+  // Seated (and watched) BEFORE ClientBegin, not after: ClientBegin is the
+  // first thing that writes to the seat, and those writes are only captured
+  // once the buffers have a watch and the client is findable in the table.
   local_seats[seat].client = newcl;
   local_seats[seat].clientIndex = newclIndex;
   num_local_seats++;
+  SV_InstallSeatCaptureWatches();
+
+  try {
+    ge.ClientBegin(ent);
+  } catch (err) {
+    local_seats[seat].client = null;
+    local_seats[seat].clientIndex = -1;
+    num_local_seats--;
+    newcl.clear();
+    newcl.state = ClientStateT.cs_free;
+    throw err;
+  }
+
   return seat;
 }
 
@@ -305,6 +479,7 @@ does not survive a map change any more than a real connection's edict does).
 */
 export function SV_RemoveLocalSeats(): void {
   const ge = geHolder.ge;
+  SV_RemoveSeatCaptureWatches();
   for (const s of local_seats) {
     const client = s.client;
     s.client = null;
@@ -401,12 +576,19 @@ export function SV_RunLocalSeatThinks(): void {
   const savedClient = svClientHolder.sv_client;
   const savedPlayer = svPlayerHolder.sv_player;
 
+  // A client that connected since the last frame needs a watch too, and this
+  // window's captures are classified and queued for the client before the
+  // buffers below are reset.
+  SV_InstallSeatCaptureWatches();
+  SV_CloseSeatCaptureWindow();
+
   for (let i = 0; i < MAX_LOCAL_SEATS; i++) {
     const s = local_seats[i];
     if (!s.client) continue;
 
-    // Drain last frame's server-to-seat writes; nothing transmits them.
-    // See SV_InitLocalSeatBuffers for what this discards and why.
+    // Reset last frame's server-to-seat writes; nothing transmits them, and
+    // what they said has just been captured for the client (SEAT MESSAGE
+    // CAPTURE above).
     SZ_Clear(s.client.netchan.message);
     s.client.netchan.message.overflowed = false;
     SZ_Clear(s.client.datagram);
@@ -428,9 +610,25 @@ export function SV_RunLocalSeatThinks(): void {
 /** Test seam: drop the seat table without touching the game module (used by
  *  suites that fabricate clients directly and never ran ClientConnect). */
 export function SV_ClearLocalSeatsForTests(): void {
+  SV_RemoveSeatCaptureWatches();
   for (const s of local_seats) {
     s.client = null;
     s.clientIndex = -1;
   }
   num_local_seats = 0;
+}
+
+/** Test seam: close the capture window the way SV_RunLocalSeatThinks does,
+ *  without running any seat's think (a suite that writes to a seat's buffers
+ *  directly has no usercmd to hand the game module). */
+export function SV_CloseLocalSeatCaptureWindowForTests(): void {
+  SV_InstallSeatCaptureWatches();
+  SV_CloseSeatCaptureWindow();
+}
+
+/** Test seam: install the capture watches without seating anyone (a suite
+ *  that fabricates a seat client directly never went through
+ *  SV_AddLocalSeat). */
+export function SV_InstallSeatCaptureWatchesForTests(): void {
+  SV_InstallSeatCaptureWatches();
 }

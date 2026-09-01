@@ -11,6 +11,7 @@ import {
   MSG_ReadPos,
   MSG_WriteByte,
   MSG_WriteString,
+  type SizeBuf,
 } from "../qcommon/sizebuf";
 import { net_message } from "../qcommon/net_chan";
 import {
@@ -86,11 +87,13 @@ import { CL_ParseEntityBits, CL_ParseDelta, CL_ParseFrame } from "./cl_ents";
 // qcommon.h's SND_*/DEFAULT_SOUND_PACKET_* constants -- not yet ported to
 // src/qcommon/qcommon.ts (see sv_send.ts's identical note, which keeps its
 // own private copy for the same reason).
-const SND_VOLUME = 1 << 0; // a byte
-const SND_ATTENUATION = 1 << 1; // a byte
-const SND_POS = 1 << 2; // three coordinates
-const SND_ENT = 1 << 3; // a short 0-2: channel, 3-12: entity
-const SND_OFFSET = 1 << 4; // a byte, msec offset from frame start
+// Exported for cl_seats.ts, which decodes the same svc_sound payload out of a
+// LOCAL SPLITSCREEN seat's own server message buffer (sv_seats.ts).
+export const SND_VOLUME = 1 << 0; // a byte
+export const SND_ATTENUATION = 1 << 1; // a byte
+export const SND_POS = 1 << 2; // three coordinates
+export const SND_ENT = 1 << 3; // a short 0-2: channel, 3-12: entity
+export const SND_OFFSET = 1 << 4; // a byte, msec offset from frame start
 
 const DEFAULT_SOUND_PACKET_VOLUME = 1.0;
 const DEFAULT_SOUND_PACKET_ATTENUATION = 1.0;
@@ -823,27 +826,27 @@ ACTION MESSAGES
 CL_ParseStartSoundPacket
 ==================
 */
-export function CL_ParseStartSoundPacket(): void {
-  const flags = MSG_ReadByte(net_message);
-  const sound_num = MSG_ReadByte(net_message);
+export function CL_ParseStartSoundPacket(msg: SizeBuf = net_message): void {
+  const flags = MSG_ReadByte(msg);
+  const sound_num = MSG_ReadByte(msg);
 
   let volume: number;
-  if (flags & SND_VOLUME) volume = MSG_ReadByte(net_message) / 255.0;
+  if (flags & SND_VOLUME) volume = MSG_ReadByte(msg) / 255.0;
   else volume = DEFAULT_SOUND_PACKET_VOLUME;
 
   let attenuation: number;
-  if (flags & SND_ATTENUATION) attenuation = MSG_ReadByte(net_message) / 64.0;
+  if (flags & SND_ATTENUATION) attenuation = MSG_ReadByte(msg) / 64.0;
   else attenuation = DEFAULT_SOUND_PACKET_ATTENUATION;
 
   let ofs: number;
-  if (flags & SND_OFFSET) ofs = MSG_ReadByte(net_message) / 1000.0;
+  if (flags & SND_OFFSET) ofs = MSG_ReadByte(msg) / 1000.0;
   else ofs = 0;
 
   let ent: number;
   let channel: number;
   if (flags & SND_ENT) {
     // entity reletive
-    channel = MSG_ReadShort(net_message);
+    channel = MSG_ReadShort(msg);
     ent = channel >> 3;
     // q2repro parse.c:852-853 `if (snd.entity >= cl.csr.max_edicts) Com_Error(...)`
     // -- family-active bound (was the vanilla-only MAX_EDICTS constant, and
@@ -861,7 +864,7 @@ export function CL_ParseStartSoundPacket(): void {
   if (flags & SND_POS) {
     // positioned in space
     pos = new Float32Array(3);
-    MSG_ReadPos(net_message, pos);
+    MSG_ReadPos(msg, pos);
   }
 
   if (!cl.sound_precache[sound_num]) return;

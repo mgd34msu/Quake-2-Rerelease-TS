@@ -39,9 +39,32 @@ import { bytedirs, NUMVERTEXNORMALS } from "./anorms";
 import { type Vec3, DotProduct, VectorCopy } from "../shared/math";
 import { type EntityStateT, type UsercmdT, MAX_EDICTS, RF_BEAM, ANGLE2SHORT, SHORT2ANGLE } from "../shared/q_shared";
 
+/** Called from SZ_GetSpace with the offset and length a caller just reserved,
+ *  BEFORE those bytes are written. See SizeBuf.observer. */
+export type SizeBufObserver = (buf: SizeBuf, offset: number, length: number) => void;
+
 export class SizeBuf {
   allowoverflow = false; // if false, do a Com_Error
   overflowed = false; // set to true if the buffer size failed
+  /** Write-boundary observer, null on every ordinary buffer.
+   *
+   *  Local splitscreen (src/server/sv_seats.ts) needs to read back what the
+   *  server wrote INTO A SEAT's message buffers, and a raw byte stream is not
+   *  enough to do that safely: a seat's buffer carries whatever the game
+   *  multicast that frame, including svc_temp_entity, whose payload length is
+   *  a per-type table the seat drain has no business duplicating. Recording
+   *  where each write STARTED gives the drain a resync point -- it can skip an
+   *  opcode it does not decode and pick up at the next boundary instead of
+   *  losing the rest of the frame. Every send-side write reaches this one
+   *  function (SZ_Write/SZ_Print/every MSG_Write* goes through SZ_GetSpace),
+   *  so one hook here sees them all.
+   *
+   *  The observer runs BEFORE the caller stores its bytes, so an observer that
+   *  wants the CONTENT copies the previous reservation on its next call (see
+   *  sv_seats.ts's SeatBufferWatch) rather than reading uninitialized bytes.
+   *  SZ_Init deliberately does not clear it: a netchan buffer that is re-Init'd
+   *  by a reconnect is still the same client's buffer. */
+  observer: SizeBufObserver | null = null;
   data: Uint8Array = new Uint8Array(0);
   view: DataView = new DataView(new ArrayBuffer(0));
   maxsize = 0;
@@ -67,6 +90,8 @@ export function SZ_Clear(buf: SizeBuf): void {
 // Returns the byte offset the caller should write `length` bytes at,
 // mirroring the C `void *SZ_GetSpace` return value (buf->data + buf->cursize).
 export function SZ_GetSpace(buf: SizeBuf, length: number): number {
+  if (buf.observer) buf.observer(buf, buf.cursize, length);
+
   if (buf.cursize + length > buf.maxsize) {
     if (!buf.allowoverflow) {
       throw new ComError(ERR_FATAL, "SZ_GetSpace: overflow without allowoverflow set");

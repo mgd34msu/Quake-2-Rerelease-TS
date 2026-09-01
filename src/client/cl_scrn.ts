@@ -59,7 +59,12 @@ import { V_RenderView } from "./cl_view";
 import { M_Draw } from "./menu";
 import type { EntityT, DrawColorT } from "./ref";
 import { CG_DrawHUD, CG_DrawHUDForSeat, CG_TouchPics, CG_GetActiveCgame } from "./cgame/host";
-import { CL_Seats_Active, CL_Seats_Count, CL_Seats_Viewports, CL_Seats_PlayerState, CL_Seats_Playernum } from "./cl_seats";
+import { CL_Seats_Active, CL_Seats_Count, CL_Seats_Viewports, CL_Seats_PlayerState, CL_Seats_Playernum, CL_Seat_ViewHeight } from "./cl_seats";
+// Straight from the server-side owner rather than through cl_seats' re-export:
+// cl_seats imports THIS file (SCR_CenterPrintSeat), and the per-seat queue
+// array below is built while this module is still evaluating, which a
+// re-export through the other half of that cycle would not be able to answer.
+import { MAX_LOCAL_SEATS } from "../server/sv_seats";
 import { CL_SetSeatView } from "./cl_ents";
 import { CL_Carousel_Draw, CL_Wheel_Draw } from "./cl_wheel";
 import { CDAudio_Play } from "../platform/cd_ogg";
@@ -284,17 +289,26 @@ class CenterPrintSlot {
   timeOff = 0; // cls.realtime-scale: expiry timestamp, valid once finished
 }
 
-let scr_centers: CenterPrintSlot[] = Array.from({ length: MAX_CENTER_PRINTS }, () => new CenterPrintSlot());
-let scr_center_index: number | null = null;
+// ONE QUEUE PER SEAT (src/client/cl_seats.ts). The reference keeps exactly
+// this shape on the cgame side -- `std::array<hud_data_t, MAX_SPLIT_PLAYERS>
+// hud_data;` (cg_screen.cpp:107), each element carrying its own centers[] and
+// center_index, indexed by isplit. This is the engine-side centerprint the
+// CLASSIC ruleset draws (the kex cgame has its own copy of the machinery and
+// SCR_CenterPrintSeat hands it the seat index instead), and it needs the same
+// per-seat split for the same reason: seat 1's "you need the blue key" must
+// not overwrite, or be overwritten by, seat 0's.
+let scr_centers: CenterPrintSlot[][] = Array.from({ length: MAX_LOCAL_SEATS }, () => Array.from({ length: MAX_CENTER_PRINTS }, () => new CenterPrintSlot()));
+let scr_center_index: (number | null)[] = Array.from({ length: MAX_LOCAL_SEATS }, () => null);
 
-/** cg_screen.cpp:109-111's CG_ClearCenterprint, adapted (this file has no
- *  splitscreen/isplit concept, so there's exactly one queue). Empties the
- *  whole rotating buffer outright. Exported for test/cl_scrn_centerprint
+/** cg_screen.cpp:109-111's CG_ClearCenterprint. Empties the whole rotating
+ *  buffer outright, for every seat. Exported for test/cl_scrn_centerprint
  *  .test.ts to reset this module's private queue state cleanly between
  *  cases; no production call site needs it yet within this unit's scope. */
 export function SCR_ClearCenterPrint(): void {
-  scr_center_index = null;
-  for (const slot of scr_centers) slot.lines = [];
+  for (let seat = 0; seat < MAX_LOCAL_SEATS; seat++) {
+    scr_center_index[seat] = null;
+    for (const slot of scr_centers[seat]) slot.lines = [];
+  }
 }
 
 // cg_screen.cpp's FindEndOfUTF8Codepoint, adapted to JS's UTF-16 strings:
@@ -314,23 +328,26 @@ function findEndOfCodepoint(str: string, pos: number): number {
   return -1;
 }
 
-function SCR_QueueCenterPrint(instant: boolean): CenterPrintSlot {
-  if (scr_center_index === null || instant) {
-    scr_center_index = 0;
-    for (let i = 1; i < MAX_CENTER_PRINTS; i++) scr_centers[i].lines = [];
-    return scr_centers[0]!;
+function SCR_QueueCenterPrint(seat: number, instant: boolean): CenterPrintSlot {
+  const slots = scr_centers[seat]!;
+  const index = scr_center_index[seat];
+
+  if (index === null || instant) {
+    scr_center_index[seat] = 0;
+    for (let i = 1; i < MAX_CENTER_PRINTS; i++) slots[i].lines = [];
+    return slots[0]!;
   }
 
   // pick the next free index if we can find one
   for (let i = 1; i < MAX_CENTER_PRINTS; i++) {
-    const slot = scr_centers[(scr_center_index + i) % MAX_CENTER_PRINTS]!;
+    const slot = slots[(index + i) % MAX_CENTER_PRINTS]!;
     if (slot.lines.length === 0) return slot;
   }
 
   // none free: overwrite the currently-displaying slot and skip ahead
   // (cg_screen.cpp:368-372, ported verbatim including this corner case)
-  const slot = scr_centers[scr_center_index]!;
-  scr_center_index = (scr_center_index + 1) % MAX_CENTER_PRINTS;
+  const slot = slots[index]!;
+  scr_center_index[seat] = (index + 1) % MAX_CENTER_PRINTS;
   return slot;
 }
 
@@ -370,40 +387,64 @@ queue/typewriter implementation below, exactly as before.
 ==============
 */
 export function SCR_CenterPrint(str: string, instant = true): void {
+  SCR_CenterPrintSeat(0, str, instant);
+}
+
+/*
+==============
+SCR_CenterPrintSeat
+
+The same message, addressed to one LOCAL SPLITSCREEN seat (cl_seats.ts).
+`seat` is the reference's `isplit`: the cgame's CG_ParseCenterPrint already
+takes it (cg_screen.cpp's `CG_ParseCenterPrint(str, isplit, instant)` ->
+hud_data[isplit]) and its CG_DrawHUD draws hud_data[isplit] into that seat's
+own hud_vrect, so under the kex ruleset passing the seat through is the whole
+fix. Under the classic ruleset the message lands in this file's own per-seat
+queue and SCR_CheckDrawCenterStringSeat draws it into the seat's pane.
+
+Seats past 0 do NOT echo to the console: the console and its notify lines
+belong to the primary player (the reference gates its own chat line the same
+way -- `if (isplit == 0)`, cg_screen.cpp:202), and Con_ClearNotify below would
+have seat 1's message wiping seat 0's notify text off the screen.
+==============
+*/
+export function SCR_CenterPrintSeat(seat: number, str: string, instant = true): void {
   const activeParseCenterPrint = CG_GetActiveCgame().ParseCenterPrint;
   if (activeParseCenterPrint) {
-    activeParseCenterPrint(str, 0, instant);
+    activeParseCenterPrint(str, seat, instant);
     return;
   }
 
-  const center = SCR_QueueCenterPrint(instant);
+  const center = SCR_QueueCenterPrint(seat, instant);
   center.lines = [];
 
-  // echo it to the console
-  const banner = "\x1d\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1f";
-  Com_Printf("\n\n%s\n\n", banner);
+  if (seat === 0) {
+    // echo it to the console
+    const banner = "\x1d\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1e\x1f";
+    Com_Printf("\n\n%s\n\n", banner);
 
-  let s = str;
-  for (;;) {
-    // scan the width of the line
-    let l = 0;
-    while (l < 40 && s[l] !== undefined && s[l] !== "\n") l++;
+    let s = str;
+    for (;;) {
+      // scan the width of the line
+      let l = 0;
+      while (l < 40 && s[l] !== undefined && s[l] !== "\n") l++;
 
-    let line = "";
-    for (let i = 0; i < Math.trunc((40 - l) / 2); i++) line += " ";
-    line += s.slice(0, l);
-    line += "\n";
+      let line = "";
+      for (let i = 0; i < Math.trunc((40 - l) / 2); i++) line += " ";
+      line += s.slice(0, l);
+      line += "\n";
 
-    Com_Printf("%s", line);
+      Com_Printf("%s", line);
 
-    let idx = l;
-    while (s[idx] !== undefined && s[idx] !== "\n") idx++;
+      let idx = l;
+      while (s[idx] !== undefined && s[idx] !== "\n") idx++;
 
-    if (s[idx] === undefined) break;
-    s = s.slice(idx + 1); // skip the \n
+      if (s[idx] === undefined) break;
+      s = s.slice(idx + 1); // skip the \n
+    }
+    Com_Printf("\n\n%s\n\n", banner);
+    Con_ClearNotify();
   }
-  Com_Printf("\n\n%s\n\n", banner);
-  Con_ClearNotify();
 
   // split into lines (cg_screen.cpp:454-484 / cg_screen.ts:597-618)
   let lineStart = 0;
@@ -437,27 +478,24 @@ export function SCR_CenterPrint(str: string, instant = true): void {
   center.lineCount = 0;
 }
 
-/** The rectangle the engine centerprint centers itself in.
+/** The rectangle a seat's engine centerprint centers itself in.
  *
  *  Ordinarily the whole display, which is what every coordinate here was
- *  implicitly relative to. Under LOCAL SPLITSCREEN it is SEAT 0's pane: this
- *  queue is fed by SCR_CenterPrint off the one connection this session has,
- *  which is seat 0's, and the kex path already puts a centerprint inside the
- *  pane of the seat that owns it (its cgame draws them from hud_data[isplit]
- *  against that seat's hud_vrect). Seats 1..N-1 have no centerprint of their
- *  own to draw at all -- their server-directed messages are written and
- *  discarded, which sv_seats.ts documents as a known limitation of both
- *  rulesets, not something this changes. */
-function centerPrintPane(): { x: number; y: number; width: number; height: number } {
+ *  implicitly relative to. Under LOCAL SPLITSCREEN it is that seat's own pane,
+ *  the same rect its 3D view and its HUD are drawn into (cl_seats.ts's
+ *  SplitscreenLayout), which is where the kex path already puts a seat's
+ *  centerprint (its cgame draws them from hud_data[isplit] against that seat's
+ *  hud_vrect). */
+function centerPrintPane(seat: number): { x: number; y: number; width: number; height: number } {
   if (!CL_Seats_Active()) return { x: 0, y: 0, width: viddef.width, height: viddef.height };
-  const seat0 = CL_Seats_Viewports()[0];
-  return seat0 ? seat0 : { x: 0, y: 0, width: viddef.width, height: viddef.height };
+  const rect = CL_Seats_Viewports()[seat];
+  return rect ? rect : { x: 0, y: 0, width: viddef.width, height: viddef.height };
 }
 
-function SCR_DrawCenterStringSlot(center: CenterPrintSlot): void {
+function SCR_DrawCenterStringSlot(center: CenterPrintSlot, seat: number): void {
   if (!re) return;
 
-  const pane = centerPrintPane();
+  const pane = centerPrintPane(seat);
 
   let y: number;
   if (center.lines.length <= 4) y = pane.y + Math.trunc(pane.height * 0.35);
@@ -529,31 +567,41 @@ function SCR_DrawCenterStringSlot(center: CenterPrintSlot): void {
 // so driving it directly from a test exercises the exact production
 // rotate/reveal/expire path.
 export function SCR_CheckDrawCenterString(): void {
-  if (scr_center_index === null) return;
+  SCR_CheckDrawCenterStringSeat(0);
+}
 
-  const center = scr_centers[scr_center_index]!;
+/** The same per-frame rotate/reveal/expire pass for one seat's queue, drawn
+ *  into that seat's pane. Seat 0 is the ordinary call above; seats 1..N-1 are
+ *  driven from SCR_DrawSeatViews, once their pane has been rendered. */
+export function SCR_CheckDrawCenterStringSeat(seat: number): void {
+  const index = scr_center_index[seat];
+  if (index === null || index === undefined) return;
+
+  const slots = scr_centers[seat]!;
+  const center = slots[index]!;
 
   // ran out of center time -- rotate to the next queued slot, if any
   // (cg_screen.cpp:619-653 / cg_screen.ts:729-757)
   if (center.finished && center.timeOff < cls.realtime) {
     center.lines = [];
 
-    const nextIndex = (scr_center_index + 1) % MAX_CENTER_PRINTS;
-    const nextCenter = scr_centers[nextIndex]!;
+    const nextIndex = (index + 1) % MAX_CENTER_PRINTS;
+    const nextCenter = slots[nextIndex]!;
 
     if (nextCenter.lines.length === 0) {
-      scr_center_index = null;
+      scr_center_index[seat] = null;
       return;
     }
 
-    scr_center_index = nextIndex;
+    scr_center_index[seat] = nextIndex;
     nextCenter.currentLine = 0;
     nextCenter.lineCount = 0;
   }
 
-  if (scr_center_index === null) return;
+  const drawIndex = scr_center_index[seat];
+  if (drawIndex === null) return;
 
-  SCR_DrawCenterStringSlot(scr_centers[scr_center_index]!);
+  SCR_DrawCenterStringSlot(slots[drawIndex]!, seat);
 }
 
 //=============================================================================
@@ -1541,14 +1589,15 @@ cleared once so the gutters between panes do not hold last frame's pixels.
 
 WHAT IS PER-SEAT AND WHAT IS NOT
   per-seat: the 3D view (rect, origin, angles, fov, blend, view weapon,
-    which body is hidden) and the cgame HUD (its own hud_vrect, its own
-    isplit HUD-state slot, its own playernum's stats).
+    which body is hidden), the cgame HUD (its own hud_vrect, its own
+    isplit HUD-state slot, its own playernum's stats) and the engine
+    centerprint queue (its own isplit slot, drawn in its own pane -- see
+    SCR_CenterPrintSeat).
   once per frame, seat 0's: the carousel/weapon wheel, the net icon, the
-    engine centerprint, the debug graphs and the pause pic. These are
-    connection-level or input-level chrome, and the reference API agrees
-    about the direction -- the 2023 cgame gates its own chat input line on
-    `if (isplit == 0)` ("only the main player can really chat anyways",
-    cg_screen.cpp:202).
+    debug graphs and the pause pic. These are connection-level or
+    input-level chrome, and the reference API agrees about the direction --
+    the 2023 cgame gates its own chat input line on `if (isplit == 0)`
+    ("only the main player can really chat anyways", cg_screen.cpp:202).
 =================
 */
 function SCR_DrawSeatViews(separation: number): void {
@@ -1577,12 +1626,20 @@ function SCR_DrawSeatViews(separation: number): void {
 
     // Seat 0 renders through the ordinary predicted/interpolated path (a
     // null override); every other seat renders from its live server
-    // playerstate -- see cl_ents.ts's CL_SetSeatView.
-    CL_SetSeatView(seat === 0 ? null : { ps, playernum: CL_Seats_Playernum(seat) });
+    // playerstate -- see cl_ents.ts's CL_SetSeatView. `viewheight` is that
+    // seat's own crouch-transition ease, kept in cl_seats.ts because
+    // cl.current_viewheight/cl.viewheight_change_time are seat 0's.
+    CL_SetSeatView(seat === 0 ? null : { ps, playernum: CL_Seats_Playernum(seat), viewheight: CL_Seat_ViewHeight(seat, ps.pmove.viewheight, cl.time) });
     V_RenderView(separation);
 
     re.SetGifBeatSeconds(cl.time / 1000);
     CG_DrawHUDForSeat(CL_Seats_Playernum(seat), ps, { isplit: seat, x: rect.x, y: rect.y, width: rect.width, height: rect.height });
+
+    // The seat's own engine centerprint queue (classic ruleset; under kex the
+    // cgame drew hud_data[isplit]'s inside CG_DrawHUDForSeat just above).
+    // Seat 0's is drawn with the rest of the connection-level chrome in
+    // SCR_UpdateScreen, after every pane has rendered.
+    if (seat !== 0) SCR_CheckDrawCenterStringSeat(seat);
   }
 
   // Never leave the override installed: every other consumer of

@@ -30,18 +30,39 @@
 // are gamepad-only and bypass the bind system entirely (a bind is global
 // state; two seats cannot both own `+attack`), reading a fixed pad->action
 // map instead -- which is also what a console engine does, since a console
-// seat has no keyboard to rebind with.
+// seat has no keyboard to rebind with. `seatcmd` (below) is the one console
+// affordance they have: a game client command run as a named seat.
+//
+// A seat also RECEIVES: the server unicasts it centerprints, prints and
+// private sounds, which sv_seats.ts captures (nothing transmits them -- a seat
+// has no netchan) and CL_Seats_DrainServerMessages decodes into the seat that
+// owns them, once per client frame.
 
-import { Cvar_Get } from "../qcommon/cvar";
-import { Com_Printf } from "../qcommon/common";
-import { UsercmdT, ANGLE2SHORT, SHORT2ANGLE, PITCH, YAW, ROLL, CVAR_ARCHIVE, type CvarT } from "../shared/q_shared";
-import { ButtonT } from "../kexapi/game";
+import { Cvar_Get, Cvar_Set, Cvar_VariableValue } from "../qcommon/cvar";
+import { Cmd_AddCommand, Cmd_Argc, Cmd_Argv } from "../qcommon/cmd";
+import { Com_Printf, Com_DPrintf } from "../qcommon/common";
+import { UsercmdT, ANGLE2SHORT, SHORT2ANGLE, PITCH, YAW, ROLL, CVAR_ARCHIVE, MAX_ITEMS, type CvarT } from "../shared/q_shared";
+import { SvcOpsT } from "../qcommon/qcommon";
+import { SizeBuf, SZ_Init, MSG_BeginReading, MSG_ReadByte, MSG_ReadShort, MSG_ReadString } from "../qcommon/sizebuf";
+import { ButtonT, PrintTypeT } from "../kexapi/game";
 import { GamepadAxisNormalize, SDL_CONTROLLER_BUTTON_A, SDL_CONTROLLER_BUTTON_B, SDL_CONTROLLER_BUTTON_X, SDL_CONTROLLER_BUTTON_Y, SDL_CONTROLLER_BUTTON_LEFTSHOULDER, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, GAMEPAD_TRIGGER_THRESHOLD } from "../platform/gamepad_map";
 import { SDL_GamepadSeatState, SDL_GamepadSeatCount, type GamepadSeatStateT } from "../platform/sdl";
 import { viddef } from "./vid";
 import { cl, cls, ConnstateT, KeydestT, clCvars } from "./client";
-import { MAX_LOCAL_SEATS, SV_AddLocalSeat, SV_RemoveLocalSeats, SV_NumLocalSeats, SV_QueueLocalSeatCmd, SV_LocalSeatPlayerState, SV_LocalSeatPlayernum } from "../server/sv_seats";
-import { sv, ServerStateT } from "../server/server";
+import { SCR_CenterPrintSeat } from "./cl_scrn";
+import { CL_ParseStartSoundPacket, SND_VOLUME, SND_ATTENUATION, SND_POS, SND_ENT, SND_OFFSET } from "./cl_parse";
+import {
+  MAX_LOCAL_SEATS,
+  SV_AddLocalSeat,
+  SV_RemoveLocalSeats,
+  SV_NumLocalSeats,
+  SV_QueueLocalSeatCmd,
+  SV_LocalSeatPlayerState,
+  SV_LocalSeatPlayernum,
+  SV_TakeLocalSeatMessages,
+  type SeatMessageChunkT,
+} from "../server/sv_seats";
+import { sv, svs, maxclients, ClientStateT, ServerStateT } from "../server/server";
 import type { PlayerStateT } from "../shared/q_shared";
 
 export { MAX_LOCAL_SEATS };
@@ -141,8 +162,9 @@ function held(buttons: number, bit: number): boolean {
   return (buttons & (1 << bit)) !== 0;
 }
 
-/** Per-seat mutable input state. viewangles is the seat's own camera; `cl`
- *  only ever holds seat 0's. */
+/** Per-seat mutable input and view state. viewangles is the seat's own camera;
+ *  `cl` only ever holds seat 0's, and the same is true of the crouch-transition
+ *  eye-height lerp below. */
 export class SeatInputStateT {
   viewangles: Float32Array = new Float32Array(3);
   /** Pad button bitmask as of the previous frame -- edge detection for the
@@ -153,6 +175,56 @@ export class SeatInputStateT {
    *  by CL_Seats_SendCmds, which is the only place allowed to run a server
    *  command on the seat's behalf. */
   pendingCommand: string | null = null;
+
+  // [Paril-KEX] re-release eye height, this seat's copy of client.ts's
+  // cl.current_viewheight/prev_viewheight/viewheight_change_time (which are
+  // the primary client's and cannot carry a second player). Same int8_t
+  // values, same cl.time-scale change stamp -- see CL_Seat_ViewHeight.
+  current_viewheight = 0;
+  prev_viewheight = 0;
+  viewheight_change_time = 0;
+}
+
+/*
+==================
+CL_Seat_ViewHeight
+
+The seat's eye height for this frame, eased exactly the way the primary
+client's is (q2repro client/entities.c:1528-1536 records the change,
+:1605-1609 eases it: `viewheight_lerp = 100 - min(cl.time - change_time,
+100); viewheight = current + (prev - current) * viewheight_lerp * 0.01;`),
+against this seat's own lerp state instead of cl's.
+
+Idempotent within a frame: re-reading the same viewheight at the same time
+records no new change, so a second call in the same frame (a stereo pass, a
+test driving the same values twice) returns the same number.
+==================
+*/
+export function CL_Seat_ViewHeight(seat: number, viewheight: number, time: number): number {
+  const state = seat_input[seat];
+  if (!state) return viewheight;
+
+  if (state.current_viewheight !== viewheight) {
+    state.prev_viewheight = state.current_viewheight;
+    state.current_viewheight = viewheight;
+    state.viewheight_change_time = time;
+  }
+
+  let viewheight_lerp = time - state.viewheight_change_time;
+  viewheight_lerp = 100 - Math.min(viewheight_lerp, 100);
+  return state.current_viewheight + (state.prev_viewheight - state.current_viewheight) * viewheight_lerp * 0.01;
+}
+
+/** Start a seat at a known eye height with no transition in flight -- what
+ *  cl_ents.ts does for seat 0 when a fresh frame arrives (current and prev
+ *  both the current value, no change stamp), so a just-seated player does not
+ *  ease in from the floor. */
+export function CL_Seat_ResetViewHeight(seat: number, viewheight: number): void {
+  const state = seat_input[seat];
+  if (!state) return;
+  state.current_viewheight = viewheight;
+  state.prev_viewheight = viewheight;
+  state.viewheight_change_time = 0;
 }
 
 export interface SeatCmdCvarsT {
@@ -284,11 +356,60 @@ export function CL_Seats_SetPadSource(src: SeatPadSourceT | null): void {
   pad_source = src ?? { count: SDL_GamepadSeatCount, state: SDL_GamepadSeatState };
 }
 
+/*
+==================
+CL_SeatCmd_f
+
+`seatcmd <seat> <command...>` -- run a GAME client command as one of the local
+seats, the way typing it at the console runs it as the primary player. Seats
+1..N-1 are pad-only (see this file's header: a bind is one global table, so
+they cannot own `+attack` or a keyboard command of their own), which leaves
+the fixed pad map as their entire command vocabulary; this is the console-side
+counterpart, and it goes through exactly the same queue the pad's
+weapnext/weapprev already uses -- parked here, executed inside SV_Frame by
+SV_RunLocalSeatThinks (see sv_seats.ts's LocalSeatT.pendingCmd for why a seat
+command may not run outside the server frame).
+
+Seat 0 is refused: it is the ordinary client, and its game commands are what
+the console already sends.
+==================
+*/
+function CL_SeatCmd_f(): void {
+  if (Cmd_Argc() < 3) {
+    Com_Printf("usage: seatcmd <seat 1-%i> <command ...>\n", MAX_LOCAL_SEATS - 1);
+    return;
+  }
+
+  const seat = Math.trunc(Number(Cmd_Argv(1)));
+  if (!Number.isFinite(seat) || seat < 1 || seat >= MAX_LOCAL_SEATS) {
+    Com_Printf("seatcmd: seat must be 1..%i (seat 0 is the console's own player)\n", MAX_LOCAL_SEATS - 1);
+    return;
+  }
+  if (seat >= active_seats) {
+    Com_Printf("seatcmd: seat %i is not seated (cl_seats is %i)\n", seat, active_seats);
+    return;
+  }
+
+  const parts: string[] = [];
+  for (let i = 2; i < Cmd_Argc(); i++) parts.push(Cmd_Argv(i));
+  const command = parts.join(" ");
+  if (!command) return;
+
+  seat_input[seat].pendingCommand = command;
+}
+
 export function CL_Seats_Init(): void {
   // Not CVAR_ARCHIVE: a seat count is a property of the session you launched,
   // not a preference to restore into a single-player game on next boot.
   cl_seats = Cvar_Get("cl_seats", "1", 0);
   cl_splitscreen_layout = Cvar_Get("cl_splitscreen_layout", "0", CVAR_ARCHIVE);
+  Cmd_AddCommand("seatcmd", CL_SeatCmd_f);
+
+  // A `+set cl_seats N` on the command line has already been applied to the
+  // cvar by now, and the command line's own `+map`/`+load` has NOT run yet, so
+  // this is the point at which widening the latched server cvars still reaches
+  // the first server this session starts.
+  CL_Seats_WidenServerCvars(CL_Seats_Requested());
 }
 
 /** Requested seat count, clamped. Reads the cvar so a console `cl_seats 2`
@@ -323,6 +444,258 @@ export function CL_Seats_Playernum(seat: number): number {
   return SV_LocalSeatPlayernum(seat - 1);
 }
 
+// ---------------------------------------------------------------------------
+// SERVER-TO-SEAT MESSAGES
+// ---------------------------------------------------------------------------
+
+/*
+The game unicasts a seat its own centerprints, prints and private sounds
+exactly as it does for a real connection; sv_seats.ts captures those writes
+per seat (SEAT MESSAGE CAPTURE there) instead of transmitting them, because a
+seat has no netchan. This is the other end: the same svc_* opcodes the primary
+client's CL_ParseServerMessage reads, decoded out of that capture and applied
+to the SEAT that owns them.
+
+WHAT IS ACTED ON
+  svc_centerprint          -> that seat's pane (SCR_CenterPrintSeat)
+  svc_print PRINT_CENTER /
+            PRINT_TYPEWRITER -> the same, matching cl_parse.ts's own
+                              svc_print branch (q2repro parse.c:970-1001)
+  svc_print, other levels  -> the shared console, tagged with the seat, and
+                              only when the payload was not also sent to the
+                              primary connection (a broadcast print is one
+                              message, not one per local player)
+  svc_sound                -> S_StartSound through cl_parse.ts's own
+                              CL_ParseStartSoundPacket, again only when the
+                              payload was seat-directed rather than a
+                              multicast the primary connection already played
+
+WHAT IS DECODED AND DROPPED, AND WHY
+  svc_stufftext     the console/cbuf is one shared thing. A seat's stuffed
+                    text is connection handshake ("precache", "cmd ...") for
+                    a connection it does not have, and running it would
+                    execute it as the PRIMARY player. Reported at developer
+                    level rather than executed.
+  svc_layout        the pane HUD draws from the seat's playerstate plus the
+                    connection's layout string (cl.layout); a per-seat layout
+                    would need its own storage on both sides of the cgame
+                    DrawHUD boundary, which is a bigger change than this one.
+  svc_inventory     same shape: cl.inventory is the primary's, and the
+                    inventory/carousel screens are seat-0 chrome
+                    (SCR_DrawSeatViews' own note).
+  svc_configstring, svc_temp_entity, svc_muzzleflash(2), everything else:
+                    shared world state. Every seat's copy is a duplicate of
+                    what the primary connection already applied -- acting on
+                    it a second time would double the effect, not add one.
+
+Anything whose length this decoder does not know (svc_temp_entity above all,
+whose payload is a per-type table) costs its own WRITE and no more: the
+capture records where each write began, so the decoder resyncs at the next
+boundary instead of losing the rest of the frame.
+*/
+
+/** Byte length of a vanilla svc_sound payload (sv_send.ts's SV_StartSound /
+ *  sv_game.ts's PF_LocalSound write exactly these fields, and cl_parse.ts's
+ *  CL_ParseStartSoundPacket reads them back), given its flags byte. Used to
+ *  step over a sound this seat should not play a second time. */
+function seatSoundPayloadLength(flags: number): number {
+  let len = 2; // flags, soundindex
+  if (flags & SND_VOLUME) len += 1;
+  if (flags & SND_ATTENUATION) len += 1;
+  if (flags & SND_OFFSET) len += 1;
+  if (flags & SND_ENT) len += 2;
+  if (flags & SND_POS) len += 6;
+  return len;
+}
+
+class SeatMessageStreamT {
+  readonly msg = new SizeBuf();
+  /** 1 per byte: this byte belongs to a payload the primary connection got too. */
+  readonly shared: Uint8Array;
+  /** Offset of each captured write, ascending -- the decoder's resync points. */
+  readonly starts: number[] = [];
+
+  constructor(chunks: readonly SeatMessageChunkT[]) {
+    let total = 0;
+    for (const chunk of chunks) total += chunk.bytes.length;
+
+    const data = new Uint8Array(total);
+    this.shared = new Uint8Array(total);
+
+    let offset = 0;
+    for (const chunk of chunks) {
+      this.starts.push(offset);
+      data.set(chunk.bytes, offset);
+      if (chunk.shared) this.shared.fill(1, offset, offset + chunk.bytes.length);
+      offset += chunk.bytes.length;
+    }
+
+    SZ_Init(this.msg, data, total);
+    this.msg.cursize = total;
+    MSG_BeginReading(this.msg);
+  }
+
+  /** True when every byte of [start, end) came from a payload the primary
+   *  connection was sent as well. */
+  isShared(start: number, end: number): boolean {
+    if (end <= start) return false;
+    for (let i = start; i < end; i++) if (!this.shared[i]) return false;
+    return true;
+  }
+
+  /** Give up on the message that started at `start` and continue at the next
+   *  captured write. Returns false when there is nothing left. */
+  resync(start: number): boolean {
+    for (const offset of this.starts) {
+      if (offset > start) {
+        this.msg.readcount = offset;
+        return true;
+      }
+    }
+    this.msg.readcount = this.msg.cursize;
+    return false;
+  }
+}
+
+/** What the last decode did, per kind. Production reads none of this; it is
+ *  how a suite (and `developer 1`, below) sees which branch a captured
+ *  message took without a screen or a sound device. */
+export interface SeatMessageStatsT {
+  centerprints: number;
+  prints: number;
+  /** Prints dropped because the primary connection got the same payload. */
+  printsShared: number;
+  sounds: number;
+  /** Sounds dropped for the same reason. */
+  soundsShared: number;
+  /** Writes stepped over because this decoder does not know their length. */
+  skipped: number;
+}
+
+const seat_message_stats: SeatMessageStatsT = { centerprints: 0, prints: 0, printsShared: 0, sounds: 0, soundsShared: 0, skipped: 0 };
+
+function CL_Seat_DispatchServerMessages(seat: number, chunks: readonly SeatMessageChunkT[]): void {
+  const stream = new SeatMessageStreamT(chunks);
+  const msg = stream.msg;
+
+  while (msg.readcount < msg.cursize) {
+    const start = msg.readcount;
+    const cmd = MSG_ReadByte(msg);
+    if (cmd === -1) break;
+
+    switch (cmd) {
+      case SvcOpsT.svc_nop:
+      case SvcOpsT.svc_disconnect:
+      case SvcOpsT.svc_reconnect:
+        // Connection-level, and a seat has no connection to end or remake.
+        break;
+
+      case SvcOpsT.svc_centerprint: {
+        const text = MSG_ReadString(msg);
+        seat_message_stats.centerprints++;
+        Com_DPrintf("cl_seats: seat %i centerprint: %s\n", seat + 1, text);
+        SCR_CenterPrintSeat(seat, text);
+        break;
+      }
+
+      case SvcOpsT.svc_print: {
+        const level = MSG_ReadByte(msg);
+        const text = MSG_ReadString(msg);
+        if (level === PrintTypeT.PRINT_CENTER || level === PrintTypeT.PRINT_TYPEWRITER) {
+          // instant for PRINT_CENTER, typed out for PRINT_TYPEWRITER -- the
+          // same split cl_parse.ts's svc_print branch makes for seat 0.
+          seat_message_stats.centerprints++;
+          Com_DPrintf("cl_seats: seat %i centerprint (print level %i): %s\n", seat + 1, level, text);
+          SCR_CenterPrintSeat(seat, text, level !== PrintTypeT.PRINT_TYPEWRITER);
+        } else if (stream.isShared(start, msg.readcount)) {
+          seat_message_stats.printsShared++;
+        } else {
+          seat_message_stats.prints++;
+          Com_Printf("[P%i] %s", seat + 1, text);
+        }
+        break;
+      }
+
+      case SvcOpsT.svc_sound: {
+        const flags = msg.data[msg.readcount] ?? 0;
+        const end = msg.readcount + seatSoundPayloadLength(flags);
+        if (stream.isShared(start, end)) {
+          seat_message_stats.soundsShared++;
+          msg.readcount = end;
+        } else {
+          seat_message_stats.sounds++;
+          CL_ParseStartSoundPacket(msg);
+        }
+        break;
+      }
+
+      case SvcOpsT.svc_stufftext: {
+        const text = MSG_ReadString(msg);
+        Com_DPrintf("cl_seats: seat %i stufftext dropped: %s\n", seat + 1, text);
+        break;
+      }
+
+      case SvcOpsT.svc_layout:
+        MSG_ReadString(msg);
+        break;
+
+      case SvcOpsT.svc_configstring:
+        MSG_ReadShort(msg);
+        MSG_ReadString(msg);
+        break;
+
+      case SvcOpsT.svc_inventory:
+        // MAX_ITEMS shorts, cl_inv.ts's CL_ParseInventory.
+        msg.readcount += MAX_ITEMS * 2;
+        break;
+
+      case SvcOpsT.svc_muzzleflash:
+      case SvcOpsT.svc_muzzleflash2:
+        msg.readcount += 3; // entity short + the flash byte
+        break;
+
+      default:
+        // Not a length this decoder knows (svc_temp_entity and friends).
+        seat_message_stats.skipped++;
+        if (!stream.resync(start)) return;
+        break;
+    }
+  }
+}
+
+/*
+==================
+CL_Seats_DrainServerMessages
+
+Once per client frame, before the panes are drawn: whatever the server wrote
+to each seat since the last frame, decoded and applied to that seat.
+==================
+*/
+export function CL_Seats_DrainServerMessages(): void {
+  if (active_seats <= 1) return;
+
+  for (let seat = 1; seat < active_seats; seat++) {
+    const chunks = SV_TakeLocalSeatMessages(seat - 1);
+    if (chunks.length === 0) continue;
+    CL_Seat_DispatchServerMessages(seat, chunks);
+  }
+}
+
+/** Test seam: what the decoder did with everything it has been handed. */
+export function CL_Seats_MessageStatsForTests(): SeatMessageStatsT {
+  return { ...seat_message_stats };
+}
+
+/** Test seam: zero the decode counters. */
+export function CL_Seats_ResetMessageStatsForTests(): void {
+  seat_message_stats.centerprints = 0;
+  seat_message_stats.prints = 0;
+  seat_message_stats.printsShared = 0;
+  seat_message_stats.sounds = 0;
+  seat_message_stats.soundsShared = 0;
+  seat_message_stats.skipped = 0;
+}
+
 /*
 ==================
 CL_Seats_Reconcile
@@ -346,6 +719,9 @@ export function CL_Seats_Reconcile(): void {
       SV_RemoveLocalSeats();
       active_seats = 1;
     }
+    // Leaving the game (or asking for one seat) clears the "already tried and
+    // reported" latch, so the next server gets a fresh attempt.
+    seating_blocked_for = 0;
     return;
   }
 
@@ -354,6 +730,11 @@ export function CL_Seats_Reconcile(): void {
     active_seats = want;
     return;
   }
+
+  // This exact seat count was already attempted against this server and did
+  // not fit. Retrying every frame would re-seat, re-fail and re-print forever;
+  // the latch is dropped by the branch above the moment the session changes.
+  if (seating_blocked_for === want) return;
 
   // Any mismatch (count changed, or a level change wiped the seats) is
   // resolved by tearing down and re-seating, rather than by patching the
@@ -378,12 +759,28 @@ export function CL_Seats_Reconcile(): void {
       Com_Printf("cl_seats: could not seat local player %i; continuing with %i\n", i + 1, i);
       break;
     }
-    // A fresh seat starts looking wherever the game spawned it.
+    // A fresh seat starts looking wherever the game spawned it, and at the eye
+    // height the game spawned it at (cl_ents.ts does the same for seat 0 on a
+    // fresh frame: current and prev both the current value, no change stamp,
+    // so the first frame does not ease in from zero).
     const ps = SV_LocalSeatPlayerState(seat);
     if (ps) for (let a = 0; a < 3; a++) seat_input[i].viewangles[a] = ps.viewangles[a];
     seat_input[i].prevButtons = 0;
     seat_input[i].pendingCommand = null;
+    CL_Seat_ResetViewHeight(i, ps ? ps.pmove.viewheight : 0);
     active_seats = i + 1;
+  }
+
+  if (active_seats < want) {
+    // Fewer seats than asked for: the server has no room. Widen the cvars a
+    // wider server needs (they are CVAR_LATCH, so this takes effect at the
+    // next SV_InitGame, not now) and say so once, with the command that
+    // applies it -- the alternative is the silent one-seat session this used
+    // to be.
+    CL_Seats_WidenServerCvars(want);
+    seating_blocked_for = want;
+    Com_Printf("cl_seats %i: this server seats %i local player%s (maxclients %i, %i free slot%s).\n", want, active_seats, active_seats === 1 ? "" : "s", seatCapacity(), freePlayerSlots(), freePlayerSlots() === 1 ? "" : "s");
+    Com_Printf("cl_seats: coop/maxclients widened for the next server start -- run `map %s` to seat %i.\n", sv.name ? sv.name : "<map>", want);
   }
 
   if (active_seats !== reported_seats) {
@@ -394,6 +791,54 @@ export function CL_Seats_Reconcile(): void {
 
 // Only printed on a transition -- CL_Seats_Reconcile runs every client frame.
 let reported_seats = 1;
+// Seat count already attempted against the running server and reported as not
+// fitting; 0 when nothing is latched off.
+let seating_blocked_for = 0;
+
+/** Player slots this server actually has. `maxclients` is CVAR_LATCH, so a
+ *  change made after SV_InitGame allocated svs.clients is visible on the cvar
+ *  but not in the array -- the smaller of the two is what can be seated, the
+ *  same bound SV_AddLocalSeat's own free-slot search uses. */
+function seatCapacity(): number {
+  return Math.min(maxclients ? maxclients.value : 0, svs.clients.length);
+}
+
+function freePlayerSlots(): number {
+  let free = 0;
+  const capacity = seatCapacity();
+  for (let i = 0; i < capacity; i++) if (svs.clients[i].state === ClientStateT.cs_free) free++;
+  return free;
+}
+
+/*
+==================
+CL_Seats_WidenServerCvars
+
+The rule PerformLaunch applies when the menu starts a split session
+(menu_content.ts:269-281), applied to a seat count that arrived any other way
+-- `+set cl_seats 2` on the command line, or `cl_seats 2` typed at the
+console. Without it, a default single-player launch forces `maxclients 1`
+(sv_init.ts's SV_InitGame: not deathmatch, not coop -> one slot) and there is
+physically no slot for a second local player, whatever cl_seats says.
+
+More than one seat IS a coop session -- the extra players need coop spawn and
+respawn rules, and a campaign started any other way has nowhere to put them.
+A deathmatch server is left alone: it already seats eight, and forcing coop
+onto it would change the game being played.
+
+Both cvars are CVAR_LATCH: this makes the NEXT server start able to seat
+them. Called before any server exists (CL_Seats_Init, i.e. before the command
+line's own `+map` runs) and again when a running server turns out to be too
+small, where CL_Seats_Reconcile prints the command that applies it.
+==================
+*/
+export function CL_Seats_WidenServerCvars(want: number): void {
+  if (want <= 1) return;
+
+  if (Cvar_VariableValue("deathmatch") <= 0 && Cvar_VariableValue("coop") < 1) Cvar_Set("coop", "1");
+  if (Cvar_VariableValue("maxclients") <= 1) Cvar_Set("maxclients", "4");
+  if (Cvar_VariableValue("maxclients") < want) Cvar_Set("maxclients", String(want));
+}
 
 /*
 ==================
@@ -440,7 +885,11 @@ export function CL_Seats_SendCmds(): void {
       const idle = new UsercmdT();
       idle.msec = msec > 250 ? 100 : msec;
       for (let a = 0; a < 3; a++) idle.angles[a] = ANGLE2SHORT(state.viewangles[a]);
-      SV_QueueLocalSeatCmd(i - 1, idle);
+      // A queued game command still goes with it: `seatcmd` does not need a
+      // controller, and a seat whose pad was unplugged must still be able to
+      // act on one.
+      SV_QueueLocalSeatCmd(i - 1, idle, state.pendingCommand);
+      state.pendingCommand = null;
       continue;
     }
 
@@ -456,10 +905,16 @@ export function CL_Seats_SendCmds(): void {
 export function CL_Seats_Shutdown(): void {
   SV_RemoveLocalSeats();
   active_seats = 1;
+  // The session is over: a seat count that did not fit THAT server gets a
+  // fresh attempt against the next one.
+  seating_blocked_for = 0;
   for (const s of seat_input) {
     s.viewangles.fill(0);
     s.prevButtons = 0;
     s.pendingCommand = null;
+    s.current_viewheight = 0;
+    s.prev_viewheight = 0;
+    s.viewheight_change_time = 0;
   }
 }
 

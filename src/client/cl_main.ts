@@ -119,7 +119,7 @@ import {
 } from "../shared/q_shared";
 import { cl, cls, cl_entities, ConnstateT, CentityT, clCvars } from "./client";
 import { CL_InitInput, CL_SendCmd, IN_Commands, IN_Frame, IN_Init, Sys_SendKeyEvents } from "./cl_input";
-import { CL_Seats_Init, CL_Seats_Reconcile, CL_Seats_SendCmds, CL_Seats_Shutdown } from "./cl_seats";
+import { CL_Seats_Init, CL_Seats_Reconcile, CL_Seats_SendCmds, CL_Seats_DrainServerMessages, CL_Seats_Shutdown } from "./cl_seats";
 import { VID_Shutdown, VID_CheckChanges, VID_Front_f, VID_Init } from "../platform/vid";
 import { CL_PredictMovement } from "./cl_pred";
 import { CL_RunDLights, CL_RunLightStyles, CL_ClearEffects } from "./cl_fx";
@@ -2083,6 +2083,10 @@ export function CL_SendCommand(): void {
   // change the player slot the primary connection already holds.
   CL_Seats_Reconcile();
   CL_Seats_SendCmds();
+  // ...then read back what the server said TO each seat since the last frame
+  // (its centerprints, its private sounds), which nothing transmits because a
+  // seat has no netchan -- see CL_Seats_DrainServerMessages.
+  CL_Seats_DrainServerMessages();
 
   // resend a connection request if necessary
   CL_CheckForResend();

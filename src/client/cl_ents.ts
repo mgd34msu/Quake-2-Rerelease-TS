@@ -1146,6 +1146,13 @@ export interface SeatViewT {
   ps: PlayerStateT;
   /** The seat's player slot -- entity `playernum + 1` is the seat's own body. */
   playernum: number;
+  /** The seat's eye height for this frame, already eased through the
+   *  re-release's 100ms crouch transition by that seat's OWN lerp state
+   *  (cl_seats.ts's CL_Seat_ViewHeight -- cl.current_viewheight and
+   *  cl.viewheight_change_time below are seat 0's singletons and cannot carry
+   *  a second player). Absent means "no ease available", which falls back to
+   *  the raw playerstate value. */
+  viewheight?: number;
 }
 
 let seat_view: SeatViewT | null = null;
@@ -1166,13 +1173,12 @@ function CL_CalcSeatViewValues(view: SeatViewT): void {
   const ps = view.ps;
 
   for (let i = 0; i < 3; i++) cl.refdef.vieworg[i] = ps.pmove.origin[i] * 0.125 + ps.viewoffset[i];
-  // Same re-release eye-height term the primary path adds below, minus the
-  // 100ms crouch-transition easing: that easing is driven by
-  // cl.current_viewheight/cl.viewheight_change_time, which are seat 0's
-  // singleton state and would be corrupted by a second writer. A seat's
-  // crouch snaps instead of easing -- a real, reported cosmetic gap, not a
-  // silent one.
-  cl.refdef.vieworg[2] += ps.pmove.viewheight;
+  // Same re-release eye-height term the primary path adds below, including
+  // the 100ms crouch-transition easing -- computed against this seat's own
+  // lerp state (SeatViewT.viewheight) rather than seat 0's singleton
+  // cl.current_viewheight/cl.viewheight_change_time, which a second writer
+  // would corrupt.
+  cl.refdef.vieworg[2] += view.viewheight ?? ps.pmove.viewheight;
 
   for (let i = 0; i < 3; i++) cl.refdef.viewangles[i] = ps.viewangles[i] + ps.kick_angles[i];
   AngleVectors(cl.refdef.viewangles, cl.v_forward, cl.v_right, cl.v_up);
