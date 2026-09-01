@@ -132,7 +132,19 @@ on them and an all-zero box rejects everything.
 */
 export interface BoxRoomOptions {
   renderable?: boolean;
+  /*
+  Give the empty leaf a strict interior sub-range of the leafface lump
+  (firstleafface 2, numleaffaces 3) instead of the whole thing. Off by
+  default so every existing caller keeps its exact lumps. Real retail maps
+  are full of leafs shaped like this; the synthetic default (0..6, i.e. the
+  entire lump) can't tell a leaf that stores its own range apart from one
+  that stores the whole tail of the shared array.
+  */
+  partialLeafFaces?: boolean;
 }
+
+const PARTIAL_FIRST_LEAFFACE = 2;
+const PARTIAL_NUM_LEAFFACES = 3;
 
 // in-plane (s, t) axes per wall, chosen so that s x t == the wall's inward
 // normal.
@@ -170,6 +182,7 @@ function wallCorners(i: number): Array<[number, number, number]> {
 
 export function buildBoxRoomBsp(entityString: string = WORLDSPAWN_ONLY_ENTITIES, options: BoxRoomOptions = {}): Uint8Array {
   const renderable = options.renderable === true;
+  const partialLeafFaces = options.partialLeafFaces === true;
   const planes = wallPlanes();
 
   // ---- PLANES (6) ----
@@ -289,8 +302,8 @@ export function buildBoxRoomBsp(entityString: string = WORLDSPAWN_ONLY_ENTITIES,
     view.setInt16(base + 14, b, true); // maxs
     view.setInt16(base + 16, b, true);
     view.setInt16(base + 18, b, true);
-    view.setUint16(base + 20, 0, true); // firstleafface
-    view.setUint16(base + 22, renderable && !solid ? 6 : 0, true); // numleaffaces
+    view.setUint16(base + 20, renderable && !solid && partialLeafFaces ? PARTIAL_FIRST_LEAFFACE : 0, true); // firstleafface
+    view.setUint16(base + 22, renderable && !solid ? (partialLeafFaces ? PARTIAL_NUM_LEAFFACES : 6) : 0, true); // numleaffaces
     view.setUint16(base + 24, 0, true); // firstleafbrush
     view.setUint16(base + 26, solid ? 6 : 0, true); // numleafbrushes
   });
@@ -410,6 +423,7 @@ results, same rendered geometry) -- not just "loads without erroring".
 */
 export function buildBoxRoomBspQbsp(entityString: string = WORLDSPAWN_ONLY_ENTITIES, options: BoxRoomOptions = {}): Uint8Array {
   const renderable = options.renderable === true;
+  const partialLeafFaces = options.partialLeafFaces === true;
   const planes = wallPlanes();
 
   const planesLump = buildLump(planes.length, DPLANE_T_SIZE, (view, base, i) => {
@@ -528,8 +542,8 @@ export function buildBoxRoomBspQbsp(entityString: string = WORLDSPAWN_ONLY_ENTIT
     view.setFloat32(base + 24, b, true); // maxs
     view.setFloat32(base + 28, b, true);
     view.setFloat32(base + 32, b, true);
-    view.setUint32(base + 36, 0, true); // firstleafface
-    view.setUint32(base + 40, renderable && !solid ? 6 : 0, true); // numleaffaces
+    view.setUint32(base + 36, renderable && !solid && partialLeafFaces ? PARTIAL_FIRST_LEAFFACE : 0, true); // firstleafface
+    view.setUint32(base + 40, renderable && !solid ? (partialLeafFaces ? PARTIAL_NUM_LEAFFACES : 6) : 0, true); // numleaffaces
     view.setUint32(base + 44, 0, true); // firstleafbrush
     view.setUint32(base + 48, solid ? 6 : 0, true); // numleafbrushes
   });

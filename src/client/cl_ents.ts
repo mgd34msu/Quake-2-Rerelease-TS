@@ -53,6 +53,8 @@ import {
   RF_SHELL_BLUE,
   RF_SHELL_DOUBLE,
   RF_SHELL_HALF_DAM,
+  RF_CUSTOM_LIGHT,
+  RF_FLARE,
   Q_strcasecmp,
   PM_TypeIsAlive,
 } from "../shared/q_shared";
@@ -654,6 +656,48 @@ function CL_AddPacketEntities(frame: FrameT): void {
     }
 
     // create a new entity
+
+    if (cls.csr.extended) {
+      // q2repro src/client/entities.c:710-748 handles both of these before
+      // the model lookup below and jumps straight to the loop's `skip:`
+      // label, so neither ever reaches the renderer. That matters here
+      // because SP_misc_flare (rerelease g_misc.cpp:2136) and SP_target_light
+      // (g_target.cpp:1532) both set `s.modelindex = 1`, which resolves to
+      // cl.model_draw[1] -- the world model. Handing that to the renderer
+      // draws the whole map once per such entity as an inline bmodel
+      // (maps/mguhub.bsp: 8 target_lights x 66621 surfaces per frame) and
+      // re-queues world surfaces that are already on the translucent chain,
+      // which turns that chain into a cycle and hangs R_DrawAlphaSurfaces.
+      if (renderfx & RF_FLARE) {
+        // DEVIATION: q2repro draws the flare here as a scaled, RGBA-tinted
+        // sprite (ent.scale/ent.rgba, cl_img_flare); EntityT carries neither
+        // field yet, so this port takes the same branch's `cl_flares 0`
+        // outcome -- the flare is consumed, not drawn -- rather than the
+        // world model. Full flare rendering is a follow-up.
+        VectorCopy(ent.origin, cent.lerp_origin);
+        continue;
+      }
+
+      if (renderfx & RF_CUSTOM_LIGHT) {
+        // DLIGHT_CUTOFF (q2repro inc/refresh/refresh.h:37) duplicated as a
+        // local the same way ref_gl/gl_light.ts and gl_shader.ts each do.
+        const DLIGHT_CUTOFF = 64;
+        // `color.u32 = BigLong(s1->skinnum)` then color.r/g/b: a big-endian
+        // read of the packed value SP_target_light writes as
+        // `(b << 8) | (g << 16) | (r << 24)`.
+        let r = 1;
+        let g = 1;
+        let b = 1;
+        if (s1.skinnum) {
+          r = ((s1.skinnum >>> 24) & 0xff) / 255.0;
+          g = ((s1.skinnum >>> 16) & 0xff) / 255.0;
+          b = ((s1.skinnum >>> 8) & 0xff) / 255.0;
+        }
+        V_AddLight(ent.origin, DLIGHT_CUTOFF + s1.frame, r, g, b);
+        VectorCopy(ent.origin, cent.lerp_origin);
+        continue;
+      }
+    }
 
     // tweak the color of beams
     if (renderfx & RF_BEAM) {

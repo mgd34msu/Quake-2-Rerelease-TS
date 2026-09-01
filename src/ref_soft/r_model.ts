@@ -311,7 +311,7 @@ export class MleafT {
   cluster = 0;
   area = 0;
 
-  firstmarksurface: MsurfaceT[] = []; // slice into model.marksurfaces starting here
+  firstmarksurface: MsurfaceT[] = []; // this leaf's own range of model.marksurfaces
   nummarksurfaces = 0;
   key = 0; // BSP sequence number for leaf's contents
 }
@@ -1268,7 +1268,15 @@ function Mod_LoadLeafs(l: LumpT): void {
     lf.cluster = din.cluster;
     lf.area = din.area;
 
-    lf.firstmarksurface = loadmodel.marksurfaces.slice(din.firstleafface);
+    // C: `out->firstmarksurface = loadmodel->marksurfaces + in->firstleafface`
+    // is a pointer into the shared array and costs nothing. Copying the whole
+    // tail per leaf instead is O(numleafs * nummarksurfaces) RETAINED memory:
+    // maps/mguhub.bsp (72159 faces) spent 17s here allocating 21 GB that then
+    // never freed, which is what the RSS climb in the CotM live-play stall
+    // was. Only [0, nummarksurfaces) is ever read out of it (both renderers'
+    // R_RecursiveWorldNode), so the leaf's own range holds every element the
+    // C pointer could reach.
+    lf.firstmarksurface = loadmodel.marksurfaces.slice(din.firstleafface, din.firstleafface + din.numleaffaces);
     lf.nummarksurfaces = din.numleaffaces;
   }
 }
@@ -1327,7 +1335,15 @@ function Mod_LoadLeafsExt(l: LumpT): void {
 
     if (din.firstleafface + din.numleaffaces > loadmodel.marksurfaces.length) ri.Sys_Error(ERR_DROP, "Bad leaffaces");
 
-    lf.firstmarksurface = loadmodel.marksurfaces.slice(din.firstleafface);
+    // C: `out->firstmarksurface = loadmodel->marksurfaces + in->firstleafface`
+    // is a pointer into the shared array and costs nothing. Copying the whole
+    // tail per leaf instead is O(numleafs * nummarksurfaces) RETAINED memory:
+    // maps/mguhub.bsp (72159 faces) spent 17s here allocating 21 GB that then
+    // never freed, which is what the RSS climb in the CotM live-play stall
+    // was. Only [0, nummarksurfaces) is ever read out of it (both renderers'
+    // R_RecursiveWorldNode), so the leaf's own range holds every element the
+    // C pointer could reach.
+    lf.firstmarksurface = loadmodel.marksurfaces.slice(din.firstleafface, din.firstleafface + din.numleaffaces);
     lf.nummarksurfaces = din.numleaffaces;
   }
 }

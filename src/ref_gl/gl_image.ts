@@ -1540,6 +1540,26 @@ export function GL_FindImage(name: string, type: ImagetypeT): ImageT | null {
 
   for (const ext of candidates) {
     const candidateName = ext === requestedExt ? name : `${base}.${ext}`;
+    // The cache probe above only saw the name as the CALLER spelled it, and
+    // GL_LoadPic records whichever extension actually resolved -- so an image
+    // that came in through this fallback chain is never found again on the
+    // next lookup, and each lookup burns a fresh gltextures slot.
+    // SCR_DrawCrosshair asks for pics/ch1.pcx every single frame and the
+    // retail file is pics/ch1.png: ~570 frames in, "ERROR: MAX_GLTEXTURES".
+    // q2repro has no such hole because its lookup_image keys the cache on the
+    // BASE name (src/refresh/images.c: baselen/memcmp, hashed on the base),
+    // matching regardless of extension; probing each candidate against the
+    // same exact-name cache this function already uses gets the same result
+    // without changing what "already loaded" means anywhere else.
+    if (ext !== requestedExt) {
+      for (let i = 0; i < numgltextures; i++) {
+        const cached = gltextures[i];
+        if (candidateName === cached.name) {
+          cached.registration_sequence = registration_sequence;
+          return cached;
+        }
+      }
+    }
     const image = GL_LoadByExt(candidateName, ext, type);
     if (image) return image;
   }

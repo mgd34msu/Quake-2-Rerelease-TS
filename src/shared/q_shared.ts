@@ -463,6 +463,14 @@ export const RF_IR_VISIBLE = 0x00008000; // 32768
 export const RF_SHELL_DOUBLE = 0x00010000; // 65536
 export const RF_SHELL_HALF_DAM = 0x00020000;
 export const RF_USE_DISGUISE = 0x00040000;
+// [Paril-KEX]/[Sam-KEX] rerelease-only renderfx (rerelease game.h:599-601,
+// q2repro inc/shared/shared.h:1235-1236). Both of the entities that set them
+// -- SP_target_light (g_target.cpp:1532) and SP_misc_flare (g_misc.cpp:2136)
+// -- also set `s.modelindex = 1`, so the client has to consume them before
+// the model lookup or they resolve to the world model; see cl_ents.ts's
+// CL_AddPacketEntities.
+export const RF_CUSTOM_LIGHT = 0x00100000; // s.frame is radius, s.skinnum is packed RGB
+export const RF_FLARE = 0x00200000;
 
 // player_state_t->refdef flags
 export const RDF_UNDERWATER = 1; // warp the screen as apropriate

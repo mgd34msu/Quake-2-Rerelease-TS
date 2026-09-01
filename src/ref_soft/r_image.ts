@@ -548,6 +548,19 @@ export function R_FindImage(name: string, type: ImagetypeT): ImageT | null {
 
   for (const ext of candidates) {
     const candidateName = ext === requestedExt ? name : `${base}.${ext}`;
+    // See gl_image.ts's GL_FindImage for the same probe and the full
+    // citation: the exact-name cache lookup above only ever sees the name as
+    // the caller spelled it, so without this an image resolved through the
+    // fallback chain reloads into a new r_images slot on every lookup.
+    if (ext !== requestedExt) {
+      for (let i = 0; i < numr_images; i++) {
+        const cached = r_images[i];
+        if (candidateName === cached.name) {
+          cached.registration_sequence = registration_sequence;
+          return cached;
+        }
+      }
+    }
     const image = R_LoadByExt(candidateName, ext, type);
     if (image) return image;
   }

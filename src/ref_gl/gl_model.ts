@@ -168,6 +168,20 @@ export class GlpolyT {
 export class MsurfaceT {
   visframe = 0; // should be drawn when node is crossed
 
+  // This port only, mirroring ref_soft/r_model.ts's field of the same name
+  // (and the same reasoning): a surface reachable through more than one path
+  // in a single frame -- an entity whose modelindex resolves to the world
+  // model makes R_DrawInlineBModel walk the world's own surface list, and
+  // R_RecursiveWorldNode has already queued those surfaces -- would be pushed
+  // onto r_alpha_surfaces twice, and the second push writes
+  // `X.texturechain = X` while r_alpha_surfaces still points at X. That
+  // self-cycle hangs R_DrawAlphaSurfaces's `for (s = ...; s; s = ...)`
+  // forever. Vanilla C corrupts its list identically given the same data (a
+  // property of the list algorithm, not of the translation), so rule 17's
+  // fidelity razor applies: match the original's observable, playable
+  // outcome rather than reproduce a permanent freeze.
+  alphaframe = -1;
+
   plane: MplaneT | null = null;
   flags = 0;
 
@@ -269,7 +283,7 @@ export class MleafT {
   cluster = 0;
   area = 0;
 
-  firstmarksurface: MsurfaceT[] = []; // slice into model.marksurfaces starting here
+  firstmarksurface: MsurfaceT[] = []; // this leaf's own range of model.marksurfaces
   nummarksurfaces = 0;
 }
 
@@ -1198,7 +1212,15 @@ function Mod_LoadLeafs(l: LumpT): void {
     lf.cluster = din.cluster;
     lf.area = din.area;
 
-    lf.firstmarksurface = loadmodel.marksurfaces.slice(din.firstleafface);
+    // C: `out->firstmarksurface = loadmodel->marksurfaces + in->firstleafface`
+    // is a pointer into the shared array and costs nothing. Copying the whole
+    // tail per leaf instead is O(numleafs * nummarksurfaces) RETAINED memory:
+    // maps/mguhub.bsp (72159 faces) spent 17s here allocating 21 GB that then
+    // never freed, which is what the RSS climb in the CotM live-play stall
+    // was. Only [0, nummarksurfaces) is ever read out of it (both renderers'
+    // R_RecursiveWorldNode), so the leaf's own range holds every element the
+    // C pointer could reach.
+    lf.firstmarksurface = loadmodel.marksurfaces.slice(din.firstleafface, din.firstleafface + din.numleaffaces);
     lf.nummarksurfaces = din.numleaffaces;
 
     // gl underwater warp: dropped, wrapped in `#if 0` in the original
@@ -1264,7 +1286,15 @@ function Mod_LoadLeafsExt(l: LumpT): void {
     lf.area = din.area;
 
     if (din.firstleafface + din.numleaffaces > loadmodel.marksurfaces.length) ri.Sys_Error(ERR_DROP, "Bad leaffaces");
-    lf.firstmarksurface = loadmodel.marksurfaces.slice(din.firstleafface);
+    // C: `out->firstmarksurface = loadmodel->marksurfaces + in->firstleafface`
+    // is a pointer into the shared array and costs nothing. Copying the whole
+    // tail per leaf instead is O(numleafs * nummarksurfaces) RETAINED memory:
+    // maps/mguhub.bsp (72159 faces) spent 17s here allocating 21 GB that then
+    // never freed, which is what the RSS climb in the CotM live-play stall
+    // was. Only [0, nummarksurfaces) is ever read out of it (both renderers'
+    // R_RecursiveWorldNode), so the leaf's own range holds every element the
+    // C pointer could reach.
+    lf.firstmarksurface = loadmodel.marksurfaces.slice(din.firstleafface, din.firstleafface + din.numleaffaces);
     lf.nummarksurfaces = din.numleaffaces;
 
     // gl underwater warp: dropped, see the classic loader's identical comment
