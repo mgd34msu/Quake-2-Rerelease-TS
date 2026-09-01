@@ -298,6 +298,27 @@ describe("ref_soft renders a real frame headless", () => {
     expect(palette?.[0]).toBe(0);
     expect(palette?.[128 * 3]).toBe(128);
     expect(palette?.[255 * 3 + 2]).toBe(255);
+  });
+
+  // The C original probes for a free "quakeNN" slot with fopen(checkname,
+  // "rb") on the absolute OS path it just built from FS_Gamedir(). This port
+  // probed with ri.FS_LoadFile instead -- a virtual-filesystem lookup
+  // relative to the search paths, which can never resolve an absolute OS
+  // path, so it answered "does not exist" for slot 0 every time and every
+  // screenshot overwrote quake00. The probe now goes through the same
+  // platform hook as the writer (SetScreenshotExists, installed by VID_Init).
+  test("R_ScreenShot_f advances to the next free slot instead of overwriting quake00", () => {
+    expect(existsSync(join(gamedir, "scrnshot", "quake00.pcx"))).toBe(true);
+    const first = readFileSync(join(gamedir, "scrnshot", "quake00.pcx"));
+
+    R_ScreenShot_f();
+    expect(existsSync(join(gamedir, "scrnshot", "quake01.pcx"))).toBe(true);
+
+    R_ScreenShot_f();
+    expect(existsSync(join(gamedir, "scrnshot", "quake02.pcx"))).toBe(true);
+
+    // and the earlier shot was left untouched
+    expect(readFileSync(join(gamedir, "scrnshot", "quake00.pcx"))).toEqual(first);
 
     SWimp_Shutdown();
   });

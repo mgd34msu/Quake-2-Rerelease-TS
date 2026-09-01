@@ -151,7 +151,30 @@ describe("gl_shader.ts -- GLSL source assembly", () => {
   test("vertex shader feeds gl_Normal into v_normal only when dynamic lights are requested", () => {
     const withLights = buildVertexShaderSource(GLS_WORLD_SURFACE);
     expect(withLights).toContain("gl_NormalMatrix * gl_Normal");
-    expect(withLights).toContain("gl_ModelViewProjectionMatrix * gl_Vertex");
+  });
+
+  // Regression: the world is drawn in two coplanar passes -- R_RenderBrushPoly
+  // emits the texture pass through the fixed-function pipeline, then
+  // R_BlendLightmaps re-emits the SAME polygons through this program. GLSL
+  // 1.10 section 8.10 only guarantees a vertex shader's position matches the
+  // fixed-function pipeline's when it is computed with ftransform(). An
+  // explicit `gl_ModelViewProjectionMatrix * gl_Vertex` is free to differ in
+  // the last bits and on NVIDIA it does: the second pass then z-fights the
+  // first and paints diagonal moire/striping, serrated surface edges, and
+  // thin hanging lines that completely reshuffle on sub-degree view changes.
+  test("every permutation computes gl_Position with ftransform() -- depth invariance with the fixed-function first pass", () => {
+    for (const bits of [GLS_LIGHTMAP, GLS_DYNAMIC_LIGHTS, GLS_WORLD_SURFACE, GLS_ENTITY_MESH]) {
+      const src = buildVertexShaderSource(bits);
+      expect(src).toContain("gl_Position = ftransform();");
+      expect(src).not.toContain("gl_ModelViewProjectionMatrix");
+    }
+  });
+
+  // v_world_pos is an eye-space position used only by the lighting math, not
+  // by gl_Position, so it may keep its own explicit matrix multiply.
+  test("the ftransform() rule constrains gl_Position only -- v_world_pos still uses gl_ModelViewMatrix", () => {
+    const src = buildVertexShaderSource(GLS_WORLD_SURFACE);
+    expect(src).toContain("v_world_pos = vec3(gl_ModelViewMatrix * gl_Vertex);");
   });
 
   test("uniform-binding table matches the fragment source's actual `uniform` declarations (world surface)", () => {

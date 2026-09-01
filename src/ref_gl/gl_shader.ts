@@ -147,7 +147,17 @@ export function buildVertexShaderSource(bits: GlShaderBits): string {
   if (bits & GLS_DYNAMIC_LIGHTS) lines.push("  v_normal = normalize(gl_NormalMatrix * gl_Normal);");
   lines.push("  gl_TexCoord[0] = gl_MultiTexCoord0;");
   lines.push("  gl_FrontColor = gl_Color;");
-  lines.push("  gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;");
+  // ftransform(), NOT `gl_ModelViewProjectionMatrix * gl_Vertex`. The world
+  // is drawn in two coplanar passes: R_RenderBrushPoly emits the texture
+  // pass through the fixed-function pipeline, then R_BlendLightmaps re-emits
+  // the SAME polygons through this program. GLSL 1.10 section 8.10 only
+  // guarantees a vertex shader's position matches the fixed-function
+  // pipeline's when the shader computes it with ftransform(); an explicit
+  // matrix multiply is free to differ in the last bits, and on NVIDIA it
+  // does -- the second pass then z-fights the first over whole surfaces and
+  // paints the diagonal moire/striping and thin hanging lines this renderer
+  // showed at gl_shaders 1.
+  lines.push("  gl_Position = ftransform();");
   lines.push("}");
   return lines.join("\n");
 }

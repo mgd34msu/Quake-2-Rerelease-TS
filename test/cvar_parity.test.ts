@@ -389,7 +389,8 @@ const MANIFEST: ManifestEntry[] = [
   { name: "hqx_y", default: "48", flags: CVAR_FILES },
   { name: "in_enable", default: "1", flags: 0 },
   { name: "in_grab", default: "1", flags: 0 },
-  { name: "intensity", default: "1", flags: 0 },
+  // "intensity" is NOT in this manifest: q2repro's "1" is not transferable to
+  // this renderer. See the dedicated divergence test below.
   { name: "libdir", default: "", flags: CVAR_NOSET },
   { name: "loc_file", default: "localization/loc_english.txt", flags: 0 },
   { name: "logfile", default: "0", flags: 0 },
@@ -914,6 +915,29 @@ describe("cvar parity audit -- full engine boot", () => {
     expect(v).toBeDefined();
     expect(v?.default_string).toBe("soft");
     expect((v?.flags ?? 0) & CVAR_ARCHIVE).toBe(CVAR_ARCHIVE);
+  });
+
+  test("intensity: judgment-call divergence, not auto-fixed -- vanilla's \"2\", because this renderer has vanilla's mechanism", () => {
+    // q2repro src/refresh/texture.c:1266 registers intensity "1", but it also
+    // moved intensity out of the texture prescale: GL_BuildIntensityTable
+    // (texture.c:955) builds an IDENTITY table whenever gl_static.use_shaders,
+    // and shader.c:687 applies the value at draw time instead
+    // (`diffuse.rgb *= u_intensity;`). "1" there means "no prescale,
+    // brightness comes from the shader".
+    //
+    // ref_gl here is vanilla's fixed-function pipeline. gl_image.ts's
+    // intensitytable is the ONLY place intensity is ever applied -- it
+    // prescales world textures at upload so R_BlendLightmaps' second modulate
+    // pass (GL_ZERO, GL_SRC_COLOR) lands back at the intended brightness, and
+    // gl_state.inverse_intensity scales the un-lightmapped alpha/warp surfaces
+    // to match. Taking q2repro's default without q2repro's shader-side
+    // multiply left the world about half as bright (Mike's RC screenshot
+    // report). vanilla gl_image.c:1503 is the correct citation for this
+    // renderer: `intensity = ri.Cvar_Get ("intensity", "2", 0);`
+    const v = cvar_vars.get("intensity");
+    expect(v).toBeDefined();
+    expect(v?.default_string).toBe("2");
+    expect(v?.flags).toBe(0);
   });
 
   test("the new q2repro extended cvar flag bits this audit added exist and match inc/common/cvar.h's BIT(5)..BIT(15)", () => {

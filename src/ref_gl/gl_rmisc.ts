@@ -10,16 +10,15 @@ there is no cross-unit placement mismatch to report.
 
 GL_ScreenShot_f: the original creates the screenshot directory (Sys_Mkdir),
 finds the next unused "quakeNN.tga" name by fopen()-probing for existence,
-then fopen/fwrite's the TGA buffer to disk. `RefImports` (client/ref.ts, out
-of this unit's SCOPE) exposes only read-only file access (FS_LoadFile/
-FS_FreeFile/FS_Gamedir) -- no directory-creation or file-write import exists
-to call. This port builds the identical TGA header and BGR-swapped pixel
-buffer via qglReadPixels (the part that is expressible), always names it
-"quake00.tga" (the existence-probing loop has no fopen-equivalent to drive
-it), and prints the original's "Wrote %s" message, but the buffer is never
-actually written to disk. Reported deviation/follow-up: RefImports needs an
-FS_WriteFile-equivalent (and a directory-creation import) before this can
-reach parity.
+then fopen/fwrite's the TGA buffer to disk. `RefImports` (client/ref.ts)
+exposes only read-only *virtual-filesystem* access (FS_LoadFile/FS_FreeFile/
+FS_Gamedir) -- no directory-creation, file-write, or raw-OS-path probe
+import exists to call. This port builds the identical TGA header and
+BGR-swapped pixel buffer via qglReadPixels, and reaches disk through two
+platform-injected hooks (SetScreenshotWriter/SetScreenshotExists, installed
+by src/platform/vid.ts's VID_Init, the same seam ref_soft's R_ScreenShot_f
+uses): the writer stands in for Sys_Mkdir+fwrite, the exists-probe for
+fopen(checkname, "rb"). Both take the absolute OS path the C original uses.
 
 `#ifdef _WIN32` in GL_UpdateSwapInterval (the wglSwapIntervalEXT call) is
 dropped per PORTING.md's portable-path rule; the modified-flag reset that
@@ -142,8 +141,7 @@ export function GL_ScreenShot_f(): void {
   for (; slot <= 99; slot++) {
     picname = `quake${(slot / 10) | 0}${slot % 10}.tga`;
     checkname = `${gamedir}/scrnshot/${picname}`;
-    const probe = ri.FS_LoadFile(checkname);
-    if (probe.length === -1) break;
+    if (!screenshotExists || !screenshotExists(checkname)) break;
   }
   if (slot === 100) {
     ri.Con_Printf(PRINT_ALL, "SCR_ScreenShot_f: Couldn't create a file\n");
@@ -176,6 +174,17 @@ export type ScreenshotWriterT = (path: string, data: Uint8Array) => void;
 let screenshotWriter: ScreenshotWriterT | null = null;
 export function SetScreenshotWriter(fn: ScreenshotWriterT | null): void {
   screenshotWriter = fn;
+}
+
+// The free-filename probe needs the same seam. `checkname` is an absolute OS
+// path built from FS_Gamedir(), which ri.FS_LoadFile -- a virtual-filesystem
+// lookup relative to the search paths -- can never resolve, so it answered
+// "does not exist" for every slot and every screenshot overwrote quake00.
+// The C original probes the OS path directly with fopen(checkname, "rb").
+export type ScreenshotExistsT = (path: string) => boolean;
+let screenshotExists: ScreenshotExistsT | null = null;
+export function SetScreenshotExists(fn: ScreenshotExistsT | null): void {
+  screenshotExists = fn;
 }
 
 /*

@@ -15,7 +15,8 @@ import { SetWorldModel, SetVisFrameCount, SetFrameCount, r_newrefdef } from "../
 import { QGLRecording } from "../src/ref_gl/qgl";
 import { SetQGL } from "../src/ref_gl/gl_image";
 import { SubdividePolygon, setWarpfaceForTesting, EmitWaterPolys, ClipSkyPolygon, R_ClearSkyBox, skymins, skymaxs } from "../src/ref_gl/gl_warp";
-import { LM_InitBlock, LM_AllocBlock, R_RecursiveWorldNode, R_DrawAlphaSurfaces, r_alpha_surfaces } from "../src/ref_gl/gl_rsurf";
+import { LM_InitBlock, LM_AllocBlock, R_RecursiveWorldNode, R_DrawAlphaSurfaces, R_BlendLightmaps, r_alpha_surfaces } from "../src/ref_gl/gl_rsurf";
+import { GL_ShutdownShaderPath } from "../src/ref_gl/gl_shader";
 
 beforeEach(() => {
   setWarpfaceForTesting(null);
@@ -41,6 +42,58 @@ describe("gl_rsurf.ts -- LM_AllocBlock", () => {
     // exceeding BLOCK_HEIGHT (128) -- must fail without allocating anything.
     const third = LM_AllocBlock(64, 64);
     expect(third).toEqual({ ok: false, x: 0, y: 0 });
+  });
+});
+
+describe("gl_rsurf.ts -- R_BlendLightmaps depth/blend state (vanilla gl_rsurf.c:315-470)", () => {
+  // The lightmap blend pass re-draws polygons the texture pass already drew,
+  // exactly coplanar. Vanilla relies on two things and nothing else to keep
+  // that from z-fighting: qglDepthMask(0) so the second pass never writes Z,
+  // and the GL_LEQUAL depth func GL_SetDefaultState left in place so a tie
+  // still passes. It never touches qglDepthFunc, qglPolygonOffset, or
+  // qglDepthRange here -- a "fix" that reached for any of those would be
+  // papering over a position-invariance bug instead of fixing it.
+  const GL_ZERO = 0;
+  const GL_SRC_COLOR = 0x0300;
+  const GL_SRC_ALPHA = 0x0302;
+  const GL_ONE_MINUS_SRC_ALPHA = 0x0303;
+  const GL_BLEND = 0x0be2;
+
+  function runBlendPass(): QGLRecording {
+    // rule 13: gl_shaders.test.ts's GL_InitShaderPath leaves gl_shader.ts's
+    // module-global shaderPathActive set, which would add qglUseProgram/
+    // qglUniform1i calls here depending on file order. Force the
+    // fixed-function path so this pin is order-independent.
+    GL_ShutdownShaderPath();
+    const rec = new QGLRecording();
+    SetQGL(rec);
+    const world = new ModelT();
+    world.lightdata = new Uint8Array(4); // R_BlendLightmaps early-outs without it
+    SetWorldModel(world);
+    R_BlendLightmaps();
+    SetWorldModel(null);
+    return rec;
+  }
+
+  test("brackets the pass with DepthMask(0)/DepthMask(1) and the vanilla modulate blendfunc", () => {
+    const names = runBlendPass().calls;
+    const seq = names.map((c) => `${c.name}(${c.args.join(",")})`);
+
+    expect(seq).toEqual([
+      "qglDepthMask(false)",
+      `qglEnable(${GL_BLEND})`,
+      `qglBlendFunc(${GL_ZERO},${GL_SRC_COLOR})`,
+      `qglDisable(${GL_BLEND})`,
+      `qglBlendFunc(${GL_SRC_ALPHA},${GL_ONE_MINUS_SRC_ALPHA})`,
+      "qglDepthMask(true)",
+    ]);
+  });
+
+  test("never reaches for a depth-func/offset/range workaround", () => {
+    const called = new Set(runBlendPass().calls.map((c) => c.name));
+    expect(called.has("qglDepthFunc")).toBe(false);
+    expect(called.has("qglPolygonOffset")).toBe(false);
+    expect(called.has("qglDepthRange")).toBe(false);
   });
 });
 

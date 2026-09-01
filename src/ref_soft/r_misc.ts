@@ -568,15 +568,25 @@ export function SetScreenshotWriter(fn: ScreenshotWriterT | null): void {
   screenshotWriter = fn;
 }
 
+// The free-filename probe needs the same seam. `checkname` is an absolute OS
+// path built from FS_Gamedir(), which ri.FS_LoadFile -- a virtual-filesystem
+// lookup relative to the search paths -- can never resolve, so it answered
+// "does not exist" for every slot and every screenshot overwrote quake00.
+// The C original probes the OS path directly with fopen(checkname, "rb").
+export type ScreenshotExistsT = (path: string) => boolean;
+let screenshotExists: ScreenshotExistsT | null = null;
+export function SetScreenshotExists(fn: ScreenshotExistsT | null): void {
+  screenshotExists = fn;
+}
+
 /*
 ==================
 R_ScreenShot_f
 
 RefImports has neither a raw file-write nor a Sys_Mkdir entry point, so the
 `scrnshot` directory is created by the platform writer instead of here
-(reported deviation) and the free-filename probe uses
-`ri.FS_LoadFile`'s documented "-1 length means the file does not exist"
-sentinel in place of `fopen(checkname, "r")`.
+(reported deviation) and the free-filename probe goes through the
+platform's `SetScreenshotExists` hook in place of `fopen(checkname, "r")`.
 ==================
 */
 export function R_ScreenShot_f(): void {
@@ -588,8 +598,7 @@ export function R_ScreenShot_f(): void {
     const ones = i % 10;
     const pcxname = `quake${tens}${ones}.pcx`;
     checkname = `${gamedir}/scrnshot/${pcxname}`;
-    const probe = ri.FS_LoadFile(checkname);
-    if (probe.length === -1) break;
+    if (!screenshotExists || !screenshotExists(checkname)) break;
   }
   if (i === 100) {
     ri.Con_Printf(PRINT_ALL, "R_ScreenShot_f: Couldn't create a PCX");

@@ -38,10 +38,10 @@ Sys_Mkdir either), so the writer does it here -- the C version relies on the
 directory already existing and silently fails when it does not.
 */
 
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { SetScreenshotWriter } from "../ref_soft/r_misc";
-import { SetScreenshotWriter as SetGLScreenshotWriter } from "../ref_gl/gl_rmisc";
+import { SetScreenshotWriter, SetScreenshotExists } from "../ref_soft/r_misc";
+import { SetScreenshotWriter as SetGLScreenshotWriter, SetScreenshotExists as SetGLScreenshotExists } from "../ref_gl/gl_rmisc";
 import { GetRefAPI as GetRefAPI_Soft } from "../ref_soft/r_main";
 import { GetRefAPI as GetRefAPI_GL, SetGLimp } from "../ref_gl/gl_rmain";
 import { SetQGL } from "../ref_gl/gl_image";
@@ -63,6 +63,14 @@ import { CUSTOM_HEIGHT_DEFAULT, CUSTOM_WIDTH_DEFAULT, VID_ClampCustomHeight, VID
 export function VID_WriteScreenshot(path: string, data: Uint8Array): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, data);
+}
+
+// Stands in for the C original's `fopen(checkname, "rb")` free-filename
+// probe: `path` is an absolute OS path under FS_Gamedir(), which the
+// virtual-filesystem FS_LoadFile the refreshes otherwise have can never
+// resolve.
+export function VID_ScreenshotExists(path: string): boolean {
+  return existsSync(path);
 }
 
 /*
@@ -375,6 +383,8 @@ VID_Init
 export function VID_Init(): void {
   SetScreenshotWriter(VID_WriteScreenshot);
   SetGLScreenshotWriter(VID_WriteScreenshot);
+  SetScreenshotExists(VID_ScreenshotExists);
+  SetGLScreenshotExists(VID_ScreenshotExists);
 
   // Create the video variables so we know how to start the graphics drivers.
   // vid_so.c picks "softx" when $DISPLAY is set and "soft" otherwise; this
@@ -431,6 +441,7 @@ export function VID_Shutdown(): void {
     VID_FreeReflib();
   }
   SetScreenshotWriter(null);
+  SetScreenshotExists(null);
 }
 
 // vid_xpos/vid_ypos are read by win32/vid_dll.c's window placement; SDL

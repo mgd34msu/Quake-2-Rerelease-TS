@@ -719,11 +719,17 @@ why this exists (q2repro's real "fonts/qconfont.png" kfont texture asset,
 truecolor, no .tga/.pcx sibling). Same {pic, width, height} shape and
 top-down RGBA8 orientation as LoadTGA's own result above, so GL_FindImage's
 ".png" branch below can call `GL_LoadPic(name, pic, width, height, type,
-32)` identically to its ".tga" branch. "Recognized but unsupported variant"
-(interlaced/16-bit/palette) mirrors LoadTGA's own Sys_Error convention for
-the same kind of failure (`Only type 2 and 10 targa RGB images supported`);
-"not a PNG at all"/corrupt data mirrors LoadPCX/LoadTGA's Con_Printf +
-null-pic convention for a genuinely bad/missing file.
+32)` identically to its ".tga" branch. Interlaced (Adam7), 16-bit, and
+palette (color type 3 + PLTE/tRNS) PNGs decode successfully as of 1bbc2a4
+(qcommon/png.ts's decodePNG covers the entire retail PNG census, not just
+truecolor) -- the `decoded.reason.startsWith("unsupported"/"interlaced"/
+"unknown")` -> Sys_Error branch below only fires for a genuinely malformed
+IHDR now (an unrecognized color type/bit-depth/interlace-method value), the
+same "recognized-format, corrupt/malformed data" class as LoadTGA's own
+Sys_Error convention (`Only type 2 and 10 targa RGB images supported`), not
+"recognized but unsupported variant" as a category anymore; "not a PNG at
+all"/corrupt data mirrors LoadPCX/LoadTGA's Con_Printf + null-pic convention
+for a genuinely bad/missing file.
 =========================================================
 */
 export function LoadPNG(name: string): { pic: Uint8Array | null; width: number; height: number } {
@@ -763,10 +769,13 @@ texture-format probe chain is "png jpg tga", images.c:2258). Same
 {pic, width, height} shape and top-down RGBA8 orientation as LoadPNG's own
 result above, so GL_FindImage's ".jpg" branch below can call
 `GL_LoadPic(name, pic, width, height, type, 32)` identically to its ".png"
-branch. "Recognized but unsupported variant" (progressive/arithmetic/
-12-bit) mirrors LoadPNG's own Sys_Error convention for the same kind of
-failure; "not a JPEG at all"/corrupt data mirrors LoadPCX/LoadTGA/LoadPNG's
-Con_Printf + null-pic convention for a genuinely bad/missing file.
+branch. Progressive (SOF2) JPEGs decode successfully as of bb7825a
+(qcommon/jpg.ts's own header covers the full baseline/progressive scan
+model) -- only arithmetic-coded variants and non-8-bit precision remain
+"recognized but unsupported" and take LoadPNG's own Sys_Error convention
+for that failure class; "not a JPEG at all"/corrupt data mirrors
+LoadPCX/LoadTGA/LoadPNG's Con_Printf + null-pic convention for a genuinely
+bad/missing file.
 =========================================================
 */
 export function LoadJPG(name: string): { pic: Uint8Array | null; width: number; height: number } {
@@ -1637,15 +1646,26 @@ GL_InitImages
 export function GL_InitImages(): void {
   SetRegistrationSequence(1);
 
-  // q2repro src/refresh/texture.c:1266: `gl_intensity = Cvar_Get("intensity",
-  // "1", 0);` -- default fixed from this port's prior "2" to q2repro's "1"
-  // (the immediately-following `<= 1` clamp below is vanilla's own, kept
-  // as-is: it forces the runtime value up to "1" whenever a lower default
-  // or explicit console value would leave it there, so the default fix
-  // still matters for what gets *displayed*/saved even though the clamp
-  // already floors the effective value at 1).
+  // vanilla gl_image.c:1503: `intensity = ri.Cvar_Get ("intensity", "2", 0);`
+  //
+  // This was briefly changed to q2repro's "1" (src/refresh/texture.c:1266) on
+  // a cvar-default parity sweep. That default does not transfer: q2repro
+  // moved intensity OUT of the texture prescale and into its GLSL pipeline.
+  // Its GL_BuildIntensityTable (texture.c:955) builds an IDENTITY table
+  // whenever `gl_static.use_shaders`, and shader.c:687 applies the value at
+  // draw time instead (`diffuse.rgb *= u_intensity;`), so "1" there means
+  // "no prescale, brightness comes from the shader".
+  //
+  // This renderer has vanilla's mechanism and only vanilla's: intensitytable
+  // below is the *only* place intensity is ever applied, prescaling world
+  // textures at upload so that R_BlendLightmaps' second modulate pass
+  // (GL_ZERO, GL_SRC_COLOR) lands back at the intended brightness. Setting it
+  // to 1 removed the prescale with nothing to replace it and left the whole
+  // world about half as bright, and left gl_state.inverse_intensity at 1.0 so
+  // the un-lightmapped alpha/warp surfaces that scale by it no longer matched
+  // the lit ones.
   // init intensity conversions
-  glCvars.intensity = ri.Cvar_Get("intensity", "1", 0);
+  glCvars.intensity = ri.Cvar_Get("intensity", "2", 0);
 
   if (glCvars.intensity && glCvars.intensity.value <= 1) {
     ri.Cvar_Set("intensity", "1");
