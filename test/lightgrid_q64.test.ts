@@ -53,11 +53,12 @@ alone, matching this repo's other renderer test files).
 */
 
 import { describe, test, expect, beforeEach } from "bun:test";
+import { existsSync, readFileSync } from "node:fs";
 import type { RefImports } from "../src/client/ref";
-import { LightstyleT } from "../src/client/ref";
+import { LightstyleT, MAX_LIGHTSTYLES } from "../src/client/ref";
 import { vec3 } from "../src/shared/math";
 import { CvarT } from "../src/shared/q_shared";
-import type { LightgridT } from "../src/qcommon/bspx";
+import type { LightgridT, LightgridSampleT } from "../src/qcommon/bspx";
 import { buildBoxRoomBsp, WORLDSPAWN_ONLY_ENTITIES } from "./support/bsp_builder";
 import {
   HEADER_LUMPS,
@@ -154,7 +155,11 @@ describe("gl_light.ts -- LightGridPoint (fabricated grids)", () => {
       [255, 255, 255], // 7: (1,1,1)
     ];
     const grid = makeUnitCubeGrid(corners);
-    glLocal.r_newrefdef.lightstyles[0].white = 1; // no extra scaling -- isolate the interpolation math
+    // no extra scaling -- isolate the interpolation math. LightGridPoint
+    // scales by style.rgb[0] (the un-tripled per-style intensity), NOT
+    // style.white (== r+g+b -- see gl_light.ts's LightGridPoint header
+    // comment for the full root-cause citation), so set rgb here.
+    glLocal.r_newrefdef.lightstyles[0].rgb.set([1, 1, 1]);
 
     const point = vec3(0.5, 0.25, 0.75);
     const color = vec3();
@@ -193,7 +198,7 @@ describe("gl_light.ts -- LightGridPoint (fabricated grids)", () => {
     ];
     const styles = [255, 0, 0, 0, 0, 0, 0, 0]; // corner 0 fully occluded
     const grid = makeUnitCubeGrid(corners, styles);
-    glLocal.r_newrefdef.lightstyles[0].white = 1;
+    glLocal.r_newrefdef.lightstyles[0].rgb.set([1, 1, 1]); // see rgb[0]-vs-white note above
 
     // query exactly at corner 0 (point_i=[0,0,0], fx=fy=fz=0) so the
     // trilinear weights collapse entirely onto that one corner -- isolating
@@ -211,7 +216,7 @@ describe("gl_light.ts -- LightGridPoint (fabricated grids)", () => {
     expect(color[0]).toBeCloseTo(avg / 255, 5);
   });
 
-  test("two lightstyles on the same corner accumulate via VectorMA(style.white, sample.rgb) and sum", () => {
+  test("two lightstyles on the same corner accumulate via VectorMA(style.rgb[0], sample.rgb) and sum", () => {
     // numstyles=2: corner 0 carries two real style entries, every other
     // corner is fully occluded in both slots -- querying exactly at corner
     // 0 (fx=fy=fz=0) collapses the trilinear weights onto corner 0 alone,
@@ -246,8 +251,8 @@ describe("gl_light.ts -- LightGridPoint (fabricated grids)", () => {
         { style: 255, rgb: [255, 255, 255] },
       ],
     };
-    glLocal.r_newrefdef.lightstyles[0].white = 1.5;
-    glLocal.r_newrefdef.lightstyles[1].white = 0.5;
+    glLocal.r_newrefdef.lightstyles[0].rgb.set([1.5, 1.5, 1.5]);
+    glLocal.r_newrefdef.lightstyles[1].rgb.set([0.5, 0.5, 0.5]);
 
     const point = vec3(0, 0, 0); // exactly at corner 0
     const color = vec3();
@@ -336,7 +341,7 @@ describe("gl_light.ts -- R_LightPoint prioritizes LIGHTGRID_OCTREE over the clas
 
     glLocal.r_newrefdef.lightstyles = [];
     for (let i = 0; i < 4; i++) glLocal.r_newrefdef.lightstyles.push(new LightstyleT());
-    glLocal.r_newrefdef.lightstyles[0].white = 1;
+    glLocal.r_newrefdef.lightstyles[0].rgb.set([1, 1, 1]); // see rgb[0]-vs-white note in the block above
 
     const on = new CvarT();
     on.value = 1;
@@ -790,5 +795,342 @@ describe("r_model.ts -- Q64-style oversized classic extents skipped per-face, no
     expect(model).not.toBeNull();
     if (!model) throw new Error("model not returned");
     expect(model.numsurfaces).toBe(6);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// OVERBRIGHT REGRESSION (.orch/followups.md "overbright model lighting":
+// "R_LightPoint returns shadelight up to ~5.6 on DECOUPLED_LM/LIGHTGRID
+// maps (vanilla ~<=1 at gl_modulate 1) -- own item, likely lightgrid
+// scaling"): loads the REAL retail maps/base1.bsp -- once from the
+// rerelease install (carries a real BSPX LIGHTGRID_OCTREE lump) and once
+// from the pre-rerelease classic install (no BSPX at all, confirming the
+// "rerelease-upgraded maps" framing is real, not assumed) -- and drives
+// LightGridPoint against the real octree data.
+//
+// ROOT CAUSE (full citation in gl_light.ts's LightGridPoint header
+// comment): q2repro's GL_LightGridPoint (src/refresh/world.c:101) scales
+// each raw grid sample by `style->white`, a MONOCHROME per-style
+// intensity q2repro's own V_AddLightStyle(style, value) stores directly
+// (q2repro src/client/view.c:217-223; src/client/effects.c:74's
+// `(c-'a')/('m'-'a')`, full-bright 'm' == 1.0). This port's `.white`
+// instead holds vanilla's `r+g+b` sum (quake-2-c client/cl_view.c:138,
+// kept byte-for-byte here in cl_view.ts's V_AddLightStyle) -- and
+// CL_RunLightStyles (quake-2-c client/cl_fx.c:77-88, ported unchanged as
+// cl_fx.ts's CL_RunLightStyles) always sets r=g=b, so `.white` is exactly
+// 3x q2repro's monochrome value at every style (full-bright white==3, not
+// 1). Using `.white` in LightGridPoint therefore over-brightened every
+// LIGHTGRID_OCTREE sample by ~3x. Fixed by scaling with `style.rgb[0]`
+// instead (== rgb[1] == rgb[2] by the same r=g=b invariant, so it always
+// holds q2repro's un-tripled value).
+//
+// No retail content is committed: both pak0.pak files are read directly
+// from the user's local retail installs at test-run time (raw node:fs
+// PACK/IBSP parsing, matching every other retail-gated test's convention
+// -- see test/gl_rsurf_lightmap_filter_retail.test.ts). Each test skips
+// itself if its install isn't present.
+// ---------------------------------------------------------------------------
+
+describe("gl_light.ts -- LightGridPoint overbright regression against REAL retail base1.bsp LIGHTGRID_OCTREE data", () => {
+  const RERELEASE_PAK = "/home/buzzkill/q2rets/rerelease/baseq2/pak0.pak";
+  const CLASSIC_PAK = "/home/buzzkill/q2rets/baseq2/pak0.pak";
+  const haveRerelease = existsSync(RERELEASE_PAK);
+  const haveClassic = existsSync(CLASSIC_PAK);
+
+  interface PakEntry {
+    name: string;
+    filepos: number;
+    filelen: number;
+  }
+
+  function readPakDirectory(pakPath: string): { data: Buffer; entries: PakEntry[] } {
+    const data = readFileSync(pakPath);
+    const entries: PakEntry[] = [];
+    if (data.toString("ascii", 0, 4) === "PACK") {
+      const dirofs = data.readInt32LE(4);
+      const dirlen = data.readInt32LE(8);
+      const numEntries = dirlen / 64;
+      for (let i = 0; i < numEntries; i++) {
+        const entryOffset = dirofs + i * 64;
+        const rawName = data.toString("ascii", entryOffset, entryOffset + 56);
+        const name = rawName.replace(/\0.*$/, "");
+        const filepos = data.readInt32LE(entryOffset + 56);
+        const filelen = data.readInt32LE(entryOffset + 60);
+        entries.push({ name, filepos, filelen });
+      }
+    }
+    return { data, entries };
+  }
+
+  function makeFakeRi(pak: { data: Buffer; entries: PakEntry[] }): RefImports {
+    return {
+      Sys_Error(_level: number, str: string): never {
+        throw new Error(str);
+      },
+      Cmd_AddCommand: () => undefined,
+      Cmd_RemoveCommand: () => undefined,
+      Cmd_Argc: () => 0,
+      Cmd_Argv: () => "",
+      Cmd_ExecuteText: () => undefined,
+      Con_Printf: () => undefined,
+      FS_LoadFile: (name: string) => {
+        const entry = pak.entries.find((e) => e.name === name);
+        if (!entry) return { length: -1, data: null };
+        const bytes = new Uint8Array(pak.data.buffer, pak.data.byteOffset + entry.filepos, entry.filelen);
+        return { length: bytes.length, data: bytes };
+      },
+      FS_FreeFile: () => undefined,
+      FS_Gamedir: () => "",
+      Cvar_Get: () => null,
+      Cvar_Set: () => null,
+      Cvar_SetValue: () => undefined,
+      Vid_GetModeInfo: () => null,
+      Vid_MenuInit: () => undefined,
+      Vid_NewWindow: () => undefined,
+    };
+  }
+
+  // Independent re-implementation of q2repro's GL_LightGridPoint math
+  // (src/refresh/world.c:69-150), computed directly from lookupLightgrid's
+  // real corner samples -- NOT by calling gl_light.ts's LightGridPoint --
+  // so this is a genuine cross-check of the port's formula against the
+  // cited reference math, not a tautology. `styleScale(style)` is the only
+  // parameter that differs between the pre-fix and post-fix formulas.
+  function referenceLightGridPoint(
+    grid: LightgridT,
+    lookupLightgrid: (grid: LightgridT, point: readonly [number, number, number]) => readonly LightgridSampleT[] | null,
+    pointI: readonly [number, number, number],
+    styleScale: (style: number) => number
+  ): [number, number, number] {
+    const samples: Array<[number, number, number]> = [];
+    let mask = 0;
+    const avg: [number, number, number] = [0, 0, 0];
+    let numsamples = 0;
+
+    for (let i = 0; i < 8; i++) {
+      const tmp: [number, number, number] = [pointI[0] + ((i >> 0) & 1), pointI[1] + ((i >> 1) & 1), pointI[2] + ((i >> 2) & 1)];
+      const s = lookupLightgrid(grid, tmp);
+      const sample: [number, number, number] = [0, 0, 0];
+      let hitAnyStyle = false;
+      if (s) {
+        for (let j = 0; j < grid.numstyles && s[j].style !== 255; j++) {
+          const scale = styleScale(s[j].style);
+          sample[0] += scale * s[j].rgb[0];
+          sample[1] += scale * s[j].rgb[1];
+          sample[2] += scale * s[j].rgb[2];
+          hitAnyStyle = true;
+        }
+      }
+      samples[i] = sample;
+      if (hitAnyStyle) {
+        mask |= 1 << i;
+        avg[0] += sample[0];
+        avg[1] += sample[1];
+        avg[2] += sample[2];
+        numsamples++;
+      }
+    }
+
+    if (!mask) throw new Error("referenceLightGridPoint: every corner missed -- pick a different pointI");
+
+    if (mask !== 255) {
+      avg[0] /= numsamples;
+      avg[1] /= numsamples;
+      avg[2] /= numsamples;
+      for (let i = 0; i < 8; i++) {
+        if (!(mask & (1 << i))) samples[i] = [avg[0], avg[1], avg[2]];
+      }
+    }
+
+    // trilinear interpolation at the corner-0 point itself (fx=fy=fz=0.5,
+    // matching this suite's query point choice below) -- symmetric weights
+    // avoid any float-edge ambiguity in which corner a coordinate lands on.
+    const f = 0.5;
+    const out: [number, number, number] = [0, 0, 0];
+    for (let c = 0; c < 3; c++) {
+      const lerpX = [
+        (1 - f) * samples[0][c] + f * samples[1][c],
+        (1 - f) * samples[2][c] + f * samples[3][c],
+        (1 - f) * samples[4][c] + f * samples[5][c],
+        (1 - f) * samples[6][c] + f * samples[7][c],
+      ];
+      const lerpY = [(1 - f) * lerpX[0] + f * lerpX[1], (1 - f) * lerpX[2] + f * lerpX[3]];
+      out[c] = ((1 - f) * lerpY[0] + f * lerpY[1]) / 255;
+    }
+    return out;
+  }
+
+  // A LIGHTGRID_OCTREE leaf's own `numsamples` only says how many sample
+  // slots it reserves, not that any of them are actually lit: leafs that
+  // fall entirely inside solid geometry still get slots, every one of them
+  // style==255 (fully occluded) -- confirmed against the real rerelease
+  // base1.bsp lump (leaf 0, mins=[24,11,3], all 8 of its own corner probes
+  // return style==255 in every style slot). Picking "the first leaf with
+  // numsamples>0" can therefore land on a leaf whose own mins gives EVERY
+  // one of the 8 surrounding corner lookups a miss -- exactly the
+  // "every corner missed" case referenceLightGridPoint refuses to silently
+  // average over, since there is nothing left to average.
+  //
+  // Walk grid.leafs in its real on-disk parse order (deterministic, no
+  // randomness -- this is the exact order parseLightgrid appended leafs in
+  // while decoding the lump) and use the first leaf whose own mins gives
+  // full (all 8 corners lit) coverage. Confirmed against the real
+  // rerelease base1.bsp lump: leaf index 5 (mins=[0,5,13]) is the first
+  // with mask===255, following leaf index 4 (mins=[0,0,13], mask 0xEE --
+  // partially occluded) and leaf index 0's fully-occluded mask 0.
+  function findFullyLitLeafMins(
+    grid: LightgridT,
+    lookupLightgrid: (grid: LightgridT, point: readonly [number, number, number]) => readonly LightgridSampleT[] | null
+  ): [number, number, number] {
+    for (const leaf of grid.leafs) {
+      const pointI: [number, number, number] = [leaf.mins[0], leaf.mins[1], leaf.mins[2]];
+      let mask = 0;
+      for (let i = 0; i < 8; i++) {
+        const tmp: [number, number, number] = [pointI[0] + ((i >> 0) & 1), pointI[1] + ((i >> 1) & 1), pointI[2] + ((i >> 2) & 1)];
+        const s = lookupLightgrid(grid, tmp);
+        if (!s) continue;
+        for (let j = 0; j < grid.numstyles; j++) {
+          if (s[j].style !== 255) {
+            mask |= 1 << i;
+            break;
+          }
+        }
+      }
+      if (mask === 255) return pointI;
+    }
+    throw new Error("findFullyLitLeafMins: no leaf in this grid has all 8 corners lit -- grid too sparse for this test");
+  }
+
+  test.skipIf(!haveRerelease)(
+    "real base1.bsp (rerelease pak0.pak): LightGridPoint matches style.rgb[0]-scaled reference formula, stays within vanilla's <=1-per-style ceiling, and the pre-fix style.white formula reproduces the reported ~3x overbright",
+    async () => {
+      const glLocal = await import("../src/ref_gl/gl_local");
+      const glLight = await import("../src/ref_gl/gl_light");
+      const glImage = await import("../src/ref_gl/gl_image");
+      const bspx = await import("../src/qcommon/bspx");
+      const glModel = await import("../src/ref_gl/gl_model" + "?lightgrid_overbright_retail_rerelease");
+      const qgl = await import("../src/ref_gl/qgl");
+
+      const pak = readPakDirectory(RERELEASE_PAK);
+      glLocal.SetRefImports(makeFakeRi(pak));
+      const fakeTex = new (await import("../src/ref_gl/gl_local")).ImageT();
+      fakeTex.width = 64;
+      fakeTex.height = 64;
+      glLocal.SetNoTexture(fakeTex);
+      glImage.SetQGL(new qgl.QGLRecording());
+
+      // fullbright default for every possible style index: rgb=[1,1,1]
+      // (== 1.0, q2repro's un-tripled monochrome value) and white=3
+      // (== r+g+b, this port's vanilla-faithful field, used by the
+      // deliberately-buggy `pre-fix` scale below to reproduce the reported
+      // defect from the SAME real corner data).
+      glLocal.r_newrefdef.lightstyles = [];
+      for (let i = 0; i < MAX_LIGHTSTYLES; i++) {
+        const ls = new LightstyleT();
+        ls.rgb.set([1, 1, 1]);
+        ls.white = 3;
+        glLocal.r_newrefdef.lightstyles.push(ls);
+      }
+      const on = new CvarT();
+      on.value = 1;
+      glLocal.glCvars.gl_lightgrid = on;
+
+      glModel.Mod_Init();
+      glModel.R_BeginRegistration("base1");
+      glModel.R_EndRegistration();
+
+      const model = glLocal.r_worldmodel;
+      expect(model).not.toBeNull();
+      if (!model) return;
+      expect(model.bspx).not.toBeNull();
+      const grid = model.bspx ? model.bspx.lightgrid : null;
+      expect(grid).not.toBeNull();
+      if (!grid) return;
+
+      // positive control: base1's real rerelease LIGHTGRID_OCTREE lump is
+      // non-trivial (.orch/followups.md and this suite's own header cite
+      // "1,554 leafs/186k samples" from the prior unit's out-of-band
+      // extraction) -- not an empty/degenerate grid that would make every
+      // assertion below vacuous.
+      expect(grid.numleafs).toBeGreaterThan(1000);
+      expect(grid.numsamples).toBeGreaterThan(100000);
+
+      // query the first leaf whose own mins gives full 8-corner coverage --
+      // point_i is that leaf's own mins (guaranteed non-null at corner 0 by
+      // construction), queried at the fractional midpoint (fx=fy=fz=0.5)
+      // of the [pointI, pointI+1] cube so trunc() lands on pointI
+      // deterministically regardless of float rounding. See
+      // findFullyLitLeafMins above for why "first leaf with numsamples>0"
+      // alone isn't sufficient (occluded-interior leafs reserve slots too).
+      const pointI = findFullyLitLeafMins(grid, bspx.lookupLightgrid);
+      const worldPoint = vec3((pointI[0] + 0.5) / grid.scale[0] + grid.mins[0], (pointI[1] + 0.5) / grid.scale[1] + grid.mins[1], (pointI[2] + 0.5) / grid.scale[2] + grid.mins[2]);
+
+      const fixedExpected = referenceLightGridPoint(grid, bspx.lookupLightgrid, pointI, () => 1); // style.rgb[0], every style set to 1 above
+      const buggyExpected = referenceLightGridPoint(grid, bspx.lookupLightgrid, pointI, () => 3); // pre-fix style.white, every style set to 3 above
+
+      const color = vec3();
+      const hit = glLight.LightGridPoint(grid, worldPoint, color);
+      expect(hit).toBe(true);
+
+      // the port's real LightGridPoint matches the corrected (style.rgb[0])
+      // reference formula exactly -- this is the formula citation the task
+      // asked for, verified against real retail octree data, not a
+      // fabricated fixture.
+      expect(color[0]).toBeCloseTo(fixedExpected[0], 5);
+      expect(color[1]).toBeCloseTo(fixedExpected[1], 5);
+      expect(color[2]).toBeCloseTo(fixedExpected[2], 5);
+
+      // vanilla's own observable ceiling at gl_modulate 1 ("<=~1", per the
+      // followups item and quake-2-c gl_light.c:347's final
+      // `VectorScale(color, gl_modulate->value, color)` with every input
+      // style capped at 1.0): with every style's un-tripled scale pinned to
+      // exactly 1.0 above, and grid.numstyles capping how many can stack at
+      // a single sample, the corrected result can never exceed numstyles.
+      for (const c of [0, 1, 2]) {
+        expect(fixedExpected[c]).toBeLessThanOrEqual(grid.numstyles + 1e-4);
+      }
+
+      // the pre-fix formula (scaling by style.white==3 instead of
+      // style.rgb[0]==1) reproduces the reported defect exactly: 3x the
+      // corrected brightness, from the identical real sample bytes -- this
+      // is the root-cause delta, not a guess.
+      for (const c of [0, 1, 2]) {
+        expect(buggyExpected[c]).toBeCloseTo(3 * fixedExpected[c], 5);
+      }
+    },
+    120000
+  );
+
+  test.skipIf(!haveClassic)("real base1.bsp (classic pre-rerelease pak0.pak): carries no BSPX lump at all -- LightGridPoint is structurally unreachable for this map, control for the 'rerelease-upgraded maps' framing", async () => {
+    const glLocal = await import("../src/ref_gl/gl_local");
+    const glImage = await import("../src/ref_gl/gl_image");
+    const glModel = await import("../src/ref_gl/gl_model" + "?lightgrid_overbright_retail_classic");
+    const qgl = await import("../src/ref_gl/qgl");
+
+    const pak = readPakDirectory(CLASSIC_PAK);
+    glLocal.SetRefImports(makeFakeRi(pak));
+    const fakeTex = new (await import("../src/ref_gl/gl_local")).ImageT();
+    fakeTex.width = 64;
+    fakeTex.height = 64;
+    glLocal.SetNoTexture(fakeTex);
+    glImage.SetQGL(new qgl.QGLRecording());
+
+    glModel.Mod_Init();
+    glModel.R_BeginRegistration("base1");
+    glModel.R_EndRegistration();
+
+    const model = glLocal.r_worldmodel;
+    expect(model).not.toBeNull();
+    if (!model) return;
+
+    // classic (pre-rerelease) base1.bsp has no BSPX directory at all -- this
+    // port's Mod_LoadBrushModel leaves `bspx` at its MsurfaceT-constructor
+    // default of null (gl_model.ts:385/1466), the same "no extension data"
+    // state a wholly ordinary vanilla IBSP produces. LightGridPoint's own
+    // R_LightPoint caller (`r_worldmodel.bspx ? r_worldmodel.bspx.lightgrid
+    // : null`) can therefore never even be reached for this map -- the
+    // LIGHTGRID_OCTREE overbright fix above has no code path to affect
+    // here, by construction, not by a value happening to come out small.
+    expect(model.bspx).toBeNull();
   });
 });

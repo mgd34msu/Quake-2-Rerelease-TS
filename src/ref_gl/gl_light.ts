@@ -339,6 +339,40 @@ consistent scale for the dlight-add and gl_modulate steps that follow in
 R_LightPoint, at the cost of dropping q2repro's extra per-pixel-lighting
 brightness adjustment (which has no observable effect here since this
 renderer has no per-pixel-lighting path to modulate).
+
+ROOT-CAUSE FIX (overbright LIGHTGRID_OCTREE lighting, .orch/followups.md
+"overbright model lighting" item): q2repro's GL_LightGridPoint multiplies
+each raw grid sample by `style->white` (src/refresh/world.c:101), and in
+q2repro that field is a single MONOCHROME per-style intensity written
+verbatim by its own `V_AddLightStyle(style, value)`
+(q2repro src/client/view.c:217-223) from `CL_AddLightStyles`'s
+char-to-float map (q2repro src/client/effects.c:74:
+`(c-'a')/('m'-'a')`, full-bright 'm' == 1.0, range ~0..2.08).
+
+This port's `LightstyleT.white` is NOT that value -- it is vanilla's
+`ls->white = r+g+b` (quake-2-c client/cl_view.c:138, kept byte-for-byte
+in this port's V_AddLightStyle, cl_view.ts). Vanilla's own
+`CL_RunLightStyles` (quake-2-c client/cl_fx.c:77-88, ported unchanged as
+CL_RunLightStyles in cl_fx.ts) always sets `value[0]=value[1]=value[2]`
+equal, so `white` is exactly 3x q2repro's monochrome value (full-bright
+white == 3, not 1). Every OTHER vanilla-derived consumer of `.white`
+(R_SetCacheState/this file, gl_rsurf.ts's cached_light comparisons,
+ref_soft's r_surf.ts lightadj*128) only uses it as an opaque
+change-detection key or an already-vanilla-scaled multiplier, so the x3
+is harmless there -- it is faithful to vanilla. But THIS function was
+ported from q2repro, which expects the un-tripled monochrome value, so
+using `style.white` here over-brightened every LIGHTGRID_OCTREE sample by
+~3x (compounding further with multiple stacked light styles per grid
+corner, and with any single style's map value above 1.0 for
+'n'..'z' chars) -- this is q2repro's own `.orch/followups.md`-reported
+"shadelight up to ~5.6 vs vanilla's <=~1" defect.
+
+Fix: use `style.rgb[0]` instead of `style.white`. CL_RunLightStyles's
+r=g=b invariant (the only call site, cl_fx.ts:490) means `rgb[0]` always
+holds the exact un-tripled per-style value q2repro's `style->white`
+would hold -- restoring parity with q2repro's observable brightness
+without touching vanilla's own `.white` semantics (still needed
+unmodified by the other consumers listed above).
 ===============
 */
 export function LightGridPoint(grid: LightgridT, start: Vec3, color: Vec3): boolean {
@@ -368,7 +402,10 @@ export function LightGridPoint(grid: LightgridT, start: Vec3, color: Vec3): bool
     for (; j < grid.numstyles && s[j].style !== 255; j++) {
       const style = r_newrefdef.lightstyles[s[j].style];
       if (!style) break;
-      VectorMA(samples[i], style.white, vec3(s[j].rgb[0], s[j].rgb[1], s[j].rgb[2]), samples[i]);
+      // style.rgb[0] (== rgb[1] == rgb[2] by CL_RunLightStyles's r=g=b
+      // invariant), NOT style.white (== r+g+b, vanilla's un-normalized
+      // sum -- see this function's header comment for the full citation).
+      VectorMA(samples[i], style.rgb[0], vec3(s[j].rgb[0], s[j].rgb[1], s[j].rgb[2]), samples[i]);
     }
 
     // count non-occluded samples
