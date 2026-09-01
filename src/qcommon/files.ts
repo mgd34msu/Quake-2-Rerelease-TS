@@ -189,6 +189,35 @@ let fs_data_roots: string[] = [];
 // close the boot-time base tier's fds.
 let fs_data_root_packs: PackT[] = [];
 
+/*
+The single path-prefix preference described at FS_FOpenFile's own carve-out
+comment: files under `prefix` are looked for in `root` before the normal
+search order is walked. Null unless a `data_root ... maps=<tree>` switch
+asked for it, which today only the kex-ruleset-on-original-data combination
+does.
+*/
+interface PathPrefT {
+  readonly prefix: string;
+  readonly root: string;
+}
+let fs_path_pref: PathPrefT | null = null;
+
+// Where a search-path entry physically lives, for matching against a
+// preference root. Directories report their own path; packs and kpfs report
+// the archive file's path -- both sit under the data root that mounted them.
+function searchPathLocation(search: SearchPathT): string {
+  if (search.kind === "dir") return search.filename;
+  if (search.kind === "pack") return search.pack.filename;
+  return search.zip.filename;
+}
+
+// The root this filename should be looked for in FIRST, or null when no
+// preference is set or the name is outside its prefix.
+function preferredRootFor(filename: string): string | null {
+  if (!fs_path_pref) return null;
+  return filename.toLowerCase().startsWith(fs_path_pref.prefix) ? fs_path_pref.root : null;
+}
+
 // closeSync that tolerates an fd another teardown already closed, and marks
 // the pack so it is never closed twice. Search-path teardown can reach the
 // same PackT from more than one direction (a data-root remount and a test's
@@ -248,10 +277,13 @@ export interface FsSearchPathSnapshotT {
   // would have the next test's remount close file descriptors belonging to a
   // tree it never mounted.
   readonly dataRootPacks: readonly PackT[];
+  // The maps-preference carve-out is mounted state too: leaving one test's
+  // preference set would silently reorder another's lookups.
+  readonly pathPref: PathPrefT | null;
 }
 
 export function FS_TestSnapshotSearchPaths(): FsSearchPathSnapshotT {
-  return { searchpaths: fs_searchpaths, baseSearchpaths: fs_base_searchpaths, dataRoots: fs_data_roots, dataRootPacks: fs_data_root_packs };
+  return { searchpaths: fs_searchpaths, baseSearchpaths: fs_base_searchpaths, dataRoots: fs_data_roots, dataRootPacks: fs_data_root_packs, pathPref: fs_path_pref };
 }
 
 export function FS_TestRestoreSearchPaths(snapshot: FsSearchPathSnapshotT): void {
@@ -266,6 +298,7 @@ export function FS_TestRestoreSearchPaths(snapshot: FsSearchPathSnapshotT): void
   fs_base_searchpaths = snapshot.baseSearchpaths;
   fs_data_roots = [...snapshot.dataRoots];
   fs_data_root_packs = [...snapshot.dataRootPacks];
+  fs_path_pref = snapshot.pathPref;
 }
 
 // Read-only view of the mounted search path, head (highest priority) first,
@@ -615,8 +648,48 @@ export function FS_FOpenFile(filename: string): FsOpenResult | null {
     return { handle, length: FS_filelength(fd) };
   }
 
+  // Mike's ruling, 2026-09-01 (quoted for the ledger): "if we are playing
+  // with a specific ruleset, we use the things from that ruleset". Under kex
+  // + ORIGINAL data the rerelease tree is mounted PRIMARY so the kex
+  // look-and-feel (HUD pics, fonts, sounds, remastered textures) is what the
+  // player gets -- but the MAP GEOMETRY must still be his 1997 files. That is
+  // the one carve-out: a single prefix, aimed at a single root, set only by
+  // the `data_root ... maps=<tree>` option for exactly this combination.
+  // Deliberately NOT a general per-prefix routing mechanism -- there is one
+  // optional preference, it is off unless a data_root switch asked for it,
+  // and it only ever REORDERS the existing search path (a miss falls straight
+  // through to the normal walk below, so nothing becomes unreachable).
+  const preferredRoot = preferredRootFor(filename);
+  if (preferredRoot !== null) {
+    for (let search = fs_searchpaths; search; search = search.next) {
+      if (!searchPathLocation(search).startsWith(preferredRoot)) continue;
+      const hit = openFromSearchPath(search, filename);
+      if (hit) return hit;
+    }
+  }
+
   // search through the path, one element at a time
   for (let search = fs_searchpaths; search; search = search.next) {
+    const hit = openFromSearchPath(search, filename);
+    if (hit) return hit;
+  }
+
+  Com_DPrintf("FindFile: can't find %s\n", filename);
+  return null;
+}
+
+/*
+===========
+openFromSearchPath
+
+One search-path entry's half of FS_FOpenFile's walk: the pak / kpf / plain
+directory lookup, unchanged from the loop body it was extracted out of.
+Split out so the walk can be run twice -- once restricted to the
+maps-preference root above, then normally -- without duplicating any of it.
+===========
+*/
+function openFromSearchPath(search: SearchPathT, filename: string): FsOpenResult | null {
+  {
     if (search.kind === "pack") {
       // look through all the pak file elements
       const pak = search.pack;
@@ -643,7 +716,7 @@ export function FS_FOpenFile(filename: string): FsOpenResult | null {
       // the classic .pak comparison above)
       const zip = search.zip;
       const entry = zip.archive.findEntry(filename);
-      if (!entry) continue;
+      if (!entry) return null;
 
       file_from_pak = 1;
       Com_DPrintf("PackFile: %s : %s\n", zip.filename, filename);
@@ -665,7 +738,7 @@ export function FS_FOpenFile(filename: string): FsOpenResult | null {
       try {
         fd = openSync(netpath, "r");
       } catch {
-        continue;
+        return null;
       }
       Com_DPrintf("FindFile: %s\n", netpath);
       const handle = fs_next_handle++;
@@ -673,8 +746,6 @@ export function FS_FOpenFile(filename: string): FsOpenResult | null {
       return { handle, length: FS_filelength(fd) };
     }
   }
-
-  Com_DPrintf("FindFile: can't find %s\n", filename);
   return null;
 }
 
@@ -1151,7 +1222,7 @@ icon set, mapdb.json -- still resolves out of the rerelease tree beneath.
 A single-element list is the plain "just this tree" case.
 ================
 */
-export function FS_SetDataRoot(roots: readonly string[]): void {
+export function FS_SetDataRoot(roots: readonly string[], mapsFromRoot = ""): void {
   const wanted: string[] = [];
   for (const root of roots) {
     if (root.length && !wanted.includes(root)) wanted.push(root);
@@ -1182,6 +1253,10 @@ export function FS_SetDataRoot(roots: readonly string[]): void {
   fs_base_searchpaths = null;
 
   fs_data_roots = wanted;
+  // See FS_FOpenFile's carve-out comment for Mike's ruling and why this is a
+  // single aimed preference rather than a general routing table. Ignored
+  // unless the named root is actually one of the roots being mounted.
+  fs_path_pref = mapsFromRoot.length && wanted.includes(mapsFromRoot) ? { prefix: "maps/", root: mapsFromRoot } : null;
 
   mountBaseTier(wanted);
 
@@ -1206,7 +1281,7 @@ export function FS_SetDataRoot(roots: readonly string[]): void {
   // Record what this call opened, so the next one closes exactly it.
   fs_data_root_packs = mountedPacks();
 
-  Com_Printf("Data root: %s\n", wanted.slice().reverse().join(" over "));
+  Com_Printf("Data root: %s%s\n", wanted.slice().reverse().join(" over "), fs_path_pref ? ` (maps/ from ${fs_path_pref.root})` : "");
 }
 
 // Resolve a data-tree id ("classic"/"rerelease") to its configured root
@@ -1236,29 +1311,43 @@ export function FS_DataRoot_f(): void {
   const cmd = cmdMod();
 
   if (cmd.Cmd_Argc() < 2) {
-    Com_Printf("usage: data_root <classic|rerelease> [fallback]\n");
+    Com_Printf("usage: data_root <classic|rerelease> [fallback] [maps=<classic|rerelease>]\n");
     Com_Printf("current: %s\n", contentRootsLowToHigh().slice().reverse().join(" over "));
+    Com_Printf("maps/ preference: %s\n", fs_path_pref ? fs_path_pref.root : "(none)");
     Com_Printf("data_root_classic: \"%s\"\n", fs_data_root_classic ? fs_data_root_classic.string : "");
     Com_Printf("data_root_rerelease: \"%s\"\n", fs_data_root_rerelease ? fs_data_root_rerelease.string : "");
     return;
   }
 
   const highToLow: string[] = [];
+  let mapsFrom = "";
   for (let i = 1; i < cmd.Cmd_Argc(); i++) {
-    const id = cmd.Cmd_Argv(i);
+    const arg = cmd.Cmd_Argv(i);
+
+    // maps=<tree>: the one prefix carve-out (FS_FOpenFile's own comment).
+    const isMapsOption = arg.startsWith("maps=");
+    const id = isMapsOption ? arg.slice("maps=".length) : arg;
+
     const path = dataRootPathFor(id);
     if (path === null) {
-      Com_Printf("data_root: unknown data tree \"%s\" (expected classic or rerelease)\n", id);
+      Com_Printf('data_root: unknown data tree "%s" (expected classic or rerelease)\n', id);
       return;
     }
     if (!path.length) {
       Com_Printf("data_root: no %s data tree configured (set data_root_%s)\n", id, id);
       return;
     }
-    highToLow.push(path);
+
+    if (isMapsOption) mapsFrom = path;
+    else highToLow.push(path);
   }
 
-  FS_SetDataRoot(highToLow.slice().reverse());
+  if (!highToLow.length) {
+    Com_Printf("data_root: no data tree given\n");
+    return;
+  }
+
+  FS_SetDataRoot(highToLow.slice().reverse(), mapsFrom);
 }
 
 /*

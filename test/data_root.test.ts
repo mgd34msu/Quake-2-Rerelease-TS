@@ -175,6 +175,9 @@ describe("files.ts -- FS_SetDataRoot remounts the whole search path", () => {
       { name: "maps/base1.bsp", body: "CLASSIC-BASE1" },
       { name: "shared.txt", body: "CLASSIC-SHARED" },
       { name: "classic_only.txt", body: "CLASSIC-ONLY" },
+      // A HUD pic that exists in BOTH trees -- the asset whose winner
+      // Mike's "we use the things from that ruleset" ruling decides.
+      { name: "pics/i_health.pcx", body: "CLASSIC-HEALTH-PIC" },
     ]);
     mkdirSync(join(classicRoot, "xatrix"), { recursive: true });
     writePak(join(classicRoot, "xatrix", "pak0.pak"), [{ name: "maps/xswamp.bsp", body: "CLASSIC-XSWAMP" }]);
@@ -196,6 +199,7 @@ describe("files.ts -- FS_SetDataRoot remounts the whole search path", () => {
       { name: "maps/q64/rtest.bsp", body: "RERELEASE-Q64" },
       { name: "shared.txt", body: "RERELEASE-SHARED" },
       { name: "pics/damage_indicator.png", body: "RERELEASE-ONLY-PIC" },
+      { name: "pics/i_health.pcx", body: "RERELEASE-HEALTH-PIC" },
     ]);
 
     saved = saveState();
@@ -253,44 +257,65 @@ describe("files.ts -- FS_SetDataRoot remounts the whole search path", () => {
     expect(FS_TestSearchPathList().some((p) => p.startsWith(rereleaseRoot))).toBe(false);
   });
 
-  test("4. RULE (a): classic over rerelease -- shared names resolve CLASSIC, kex-only assets still resolve", () => {
-    // Lowest priority first, so the classic tree is mounted last and wins.
-    FS_SetDataRoot([rereleaseRoot, classicRoot]);
+  test("4. RULE (a): rerelease over classic with maps=classic -- kex assets win, 1997 MAPS win", () => {
+    // Lowest priority first, so the rerelease tree is mounted last and wins
+    // everywhere; the maps/ carve-out then aims map lookups at classic.
+    FS_SetDataRoot([classicRoot, rereleaseRoot], classicRoot);
 
-    // The whole point of Mike's amendment: his 1997 map files play.
-    expect(textOf("maps/base1.bsp")).toBe("CLASSIC-BASE1");
-    expect(textOf("shared.txt")).toBe("CLASSIC-SHARED");
-
-    // ...while every kex-module asset the classic tree does not have still
-    // resolves out of the rerelease tree beneath it.
+    // Mike's ruling: "if we are playing with a specific ruleset, we use the
+    // things from that ruleset" -- every shared asset is the RERELEASE copy.
+    expect(textOf("shared.txt")).toBe("RERELEASE-SHARED");
+    expect(textOf("pics/i_health.pcx")).toBe("RERELEASE-HEALTH-PIC");
     expect(textOf("pics/damage_indicator.png")).toBe("RERELEASE-ONLY-PIC");
+
+    // ...EXCEPT the map files, which stay his 1997 geometry.
+    expect(textOf("maps/base1.bsp")).toBe("CLASSIC-BASE1");
+
+    // A map only the rerelease tree has still resolves: the carve-out only
+    // REORDERS the walk, it never makes anything unreachable.
     expect(textOf("maps/mguhub.bsp")).toBe("RERELEASE-MGUHUB");
+
+    // A file only the classic tree has is still reachable underneath.
     expect(textOf("classic_only.txt")).toBe("CLASSIC-ONLY");
   });
 
-  test("5. search-path ORDER: every classic entry precedes every rerelease entry", () => {
-    FS_SetDataRoot([rereleaseRoot, classicRoot]);
+  test("5. search-path ORDER: every rerelease entry precedes every classic entry", () => {
+    FS_SetDataRoot([classicRoot, rereleaseRoot], classicRoot);
 
     const paths = FS_TestSearchPathList(); // head (highest priority) first
-    const lastClassic = paths.map((p) => p.startsWith(classicRoot)).lastIndexOf(true);
-    const firstRerelease = paths.map((p) => p.startsWith(rereleaseRoot)).indexOf(true);
+    const lastRerelease = paths.map((p) => p.startsWith(rereleaseRoot)).lastIndexOf(true);
+    const firstClassic = paths.map((p) => p.startsWith(classicRoot)).indexOf(true);
 
-    expect(lastClassic).toBeGreaterThanOrEqual(0);
-    expect(firstRerelease).toBeGreaterThanOrEqual(0);
-    expect(lastClassic).toBeLessThan(firstRerelease);
+    expect(lastRerelease).toBeGreaterThanOrEqual(0);
+    expect(firstClassic).toBeGreaterThanOrEqual(0);
+    // The raw mount order really is rerelease-first...
+    expect(lastRerelease).toBeLessThan(firstClassic);
+    // ...which is exactly why the maps/ result below cannot be an accident
+    // of ordering -- it can only come from the carve-out.
+    expect(textOf("maps/base1.bsp")).toBe("CLASSIC-BASE1");
   });
 
-  test("6. a gamedir mounted across a switch is re-laid against BOTH roots, classic first", () => {
+  test("5b. without the carve-out the same mount order serves the RERELEASE map", () => {
+    // Same two roots, same order, no maps= preference: the control that
+    // proves the carve-out is what moves maps/, not the mount order.
+    FS_SetDataRoot([classicRoot, rereleaseRoot]);
+    expect(textOf("maps/base1.bsp")).toBe("RERELEASE-BASE1");
+    expect(textOf("pics/i_health.pcx")).toBe("RERELEASE-HEALTH-PIC");
+  });
+
+  test("6. a gamedir mounted across a switch is re-laid against BOTH roots, and maps/ still honors the carve-out", () => {
     FS_SetDataRoot([classicRoot]);
     Cvar_ForceSet("gamedir", "xatrix");
-    FS_SetDataRoot([rereleaseRoot, classicRoot]);
+    FS_SetDataRoot([classicRoot, rereleaseRoot], classicRoot);
 
     const paths = FS_TestSearchPathList();
     expect(paths).toContain(join(classicRoot, "xatrix"));
     expect(paths).toContain(join(rereleaseRoot, "xatrix"));
-    expect(paths.indexOf(join(classicRoot, "xatrix"))).toBeLessThan(paths.indexOf(join(rereleaseRoot, "xatrix")));
+    // rerelease is primary, so its gamedir layer sits above the classic one
+    expect(paths.indexOf(join(rereleaseRoot, "xatrix"))).toBeLessThan(paths.indexOf(join(classicRoot, "xatrix")));
 
-    // The classic xatrix pak wins over the rerelease baseq2 copy.
+    // The expansion's MAP still comes from the classic tree's own xatrix pak
+    // even though the rerelease baseq2 pak (higher priority) also has it.
     expect(textOf("maps/xswamp.bsp")).toBe("CLASSIC-XSWAMP");
 
     Cvar_ForceSet("gamedir", "");
@@ -315,9 +340,12 @@ describe("files.ts -- FS_SetDataRoot remounts the whole search path", () => {
     Cbuf_Execute();
     expect(textOf("maps/base1.bsp")).toBe("CLASSIC-BASE1");
 
-    Cbuf_AddText("data_root classic rerelease\n");
+    // The kex-on-original-data form: rerelease primary, classic beneath,
+    // maps/ aimed at classic.
+    Cbuf_AddText("data_root rerelease classic maps=classic\n");
     Cbuf_Execute();
     expect(textOf("maps/base1.bsp")).toBe("CLASSIC-BASE1");
+    expect(textOf("pics/i_health.pcx")).toBe("RERELEASE-HEALTH-PIC");
     expect(textOf("pics/damage_indicator.png")).toBe("RERELEASE-ONLY-PIC");
 
     Cbuf_AddText("data_root rerelease\n");
@@ -331,6 +359,15 @@ describe("files.ts -- FS_SetDataRoot remounts the whole search path", () => {
     const before = FS_TestSearchPathList();
 
     Cbuf_AddText("data_root nonsense\n");
+    Cbuf_Execute();
+    expect(FS_TestSearchPathList()).toEqual(before);
+
+    Cbuf_AddText("data_root rerelease maps=nonsense\n");
+    Cbuf_Execute();
+    expect(FS_TestSearchPathList()).toEqual(before);
+
+    // maps= alone names no tree to mount
+    Cbuf_AddText("data_root maps=classic\n");
     Cbuf_Execute();
     expect(FS_TestSearchPathList()).toEqual(before);
 
@@ -494,16 +531,19 @@ describe("menu_content.ts -- per-tree availability is scanned, not assumed", () 
 
 describe("menu_content.ts -- (ruleset, tree) -> mount plan and launch sequence", () => {
   test("16. DataMountPlanFor encodes both of Mike's rules", () => {
-    // (b) classic ruleset: whichever single tree was picked, alone.
-    expect(DataMountPlanFor("classic", "classic")).toEqual({ primary: "classic", fallback: null });
-    expect(DataMountPlanFor("classic", "rerelease")).toEqual({ primary: "rerelease", fallback: null });
+    // (b) classic ruleset: whichever single tree was picked, alone, and no
+    // carve-out -- classic + original data is classic EVERYTHING.
+    expect(DataMountPlanFor("classic", "classic")).toEqual({ primary: "classic", fallback: null, mapsFrom: null });
+    expect(DataMountPlanFor("classic", "rerelease")).toEqual({ primary: "rerelease", fallback: null, mapsFrom: null });
 
-    // (a) kex ruleset on ORIGINAL data: classic primary (his 1997 maps win),
-    // rerelease beneath as the asset fallback.
-    expect(DataMountPlanFor("rerelease", "classic")).toEqual({ primary: "classic", fallback: "rerelease" });
+    // (a) kex ruleset on ORIGINAL data (Mike, 2026-09-01: "if we are playing
+    // with a specific ruleset, we use the things from that ruleset"):
+    // rerelease assets win everywhere, classic supplies maps/ only.
+    expect(DataMountPlanFor("rerelease", "classic")).toEqual({ primary: "rerelease", fallback: "classic", mapsFrom: "classic" });
 
-    // (a) kex ruleset on rerelease data: rerelease alone, as before.
-    expect(DataMountPlanFor("rerelease", "rerelease")).toEqual({ primary: "rerelease", fallback: null });
+    // (a) kex ruleset on rerelease data: rerelease alone, nothing to
+    // disambiguate.
+    expect(DataMountPlanFor("rerelease", "rerelease")).toEqual({ primary: "rerelease", fallback: null, mapsFrom: null });
   });
 
   // The launch sequence is captured by standing in for the four commands
@@ -544,11 +584,12 @@ describe("menu_content.ts -- (ruleset, tree) -> mount plan and launch sequence",
       expect(plan).not.toBeNull();
       if (!plan) return;
 
-      // kex ruleset + ORIGINAL data -> "data_root classic rerelease"
+      // kex ruleset + ORIGINAL data -> rerelease primary, classic beneath,
+      // maps/ from classic
       const kexOnClassic = captureLaunch(() => {
         PerformLaunch(plan, "base1", 1, false, DataMountPlanFor("rerelease", "classic"));
       });
-      expect(kexOnClassic).toEqual(["loading", "killserver", "data_root classic rerelease", "map base1"]);
+      expect(kexOnClassic).toEqual(["loading", "killserver", "data_root rerelease classic maps=classic", "map base1"]);
 
       // kex ruleset + rerelease data -> a single root
       const kexOnRerelease = captureLaunch(() => {
@@ -634,64 +675,105 @@ describe.if(RETAIL_PRESENT)("RETAIL-GATED -- the two real installs on this machi
       const mount = DataMountPlanFor("rerelease", tree);
       const mounted = [mount.primary, ...(mount.fallback ? [mount.fallback] : [])];
       expect(mounted).toContain("rerelease");
+      // and the rerelease tree is the PRIMARY one either way, per Mike's
+      // "we use the things from that ruleset" ruling.
+      expect(mount.primary).toBe("rerelease");
     }
   });
 
-  test("21. classic ruleset on original data mounts the classic tree ALONE -- no rerelease mount", () => {
+  function bootClassicBasedir(): void {
+    Cvar_ForceSet("basedir", CLASSIC_INSTALL);
+    Cvar_ForceSet("homedir", "");
+    Cvar_ForceSet("cddir", "");
+    Cvar_ForceSet("content_root", "");
+    Cvar_ForceSet("game", "");
+    Cvar_ForceSet("gamedir", "");
+    FS_InitFilesystem();
+  }
+
+  function sizeOf(path: string): number {
+    const raw = FS_LoadFile(path);
+    return raw ? raw.length : -1;
+  }
+
+  test("21. classic ruleset on original data mounts the classic tree ALONE -- no rerelease mount, no carve-out", () => {
     const mount = DataMountPlanFor("classic", "classic");
     expect(mount.fallback).toBeNull();
+    expect(mount.mapsFrom).toBeNull();
     expect(mount.primary).toBe("classic");
 
-    Cvar_ForceSet("basedir", CLASSIC_INSTALL);
-    Cvar_ForceSet("homedir", "");
-    Cvar_ForceSet("cddir", "");
-    Cvar_ForceSet("content_root", "");
-    Cvar_ForceSet("game", "");
-    Cvar_ForceSet("gamedir", "");
-    FS_InitFilesystem();
-
+    bootClassicBasedir();
     FS_SetDataRoot([CLASSIC_INSTALL]);
 
-    // A classic-only file resolves...
-    expect(FS_LoadFile("maps/base1.bsp")).not.toBeNull();
-    // ...and nothing from the rerelease tree is mounted at all.
+    // Classic everything: the 1997 map AND the 1997 HUD pic.
+    expect(sizeOf("maps/base1.bsp")).toBe(1991536);
+    expect(sizeOf("pics/i_health.pcx")).toBe(1353);
+
+    // Nothing from the rerelease tree is mounted at all.
     expect(FS_TestSearchPathList().some((p) => p.startsWith(RERELEASE_INSTALL))).toBe(false);
-    // pics/damage_indicator.png lives only in the rerelease pak.
-    expect(FS_LoadFile("pics/damage_indicator.png")).toBeNull();
+    expect(sizeOf("pics/damage_indicator.png")).toBe(-1);
+    expect(sizeOf("pics/i_armor_shard.pcx")).toBe(-1);
   });
 
-  test("22. kex on ORIGINAL data: the CLASSIC base1.bsp is served, and the rerelease-only pic still resolves", () => {
-    Cvar_ForceSet("basedir", CLASSIC_INSTALL);
-    Cvar_ForceSet("homedir", "");
-    Cvar_ForceSet("cddir", "");
-    Cvar_ForceSet("content_root", "");
-    Cvar_ForceSet("game", "");
-    Cvar_ForceSet("gamedir", "");
-    FS_InitFilesystem();
+  test("22. kex on ORIGINAL data: RERELEASE pics/fonts win, CLASSIC map geometry wins", () => {
+    bootClassicBasedir();
 
-    // lowest priority first: rerelease beneath, classic on top
-    FS_SetDataRoot([RERELEASE_INSTALL, CLASSIC_INSTALL]);
-
-    const bsp = FS_LoadFile("maps/base1.bsp");
-    expect(bsp).not.toBeNull();
-
-    // The two trees' base1.bsp differ sharply in size; the classic one is
-    // the smaller 1997 file. This is the proof that the player's original
-    // map is what loaded, not the re-authored rerelease version.
-    const classicOnly = FS_LoadFile("maps/base1.bsp");
-    expect(classicOnly).not.toBeNull();
+    // Baseline: what each tree alone reports, so the combined mount's
+    // numbers below are attributable to a specific tree rather than asserted
+    // against hardcoded constants alone.
+    FS_SetDataRoot([CLASSIC_INSTALL]);
+    const classicBsp = sizeOf("maps/base1.bsp");
+    const classicHealth = sizeOf("pics/i_health.pcx");
+    const classicInventory = sizeOf("pics/inventory.pcx");
 
     FS_SetDataRoot([RERELEASE_INSTALL]);
-    const rereleaseBsp = FS_LoadFile("maps/base1.bsp");
-    expect(rereleaseBsp).not.toBeNull();
-    if (!classicOnly || !rereleaseBsp) return;
-    expect(classicOnly.length).toBeLessThan(rereleaseBsp.length);
+    const rereleaseBsp = sizeOf("maps/base1.bsp");
+    const rereleaseHealth = sizeOf("pics/i_health.pcx");
+    const rereleaseInventory = sizeOf("pics/inventory.pcx");
 
-    // Back to the kex-on-original mount and confirm the kex-only asset.
-    FS_SetDataRoot([RERELEASE_INSTALL, CLASSIC_INSTALL]);
-    expect(FS_LoadFile("pics/damage_indicator.png")).not.toBeNull();
-    const served = FS_LoadFile("maps/base1.bsp");
-    expect(served).not.toBeNull();
-    if (served) expect(served.length).toBe(classicOnly.length);
+    // The two trees really do differ on all three, or the test proves nothing.
+    expect(classicBsp).not.toBe(rereleaseBsp);
+    expect(classicHealth).not.toBe(rereleaseHealth);
+    expect(classicInventory).not.toBe(rereleaseInventory);
+
+    // The real kex-on-original-data mount, exactly as DataMountPlanFor
+    // describes it: rerelease primary, classic beneath, maps/ from classic.
+    const mount = DataMountPlanFor("rerelease", "classic");
+    expect(mount).toEqual({ primary: "rerelease", fallback: "classic", mapsFrom: "classic" });
+    FS_SetDataRoot([CLASSIC_INSTALL, RERELEASE_INSTALL], CLASSIC_INSTALL);
+
+    // MAPS: the player's 1997 geometry.
+    expect(sizeOf("maps/base1.bsp")).toBe(classicBsp);
+    expect(sizeOf("maps/base1.bsp")).toBe(1991536);
+
+    // EVERYTHING ELSE: the kex ruleset's own assets.
+    expect(sizeOf("pics/i_health.pcx")).toBe(rereleaseHealth);
+    expect(sizeOf("pics/inventory.pcx")).toBe(rereleaseInventory);
+    expect(sizeOf("pics/i_armor_shard.pcx")).toBe(1503);
+    expect(sizeOf("pics/damage_indicator.png")).toBe(2149);
+    expect(sizeOf("fonts/qconfont.kfont")).toBe(5202);
+    expect(sizeOf("mapdb.json")).toBe(40120);
+
+    // A rerelease-only map is still reachable -- the carve-out reorders, it
+    // does not restrict.
+    expect(sizeOf("maps/mguhub.bsp")).toBeGreaterThan(0);
+  });
+
+  test("23. the expansions' maps also come from the classic tree under kex + original data", () => {
+    bootClassicBasedir();
+
+    FS_SetDataRoot([CLASSIC_INSTALL]);
+    Cvar_ForceSet("gamedir", "xatrix");
+    FS_SetDataRoot([CLASSIC_INSTALL], "");
+    const classicXswamp = sizeOf("maps/xswamp.bsp");
+
+    FS_SetDataRoot([RERELEASE_INSTALL]);
+    const rereleaseXswamp = sizeOf("maps/xswamp.bsp");
+    expect(classicXswamp).not.toBe(rereleaseXswamp);
+
+    FS_SetDataRoot([CLASSIC_INSTALL, RERELEASE_INSTALL], CLASSIC_INSTALL);
+    expect(sizeOf("maps/xswamp.bsp")).toBe(classicXswamp);
+
+    Cvar_ForceSet("gamedir", "");
   });
 });

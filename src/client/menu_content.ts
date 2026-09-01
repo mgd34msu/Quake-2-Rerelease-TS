@@ -286,7 +286,7 @@ export function PerformLaunch(plan: LaunchPlan, bsp: string, skill: number | nul
 
   // "classic over rerelease" reads most-significant first, which is the
   // argument order FS_DataRoot_f takes.
-  const mount = data ? ` data_root ${data.primary}${data.fallback ? ` ${data.fallback}` : ""} ; wait ;` : "";
+  const mount = data ? ` data_root ${data.primary}${data.fallback ? ` ${data.fallback}` : ""}${data.mapsFrom ? ` maps=${data.mapsFrom}` : ""} ; wait ;` : "";
   Cbuf_AddText(`loading ; killserver ; wait ;${mount} map ${bsp}\n`);
 }
 
@@ -644,14 +644,21 @@ THE TWO MOUNT RULES (Mike, 2026-09-01, as amended the same morning)
     hundreds of "Can't find pic" lines and attempts a download per missing
     file (his 2026-09-01 finding 2).
 
-    AMENDED: "always mounts the rerelease tree" does NOT mean "always plays
-    the rerelease maps". When the player picks kex + original data he wants
-    HIS 1997 map files, not the re-authored ones -- so the classic tree is
-    mounted as the PRIMARY content source and the rerelease tree goes
-    BENEATH it as an asset fallback. Every name present in both trees
-    (maps/base1.bsp, textures, sounds) resolves to the classic copy; every
-    kex-only asset still resolves out of the rerelease tree below. That is
-    what makes the spam structurally impossible WITHOUT swapping his maps.
+    AMENDED (Mike, 2026-09-01, quoted for the ledger: "if we are playing
+    with a specific ruleset, we use the things from that ruleset"): kex +
+    original data mounts the RERELEASE tree PRIMARY, with the classic tree
+    beneath it, and carves out exactly one exception -- `maps/` lookups
+    resolve from the CLASSIC tree first (files.ts's `data_root ...
+    maps=<tree>` option, documented at FS_FOpenFile's own site).
+
+    Net effect: kex look-and-feel -- rerelease HUD icons, pics, fonts,
+    sounds, remastered textures -- on 1997 map geometry. An earlier revision
+    had this backwards (classic primary, rerelease beneath), which kept his
+    maps but also served the classic HUD pics under a kex ruleset.
+
+    Either way the rerelease tree is mounted, so rule (a)'s real requirement
+    -- the kex module never starves for its own assets -- holds, and finding
+    2's spam stays structurally impossible.
 
 (b) The CLASSIC ruleset runs whichever tree the player picked, alone -- a
     classic 3.21 module has no rerelease asset requirements to satisfy, and
@@ -683,11 +690,23 @@ export function DataTreeDisplayName(id: DataTreeId): string {
 export interface DataMountPlan {
   readonly primary: DataTreeId;
   readonly fallback: DataTreeId | null;
+  // The one prefix carve-out: which tree `maps/` comes from, when that is
+  // NOT the primary tree. Null means "no carve-out, everything follows the
+  // mount order" -- true of every combination except kex + original data.
+  readonly mapsFrom: DataTreeId | null;
 }
 
 export function DataMountPlanFor(ruleset: RulesetId, tree: DataTreeId): DataMountPlan {
-  if (ruleset !== "rerelease") return { primary: tree, fallback: null };
-  return tree === "classic" ? { primary: "classic", fallback: "rerelease" } : { primary: "rerelease", fallback: null };
+  // (b) classic ruleset: the picked tree, alone, no carve-out.
+  if (ruleset !== "rerelease") return { primary: tree, fallback: null, mapsFrom: null };
+
+  // (a) kex ruleset on rerelease data: one tree, nothing to disambiguate.
+  if (tree === "rerelease") return { primary: "rerelease", fallback: null, mapsFrom: null };
+
+  // (a) kex ruleset on ORIGINAL data: rerelease assets win everywhere
+  // ("we use the things from that ruleset") EXCEPT the map files, which
+  // stay the player's 1997 geometry.
+  return { primary: "rerelease", fallback: "classic", mapsFrom: "classic" };
 }
 
 /*
