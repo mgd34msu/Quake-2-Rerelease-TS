@@ -69,7 +69,7 @@ import {
   Max_Armor_Types,
 } from "../../kexapi/game";
 import type { PlayerStateT, PmoveStateT, TraceT, CsurfaceT, UsercmdT, CvarT } from "../../shared/q_shared";
-import { PmTypeT, SHORT2ANGLE, CplaneT } from "../../shared/q_shared";
+import { PmTypeT, SHORT2ANGLE, CplaneT, CVAR_ARCHIVE } from "../../shared/q_shared";
 import { vec3, type Vec3 } from "../../shared/math";
 import type { DrawColorT } from "../ref";
 import { Key_GetBinding } from "../keys_impl";
@@ -670,10 +670,31 @@ export function buildCgameImports(): CgameImports {
       return cls.state === ConnstateT.ca_active && cl.refresh_prepped;
     },
 
-    // TODO(phase 3, variable tick + framediv): wall-clock plumbing
-    // (com_localTime equivalent) is not wired client-side yet.
+    // com_localTime (q2repro's src/common/common.c:141/1138, "milliseconds
+    // since Q2 startup", incremented every frame REGARDLESS of sv_paused --
+    // that pause-masked variant is the separate com_localTime2, which
+    // nothing here needs) has no snapshot of its own in this port, but
+    // cls.realtime (Sys_Milliseconds(), cl_main.ts's CL_Frame) is the exact
+    // same concept this client already maintains: always-increasing wall
+    // time, never rewound, not paused-masked -- cl_scrn.ts's own classic-
+    // cgame centerprint fallback (SCR_CenterPrint/SCR_CheckDrawCenterString)
+    // already uses cls.realtime for this identical role. Previously hard-
+    // coded to 0 (a real bug, not a documented stub-forever gap): every
+    // consumer of this import compares a future deadline against its
+    // return value to decide when to stop showing something --
+    // src/kexgame/cgame/cg_screen.ts's CG_CheckDrawCenterString
+    // (`center.finished && center.time_off < CGI().CL_ClientRealTime()`)
+    // computes `time_off` as `CL_ClientRealTime() + scr_centertime*1000`,
+    // so with this stuck at a constant 0 that comparison was ALWAYS false
+    // and centerprints (svc_print's PRINT_CENTER level, e.g. the "You found
+    // a secret!" trigger message under the kex cgame) never expired --
+    // Mike's "You found a secret!" report, root cause #1 (.orch/followups.md
+    // finding 4). Also fixes every OTHER consumer of this same stub for
+    // free: cg_main.ts's cgame_init_time-relative blink/flash timers
+    // (cg_screen.ts:1532/1570/1720) were all permanently frozen at their
+    // t=0 phase for the identical reason.
     CL_ClientRealTime() {
-      return 0;
+      return cls.realtime;
     },
 
     // TODO(phase 5, protocol layer): "which protocol are we speaking" is
@@ -1249,22 +1270,93 @@ export function kexUsercmdFromClassic(cmd: UsercmdT, server_frame: number): KexU
   };
 }
 
+// get_auto_scale (q2repro's src/refresh/draw.c:266-290): the real engine's
+// automatic HUD-scale tier off raw display resolution, before any user
+// override. Landscape displays tier on height, portrait ones on width --
+// preserved exactly, including the asymmetric thresholds (2160/720 vs
+// 3840/1920), since that asymmetry is the C source's own real behavior, not
+// a transcription slip.
+function autoHudUpscale(width: number, height: number): number {
+  let scale = 1;
+  if (height < width) {
+    if (height >= 2160) scale = 4;
+    else if (height >= 720) scale = 2;
+  } else {
+    if (width >= 3840) scale = 4;
+    else if (width >= 1920) scale = 2;
+  }
+  return scale;
+  // q2repro's get_auto_scale also clamps against `vid->get_dpi_scale()` when
+  // the platform video backend reports one (`max(scale, min_scale)`). This
+  // port's platform/vid layer has no DPI-awareness query at all (grepped) --
+  // dropped per PORTING.md's "#ifdef ... take the portable path" idiom for a
+  // platform capability this port never had, not a silently-dropped behavior
+  // with an in-repo counterpart.
+}
+
+let scr_scale_cvar: CvarT | null = null;
+
+// R_ClampScale(scr_scale) (q2repro's src/refresh/draw.c:293-301): a
+// nonzero, user-set scr_scale (clamped 1..10) wins outright over the auto
+// tier above; "0" (scr_scale's own registered default) means auto. Reuses
+// the SAME cvar cl_scrn.ts's SCR_Init already registers ("scr_scale", "0",
+// CVAR_ARCHIVE, screen.c:1450) -- Cvar_Get is idempotent (cvar.ts:70-74
+// returns the existing CvarT, OR-ing in any new flags, when the name is
+// already registered), so calling it again here from the cgame-host side is
+// the same safe multi-registration pattern this codebase already uses for
+// shared cvars, not a duplicate/competing registration.
+function hudUpscaleFactor(): number {
+  const cvar = scr_scale_cvar ?? (scr_scale_cvar = Cvar_Get("scr_scale", "0", CVAR_ARCHIVE));
+  const requested = cvar ? cvar.value : 0;
+  if (requested) return Math.min(Math.max(requested, 1), 10);
+  return autoHudUpscale(viddef.width, viddef.height);
+}
+
 // hud_vrect/hud_safe/scale/isplit: the real kex client (q2repro's
 // cgame.c-equivalent caller) computes these once per frame from the video
 // mode and a splitscreen layout; no such caller-side computation exists yet
 // in this port line (classic_hud.ts's own top-of-file comment notes the same
 // gap for ITS geometry -- "no CgameImports counterpart exists yet", reading
 // viddef directly instead). This adapter follows that same established
-// precedent: hud_vrect covers the full viddef surface, hud_safe is identical
-// to hud_vrect (no console-style safe-zone/overscan-inset concept exists in
-// this PC-only port), scale is 1 (no hud-scale cvar has been ported), and
-// isplit is always 0 (this port has no splitscreen support -- the same
-// "isplit is unused/hardcoded 0" precedent buildCgameImports()'s own
-// SCR_DrawBind above already documents for KexCgameImports's isplit
-// parameter). Follow-up: replace with a real per-frame computation if/when
-// splitscreen or HUD-scale cvars land.
-function kexHudVrect(): VrectT {
-  return { x: 0, y: 0, width: viddef.width, height: viddef.height };
+// precedent for hud_safe (identical to hud_vrect -- no console-style safe-
+// zone/overscan-inset concept exists in this PC-only port) and isplit
+// (always 0, no splitscreen support -- the same "isplit is unused/
+// hardcoded 0" precedent buildCgameImports()'s own SCR_DrawBind above
+// already documents for KexCgameImports's isplit parameter).
+//
+// hud_vrect/scale themselves are now real (Mike's "You found a secret!"
+// report, root cause #2, .orch/followups.md finding 4): q2repro's actual
+// mechanism is a RENDERER-level R_SetScale(1/upscale) applied to the whole
+// 2D ortho projection once per frame (screen.c's SCR_Draw2D, "a scaling
+// factor of 1 is fine, we're passing a pre-scale HUD rect and the drawing
+// functions do the scaling"), paired with a hud_rect ALREADY divided down
+// by that same upscale factor and a DrawHUD `scale` argument hardcoded to
+// literal `1`. This port's renderer (RefExports, ref.ts) has no SetScale
+// primitive -- adding one is a ref.ts/gl_rmain.ts/r_main.ts change, out of
+// this file's SCOPE. Per the FIDELITY RAZOR (preferences.md rule 17), the
+// OBSERVABLE result -- HUD text drawn at `upscale`x its native atlas pixel
+// size on a high-resolution display -- is what must match, not the
+// mechanism: every position/size formula inside cg_screen.ts already
+// multiplies by its own `scale` PARAMETER (CG_DrawCenterString's
+// `lineHeight = (kfont?10:8) * scale`, drawKfontChar's `ch.w * scale`
+// above, etc.), so passing `upscale` itself as that parameter -- instead of
+// the literal `1` q2repro always passes -- reproduces the identical final
+// real-pixel-space numbers algebraically: q2repro computes position/size in
+// a SMALLER pre-scale hud_rect times 1, then the renderer's ortho remap
+// multiplies the final draw call by `upscale`; this does that same multiply
+// one step earlier in the same arithmetic expression, with hud_vrect ALSO
+// shrunk to the same pre-scale dimensions so every fractional-of-hud_vrect
+// position (e.g. CG_DrawCenterString's `hud_vrect.height * 0.2`) still
+// lands on the same virtual coordinate before the final `* scale`.
+// Previously hardcoded to viddef's full real pixel dimensions with scale
+// fixed at 1 (no separate renderer-level scale to compensate) -- every
+// kfont/notify/centerprint glyph drew at its native, unscaled atlas pixel
+// size regardless of display resolution, illegibly thin at any modern
+// (>=720p) resolution. Q_rint's exact round-half-to-even tie-breaking is
+// not reproduced -- plain nearest-integer rounding, cited rather than
+// silently approximated.
+function kexHudVrect(upscale: number): VrectT {
+  return { x: 0, y: 0, width: Math.round(viddef.width / upscale), height: Math.round(viddef.height / upscale) };
 }
 
 function GetKexCgameAsClassicShape(kex: KexCgameExports): CgameExports {
@@ -1278,8 +1370,9 @@ function GetKexCgameAsClassicShape(kex: KexCgameExports): CgameExports {
     Init: kex.Init,
     Shutdown: kex.Shutdown,
     DrawHUD(playernum, ps, data) {
-      const hud_vrect = kexHudVrect();
-      kex.DrawHUD(0, kexServerDataViewFromClassic(data), hud_vrect, hud_vrect, 1, playernum, kexPlayerStateViewFromClassic(ps));
+      const upscale = hudUpscaleFactor();
+      const hud_vrect = kexHudVrect(upscale);
+      kex.DrawHUD(0, kexServerDataViewFromClassic(data), hud_vrect, hud_vrect, upscale, playernum, kexPlayerStateViewFromClassic(ps));
     },
     TouchPics: kex.TouchPics,
     GetOwnedWeaponWheelWeapons: (ps) => kex.GetOwnedWeaponWheelWeapons(kexPlayerStateViewFromClassic(ps)),
@@ -1433,3 +1526,8 @@ export function CG_TouchPics(): void {
 // Exposed for test/cgame_activation.test.ts's ps-view/server-data conversion
 // spot checks -- pure functions, no engine state touched.
 export { kexPlayerStateViewFromClassic, kexServerDataViewFromClassic, kexPmTypeFromEngine, kexPmoveStateViewFromClassic };
+// Exported for test/cgame_host_hud_scale.test.ts: pure functions pinning
+// root cause #2 of Mike's "You found a secret!" report (see kexHudVrect's
+// own doc comment above) against q2repro's real get_auto_scale/
+// R_ClampScale tiering.
+export { autoHudUpscale, hudUpscaleFactor, kexHudVrect };
