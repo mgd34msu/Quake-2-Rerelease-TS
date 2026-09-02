@@ -83,10 +83,15 @@ function makeCapture(statusbar: string): Capture {
     CL_FrameValid: () => true,
     get_configstring: (index: number) => (index === CS_STATUSBAR ? statusbar : `cs${index}`),
     CL_GetKeyBinding: () => "k",
-    Draw_Pic: (x: number, y: number, name: string) => {
+    // Captured at Draw_PicScaled/Draw_CharScaled, the two members
+    // classic_hud.ts's hudPic/hudChar actually call now that the classic
+    // layout program carries a HUD scale (see that file's SCALE TERM note).
+    // x/y here are REAL pixels -- the scale has already been applied -- which
+    // is the space every assertion below is written in.
+    Draw_PicScaled: (x: number, y: number, _scale: number, name: string) => {
       pics.push({ x, y, name });
     },
-    SCR_DrawChar: (x: number, y: number, _scale: number, num: number) => {
+    Draw_CharScaled: (x: number, y: number, _scale: number, num: number) => {
       chars.push({ x, y, num });
     },
     Com_Print: () => {},
@@ -147,15 +152,38 @@ describe("classic cgame HUD pane -- anchors resolve against the seat, not the di
     expect(fullScreenHudPane()).toEqual({ x: 0, y: 0, width: 1280, height: 960 });
   });
 
-  test("with NO seat, every anchor lands exactly where the pre-splitscreen arithmetic put it", () => {
+  test("with NO seat at a sub-720p render size, every anchor lands exactly where the pre-splitscreen arithmetic put it", () => {
+    // 640x480 is below the auto HUD-scale tier's 720p threshold, so the scale
+    // is 1 and this is the LITERAL pre-scale, pre-pane arithmetic: viddef.width
+    // + n, trunc(viddef.width / 2) - 160 + n, etc. Pinned at this size on
+    // purpose -- it is the identity case classic_hud.ts's SCALE TERM note
+    // promises, and the reason a 640x480 (or 1280x960-at-vid_scale-0.5)
+    // session is byte-for-byte unchanged by the scale term.
+    viddef.width = 640;
+    viddef.height = 480;
     const cap = makeCapture(ANCHOR_LAYOUT);
     GetClassicCgameAPI(cap.imports).DrawHUD(0, makePlayerState(0), emptyData());
 
-    // The literal expressions this code carried before a pane parameter
-    // existed: viddef.width + n, trunc(viddef.width / 2) - 160 + n, etc.
     expect(picNamed(cap.pics, "topleft")).toEqual({ x: 8, y: 12, name: "topleft" });
-    expect(picNamed(cap.pics, "bottomright")).toEqual({ x: 1280 - 40, y: 960 - 30, name: "bottomright" });
-    expect(picNamed(cap.pics, "centered")).toEqual({ x: 1280 / 2 - 160, y: 960 / 2 - 120, name: "centered" });
+    expect(picNamed(cap.pics, "bottomright")).toEqual({ x: 640 - 40, y: 480 - 30, name: "bottomright" });
+    expect(picNamed(cap.pics, "centered")).toEqual({ x: 640 / 2 - 160, y: 480 / 2 - 120, name: "centered" });
+    expect(picNamed(cap.pics, "origin")).toEqual({ x: 0, y: 0, name: "origin" });
+  });
+
+  test("with NO seat at 1280x960, every anchor is the same expression against the PRE-SCALE pane, times the 2x tier", () => {
+    // The same four anchors, at a display size whose auto tier is 2. The pane
+    // handed to the layout program is 1280/2 x 960/2, and every coordinate is
+    // multiplied on the way out -- so an `xr -40` element sits 40 VIRTUAL
+    // units (80 real pixels) in from the right edge, and the 320x240 island
+    // covers twice the screen it used to. That is the whole fix: at this size
+    // the kex cgame has always drawn its HUD at 2x and the classic one drew at
+    // 1x.
+    const cap = makeCapture(ANCHOR_LAYOUT);
+    GetClassicCgameAPI(cap.imports).DrawHUD(0, makePlayerState(0), emptyData());
+
+    expect(picNamed(cap.pics, "topleft")).toEqual({ x: 8 * 2, y: 12 * 2, name: "topleft" });
+    expect(picNamed(cap.pics, "bottomright")).toEqual({ x: (640 - 40) * 2, y: (480 - 30) * 2, name: "bottomright" });
+    expect(picNamed(cap.pics, "centered")).toEqual({ x: (640 / 2 - 160) * 2, y: (480 / 2 - 120) * 2, name: "centered" });
     expect(picNamed(cap.pics, "origin")).toEqual({ x: 0, y: 0, name: "origin" });
   });
 

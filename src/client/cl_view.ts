@@ -37,6 +37,7 @@ import { Sys_SendKeyEvents } from "./cl_input";
 import { Con_ClearNotify } from "./console_impl";
 import { viddef } from "./vid";
 import { Sys_Milliseconds } from "../platform/sys";
+import { CG_HudUpscaleFactor } from "./cgame/host";
 
 //=============
 //
@@ -618,7 +619,31 @@ export function SCR_DrawCrosshair(): void {
   SCR_DrawPOIs();
 
   if (crosshair_pic) {
-    re?.DrawPic(scr_vrect.x + ((scr_vrect.width - crosshair_width) >> 1), scr_vrect.y + ((scr_vrect.height - crosshair_height) >> 1), crosshair_pic);
+    // HUD SCALE. q2repro applies its whole 2D pass -- crosshair included --
+    // through one renderer-level R_SetScale(1/scr.hud_scale) (screen.c's
+    // SCR_Draw2D), so the crosshair pic has always grown with the HUD there.
+    // This port has no SetScale primitive (host.ts's kexHudVrect note has the
+    // full writeup on why, and does the same multiply one step earlier for
+    // the kex HUD); the crosshair is the one 2D element outside either
+    // cgame's DrawHUD, so it multiplies here instead, off the SAME factor
+    // both cgames now use (CG_HudUpscaleFactor). Without it the rerelease
+    // baseq2 "crosshair 1" asset -- pics/ch1.png, a 64x64 image whose only
+    // opaque content is a 2x2 centre dot plus a near-transparent ring --
+    // renders as a couple of pixels at 1280x960 and is effectively invisible
+    // at 1080p, which is the "crosshair does not draw at all" play-test
+    // report. Centring stays the C's `(width - w) >> 1` integer form, on the
+    // SCALED size, so the pic still lands on scr_vrect's centre.
+    //
+    // scale === 1 forwards to the identical re.DrawPic call, so a sub-720p
+    // render (a 640x480 mode, or 1280x960 at vid_scale 0.5) is unchanged.
+    const scale = CG_HudUpscaleFactor();
+    if (scale === 1) {
+      re?.DrawPic(scr_vrect.x + ((scr_vrect.width - crosshair_width) >> 1), scr_vrect.y + ((scr_vrect.height - crosshair_height) >> 1), crosshair_pic);
+    } else {
+      const w = Math.round(crosshair_width * scale);
+      const h = Math.round(crosshair_height * scale);
+      re?.DrawStretchPic(scr_vrect.x + ((scr_vrect.width - w) >> 1), scr_vrect.y + ((scr_vrect.height - h) >> 1), w, h, crosshair_pic);
+    }
   }
 
   // Not nested under the `if (crosshair_pic)` check above: that check is

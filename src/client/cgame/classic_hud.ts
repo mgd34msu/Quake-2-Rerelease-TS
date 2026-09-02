@@ -26,10 +26,15 @@
 //     API expresses screen geometry via DrawHUD's hud_vrect/hud_safe/scale
 //     params, a phase-6 kex-cgame concept CgameExports intentionally hasn't
 //     grown into yet -- see host.ts's own doc comment on CgameExports).
-//   - DrawString/DrawAltString (console_impl.ts): KexCgameImports's nearest
-//     equivalent, SCR_DrawFontString, is alignment-based with no discrete
-//     high-bit/color toggle -- routing "client"/"ctf"/"string"/"string2"
-//     through it would not reproduce the same draw calls.
+//   - conchar strings ("client"/"ctf"/"string"/"string2"/"stat_string" and
+//     the inventory rows): KexCgameImports's nearest equivalent,
+//     SCR_DrawFontString, is alignment-based with no discrete high-bit/color
+//     toggle -- routing them through it would not reproduce the same draw
+//     calls. These used to call console_impl.ts's DrawString/DrawAltString
+//     directly; they now go through this file's own hudString, which applies
+//     the HUD scale and emits the identical per-character draw at scale 1.
+//     console_impl.ts keeps its own unscaled pair for the CONSOLE's callers,
+//     which have no HUD scale.
 //   - cls.realtime (CL_DrawInventory's blinky-cursor timing): CgameImports'
 //     CL_ClientRealTime() is earmarked for a different concept (wall-clock/
 //     com_localTime, phase-3 TODO in host.ts) -- reusing it here ahead of
@@ -57,7 +62,6 @@ import { fixedLength } from "../../shared/fixed";
 import { type ComParseState, COM_Parse } from "../../shared/math";
 import { cls } from "../client";
 import { viddef } from "../vid";
-import { DrawString, DrawAltString } from "../console_impl";
 import { SCR_AddDirtyPoint, SCR_DirtyScreen } from "../cl_scrn";
 
 // ---------------------------------------------------------------------------
@@ -111,16 +115,34 @@ function atoi(s: string): number {
 // pane.width is viddef.width) -- which is what keeps
 // test/cgame_classic_extraction.test.ts's pixel-identity contract intact.
 //
-// NO SCALE TERM, deliberately. The v3.19 status bar is a fixed 320x240
-// virtual layout drawn at native atlas pixel size (Draw_Pic draws a pic at
-// its own size; SCR_DrawChar draws 8x8), and the engine has never scaled it
-// -- at 320x240 fullscreen it exactly fills the screen and at 1920x1080 it
-// stays a small 320x240 island anchored by the xl/xr/xv/yt/yb/yv tokens.
-// Handing it a pane just re-anchors that same unscaled island inside the
-// pane, which gives a seat's HUD exactly the geometry a single-viewport
-// session at the pane's resolution would have. (The kex HUD does carry a
-// scale, because cg_screen.ts multiplies every coordinate by one; nothing in
-// this file has a term to multiply.)
+// SCALE TERM (added 2026-09-02; this note used to read "NO SCALE TERM,
+// deliberately"). The v3.19 status bar is a fixed 320x240 virtual layout that
+// the original engine drew at native atlas pixel size -- at 320x240
+// fullscreen it exactly fills the screen, and at 1920x1080 it stayed a small
+// 320x240 island anchored by the xl/xr/xv/yt/yb/yv tokens. The kex HUD has
+// always carried a scale here (cg_screen.ts multiplies every coordinate by
+// its `scale` parameter, fed by host.ts's hudUpscaleFactor tier), so the SAME
+// engine at 1080p drew a 2x HUD for the re-release ruleset and a 1x island
+// for the classic one. That is the owner's "tiny icons" play-test report, and
+// it is what this term fixes: the classic layout program now takes the same
+// factor (host.ts's CG_HudUpscaleFactor -- q2repro's get_auto_scale tier,
+// with a user-set scr_scale winning outright) and multiplies every draw by
+// it, so one display resolution gives one HUD size under either ruleset.
+//
+// The pane is PRE-SCALE, exactly as GetKexCgameAsClassicShape's kexHudVrect
+// already hands the kex cgame a hud_vrect divided by the same factor: all the
+// anchor arithmetic below stays in the 320x240-relative virtual space it was
+// written in, and only the final draw call multiplies by `scale`. That is
+// also why `scale` is threaded as a parameter rather than read from a global
+// here -- a splitscreen seat tiers off its own pane size (classic.ts).
+//
+// scale === 1 (any render size below 720p -- a 640x480 mode, or a 1280x960
+// mode at vid_scale 0.5) is byte-for-byte the arithmetic and the draw calls
+// this file had before the term existed: every `* scale` is an identity, and
+// imports.Draw_PicScaled/Draw_CharScaled forward to the same
+// re.DrawPic/re.DrawChar the old imports.Draw_Pic/SCR_DrawChar calls made
+// (see their declarations in host.ts). That is what keeps
+// test/cgame_classic_extraction.test.ts's pixel-identity contract intact.
 //
 // pane.x/pane.y are the pane's ORIGIN, added to left/top-anchored tokens and
 // used as the base for right/bottom-anchored ones (`pane.x + pane.width + n`
@@ -138,9 +160,57 @@ export interface HudPaneT {
 }
 
 /** The whole display, i.e. what every coordinate below was implicitly
- *  relative to before panes existed. */
-export function fullScreenHudPane(): HudPaneT {
-  return { x: 0, y: 0, width: viddef.width, height: viddef.height };
+ *  relative to before panes existed -- in PRE-SCALE virtual units, the same
+ *  shape host.ts's kexHudVrect hands the kex cgame. `scale` 1 (the default,
+ *  and what every existing caller/test that does not pass one gets) is the
+ *  literal viddef rect this returned before the scale term existed. */
+export function fullScreenHudPane(scale = 1): HudPaneT {
+  return { x: 0, y: 0, width: Math.round(viddef.width / scale), height: Math.round(viddef.height / scale) };
+}
+
+/** One local splitscreen seat's pane, in the same pre-scale virtual units. */
+export function seatHudPane(seat: { x: number; y: number; width: number; height: number }, scale = 1): HudPaneT {
+  return {
+    x: Math.round(seat.x / scale),
+    y: Math.round(seat.y / scale),
+    width: Math.round(seat.width / scale),
+    height: Math.round(seat.height / scale),
+  };
+}
+
+//=============================================================================
+// The four scaled draw primitives every draw below goes through. Each takes
+// VIRTUAL coordinates and multiplies on the way out, so nothing above them
+// has to know the scale exists. At scale 1 each is the exact call this file
+// used to make (see the SCALE TERM note above).
+//=============================================================================
+
+function hudPic(imports: CgameImports, x: number, y: number, scale: number, name: string): void {
+  imports.Draw_PicScaled(x * scale, y * scale, scale, name);
+}
+
+function hudChar(imports: CgameImports, x: number, y: number, scale: number, num: number): void {
+  imports.Draw_CharScaled(x * scale, y * scale, scale, num);
+}
+
+/** console_impl.ts's DrawString/DrawAltString, with the scale term. Same
+ *  8-unit advance and same `^ xor` high-bit toggle those two apply; kept here
+ *  rather than widening console_impl.ts because the console's own callers
+ *  have no HUD scale and must keep drawing at 8x8 (see this file's
+ *  top-of-file BOUNDARY note on why those two were direct imports at all). */
+function hudString(imports: CgameImports, x: number, y: number, scale: number, s: string, xor: number): void {
+  let cx = x;
+  for (let i = 0; i < s.length; i++) {
+    hudChar(imports, cx, y, scale, s.charCodeAt(i) ^ xor);
+    cx += 8;
+  }
+}
+
+/** SCR_AddDirtyPoint takes REAL pixels (it feeds the software renderer's
+ *  tile-clear bookkeeping, which knows nothing about the HUD's virtual
+ *  space), so every dirty point is scaled the same way a draw is. */
+function hudDirty(x: number, y: number, scale: number): void {
+  SCR_AddDirtyPoint(x * scale, y * scale);
 }
 
 //=============================================================================
@@ -175,14 +245,14 @@ void ICON_SPACE;
 SCR_DrawField
 ==============
 */
-function SCR_DrawField(imports: CgameImports, x: number, yIn: number, color: number, widthIn: number, value: number): void {
+function SCR_DrawField(imports: CgameImports, x: number, yIn: number, color: number, widthIn: number, value: number, scale: number): void {
   if (widthIn < 1) return;
 
   // draw number string
   const width = widthIn > 5 ? 5 : widthIn;
 
-  SCR_AddDirtyPoint(x, yIn);
-  SCR_AddDirtyPoint(x + width * CHAR_WIDTH + 2, yIn + 23);
+  hudDirty(x, yIn, scale);
+  hudDirty(x + width * CHAR_WIDTH + 2, yIn + 23, scale);
 
   const num = Com_sprintf("%i", value);
   let l = num.length;
@@ -194,7 +264,7 @@ function SCR_DrawField(imports: CgameImports, x: number, yIn: number, color: num
     const ch = num[ptr];
     const frame = ch === "-" ? STAT_MINUS : ch.charCodeAt(0) - "0".charCodeAt(0);
 
-    imports.Draw_Pic(px, yIn, sb_nums[color][frame]);
+    hudPic(imports, px, yIn, scale, sb_nums[color][frame]);
     px += CHAR_WIDTH;
     ptr++;
     l--;
@@ -213,7 +283,7 @@ function nextLayoutToken(state: ComParseState): { token: string; done: boolean }
   return { token, done };
 }
 
-function DrawHUDString(imports: CgameImports, str: string, xIn: number, yIn: number, centerwidth: number, xor: number): void {
+function DrawHUDString(imports: CgameImports, str: string, xIn: number, yIn: number, centerwidth: number, xor: number, scale: number): void {
   const margin = xIn;
   let y = yIn;
   let i = 0;
@@ -227,7 +297,7 @@ function DrawHUDString(imports: CgameImports, str: string, xIn: number, yIn: num
     if (centerwidth) x = margin + Math.trunc((centerwidth - line.length * 8) / 2);
     else x = margin;
     for (let j = 0; j < line.length; j++) {
-      imports.SCR_DrawChar(x, y, 1, line.charCodeAt(j) ^ xor, false);
+      hudChar(imports, x, y, scale, line.charCodeAt(j) ^ xor);
       x += 8;
     }
     if (i < str.length) {
@@ -237,7 +307,7 @@ function DrawHUDString(imports: CgameImports, str: string, xIn: number, yIn: num
   }
 }
 
-function SCR_ExecuteLayoutString(imports: CgameImports, ps: PlayerStateT, playernum: number, s: string, pane: HudPaneT): void {
+function SCR_ExecuteLayoutString(imports: CgameImports, ps: PlayerStateT, playernum: number, s: string, pane: HudPaneT, scale: number): void {
   if (!imports.CL_FrameValid()) return;
   if (!s || s.length === 0) return;
 
@@ -299,9 +369,9 @@ function SCR_ExecuteLayoutString(imports: CgameImports, ps: PlayerStateT, player
       }
       const picname = imports.get_configstring(cls.csr.images + value);
       if (picname) {
-        SCR_AddDirtyPoint(x, y);
-        SCR_AddDirtyPoint(x + 23, y + 23);
-        imports.Draw_Pic(x, y, picname);
+        hudDirty(x, y, scale);
+        hudDirty(x + 23, y + 23, scale);
+        hudPic(imports, x, y, scale, picname);
       }
       continue;
     }
@@ -310,8 +380,8 @@ function SCR_ExecuteLayoutString(imports: CgameImports, ps: PlayerStateT, player
       // draw a deathmatch client block
       x = xv(atoi(nextLayoutToken(state).token));
       y = yv(atoi(nextLayoutToken(state).token));
-      SCR_AddDirtyPoint(x, y);
-      SCR_AddDirtyPoint(x + 159, y + 31);
+      hudDirty(x, y, scale);
+      hudDirty(x + 159, y + 31, scale);
 
       const value = atoi(nextLayoutToken(state).token);
       if (value >= MAX_CLIENTS || value < 0) {
@@ -324,13 +394,13 @@ function SCR_ExecuteLayoutString(imports: CgameImports, ps: PlayerStateT, player
       const time = atoi(nextLayoutToken(state).token);
 
       const name = imports.CL_GetClientName(value);
-      DrawAltString(x + 32, y, name);
-      DrawString(x + 32, y + 8, "Score: ");
-      DrawAltString(x + 32 + 7 * 8, y + 8, Com_sprintf("%i", score));
-      DrawString(x + 32, y + 16, Com_sprintf("Ping:  %i", ping));
-      DrawString(x + 32, y + 24, Com_sprintf("Time:  %i", time));
+      hudString(imports, x + 32, y, scale, name, 0x80);
+      hudString(imports, x + 32, y + 8, scale, "Score: ", 0);
+      hudString(imports, x + 32 + 7 * 8, y + 8, scale, Com_sprintf("%i", score), 0x80);
+      hudString(imports, x + 32, y + 16, scale, Com_sprintf("Ping:  %i", ping), 0);
+      hudString(imports, x + 32, y + 24, scale, Com_sprintf("Time:  %i", time), 0);
 
-      imports.Draw_Pic(x, y, imports.CL_GetClientPic(value));
+      hudPic(imports, x, y, scale, imports.CL_GetClientPic(value));
       continue;
     }
 
@@ -338,8 +408,8 @@ function SCR_ExecuteLayoutString(imports: CgameImports, ps: PlayerStateT, player
       // draw a ctf client block
       x = xv(atoi(nextLayoutToken(state).token));
       y = yv(atoi(nextLayoutToken(state).token));
-      SCR_AddDirtyPoint(x, y);
-      SCR_AddDirtyPoint(x + 159, y + 31);
+      hudDirty(x, y, scale);
+      hudDirty(x + 159, y + 31, scale);
 
       const value = atoi(nextLayoutToken(state).token);
       if (value >= MAX_CLIENTS || value < 0) {
@@ -354,17 +424,17 @@ function SCR_ExecuteLayoutString(imports: CgameImports, ps: PlayerStateT, player
       const name = imports.CL_GetClientName(value);
       const block = Com_sprintf("%3i %3i %-12.12s", score, ping, name);
 
-      if (value === playernum) DrawAltString(x, y, block);
-      else DrawString(x, y, block);
+      if (value === playernum) hudString(imports, x, y, scale, block, 0x80);
+      else hudString(imports, x, y, scale, block, 0);
       continue;
     }
 
     if (token === "picn") {
       // draw a pic from a name
       const name = nextLayoutToken(state).token;
-      SCR_AddDirtyPoint(x, y);
-      SCR_AddDirtyPoint(x + 23, y + 23);
-      imports.Draw_Pic(x, y, name);
+      hudDirty(x, y, scale);
+      hudDirty(x + 23, y + 23, scale);
+      hudPic(imports, x, y, scale, name);
       continue;
     }
 
@@ -372,7 +442,7 @@ function SCR_ExecuteLayoutString(imports: CgameImports, ps: PlayerStateT, player
       // draw a number
       width = atoi(nextLayoutToken(state).token);
       const value = ps.stats[atoi(nextLayoutToken(state).token)];
-      SCR_DrawField(imports, x, y, 0, width, value);
+      SCR_DrawField(imports, x, y, 0, width, value, scale);
       continue;
     }
 
@@ -386,10 +456,10 @@ function SCR_ExecuteLayoutString(imports: CgameImports, ps: PlayerStateT, player
       else color = 1;
 
       if (ps.stats[STAT_FLASHES] & 1) {
-        imports.Draw_Pic(x, y, "field_3");
+        hudPic(imports, x, y, scale, "field_3");
       }
 
-      SCR_DrawField(imports, x, y, color, width, value);
+      SCR_DrawField(imports, x, y, color, width, value, scale);
       continue;
     }
 
@@ -403,10 +473,10 @@ function SCR_ExecuteLayoutString(imports: CgameImports, ps: PlayerStateT, player
       else continue; // negative number = don't show
 
       if (ps.stats[STAT_FLASHES] & 4) {
-        imports.Draw_Pic(x, y, "field_3");
+        hudPic(imports, x, y, scale, "field_3");
       }
 
-      SCR_DrawField(imports, x, y, color, width, value);
+      SCR_DrawField(imports, x, y, color, width, value, scale);
       continue;
     }
 
@@ -419,10 +489,10 @@ function SCR_ExecuteLayoutString(imports: CgameImports, ps: PlayerStateT, player
       const color = 0; // green
 
       if (ps.stats[STAT_FLASHES] & 2) {
-        imports.Draw_Pic(x, y, "field_3");
+        hudPic(imports, x, y, scale, "field_3");
       }
 
-      SCR_DrawField(imports, x, y, color, width, value);
+      SCR_DrawField(imports, x, y, color, width, value, scale);
       continue;
     }
 
@@ -437,27 +507,27 @@ function SCR_ExecuteLayoutString(imports: CgameImports, ps: PlayerStateT, player
         imports.Com_Print("Bad stat_string index\n");
         return;
       }
-      DrawString(x, y, imports.get_configstring(index));
+      hudString(imports, x, y, scale, imports.get_configstring(index), 0);
       continue;
     }
 
     if (token === "cstring") {
-      DrawHUDString(imports, nextLayoutToken(state).token, x, y, 320, 0);
+      DrawHUDString(imports, nextLayoutToken(state).token, x, y, 320, 0, scale);
       continue;
     }
 
     if (token === "string") {
-      DrawString(x, y, nextLayoutToken(state).token);
+      hudString(imports, x, y, scale, nextLayoutToken(state).token, 0);
       continue;
     }
 
     if (token === "cstring2") {
-      DrawHUDString(imports, nextLayoutToken(state).token, x, y, 320, 0x80);
+      DrawHUDString(imports, nextLayoutToken(state).token, x, y, 320, 0x80, scale);
       continue;
     }
 
     if (token === "string2") {
-      DrawAltString(x, y, nextLayoutToken(state).token);
+      hudString(imports, x, y, scale, nextLayoutToken(state).token, 0x80);
       continue;
     }
 
@@ -471,10 +541,18 @@ function SCR_ExecuteLayoutString(imports: CgameImports, ps: PlayerStateT, player
       // STAT_HEALTH_BARS cannot travel on protocol 34 at all.
       //
       // GEOMETRY, term by term against cg_screen.ts:
-      //   scale                 -> 1. The classic layout program is a fixed
-      //                            320x240 virtual HUD drawn at native atlas
-      //                            size; nothing in this file has a scale
-      //                            term (see the HUD PANE note above).
+      //   scale                 -> `scale`, the same factor every other draw
+      //                            in this file now carries (see the SCALE
+      //                            TERM note above). This used to be a hard 1
+      //                            because the classic layout program had no
+      //                            scale term at all; the bar therefore has
+      //                            always been half the pane wide, and still
+      //                            is -- what changed is that the pane is now
+      //                            expressed in pre-scale virtual units, so
+      //                            the bar's REAL width is unchanged while its
+      //                            4-unit height, its 1-unit outline and its
+      //                            barHeight*3 pitch grow with the digits
+      //                            instead of staying a 4-pixel sliver.
       //   hud_vrect             -> `pane`, this seat's rectangle.
       //   hud_safe.x            -> 0. The classic HUD has no safe-area inset
       //                            concept; the pane carries the origin and
@@ -490,7 +568,7 @@ function SCR_ExecuteLayoutString(imports: CgameImports, ps: PlayerStateT, player
       const bytes = [raw & 0xff, (raw >> 8) & 0xff];
 
       const name = imports.Localize(imports.get_configstring(cls.csr.general + CONFIG_HEALTH_BAR_NAME_OFFSET), [], 0);
-      DrawHUDString(imports, name, pane.x + Math.trunc(pane.width / 2) - 160, y, 320, 0);
+      DrawHUDString(imports, name, pane.x + Math.trunc(pane.width / 2) - 160, y, 320, 0, scale);
 
       const barWidth = pane.width * 0.5;
       const barHeight = 4;
@@ -506,12 +584,12 @@ function SCR_ExecuteLayoutString(imports: CgameImports, ps: PlayerStateT, player
 
         const percent = (stat & 0b01111111) / 127;
 
-        SCR_AddDirtyPoint(barX, barY);
-        SCR_AddDirtyPoint(barX + barWidth + 1, barY + barHeight + 1);
+        hudDirty(barX, barY, scale);
+        hudDirty(barX + barWidth + 1, barY + barHeight + 1, scale);
 
-        imports.SCR_DrawColorPic(barX, barY, barWidth + 1, barHeight + 1, "_white", RGBA_BLACK);
-        if (percent > 0) imports.SCR_DrawColorPic(barX, barY, barWidth * percent, barHeight, "_white", RGBA_RED);
-        if (percent < 1) imports.SCR_DrawColorPic(barX + barWidth * percent, barY, barWidth * (1 - percent), barHeight, "_white", RGBA_GREY);
+        imports.SCR_DrawColorPic(barX * scale, barY * scale, (barWidth + 1) * scale, (barHeight + 1) * scale, "_white", RGBA_BLACK);
+        if (percent > 0) imports.SCR_DrawColorPic(barX * scale, barY * scale, barWidth * percent * scale, barHeight * scale, "_white", RGBA_RED);
+        if (percent < 1) imports.SCR_DrawColorPic((barX + barWidth * percent) * scale, barY * scale, barWidth * (1 - percent) * scale, barHeight * scale, "_white", RGBA_GREY);
 
         barY += barHeight * 3;
         y = barY;
@@ -542,8 +620,8 @@ The status bar is a small layout program that
 is based on the stats array
 ================
 */
-export function SCR_DrawStats(imports: CgameImports, ps: PlayerStateT, playernum: number, pane: HudPaneT = fullScreenHudPane()): void {
-  SCR_ExecuteLayoutString(imports, ps, playernum, imports.get_configstring(CS_STATUSBAR), pane);
+export function SCR_DrawStats(imports: CgameImports, ps: PlayerStateT, playernum: number, pane: HudPaneT = fullScreenHudPane(), scale = 1): void {
+  SCR_ExecuteLayoutString(imports, ps, playernum, imports.get_configstring(CS_STATUSBAR), pane, scale);
 }
 
 /*
@@ -551,9 +629,9 @@ export function SCR_DrawStats(imports: CgameImports, ps: PlayerStateT, playernum
 SCR_DrawLayout
 ================
 */
-export function SCR_DrawLayout(imports: CgameImports, ps: PlayerStateT, playernum: number, layout: string, pane: HudPaneT = fullScreenHudPane()): void {
+export function SCR_DrawLayout(imports: CgameImports, ps: PlayerStateT, playernum: number, layout: string, pane: HudPaneT = fullScreenHudPane(), scale = 1): void {
   if (!ps.stats[STAT_LAYOUTS]) return;
-  SCR_ExecuteLayoutString(imports, ps, playernum, layout, pane);
+  SCR_ExecuteLayoutString(imports, ps, playernum, layout, pane, scale);
 }
 
 //=============================================================================
@@ -568,10 +646,10 @@ function SetStringHighBit(s: string): string {
   return out;
 }
 
-function Inv_DrawString(imports: CgameImports, x: number, y: number, s: string): void {
+function Inv_DrawString(imports: CgameImports, x: number, y: number, s: string, scale: number): void {
   let cx = x;
   for (let i = 0; i < s.length; i++) {
-    imports.SCR_DrawChar(cx, y, 1, s.charCodeAt(i), false);
+    hudChar(imports, cx, y, scale, s.charCodeAt(i));
     cx += 8;
   }
 }
@@ -583,7 +661,7 @@ const DISPLAY_ITEMS = 17;
 CL_DrawInventory
 ================
 */
-export function CL_DrawInventory(imports: CgameImports, ps: PlayerStateT, inventory: Int32Array, pane: HudPaneT = fullScreenHudPane()): void {
+export function CL_DrawInventory(imports: CgameImports, ps: PlayerStateT, inventory: Int32Array, pane: HudPaneT = fullScreenHudPane(), scale = 1): void {
   const selected = ps.stats[STAT_SELECTED_ITEM];
 
   let num = 0;
@@ -610,12 +688,12 @@ export function CL_DrawInventory(imports: CgameImports, ps: PlayerStateT, invent
   // repaint everything next frame
   SCR_DirtyScreen();
 
-  imports.Draw_Pic(x, y + 8, "inventory");
+  hudPic(imports, x, y + 8, scale, "inventory");
 
   y += 24;
   x += 24;
-  Inv_DrawString(imports, x, y, "hotkey ### item");
-  Inv_DrawString(imports, x, y + 8, "------ --- ----");
+  Inv_DrawString(imports, x, y, "hotkey ### item", scale);
+  Inv_DrawString(imports, x, y + 8, "------ --- ----", scale);
   y += 16;
   for (let i = top; i < num && i < top + DISPLAY_ITEMS; i++) {
     const item = index[i];
@@ -629,9 +707,9 @@ export function CL_DrawInventory(imports: CgameImports, ps: PlayerStateT, invent
       str = SetStringHighBit(str);
     } else if ((Math.trunc(cls.realtime * 10) & 1) === 1) {
       // draw a blinky cursor by the selected item
-      imports.SCR_DrawChar(x - 8, y, 1, 15, false);
+      hudChar(imports, x - 8, y, scale, 15);
     }
-    Inv_DrawString(imports, x, y, str);
+    Inv_DrawString(imports, x, y, str, scale);
     y += 8;
   }
 }

@@ -20,9 +20,9 @@
 // cl_scrn.ts's own note on it.
 
 import { STAT_LAYOUTS } from "../../shared/q_shared";
-import { SCR_DrawStats, SCR_DrawLayout, CL_DrawInventory, sb_nums, fullScreenHudPane, type HudPaneT } from "./classic_hud";
+import { SCR_DrawStats, SCR_DrawLayout, CL_DrawInventory, sb_nums, fullScreenHudPane, seatHudPane, type HudPaneT } from "./classic_hud";
 import type { CgameImports, CgameExports } from "./host";
-import { CGAME_API_VERSION } from "./host";
+import { CGAME_API_VERSION, CG_HudUpscaleFactor, CG_SeatHudUpscaleFactor } from "./host";
 
 export function GetClassicCgameAPI(imports: CgameImports): CgameExports {
   return {
@@ -62,11 +62,25 @@ export function GetClassicCgameAPI(imports: CgameImports): CgameExports {
     // The rect's origin is only ever ADDED to a coordinate. Conflating the two
     // is what previously pushed the kex path's bottom-anchored HUD elements a
     // whole pane off the bottom (host.ts's kexSeatHudSafe).
+    //
+    // HUD SCALE: the same tier GetKexCgameAsClassicShape (host.ts) already
+    // hands the kex cgame, taken from the same CG_HudUpscaleFactor/
+    // CG_SeatHudUpscaleFactor pair, and derived from the same thing it is
+    // derived from there -- display (or seat) geometry and scr_scale. It does
+    // NOT depend on the session's wire layout: a classic-ruleset session
+    // scales identically whether it arrived on protocol 36 or on the
+    // engine-local 4038 wide layout. A seat tiers off its own pane, so a
+    // quarter-screen pane on a 4K display picks the 1080p tier, exactly as
+    // the kex adapter's own comment describes. The pane handed down is
+    // PRE-SCALE (seatHudPane/fullScreenHudPane divide by the factor), which
+    // is the same shape kexHudVrect produces; classic_hud.ts's SCALE TERM
+    // note has the full algebra.
     DrawHUD(playernum, ps, data, seat) {
-      const pane: HudPaneT = seat ? { x: seat.x, y: seat.y, width: seat.width, height: seat.height } : fullScreenHudPane();
-      SCR_DrawStats(imports, ps, playernum, pane);
-      if (ps.stats[STAT_LAYOUTS] & 1) SCR_DrawLayout(imports, ps, playernum, data.layout, pane);
-      if (ps.stats[STAT_LAYOUTS] & 2) CL_DrawInventory(imports, ps, data.inventory, pane);
+      const scale = seat ? CG_SeatHudUpscaleFactor(seat.width, seat.height) : CG_HudUpscaleFactor();
+      const pane: HudPaneT = seat ? seatHudPane(seat, scale) : fullScreenHudPane(scale);
+      SCR_DrawStats(imports, ps, playernum, pane, scale);
+      if (ps.stats[STAT_LAYOUTS] & 1) SCR_DrawLayout(imports, ps, playernum, data.layout, pane, scale);
+      if (ps.stats[STAT_LAYOUTS] & 2) CL_DrawInventory(imports, ps, data.inventory, pane, scale);
     },
 
     // The sb_nums half of cl_scrn.ts's former SCR_TouchPics -- moved behind
