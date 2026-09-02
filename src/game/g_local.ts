@@ -494,8 +494,19 @@ export class SpawnTempT {
   achievement: string | null = null;
   goals: string | null = null;
   image: string | null = null;
-  fade_start_dist = 0;
-  fade_end_dist = 0;
+  // misc_flare's distance fade, and NOT 0: the re-release declares these with
+  // real defaults (src/kexgame/g_local_types.ts:319-320, itself g_local.h's
+  // `int32_t fade_start_dist = 96; int32_t fade_end_dist = 384;`), and every
+  // shipped misc_flare relies on them -- none of the 53 in mgu2m3 spells
+  // either key. They ride the wire in s.modelindex2/s.modelindex3 and the
+  // client's RF_FLARE branch (cl_ents.ts) computes the flare's alpha from
+  // them: with both at 0 the ramp collapses to "always fully opaque", so the
+  // flare that should fade in with distance is drawn at full strength from
+  // any range. Harmless while nothing rendered flares at all; wrong now that
+  // a widened classic session does. No effect on any vanilla entity -- these
+  // are re-release-only spawn keys read only by SP_misc_flare.
+  fade_start_dist = 96;
+  fade_end_dist = 384;
   start_items: string | null = null;
   no_grapple = 0;
   // Default 1.0, NOT 0 -- kexgame/g_spawn.ts:707 (`health_multiplier: 1.0`,

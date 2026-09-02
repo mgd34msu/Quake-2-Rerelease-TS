@@ -165,7 +165,7 @@ import { SP_monster_makron } from "./m_boss32";
 // stays exactly as it was.
 import { SP_dm_tag_token } from "./dm_tag";
 import { SP_info_player_team1, SP_info_player_team2, SP_misc_ctf_banner, SP_misc_ctf_small_banner } from "./g_ctf";
-import { SP_dynamic_light, SP_func_animation, SP_info_landmark, SP_info_world_text, SP_misc_flare, SP_misc_hologram, SP_misc_lavaball, SP_misc_model, SP_misc_player_mannequin } from "./g_kexmisc";
+import { G_ResetShadowLights, setup_shadow_lights, SP_dynamic_light, SP_func_animation, SP_info_landmark, SP_info_world_text, SP_misc_flare, SP_misc_hologram, SP_misc_lavaball, SP_misc_model, SP_misc_player_mannequin } from "./g_kexmisc";
 import { SP_target_achievement, SP_target_autosave, SP_target_camera, SP_target_crossunit_target, SP_target_crossunit_trigger, SP_target_gravity, SP_target_healthbar, SP_target_light, SP_target_music, SP_target_poi, SP_target_sky, SP_target_soundfx, SP_target_story } from "./g_kextarg";
 import { SP_func_eye, SP_info_nav_lock, SP_trigger_coop_relay, SP_trigger_flashlight, SP_trigger_fog, SP_trigger_health_relay } from "./g_kextrig";
 import { SP_func_plat2, SP_object_repair, SP_rotating_light } from "./g_newfnc";
@@ -465,7 +465,24 @@ export function ED_ParseEdict(state: ComParseState, ent: EdictT): void {
 
     // keynames with a leading underscore are used for utility comments,
     // and are immediately discarded by quake
-    if (firstChar(keyname) === "_") continue;
+    if (firstChar(keyname) === "_") {
+      // ...EXCEPT `_color` on a WIDE session. The rerelease parser carves
+      // this one key out of the underscore rule (src/kexgame/g_spawn.ts:979,
+      // `if (keyname === "_color") ent.s.skinnum = ED_LoadColor(value)`)
+      // because it is how a map tints a shadow light: cl_fx.ts's
+      // unpackShadowLightColor reads the light entity's skinnum, and base1's
+      // 37 dynamic_lights carry their color in nothing but `_color`. Without
+      // this, every one of them would come out white.
+      //
+      // Gated on the layout, not just on the classname, for the same reason
+      // everything else in this change is: a narrow (1997-data) session must
+      // stay byte-for-byte what it was, and vanilla 3.21 really does discard
+      // `_color` on every entity. Widening only ever happens for content the
+      // classic wire cannot carry (sv_init.ts's SV_ContentNeedsWideLayout),
+      // so this can never fire on a 1997 map.
+      if (keyname === "_color" && gi.extended_layout?.() === true) ent.s.skinnum = ED_LoadColor(valToken);
+      continue;
+    }
 
     ED_ParseField(keyname, valToken, ent);
   }
@@ -943,6 +960,11 @@ export function SpawnEntities(mapname: string, entities: string, spawnpoint: str
   unknownFieldKeys.clear();
   unknownClassnames.clear();
 
+  // [Sam-KEX] shadow lights are collected during this parse pass and
+  // published after it (see setup_shadow_lights below); clear last level's
+  // collection first. No-op on a narrow session, which never collects any.
+  G_ResetShadowLights();
+
   const state: ComParseState = { data: entities, index: 0 };
 
   // parse ents
@@ -1023,6 +1045,12 @@ export function SpawnEntities(mapname: string, entities: string, spawnpoint: str
   // ruling (portable path only; Com_DPrintf sanity check, not behavior).
 
   G_FindTeams();
+
+  // [Sam-KEX] g_spawn.cpp's own `setup_shadow_lights()` sits at this exact
+  // point in SpawnEntities (src/kexgame/g_spawn.ts:1697) -- after every
+  // entity exists, because each light resolves its cone direction and its
+  // driving lightstyle by targetname. Zero-iteration on a narrow session.
+  setup_shadow_lights();
 
   PlayerTrail_Init();
 }

@@ -68,7 +68,7 @@ import { Qcommon_Init, runFrames } from "../src/main";
 import { sv, svs, ServerStateT } from "../src/server/server";
 import { SV_Shutdown } from "../src/server/sv_main";
 import { geHolder, currentGameFamily } from "../src/server/sv_game";
-import { CS_REMAP_OLD, type CsRemapT } from "../src/shared/cs_remap";
+import { CS_REMAP_OLD, CS_REMAP_RERELEASE, type CsRemapT } from "../src/shared/cs_remap";
 import type { ProtocolCodec } from "../src/qcommon/protocol/codec";
 import { FS_TestSnapshotSearchPaths, FS_TestRestoreSearchPaths, type FsSearchPathSnapshotT } from "../src/qcommon/files";
 import { snapshotCvars, restoreCvars, type CvarSnapshotT } from "./support/cvar_snapshot";
@@ -167,7 +167,16 @@ describe.skipIf(!havePak)("legacy 3.21 game module on the real rerelease base1.b
     expect(sv.name).toBe("base1");
     expect(geHolder.ge).not.toBeNull();
     expect(currentGameFamily()).toBe("legacy");
-    expect(svs.csr).toBe(CS_REMAP_OLD);
+    // The RULESET is still the legacy one; the LAYOUT is not, and has not
+    // been since sv_init.ts's SV_ContentNeedsWideLayout started asking the
+    // map what it carries. Retail base1's entity lump has 37 dynamic_lights
+    // with shadowlightradius keys, which the classic configstring layout has
+    // no block for and protocol 34 no renderfx bit for, so this session
+    // widens at spawn -- see that function's header for the full rule. The
+    // 1997 base1 in the classic tree carries none of that and still comes up
+    // CS_REMAP_OLD on protocol 34 (test/wide_classic_session.test.ts pins
+    // both outcomes directly).
+    expect(svs.csr).toBe(CS_REMAP_RERELEASE);
     // Campaign rules really are in force -- if this is 1, SV_InitGame's
     // dedicated-server rule won and every assertion below would be
     // measuring deathmatch instead.

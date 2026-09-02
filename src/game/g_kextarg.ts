@@ -573,6 +573,13 @@ function target_light_use(self: EdictT, _other: EdictT | null, _activator: Edict
  *    entity is culled from client frames by sv_ents.ts:344 whenever it is not
  *    SVF_NOCLIENT anyway.
  *
+ * BOTH ARE LIFTED ON A WIDE SESSION (gi.extended_layout()), for the reasons
+ * SP_misc_flare's note now spells out: the client has the RF_CUSTOM_LIGHT
+ * branch, it consumes the entity before the model lookup, and without the
+ * restored modelindex sv_ents.ts:344 would cull the entity so the light could
+ * never be drawn no matter how correct its state was. A narrow session is
+ * unchanged.
+ *
  * Everything else runs: the START_ON toggle, the FLICKER svflags flip, the
  * chain lookup to the dynamic_light target, the whole colour-lerp think, the
  * `speed` reciprocal, and the s.skinnum the rerelease client would read.
@@ -582,8 +589,9 @@ function target_light_use(self: EdictT, _other: EdictT | null, _activator: Edict
  * worldspawn), so the style offset cannot be decided here.
  */
 export function SP_target_light(self: EdictT): void {
-  // g_target.cpp:1531 -- `self->s.modelindex = 1;` INTENTIONALLY OMITTED, see
+  // g_target.cpp:1531 -- `self->s.modelindex = 1;`. Wide sessions only; see
   // degradation note 2 above.
+  if (gi.extended_layout?.() === true) self.s.modelindex = 1;
   self.s.renderfx = RF_CUSTOM_LIGHT;
   self.s.frame = st.radius !== 0 ? st.radius : 150;
   self.count = self.s.skinnum;

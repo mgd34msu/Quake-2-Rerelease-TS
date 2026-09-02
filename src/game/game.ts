@@ -137,6 +137,37 @@ export interface GameImports {
   // they connect, and changes are sent to all connected clients.
   configstring(num: number, str: string): void;
 
+  // ---------------------------------------------------------------------
+  // ADDITIONS TO THE FROZEN v3 IMPORT SET (not in the 1997 game.h).
+  //
+  // The configstring space is a property of the SESSION, not of the game
+  // module (src/server/sv_init.ts's SV_WidenConfigstringSpace). A classic
+  // module hosted on the WIDE layout can deliver presentation the classic
+  // layout has no room for, and these two are how it asks and how it
+  // publishes.
+  //
+  // Both are OPTIONAL (`?`) on purpose: the engine always supplies them
+  // (src/server/bindings/legacy.ts), but declaring them optional means the
+  // other frozen legacy trees -- src/ctf, src/rogue, src/xatrix, src/lmctf,
+  // each with its own copy of this interface -- need no edit at all to keep
+  // compiling and keep behaving identically. Call sites use `?.()` and treat
+  // "absent" as "classic layout", which is the correct answer for any engine
+  // that does not provide them.
+  // ---------------------------------------------------------------------
+
+  // True when this session runs on the wide (re-release) configstring
+  // layout, i.e. when the client will have cls.csr.extended set and the
+  // delta can carry s.alpha / s.scale and the extended renderfx bits.
+  extended_layout?(): boolean;
+
+  // Publish one CS_SHADOWLIGHTS slot. The block exists only in the wide
+  // layout (cs_remap.ts gives CS_REMAP_OLD shadowlights -1 /
+  // max_shadowlights 0), and its index cannot be spelled in the frozen v3
+  // CS_* constants at all, so it cannot go through configstring() and its
+  // legacy-index translation. `slot` is 0-based within the block; the engine
+  // adds the live layout's base and bounds-checks.
+  shadowlight?(slot: number, value: string): void;
+
   // Com_Error(ERR_DROP, ...) never returns to the caller (see PORTING.md
   // idiom map: ComError is thrown and caught in Qcommon_Frame).
   error(fmt: string): never;

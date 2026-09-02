@@ -270,6 +270,8 @@ export function BuildLegacyImports(): GameImports {
     imageindex: SV_ImageIndex,
 
     configstring: PF_LegacyConfigstring,
+    extended_layout: PF_ExtendedLayout,
+    shadowlight: PF_ShadowLight,
     sound: PF_StartSound,
     positioned_sound: SV_StartSound,
 
@@ -361,6 +363,41 @@ function PF_LegacyConfigstring(index: number, str: string): void {
   PF_Configstring(remapLegacyConfigstringIndex(index, CS_REMAP_OLD, svs.csr), str);
 }
 
+/*
+===============
+PF_ExtendedLayout / PF_ShadowLight
+
+The engine half of game.ts's two additions to the frozen v3 import set (see
+the block comment there for why they are optional on the interface).
+
+PF_ExtendedLayout is a plain read of the live session layout. A legacy tree
+calls it to decide whether presentation it holds on the edict can actually
+reach a client this session -- src/game's setup_dynamic_light and the
+`_color` spawn-key case are the two consumers today. It answers for the
+CURRENT moment, so it must not be cached across a level change; sv_game.ts
+resets svs.csr on every game-library load and SV_SpawnServer settles the
+session's layout before ge.SpawnEntities runs, which is exactly when the
+module asks.
+
+PF_ShadowLight exists because CS_SHADOWLIGHTS has no legacy index to
+translate: the classic layout has no such block (cs_remap.ts gives it
+shadowlights -1, max_shadowlights 0), so a raw index through
+PF_LegacyConfigstring could only land on top of some other block. Taking the
+slot number instead and adding the LIVE base here keeps the module free of
+any layout arithmetic. On the classic layout there is nowhere to put it, so
+the call is a silent no-op rather than an error -- the module is allowed to
+call unconditionally, and a caller that cares checks extended_layout() first.
+===============
+*/
+function PF_ExtendedLayout(): boolean {
+  return svs.csr.extended;
+}
+
+function PF_ShadowLight(slot: number, value: string): void {
+  if (svs.csr.shadowlights < 0 || slot < 0 || slot >= svs.csr.max_shadowlights) return;
+  PF_Configstring(svs.csr.shadowlights + slot, value);
+}
+
 // The live `g_edicts` module singleton of whichever legacy tree `gameName`
 // selects -- read directly rather than through `ge.edicts` for the
 // live-binding reason this file's Nav_SetEdictSource comment already
@@ -380,7 +417,14 @@ function isPlayerStateHolder(client: unknown): client is { ps: PlayerStateT } {
 
 /*
 ===============
-fixupRawConfigstringStats
+fixupWidenedSessionPlayerState
+
+Everything a WIDENED classic session has to correct in a legacy tree's player
+state before it goes on the wire. Two independent jobs, both no-ops on the
+narrow layout (single early-out below), so an unwidened classic session --
+the overwhelmingly common case -- is byte-for-byte untouched.
+
+JOB 1: RAW CONFIGSTRING INDICES EMBEDDED AS PLAYER-STATE DATA.
 
 The one class of cross-boundary leak PF_LegacyConfigstring above cannot
 catch: a raw configstring index the game tree embeds as PLAYER-STATE DATA
@@ -398,12 +442,42 @@ Run after every entry point that can change a client's stats -- pickups and
 chase-cam updates both happen inside RunFrame's think/touch dispatch, not at
 a call this binding otherwise observes. The range checks make it idempotent:
 a remapped value lands far outside CS_REMAP_OLD's block, so a later pass
-leaves it alone instead of remapping twice. Returns immediately on an
-unwidened session, which is the overwhelmingly common case.
+leaves it alone instead of remapping twice.
+
+JOB 2: THE FLOAT PMOVE MIRROR (originF/velocityF).
+
+PmoveStateT carries the pmove origin/velocity twice: `origin`/`velocity` as
+the classic 12.3 fixed-point Int16 pair, and `originF`/`velocityF` as plain
+world-unit floats. q_shared.ts's own comment on those float fields records
+the assumption that held until the configstring space became a session
+property: "Always zero for every vanilla-family game (nothing writes them)"
+-- true, because only server/bindings/kex.ts filled them, and only the kex
+family ever spoke a protocol that read them.
+
+A widened classic session breaks that pairing. It runs a LEGACY game tree
+(which writes only the Int16 pair, through qcommon/pmove.ts) over 1038's
+codec (protocol/q2repro.ts, which reads pm_origin/pm_velocity from the FLOAT
+pair and nothing else -- svc_playerstate carries them as full IEEE-754). The
+floats are still zero, so every frame told the client the player was standing
+at the world origin with no velocity. Seen directly: rerelease base1 under the
+classic ruleset rendered a completely different part of the level from the
+same map under either protocol 34 or the kex module, both of which agree with
+each other.
+
+Mirroring here rather than in qcommon/pmove.ts is deliberate. pmove.ts's
+quantization is bit-exact vanilla behavior on the Int16 domain and is shared
+by the client's own prediction; the float pair is purely a WIRE carrier for
+the extended protocols, so the place to derive it is the same engine/module
+seam that already translates this session's other layout-dependent values.
+Dividing the 12.3 fixed-point value by 8 is the exact inverse of
+protocol/q2repro.ts's pmFloatToShort (`round(f * 8)`), so the widened classic
+session puts the same numbers on the wire that the classic codec always did,
+at the classic quantization -- no accuracy is claimed that the legacy tree
+did not have.
 ===============
 */
-function fixupRawConfigstringStats(edicts: { client: unknown }[]): void {
-  if (svs.csr === CS_REMAP_OLD) return; // classic layout: the raw indices are already correct
+function fixupWidenedSessionPlayerState(edicts: { client: unknown }[]): void {
+  if (svs.csr === CS_REMAP_OLD) return; // classic layout: raw indices are correct and the float pair is never read
 
   for (const edict of edicts) {
     if (!isPlayerStateHolder(edict.client)) continue;
@@ -417,6 +491,14 @@ function fixupRawConfigstringStats(edicts: { client: unknown }[]): void {
     const chase = stats[STAT_CHASE];
     if (chase >= CS_REMAP_OLD.playerskins && chase < CS_REMAP_OLD.playerskins + MAX_CLIENTS) {
       stats[STAT_CHASE] = remapLegacyConfigstringIndex(chase, CS_REMAP_OLD, svs.csr);
+    }
+
+    // Job 2: derive the float pair the wide codec actually transmits from the
+    // fixed-point pair the legacy tree actually wrote. See the header.
+    const pm = edict.client.ps.pmove;
+    for (let i = 0; i < 3; i++) {
+      pm.originF[i] = (pm.origin[i] ?? 0) / 8;
+      pm.velocityF[i] = (pm.velocity[i] ?? 0) / 8;
     }
   }
 }
@@ -470,15 +552,23 @@ export function LoadLegacyGame(gameName: string): GameExports {
 
   // Keep the two raw configstring indices a legacy tree embeds in PLAYER
   // STATE (rather than passing to gi.configstring()) in step with the layout
-  // the engine is actually using -- see fixupRawConfigstringStats. Registered
+  // the engine is actually using, and the float pmove mirror the wide codec
+  // transmits -- see fixupWidenedSessionPlayerState. Registered
   // as an engine-side post-frame hook rather than by wrapping ge.Init/
   // ge.SpawnEntities/ge.RunFrame, because the base track's GameExports is
   // returned unwrapped with its function identities intact (see
   // SV_SetGamePostFrameHook's own doc comment in sv_game.ts). A no-op for
   // every session that never widens, which is every session whose map fits
   // the classic limits.
-  const treeEdicts = legacyTreeEdicts(gameName);
-  SV_SetGamePostFrameHook(() => fixupRawConfigstringStats(treeEdicts));
+  // legacyTreeEdicts is re-evaluated INSIDE the closure, not captured once
+  // out here: each tree's `g_edicts` is an `export let` that InitGame
+  // REASSIGNS when it allocates the real array (g_save.ts's SetGEdicts),
+  // and that happens after this function returns. Reading it through the
+  // live module binding on every call is the same "read live, don't
+  // snapshot" rule the Nav_SetEdictSource registration just below already
+  // follows; capturing the array reference here instead pinned the hook to
+  // the empty pre-Init array, so it silently iterated nothing.
+  SV_SetGamePostFrameHook(() => fixupWidenedSessionPlayerState(legacyTreeEdicts(gameName)));
 
   return ge;
 }

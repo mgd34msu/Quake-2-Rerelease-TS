@@ -32,11 +32,14 @@
 //  * misc_flare must NOT set `s.modelindex = 1`. See SP_misc_flare.
 //  * dynamic_light's shadow-light data is stored but neither the
 //    CS_SHADOWLIGHTS configstring block nor RF_CASTSHADOW is usable under
-//    protocol 34. See SP_dynamic_light.
+//    protocol 34. See SP_dynamic_light. -- NO LONGER UNCONDITIONAL: a
+//    session on the WIDE layout has both, and setup_dynamic_light now takes
+//    that path when gi.extended_layout() says so. The protocol-34 behavior
+//    below is unchanged for a session that stays narrow.
 //  * misc_hologram must NOT set EF_HOLOGRAM. See SP_misc_hologram.
 //  * info_world_text has no draw call. See info_world_text_think.
 
-import { anglemod, crandom, VectorCopy, VectorScale, VectorSet, vec3, type Vec3 } from "../shared/math";
+import { anglemod, crandom, VectorCopy, VectorNormalize, VectorScale, VectorSet, vec3, type Vec3 } from "../shared/math";
 import {
   CONTENTS_LAVA,
   CS_PLAYERSKINS,
@@ -44,6 +47,7 @@ import {
   EF_ROCKET,
   MASK_SHOT,
   MAX_CLIENTS,
+  RF_CASTSHADOW,
   RF_CUSTOMSKIN,
   RF_FLARE,
   RF_FLARE_LOCK_ANGLE,
@@ -59,6 +63,7 @@ import {
   AI_TARGET_ANGER,
   type EdictT,
   FRAMETIME,
+  g_edicts,
   gi,
   level,
   MOD_EXPLOSIVE,
@@ -67,7 +72,7 @@ import {
 } from "./g_local";
 import { kexEdictFmt, kexFrandom, kexRandomTimeSec } from "./g_kexent";
 import { BecomeExplosion1 } from "./g_misc";
-import { G_FreeEdict, G_PickTarget, G_Spawn, vectoyaw } from "./g_utils";
+import { G_Find, G_FreeEdict, G_PickTarget, G_Spawn, vectoyaw } from "./g_utils";
 import { M_ChangeYaw } from "./m_move";
 import {
   FRAME_flip01,
@@ -100,7 +105,18 @@ const SPAWNFLAG_LIGHT_START_OFF = 1;
  * "has effects" test keeps it in the client's frame, and later publishes one
  * CS_SHADOWLIGHTS configstring per light for the client's CL_AddShadowLights.
  *
- * DEGRADATION (protocol 34) -- BOTH halves of that are unavailable here:
+ * WHICH HALF RUNS DEPENDS ON THE SESSION LAYOUT, NOT ON THE MODULE.
+ *
+ * WIDE layout (gi.extended_layout() true -- either the kex family, or a
+ * classic session the engine widened because this very map's entity lump
+ * asked for it; see sv_init.ts's SV_ContentNeedsWideLayout, which lists
+ * `dynamic_light` as one of its triggers): the full rerelease path runs.
+ * RF_CASTSHADOW is stamped, the eight parsed `shadowlight*` keys are copied
+ * into shadowlightinfo[] below, and setup_shadow_lights publishes one
+ * CS_SHADOWLIGHTS string per light once every entity has spawned. That is
+ * what feeds cl_fx.ts's CL_AddShadowLights and the GL shadow pass.
+ *
+ * NARROW layout (a 1997-data classic session) -- BOTH halves are unavailable:
  *   * The classic configstring layout is shared/cs_remap.ts's CS_REMAP_OLD,
  *     whose `shadowlights` index is the -1 sentinel and whose
  *     `max_shadowlights` is 0: there is no configstring block to write to,
@@ -108,33 +124,157 @@ const SPAWNFLAG_LIGHT_START_OFF = 1;
  *     reads that block.
  *   * Stamping RF_CASTSHADOW would push a MODELINDEX-0 entity into every
  *     client frame (sv_ents.ts:344 keeps any RF_CASTSHADOW entity regardless
- *     of model/effects/sound/event). With cls.csr.extended false the client
- *     has no special handling for it, so it reaches the renderer with a null
- *     model and ref_gl/gl_rmain.ts draws R_DrawNullModel's placeholder
- *     diamond -- a visible artifact where the rerelease shows a light.
+ *     of model/effects/sound/event) for no benefit, since nothing downstream
+ *     can consume it without the configstring half.
  *
- * So the one piece of shadow-light data that lives ON THE EDICT in the
- * rerelease -- `itemtarget`, the name of the entity whose `style` drives this
- * light -- is still recorded, the bbox is still zeroed, the entity is still
- * linked, and its targetname/use toggle still works. Nothing is stamped into
- * renderfx and no configstring is published, so nothing renders. The eight
- * `shadowlight*` keys themselves remain parsed and available in `st` for a
- * future renderer.
+ * So on the narrow layout the one piece of shadow-light data that lives ON
+ * THE EDICT in the rerelease -- `itemtarget`, the name of the entity whose
+ * `style` drives this light -- is still recorded, the bbox is still zeroed,
+ * the entity is still linked, and its targetname/use toggle still works.
+ * Nothing is stamped into renderfx and no configstring is published, so
+ * nothing renders, exactly as before.
  */
 function setup_dynamic_light(self: EdictT): void {
   // [Sam-KEX] Shadow stuff
   if (st.shadowlightradius > 0) {
     // g_misc.cpp:604-605: `self->s.renderfx = RF_CASTSHADOW;` and
-    // `self->itemtarget = st.sl.lightstyletarget;`. Only the itemtarget half
-    // is kept -- see the degradation note above for why RF_CASTSHADOW is not
-    // stamped under protocol 34.
+    // `self->itemtarget = st.sl.lightstyletarget;`.
     self.itemtarget = st.shadowlightstyletarget;
+
+    if (gi.extended_layout?.() === true && shadow_light_count < MAX_SHADOW_LIGHTS) {
+      self.s.renderfx = RF_CASTSHADOW;
+      const info = shadowlightinfo[shadow_light_count];
+      if (info !== undefined) {
+        info.entity_number = self.s.number;
+        // g_misc.cpp:606-615 -- the parsed keys, with the rerelease's own
+        // defaults for the two the classic `st` leaves at 0 when the map
+        // omits them (resolution 512, intensity 1). fade_start/fade_end come
+        // from shadowlightstartfadedistance/shadowlightendfadedistance.
+        info.radius = st.shadowlightradius;
+        info.resolution = st.shadowlightresolution > 0 ? st.shadowlightresolution : 512;
+        info.intensity = st.shadowlightintensity > 0 ? st.shadowlightintensity : 1;
+        info.fade_start = st.shadowlightstartfadedistance;
+        info.fade_end = st.shadowlightendfadedistance;
+        info.lightstyle = st.shadowlightstyle;
+        info.coneangle = st.shadowlightconeangle > 0 ? st.shadowlightconeangle : 45;
+        info.lighttype = SHADOW_LIGHT_POINT;
+        VectorSet(info.conedirection, 0, 0, 0);
+        shadow_light_count++;
+      }
+    }
 
     // g_misc.cpp:616-619
     VectorSet(self.mins, 0, 0, 0);
     VectorSet(self.maxs, 0, 0, 0);
 
     gi.linkentity(self);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// [Sam-KEX] shadow light tracking (g_misc.cpp:507-622), translated for the
+// classic module. src/kexgame/g_misc.ts keeps the identical table on
+// level.shadow_light_count; the classic LevelLocalsT is the frozen 3.21
+// struct and gains no field for it, so the count lives module-local here and
+// is reset by G_ResetShadowLights at the top of every SpawnEntities.
+//
+// Only ever populated on the wide layout (setup_dynamic_light's gate), so a
+// narrow session leaves this untouched and setup_shadow_lights below is a
+// zero-iteration loop.
+// ---------------------------------------------------------------------------
+
+/** kexapi/game.ts's MAX_SHADOW_LIGHTS / cs_remap.ts's MAX_SHADOW_LIGHTS_WIDE. */
+const MAX_SHADOW_LIGHTS = 256;
+/** shadow_light_type_t: point = 0, cone = 1 (kexapi/game.ts). */
+const SHADOW_LIGHT_POINT = 0;
+const SHADOW_LIGHT_CONE = 1;
+
+interface ShadowLightInfoT {
+  entity_number: number;
+  lighttype: number;
+  radius: number;
+  resolution: number;
+  intensity: number;
+  fade_start: number;
+  fade_end: number;
+  lightstyle: number;
+  coneangle: number;
+  conedirection: Vec3;
+}
+
+const shadowlightinfo: ShadowLightInfoT[] = Array.from({ length: MAX_SHADOW_LIGHTS }, () => ({
+  entity_number: 0,
+  lighttype: SHADOW_LIGHT_POINT,
+  radius: 0,
+  resolution: 512,
+  intensity: 1,
+  fade_start: 0,
+  fade_end: 0,
+  lightstyle: 0,
+  coneangle: 45,
+  conedirection: vec3(),
+}));
+
+let shadow_light_count = 0;
+
+/** Called by g_spawn.ts's SpawnEntities before it parses a new level. */
+export function G_ResetShadowLights(): void {
+  shadow_light_count = 0;
+}
+
+/*
+ * g_misc.cpp's `setup_shadow_lights` (src/kexgame/g_misc.ts:882-917), called
+ * from SpawnEntities once every entity exists -- the cone direction and the
+ * driving lightstyle are both resolved by TARGETNAME, so neither can be
+ * known while the light itself is spawning.
+ *
+ * The published string is the same 12 semicolon-separated fields the kex
+ * module writes and the same ones cl_fx.ts's CL_ParseShadowLightConfigstring
+ * reads back (it drops anything that is not exactly 12 fields), so a widened
+ * classic session and a kex session put byte-identical data on the wire for
+ * the same map.
+ *
+ * gi.shadowlight is the engine's slot-addressed publisher: CS_SHADOWLIGHTS
+ * has no index in the frozen v3 CS_* constants, so it cannot go through
+ * gi.configstring (see game.ts's GameImports comment). On a narrow session
+ * this loop never runs at all.
+ */
+export function setup_shadow_lights(): void {
+  for (let i = 0; i < shadow_light_count; i++) {
+    const info = shadowlightinfo[i];
+    if (info === undefined) continue;
+    const self = g_edicts[info.entity_number];
+    if (self === undefined) continue;
+
+    info.lighttype = SHADOW_LIGHT_POINT;
+    VectorSet(info.conedirection, 0, 0, 0);
+
+    if (self.target !== null) {
+      const target = G_Find(null, "targetname", self.target);
+      if (target !== null) {
+        const dir = vec3(
+          (target.s.origin[0] ?? 0) - (self.s.origin[0] ?? 0),
+          (target.s.origin[1] ?? 0) - (self.s.origin[1] ?? 0),
+          (target.s.origin[2] ?? 0) - (self.s.origin[2] ?? 0),
+        );
+        VectorNormalize(dir);
+        VectorCopy(dir, info.conedirection);
+        info.lighttype = SHADOW_LIGHT_CONE;
+      }
+    }
+
+    if (self.itemtarget !== null) {
+      const target = G_Find(null, "targetname", self.itemtarget);
+      if (target !== null) info.lightstyle = target.style;
+    }
+
+    gi.shadowlight?.(
+      i,
+      `${self.s.number};${info.lighttype};${info.radius};${info.resolution};` +
+        `${info.intensity};${info.fade_start};${info.fade_end};` +
+        `${info.lightstyle};${info.coneangle};${info.conedirection[0]};` +
+        `${info.conedirection[1]};${info.conedirection[2]}`,
+    );
   }
 }
 
@@ -248,13 +388,25 @@ function misc_flare_use(ent: EdictT, _other: EdictT | null, _activator: EdictT |
  *    entity exists, links, and honors its targetname/use toggle server-side,
  *    and nothing at all is drawn. That is strictly better than a hang.
  *
- * All of the flare's authored state is still computed and stored, so a future
- * extended-protocol client would see a correct flare with no further work
- * here beyond restoring the modelindex.
+ * BOTH ARE LIFTED ON A WIDE SESSION, and that is exactly the "no further work
+ * beyond restoring the modelindex" this note used to predict. When
+ * gi.extended_layout() is true the client HAS the RF_FLARE branch (cls.csr.
+ * extended is set), that branch intercepts the entity BEFORE the model lookup
+ * and never hands modelindex 1 to the renderer, and
+ * test/cl_ents_flare.test.ts pins precisely that interception. So the
+ * rerelease's `s.modelindex = 1` is restored, which is what gets the entity
+ * past sv_ents.ts:344's "has a model" cull and onto the wire at all --
+ * without it the wide session would carry the flare's renderfx, tint, fade
+ * distances and scale correctly and still draw nothing, because the server
+ * would never send the entity. Narrow sessions keep modelindex 0 and behave
+ * exactly as before.
  */
 export function SP_misc_flare(ent: EdictT): void {
-  // g_misc.cpp:2137 -- `ent->s.modelindex = 1;` INTENTIONALLY OMITTED, see
-  // degradation note 2 above.
+  // g_misc.cpp:2137 -- `ent->s.modelindex = 1;`. Set only on a wide session,
+  // where the client's RF_FLARE branch consumes the entity before the model
+  // lookup; omitted on a narrow one, where it would resolve to the world
+  // model. See degradation note 2 above.
+  if (gi.extended_layout?.() === true) ent.s.modelindex = 1;
   ent.s.renderfx = RF_FLARE;
   ent.solid = SolidT.SOLID_NOT;
   // s.scale is stored but not transmitted by protocol 34's delta.

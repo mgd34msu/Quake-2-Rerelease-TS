@@ -53,8 +53,7 @@ import { sv, svs, ServerStateT } from "../src/server/server";
 import { SV_Shutdown } from "../src/server/sv_main";
 import { geHolder, currentGameFamily } from "../src/server/sv_game";
 import { CS_REMAP_OLD, CS_REMAP_RERELEASE, type CsRemapT } from "../src/shared/cs_remap";
-import { Q2REPRO_CODEC } from "../src/qcommon/protocol/q2repro";
-import { VANILLA_CODEC } from "../src/qcommon/protocol/vanilla";
+import { Q2REPRO_CODEC, Q2REPRO_CLASSIC_CODEC } from "../src/qcommon/protocol/q2repro";
 import type { ProtocolCodec } from "../src/qcommon/protocol/codec";
 import { FS_TestSnapshotSearchPaths, FS_TestRestoreSearchPaths, type FsSearchPathSnapshotT } from "../src/qcommon/files";
 import { snapshotCvars, restoreCvars, type CvarSnapshotT } from "./support/cvar_snapshot";
@@ -194,8 +193,16 @@ describe.skipIf(!havePak)("nav loading is family-aware (sv_nav_legacy) on the re
 
       expect(sv.state).toBe(ServerStateT.ss_game);
       expect(currentGameFamily()).toBe("legacy");
-      expect(svs.csr).toBe(CS_REMAP_OLD);
-      expect(svs.codec).toBe(VANILLA_CODEC);
+      // The RULESET is the legacy one; the LAYOUT is the wide one, because
+      // retail base1's entity lump carries 37 dynamic_lights (shadow lights)
+      // that the classic configstring layout has no block for -- sv_init.ts's
+      // SV_ContentNeedsWideLayout widens the session at spawn. Orthogonal to
+      // what this file tests (nav gating reads currentGameFamily(), asserted
+      // just above, never the layout); pinned here so the two axes stay
+      // visibly separate. The 1997 base1 still comes up CS_REMAP_OLD /
+      // VANILLA_CODEC -- test/wide_classic_session.test.ts pins both.
+      expect(svs.csr).toBe(CS_REMAP_RERELEASE);
+      expect(svs.codec).toBe(Q2REPRO_CLASSIC_CODEC);
 
       const nav = Nav_DebugState();
       // freshNavData()'s own default -- Nav_Load was never called at all.
