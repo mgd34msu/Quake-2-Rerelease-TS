@@ -345,7 +345,14 @@ export function ED_ParseField(key: string, value: string, ent: EdictT): void {
         else if (f.target === "spawntemp") st[f.prop] = n;
         else if (f.target === "edict_s") ent.s[f.prop] = n;
         else if (f.target === "monsterinfo") ent.monsterinfo[f.prop] = n;
-        else ent.bmodel_anim[f.prop] = n;
+        else {
+          ent.bmodel_anim[f.prop] = n;
+          // kexgame/g_spawn.ts:860-869: the start/end keys are what arm the
+          // animation -- their loaders set `bmodel_anim.enabled = true`.
+          // Without this every func_animation freed itself at spawn with
+          // "has no animation data" (g_kexmisc.ts) under the classic module.
+          if (f.prop === "start" || f.prop === "end") ent.bmodel_anim.enabled = true;
+        }
         break;
       }
       case "F_FLOAT": {
