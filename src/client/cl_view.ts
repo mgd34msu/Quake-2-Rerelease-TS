@@ -29,6 +29,8 @@ import { CL_AddShadowLights } from "./cl_fx";
 import { crosshair, crosshair_height, crosshair_pic, crosshair_width, scr_vrect, setCrosshair } from "./screen";
 import { entitycmpfnc, SCR_AddDirtyPoint, SCR_TouchPics, SCR_UpdateScreen, SCR_DrawPOIs, SCR_DrawDamageDisplays, SCR_GetHelpPathMarkers } from "./cl_scrn";
 import { CL_AddEntities, CL_ActiveSeatView } from "./cl_ents";
+import { CL_CurrentFog } from "./cl_fog";
+import { CL_WorldTexts } from "./cl_worldtext";
 import { CL_RegisterTEntModels } from "./cl_tent";
 import { CL_LoadClientinfo, CL_ParseClientinfo, CL_RegisterImage } from "./cl_parse";
 import { Sys_SendKeyEvents } from "./cl_input";
@@ -666,6 +668,20 @@ export function V_RenderView(stereo_separation: number): void {
     // CL_ActiveSeatView() is null for every ordinary frame.
     const seatView = CL_ActiveSeatView();
     cl.refdef.rdflags = seatView ? seatView.ps.rdflags : cl.frame.playerstate.rdflags;
+
+    // Resolve this frame's fog. q2repro view.c:616-650 does exactly this at
+    // exactly this point (immediately after the entity/particle/dlight
+    // handoff, immediately before the qsort): the client, not the server,
+    // interpolates between the previous fog values and the ones the last
+    // svc_fog asked for.
+    CL_CurrentFog(cl.time, cl.refdef.fog, cl.refdef.heightfog);
+
+    // info_world_text's draws for this frame. Filled by the server side of
+    // this same process (sv_main.ts's SV_DeliverWorldText) rather than by a
+    // network message -- see cl_worldtext.ts's header for why the
+    // re-release has no such message to port.
+    cl.refdef.worldtexts = CL_WorldTexts().slice();
+    cl.refdef.num_worldtexts = cl.refdef.worldtexts.length;
 
     // sort entities for better cache locality
     const activeEntities = r_entities.slice(0, r_numentities);

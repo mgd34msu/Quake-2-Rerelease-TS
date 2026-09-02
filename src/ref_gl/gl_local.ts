@@ -237,6 +237,8 @@ export const glCvars: {
   gl_skymip: CvarT | null;
   gl_showtris: CvarT | null;
   gl_finish: CvarT | null;
+  gl_fog: CvarT | null;
+  gl_debug_distfrac: CvarT | null;
   gl_ztrick: CvarT | null;
   gl_clear: CvarT | null;
   gl_cull: CvarT | null;
@@ -360,6 +362,8 @@ export const glCvars: {
   gl_skymip: null,
   gl_showtris: null,
   gl_finish: null,
+  gl_fog: null,
+  gl_debug_distfrac: null,
   gl_ztrick: null,
   gl_clear: null,
   gl_cull: null,

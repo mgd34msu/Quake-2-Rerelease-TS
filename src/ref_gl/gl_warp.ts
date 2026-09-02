@@ -53,7 +53,8 @@ elsewhere.
 import { type Vec3, vec3, DotProduct, VectorAdd, VectorSubtract, VectorCopy } from "../shared/math";
 import { MAX_QPATH, ERR_DROP, SURF_FLOWING } from "../shared/q_shared";
 import { GlpolyT, VERTEXSIZE, SIDE_FRONT, SIDE_BACK, SIDE_ON, type MsurfaceT } from "./gl_model";
-import { r_origin, r_newrefdef, ri, glCvars, r_notexture, currentmodel, ImagetypeT, type ImageT } from "./gl_local";
+import { r_origin, r_newrefdef, ri, glCvars, r_notexture, currentmodel, ImagetypeT, gldepthmin, gldepthmax, type ImageT } from "./gl_local";
+import { GL_FogActive, GL_FogNoteSkyDrawn } from "./gl_fog";
 import { GL_Bind, GL_FindImage, qgl } from "./gl_image";
 export { qgl, SetQGL } from "./gl_image";
 import { fixedLength } from "../shared/fixed";
@@ -514,6 +515,25 @@ export function R_DrawSkyBox(): void {
     if (i === 6) return; // nothing visible
   }
 
+  // While fog is live, pin the sky box to the far end of the depth range.
+  //
+  // q2repro separates sky from the world for fog purposes with a shader bit
+  // (glr.fog_bits_sky, sky.c:334): sky surfaces get GLS_FOG_SKY's flat
+  // sky-factor mix and NONE of the distance fog. gl_fog.ts's screen-space
+  // pass has only the depth buffer to tell them apart, and the sky box's own
+  // geometry sits at a perfectly ordinary 2300 units (MakeSkyVec below), so
+  // without this it would be fogged as if it were a wall at 2300 units --
+  // about 52% fog on mgu6m1 where the map asks for a 20% sky factor.
+  //
+  // Writing gldepthmax puts every sky pixel at exactly the value gl_fog.ts
+  // treats as "sky or nothing drawn". The depth TEST is untouched, so the
+  // sky still loses to every piece of world geometry in front of it: it is
+  // drawn last, GL_LEQUAL against the cleared far value passes, against any
+  // nearer surface it fails. Skipped entirely when fog is off, which is what
+  // keeps a no-fog frame bit-identical to the pre-fog renderer.
+  const pinSkyDepth = GL_FogActive();
+  if (pinSkyDepth) qgl.qglDepthRange(gldepthmax, gldepthmax);
+
   qgl.qglPushMatrix();
   qgl.qglTranslatef(r_origin[0], r_origin[1], r_origin[2]);
   qgl.qglRotatef(r_newrefdef.time * skyrotate, skyaxis[0], skyaxis[1], skyaxis[2]);
@@ -542,8 +562,14 @@ export function R_DrawSkyBox(): void {
     MakeSkyVec(skymaxs[0][i], skymaxs[1][i], i);
     MakeSkyVec(skymaxs[0][i], skymins[1][i], i);
     qgl.qglEnd();
+    // At least one face painted: the flat sky-factor mix has somewhere to
+    // land. A frame that drew no sky at all must not have it applied to the
+    // cleared background, which sits at the same depth.
+    if (pinSkyDepth) GL_FogNoteSkyDrawn();
   }
   qgl.qglPopMatrix();
+
+  if (pinSkyDepth) qgl.qglDepthRange(gldepthmin, gldepthmax);
 }
 
 /*

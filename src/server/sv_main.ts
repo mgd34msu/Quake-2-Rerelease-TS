@@ -94,6 +94,10 @@ import { SV_InitOperatorCommands } from "./sv_ccmds";
 import { Nav_Init, Nav_Unload, Nav_Frame } from "./nav";
 import { SV_MvdRegister, SV_MvdBeginFrame, SV_MvdEndFrame } from "./sv_mvd";
 import { SV_RunLocalSeatThinks } from "./sv_seats";
+import { SV_DebugDraw_Tick, SV_DebugDraw_Drain } from "./sv_debugdraw";
+import { CL_SetWorldText, makeWorldText } from "../client/cl_worldtext";
+import type { WorldTextT } from "../client/ref";
+import type { RgbaT } from "../kexapi/game";
 
 //============================================================================
 
@@ -985,6 +989,43 @@ export function SV_PrepWorldFrame(): void {
 
 /*
 =================
+SV_DeliverWorldText
+
+Moves this server frame's world-text debug draws out of sv_debugdraw.ts's
+buffer and into the client's per-frame snapshot (cl_worldtext.ts), which
+the renderer then reads off the refdef.
+
+This is the consumer sv_debugdraw.ts's own header comment said was still
+missing: SV_DebugDraw_Drain had no production caller before this. Only the
+two world-text shapes are consumed -- the other eight (line, point,
+circle, bounds, sphere, cylinder, ray, arrow) still have no renderer, so
+draining them here would discard them silently; leaving them buffered
+keeps them available for whoever draws them next, and SV_DebugDraw_Tick
+above still expires them on schedule.
+=================
+*/
+function SV_DeliverWorldText(): void {
+  const entries = SV_DebugDraw_Drain();
+  const texts: WorldTextT[] = [];
+  for (const entry of entries) {
+    const shape = entry.shape;
+    if (shape.kind === "orientedWorldText") {
+      // No angles on the wire from the game -> billboard toward the view,
+      // mirroring q2repro's PF_Draw_OrientedWorldText passing NULL angles.
+      texts.push(makeWorldText(shape.origin, null, shape.text, shape.size, packColor(entry.color), entry.depthTest));
+    } else if (shape.kind === "staticWorldText") {
+      texts.push(makeWorldText(shape.origin, shape.angles, shape.text, shape.size, packColor(entry.color), entry.depthTest));
+    }
+  }
+  CL_SetWorldText(texts);
+}
+
+function packColor(color: RgbaT): Uint8Array {
+  return new Uint8Array([color.r, color.g, color.b, color.a]);
+}
+
+/*
+=================
 SV_RunGameFrame
 =================
 */
@@ -994,6 +1035,18 @@ export function SV_RunGameFrame(): void {
   // has no pause guard around either Nav_Frame() or the ge->RunFrame(true)
   // that follows it), unlike the `!paused` gate below that guards only the
   // engine's own ge.RunFrame() call.
+  // q2repro src/server/main.c:1721-1723 calls GL_ExpireDebugObjects() here,
+  // immediately before Nav_Frame() and the game's RunFrame, with the comment
+  // "debug stuff is pushed via the game, so it needs to look at server time
+  // for expiry, not client time". Same slot, same reason: expire LAST
+  // frame's entries before this frame's ge.RunFrame() re-adds them.
+  //
+  // q2repro's expiry is absolute (`time <= sv.framenum * sv.frametime`);
+  // this port's buffer counts down instead, so the tick gets one server
+  // tick's worth of milliseconds -- NOT SV_Frame's `msec`, which is host
+  // rate and can pass through several times per server tick or not at all.
+  SV_DebugDraw_Tick(sv.frametime);
+
   Nav_Frame();
 
   if (host_speeds && host_speeds.value) comTiming.time_before_game = Sys_Milliseconds();
@@ -1011,6 +1064,17 @@ export function SV_RunGameFrame(): void {
     const ge = requireGe();
     ge.RunFrame();
     SV_RunGamePostFrameHook();
+
+    // Hand this frame's world-text draws to the client. See
+    // src/client/cl_worldtext.ts for why this is an in-process handoff and
+    // not a new svc_ opcode: q2repro's PF_Draw_*WorldText call the client's
+    // R_AddDebugText directly under `#if USE_REF` (src/server/game.c:834-889)
+    // and the re-release has no debug-draw message on the wire at all.
+    //
+    // Drained after RunFrame because that is when info_world_text_think has
+    // emitted them (g_kexmisc.ts), and the whole snapshot replaces the
+    // client's list so a text that stopped being emitted disappears.
+    SV_DeliverWorldText();
 
     // never get more than one tic behind
     if (sv.time < svs.realtime) {

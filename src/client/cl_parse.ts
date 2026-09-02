@@ -79,6 +79,8 @@ import { CG_SetActiveCgameKind } from "./cgame/host";
 import { SCR_PlayCinematic } from "./cl_cin";
 import { SCR_CenterPrint, SCR_AddToDamageDisplay, SCR_AddPOI, SCR_RemovePOI, SCR_AddHelpPath } from "./cl_scrn";
 import { con } from "./console";
+import { CL_FogParamsChanged, CL_ClearFog } from "./cl_fog";
+import { CL_ClearWorldText } from "./cl_worldtext";
 import { S_StartSound, S_StartLocalSound, S_BeginRegistration, S_RegisterSound, S_EndRegistration } from "./snd_dma";
 import { CL_RegisterTEntSounds, CL_ParseTEnt } from "./cl_tent";
 import { CL_ParseMuzzleFlash, CL_ParseMuzzleFlash2, CL_SetLightstyle, CL_ParseShadowLightConfigstring } from "./cl_fx";
@@ -545,6 +547,12 @@ export function CL_ParseServerData(): void {
   // wipe the client_state_t struct
   //
   CL_ClearState();
+  // q2repro folds this into the same wipe (its fog state lives inside `cl`,
+  // which CL_ClearState memsets); this port keeps fog state in its own
+  // module, so the reset is explicit. Without it a map with no worldspawn
+  // fog keys would inherit the previous map's fog.
+  CL_ClearFog();
+  CL_ClearWorldText();
   cls.state = ConnstateT.ca_connected;
 
   // parse protocol version number
@@ -1249,7 +1257,12 @@ function CL_ParseServerMessageLoop(): void {
       }
 
       case ServerCommandT.svc_fog:
-        readFog();
+        // q2repro parse.c:1370/1524 -> CL_ParseFog(): the decoded message
+        // folds into the client's persistent fog target and (when it carries
+        // a transition time) arms the fade. cl_fog.ts owns both; the renderer
+        // reads the resolved per-frame values off the refdef, filled in
+        // cl_view.ts's V_RenderView. Previously decode-only here.
+        CL_FogParamsChanged(readFog(), cl.time);
         break;
 
       case ServerCommandT.svc_poi: {

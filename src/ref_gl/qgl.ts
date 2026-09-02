@@ -113,6 +113,12 @@ export interface QGL {
   qglShadeModel(mode: number): void;
   qglTexCoord2f(s: number, t: number): void;
   qglTexEnvf(target: number, pname: number, param: number): void;
+  // GL 1.1. Reads the CURRENT read buffer (the depth attachment when the
+  // internal format is a depth one) straight into a texture image --
+  // gl_fog.ts's per-fragment fog needs the frame's depth buffer as a
+  // sampler, and this is the GL1.1 way to get it without restructuring
+  // the whole scene draw onto a framebuffer object.
+  qglCopyTexImage2D(target: number, level: number, internalformat: number, x: number, y: number, width: number, height: number, border: number): void;
   qglTexImage2D(target: number, level: number, internalformat: number, width: number, height: number, border: number, format: number, type: number, pixels: GLPointer): void;
   qglTexParameterf(target: number, pname: number, param: number): void;
   qglTexParameteri(target: number, pname: number, param: number): void;
@@ -408,6 +414,9 @@ export class QGLRecording implements QGL {
   qglTexEnvf(target: number, pname: number, param: number): void {
     this.record("qglTexEnvf", [target, pname, param]);
   }
+  qglCopyTexImage2D(target: number, level: number, internalformat: number, x: number, y: number, width: number, height: number, border: number): void {
+    this.record("qglCopyTexImage2D", [target, level, internalformat, x, y, width, height, border]);
+  }
   qglTexImage2D(target: number, level: number, internalformat: number, width: number, height: number, border: number, format: number, type: number, pixels: GLPointer): void {
     this.record("qglTexImage2D", [target, level, internalformat, width, height, border, format, type, pixels]);
   }
@@ -642,6 +651,7 @@ const glSymbols = {
   glShadeModel: { args: [u32], returns: voidType },
   glTexCoord2f: { args: [f32, f32], returns: voidType },
   glTexEnvf: { args: [u32, u32, f32], returns: voidType },
+  glCopyTexImage2D: { args: [u32, i32, u32, i32, i32, i32, i32, i32], returns: voidType },
   glTexImage2D: { args: [u32, i32, i32, i32, i32, i32, u32, u32, ptr], returns: voidType },
   glTexParameterf: { args: [u32, u32, f32], returns: voidType },
   glTexParameteri: { args: [u32, u32, i32], returns: voidType },
@@ -1110,6 +1120,8 @@ export function loadQGLFromSystem(getProcAddress?: GLGetProcAddressFn): QGL {
     qglShadeModel: (mode) => s.glShadeModel(mode),
     qglTexCoord2f: (sVal, tVal) => s.glTexCoord2f(sVal, tVal),
     qglTexEnvf: (target, pname, param) => s.glTexEnvf(target, pname, param),
+    qglCopyTexImage2D: (target, level, internalformat, x, y, width, height, border) =>
+      s.glCopyTexImage2D(target, level, internalformat, x, y, width, height, border),
     qglTexImage2D: (target, level, internalformat, width, height, border, format, type, pixels) =>
       s.glTexImage2D(target, level, internalformat, width, height, border, format, type, pixels),
     qglTexParameterf: (target, pname, param) => s.glTexParameterf(target, pname, param),

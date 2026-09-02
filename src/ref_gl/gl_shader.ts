@@ -564,6 +564,70 @@ function createProgram(bits: GlShaderBits): CompiledProgram | null {
   return { program, uniforms };
 }
 
+/*
+====================
+GL_BuildProgram
+
+The compile/link/uniform-lookup sequence above, exposed for a second
+consumer that has its own GLSL and its own uniform list rather than a
+`GlShaderBits` permutation: gl_fog.ts's screen-space fog passes. Factored
+out rather than duplicated so there is exactly one place that knows how
+this renderer reports a shader that would not build.
+
+Callers own the returned program's lifetime (gl_fog.ts deletes its own in
+GL_ShutdownFog); this module's cache is not involved.
+====================
+*/
+export interface GlProgramT {
+  readonly program: number;
+  readonly uniforms: ReadonlyMap<string, number>;
+}
+
+export function GL_BuildProgram(vertexSource: string, fragmentSource: string, uniformNames: readonly string[]): GlProgramT | null {
+  if (!qgl.qglCreateProgram || !qgl.qglAttachShader || !qgl.qglLinkProgram || !qgl.qglGetProgramiv || !qgl.qglGetProgramInfoLog || !qgl.qglDeleteProgram || !qgl.qglGetUniformLocation) {
+    return null;
+  }
+
+  const vs = compileStage(GL_VERTEX_SHADER, vertexSource);
+  if (vs === null) return null;
+  const fs = compileStage(GL_FRAGMENT_SHADER, fragmentSource);
+  if (fs === null) {
+    if (qgl.qglDeleteShader) qgl.qglDeleteShader(vs);
+    return null;
+  }
+
+  const program = qgl.qglCreateProgram();
+  if (!program) {
+    if (qgl.qglDeleteShader) {
+      qgl.qglDeleteShader(vs);
+      qgl.qglDeleteShader(fs);
+    }
+    return null;
+  }
+
+  qgl.qglAttachShader(program, vs);
+  qgl.qglAttachShader(program, fs);
+  qgl.qglLinkProgram(program);
+  if (qgl.qglDeleteShader) {
+    qgl.qglDeleteShader(vs);
+    qgl.qglDeleteShader(fs);
+  }
+
+  const status = new Int32Array(1);
+  qgl.qglGetProgramiv(program, GL_LINK_STATUS, status);
+  if (!status[0]) {
+    const log = qgl.qglGetProgramInfoLog(program);
+    if (log) ri.Con_Printf(PRINT_ALL, `${log}\n`);
+    qgl.qglDeleteProgram(program);
+    return null;
+  }
+
+  const uniforms = new Map<string, number>();
+  const getLocation = qgl.qglGetUniformLocation;
+  for (const name of uniformNames) uniforms.set(name, getLocation(program, name));
+  return { program, uniforms };
+}
+
 function getProgram(bits: GlShaderBits): CompiledProgram | null {
   const cached = programCache.get(bits);
   if (cached !== undefined) return cached;

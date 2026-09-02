@@ -154,6 +154,8 @@ import { loadQGLFromSystem, QGL_Shutdown, type GLGetProcAddressFn } from "./qgl"
 import { Draw_Char, Draw_ColorPic, Draw_Fill, Draw_FadeScreen, Draw_FindPic, Draw_GetPicSize, Draw_InitLocal, Draw_Pic, Draw_StretchPic, Draw_StretchPicRegion, Draw_StretchRaw, Draw_TileClear, SetGifBeatSeconds, SetRawPalette } from "./gl_draw";
 import { R_ScaleTurbsinForRInit, R_SetSky } from "./gl_warp";
 import { R_DrawWorld, R_DrawAlphaSurfaces, R_MarkLeaves, R_DrawBrushModel } from "./gl_rsurf";
+import { GL_FogFrameSetup, GL_DrawFogPass, GL_ShutdownFog } from "./gl_fog";
+import { GL_DrawWorldTexts } from "./gl_worldtext";
 import { R_LightPoint, R_PushDlights, R_RenderDlights } from "./gl_light";
 import { R_DrawAliasModel } from "./gl_mesh";
 import { GL_ScreenShot_f, GL_SetDefaultState, GL_UpdateSwapInterval, GL_Strings_f, R_InitParticleTexture } from "./gl_rmisc";
@@ -992,6 +994,18 @@ function copyRefdef(dst: RefdefT, src: RefdefT): void {
   dst.blend.set(src.blend);
   dst.time = src.time;
   dst.rdflags = src.rdflags;
+  // refresh.h:108-109's two fog structs. Copied field by field like every
+  // other member here (this function exists because the C assigns the whole
+  // refdef_t by value, `glr.fd = *fd`, main.c:810).
+  VectorCopy(src.fog.color, dst.fog.color);
+  dst.fog.density = src.fog.density;
+  dst.fog.skyFactor = src.fog.skyFactor;
+  VectorCopy(src.heightfog.start.color, dst.heightfog.start.color);
+  dst.heightfog.start.dist = src.heightfog.start.dist;
+  VectorCopy(src.heightfog.end.color, dst.heightfog.end.color);
+  dst.heightfog.end.dist = src.heightfog.end.dist;
+  dst.heightfog.density = src.heightfog.density;
+  dst.heightfog.falloff = src.heightfog.falloff;
   dst.areabits = src.areabits;
   dst.lightstyles = src.lightstyles;
   dst.num_entities = src.num_entities;
@@ -1000,6 +1014,8 @@ function copyRefdef(dst: RefdefT, src: RefdefT): void {
   dst.dlights = src.dlights;
   dst.num_particles = src.num_particles;
   dst.particles = src.particles;
+  dst.num_worldtexts = src.num_worldtexts;
+  dst.worldtexts = src.worldtexts;
 }
 
 export function R_RenderView(fd: RefdefT): void {
@@ -1026,6 +1042,11 @@ export function R_RenderView(fd: RefdefT): void {
 
   R_SetupGL();
 
+  // q2repro main.c:817-826 sets its fog bits here, right after the refdef
+  // copy and before anything draws. It has to precede R_DrawWorld: the sky
+  // box asks GL_FogActive() whether to pin its depth (gl_warp.ts).
+  GL_FogFrameSetup();
+
   R_MarkLeaves(); // done here so we know if we're in water
 
   // v1.1.0 shadow maps: build/refresh the shadow lights' depth atlas. Must sit
@@ -1049,6 +1070,19 @@ export function R_RenderView(fd: RefdefT): void {
   R_DrawParticles();
 
   R_DrawAlphaSurfaces();
+
+  // Fog goes on after every 3D pass and before the screen blend. In q2repro
+  // fog is inside each surface shader and R_PolyBlend follows the scene the
+  // same way; here it is one screen-space pass over the scene's depth
+  // buffer -- gl_fog.ts's header explains why that is the only placement
+  // that composes correctly with this renderer's two-pass world.
+  GL_DrawFogPass(glCvars.gl_znear ? glCvars.gl_znear.value : 4, 4096);
+
+  // World text last in world space, matching q2repro's GL_DrawDebugObjects
+  // placement (src/refresh/main.c:867) -- and after the fog pass on purpose,
+  // because q2repro's debug text carries no GLS_FOG_* bits and so is not
+  // fogged either. See gl_worldtext.ts's header.
+  GL_DrawWorldTexts();
 
   R_Flash();
 
@@ -1375,7 +1409,10 @@ export function R_Register(): void {
   // file's own header comment; no fog or bloom pass anywhere) -- registered
   // only.
   ri.Cvar_Get("gl_waterwarp", "1", 0);
-  ri.Cvar_Get("gl_fog", "1", 0);
+  // gl_fog is no longer registration-only: gl_fog.ts implements q2repro
+  // main.c:819-826's three fog terms, and this cvar is its gate, exactly as
+  // there (`if (gl_fog->integer > 0)`).
+  glCvars.gl_fog = ri.Cvar_Get("gl_fog", "1", 0);
   ri.Cvar_Get("gl_bloom", "1", 0);
 
   // q2repro src/refresh/models.c:1691: `gl_gpulerp = Cvar_Get("gl_gpulerp", "1", 0);`
@@ -1400,7 +1437,10 @@ export function R_Register(): void {
   // debug_fonts[] array, first entry `DEBUG_FONT(futural)` -- confirmed by
   // reading that array in q2repro's tree): "futural".
   ri.Cvar_Get("gl_debug_linewidth", "2", 0);
-  ri.Cvar_Get("gl_debug_distfrac", "0.004", 0);
+  // No longer registration-only: gl_worldtext.ts consumes it as q2repro
+  // debug.c:610 does, to drop world text whose character cell has become
+  // small relative to its distance.
+  glCvars.gl_debug_distfrac = ri.Cvar_Get("gl_debug_distfrac", "0.004", 0);
   ri.Cvar_Get("gl_debug_text_style", "lines", 0);
   ri.Cvar_Get("gl_debug_font", "futural", 0);
 
@@ -1741,6 +1781,7 @@ export function R_Shutdown(): void {
 
   GL_ShutdownShadowMaps();
   GL_ShutdownShaderPath();
+  GL_ShutdownFog();
 
   Mod_FreeAll();
 

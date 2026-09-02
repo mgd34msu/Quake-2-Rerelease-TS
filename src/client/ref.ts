@@ -151,6 +151,57 @@ export class LightstyleT {
   white = 0; // highest of rgb
 }
 
+/*
+Fog, as the renderer sees it. q2repro carries exactly these two structs on
+its refdef (inc/refresh/refresh.h:108-109 `player_fog_t fog;
+player_heightfog_t heightfog;`), declared in inc/shared/shared.h:1817-1830.
+Values are already in renderer units: colors and the sky factor are 0..1
+fractions, the two height distances are world Z.
+
+The CLIENT owns the transition between two sets of these (see
+src/client/cl_fog.ts); by the time they reach here they are one frame's
+resolved values, never a start/target pair.
+*/
+export class FogGlobalT {
+  color: Vec3 = vec3(); // 0..1
+  density = 0;
+  skyFactor = 0; // 0..1, applied as a flat mix on sky surfaces only
+}
+
+export class FogHeightPointT {
+  color: Vec3 = vec3(); // 0..1
+  dist = 0; // world Z
+}
+
+export class FogHeightT {
+  start: FogHeightPointT = new FogHeightPointT();
+  end: FogHeightPointT = new FogHeightPointT();
+  density = 0;
+  falloff = 0;
+}
+
+/*
+One world-space text draw for the frame (info_world_text). q2repro holds
+these renderer-side in its own debug_text_t freelist (src/refresh/debug.c:
+42-55) because its server calls R_AddDebugText directly; this port routes
+them through the refdef alongside entities and particles instead, so the
+renderer keeps taking exactly one per-frame input struct.
+
+`size` is already q2repro's `size * 8` world-unit character cell
+(debug.c:376), and `oriented` means "angles were supplied" -- see
+cl_worldtext.ts's makeWorldText for why that word reads backwards against
+sv_debugdraw.ts's shape names.
+*/
+export class WorldTextT {
+  origin: Vec3 = vec3();
+  angles: Vec3 = vec3();
+  oriented = false; // true: use `angles`; false: billboard toward the view
+  text = "";
+  size = 0; // world units per character cell
+  color: Uint8Array = new Uint8Array(4); // rgba 0-255
+  depthTest = true;
+}
+
 export class RefdefT {
   x = 0;
   y = 0;
@@ -164,6 +215,10 @@ export class RefdefT {
   time = 0; // time is used to auto animate
   rdflags = 0; // RDF_UNDERWATER, etc
 
+  // refresh.h:108-109
+  fog: FogGlobalT = new FogGlobalT();
+  heightfog: FogHeightT = new FogHeightT();
+
   areabits: Uint8Array | null = null; // if not null, only areas with set bits will be drawn
 
   lightstyles: LightstyleT[] = []; // [MAX_LIGHTSTYLES]
@@ -176,6 +231,9 @@ export class RefdefT {
 
   num_particles = 0;
   particles: ParticleT[] = [];
+
+  num_worldtexts = 0;
+  worldtexts: WorldTextT[] = [];
 }
 
 // these are the functions exported by the refresh module
