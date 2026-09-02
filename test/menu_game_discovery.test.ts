@@ -74,7 +74,7 @@ import {
   type SelectableGame,
   type ContentId,
 } from "../src/client/menu_content";
-import { M_Menu_Content_f, BeginContentFunc, Content_MenuKey } from "../src/client/menu";
+import { M_Menu_Content_f, BeginContentFunc, Content_MenuKey, Content_MenuRowsForTests } from "../src/client/menu";
 import { K_RIGHTARROW, K_LEFTARROW } from "../src/client/keys";
 
 // The real, production seam: files.ts's FS_ListFiles/FS_ReadRawFile
@@ -392,9 +392,18 @@ describe("menu.ts wiring -- Content_MenuInit discovers a real mkdtemp gamedir en
     M_Menu_Content_f(); // reload-on-open: DiscoverGameDirs re-scans tmpRoot fresh every call
 
     // cursor defaults to 0 == the "content" spincontrol (first Menu_AddItem
-    // in Content_MenuInit) -- CONTENT_LIST.length real K_RIGHTARROW presses
-    // land exactly on the one discovered gamedir appended right after it.
-    for (let i = 0; i < CONTENT_LIST.length; i++) Content_MenuKey(K_RIGHTARROW);
+    // in Content_MenuInit). The curated entries shown depend on which data
+    // trees the scan can see (GamesWithData), so press K_RIGHTARROW until the
+    // row's displayed value IS the discovered gamedir instead of assuming a
+    // fixed count.
+    const contentRow = (): string => Content_MenuRowsForTests().find((r) => r.name === "content")?.value ?? "";
+    const maxPresses = (Content_MenuRowsForTests().find((r) => r.name === "content")?.values.length ?? 0) + 1;
+    let presses = 0;
+    while (contentRow() !== "buzzmod" && presses < maxPresses) {
+      Content_MenuKey(K_RIGHTARROW);
+      presses++;
+    }
+    expect(contentRow()).toBe("buzzmod");
 
     try {
       BeginContentFunc();
@@ -407,7 +416,7 @@ describe("menu.ts wiring -- Content_MenuInit discovers a real mkdtemp gamedir en
       // test never leaks selection state into another test in this
       // process (rule 13/21: self-sufficient, and no landmines for a
       // later full-suite regate).
-      for (let i = 0; i < CONTENT_LIST.length; i++) Content_MenuKey(K_LEFTARROW);
+      for (let i = 0; i < presses; i++) Content_MenuKey(K_LEFTARROW);
     }
   });
 });
