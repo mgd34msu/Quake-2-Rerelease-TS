@@ -623,6 +623,18 @@ describe("Draw_StretchPicRegion", () => {
     expect(colorCalls[0]?.args).toEqual([200 / 255, 100 / 255, 50 / 255, 1]); // a=255 -> opaque, no GL_BLEND toggle
     expect(colorCalls[1]?.args).toEqual([1, 1, 1, 1]); // reset after the quad, matching Draw_ColorPic's own convention
 
+    // The tint only takes effect under GL_MODULATE: the 2D pass runs in
+    // GL_REPLACE, which discards qglColor4f, and that is exactly how a kfont
+    // drop shadow asked for in black drew as a second white glyph. The quad
+    // must be bracketed MODULATE -> REPLACE.
+    const names = qgl.calls.map((c) => c.name);
+    const beginIdx = names.indexOf("qglBegin");
+    const endIdx = names.indexOf("qglEnd");
+    const envBefore = qgl.calls.slice(0, beginIdx).filter((c) => c.name === "qglTexEnvf").map((c) => c.args[2]);
+    const envAfter = qgl.calls.slice(endIdx).filter((c) => c.name === "qglTexEnvf").map((c) => c.args[2]);
+    expect(envBefore[envBefore.length - 1]).toBe(0x2100); // GL_MODULATE
+    expect(envAfter[envAfter.length - 1]).toBe(0x1e01); // GL_REPLACE
+
     const texCoords = qgl.calls.filter((c) => c.name === "qglTexCoord2f").map((c) => c.args);
     expect(texCoords).toEqual([
       [s0, t0],

@@ -377,6 +377,12 @@ export function Draw_StretchPicRegion(
   const translucent = color.a < 255;
   if (translucent) qgl.qglEnable(GL_BLEND);
 
+  // Same GL_REPLACE trap as Draw_ColorPic above: the 2D pass replaces the
+  // fragment colour with the texel, so the qglColor4f below was ignored and
+  // a kfont drop shadow asked for in black drew as a second white copy of
+  // the glyph (the owner's "white text and a white drop shadow"). MODULATE
+  // for this quad, REPLACE after.
+  GL_TexEnv(GL_MODULATE);
   qgl.qglColor4f(color.r / 255, color.g / 255, color.b / 255, color.a / 255);
 
   const uSpan = frame.sh - frame.sl;
@@ -399,6 +405,7 @@ export function Draw_StretchPicRegion(
   qgl.qglEnd();
 
   qgl.qglColor4f(1, 1, 1, 1);
+  GL_TexEnv(GL_REPLACE);
   if (translucent) qgl.qglDisable(GL_BLEND);
 
   if (disableAlphaTest) qgl.qglEnable(GL_ALPHA_TEST);
