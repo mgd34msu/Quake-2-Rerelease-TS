@@ -2,6 +2,8 @@
 
 import {
   crandom,
+  RotatePointAroundVector,
+  type Vec3,
   vec3,
   vec3_origin,
   VectorCompare,
@@ -58,7 +60,7 @@ import {
   svc_temp_entity,
   world,
 } from "./g_local";
-import { G_Find, G_FreeEdict, G_SetMovedir, G_Spawn, G_UseTargets, KillBox, vtos } from "./g_utils";
+import { G_Find, G_FreeEdict, G_PickTarget, G_SetMovedir, G_Spawn, G_UseTargets, KillBox, vtos } from "./g_utils";
 import { fire_blaster } from "./g_weapon";
 import { BeginIntermission } from "./p_hud";
 
@@ -340,7 +342,78 @@ export function use_target_changelevel(self: EdictT, other: EdictT | null, activ
     game.serverflags &= ~SFL_CROSS_TRIGGER_MASK;
   }
 
+  // ===================================================================
+  // RERELEASE CONTENT PORT -- landmark level transitions.
+  // g_target.cpp:403-464's own block, transcribed from this port's copy
+  // of it in src/kexgame/g_target.ts:637-659.
+  //
+  // "if map has a landmark, store position instead of using spawn next
+  // map": record where the activator stands RELATIVE to the landmark
+  // this target_changelevel points at, un-rotated by that landmark's
+  // angles so the destination map's landmark can rotate it into its own
+  // frame (p_client.ts's TryLandmarkSpawn does the other half).
+  //
+  // THE GATE. `self.target` is the whole gate, and it is content, not a
+  // cvar: a 1997 target_changelevel has no `target` key at all, so
+  // landmark_name stays null and nothing downstream changes. 130 of the
+  // 241 shipped target_changelevels carry one (all on the classic /
+  // Reckoning / Ground Zero campaign maps in the rerelease tree; CotM
+  // uses $spawnpoint only), and 127 of those resolve to an info_landmark
+  // in the destination map. The other 3 resolve to nothing there, which
+  // TryLandmarkSpawn already handles by falling straight back to the
+  // vanilla spawn-point path.
+  //
+  // COOP: only the activator is recorded, exactly as the rerelease has
+  // it. Everyone else keeps a null landmark_name and lands on the
+  // destination's coop spawn point the vanilla way.
+  //
+  // The three carried values -- landmark_rel_pos, oldvelocity and
+  // oldviewangles -- survive the map change because SpawnEntities()
+  // never touches game.clients[], and they survive the rest of THIS
+  // level because BeginIntermission (below) sets level.intermissiontime,
+  // after which p_view.ts's ClientEndServerFrame returns before its own
+  // end-of-frame `oldvelocity = velocity` / `oldviewangles = viewangles`
+  // copy would overwrite them.
+  // ===================================================================
+  if (activator !== null && activator.client !== null && !deathmatch) {
+    const client = activator.client;
+    client.landmark_name = null;
+    VectorCopy(vec3_origin, client.landmark_rel_pos);
+
+    self.target_ent = self.target !== null ? G_PickTarget(self.target) : null;
+    const landmark = self.target_ent;
+
+    if (landmark !== null) {
+      client.landmark_name = landmark.targetname;
+
+      // get relative vector to landmark pos, and unrotate by the
+      // landmark angles in preparation to be rotated by the next map
+      VectorSubtract(activator.s.origin, landmark.s.origin, client.landmark_rel_pos);
+      unrotateByLandmark(client.landmark_rel_pos, landmark.s.angles);
+      unrotateByLandmark(client.oldvelocity, landmark.s.angles);
+
+      // unrotate our view angles for the next map too
+      VectorSubtract(client.ps.viewangles, landmark.s.angles, client.oldviewangles);
+    }
+  }
+
   BeginIntermission(self);
+}
+
+/**
+ * The rerelease's three-axis un-rotation, applied in the source map so the
+ * destination map's landmark can re-apply it in its own frame. Ported from
+ * src/kexgame/g_target.ts:650-656; the axis ORDER (x by angles[0], y by
+ * angles[2], z by angles[1]) and the negated degrees are the C's, not a
+ * simplification -- TryLandmarkSpawn re-applies them in the same order with
+ * positive degrees.
+ */
+function unrotateByLandmark(v: Vec3, landmarkAngles: Vec3): void {
+  const tmp = vec3();
+  RotatePointAroundVector(tmp, vec3(1, 0, 0), v, -landmarkAngles[0]);
+  RotatePointAroundVector(v, vec3(0, 1, 0), tmp, -landmarkAngles[2]);
+  VectorCopy(v, tmp);
+  RotatePointAroundVector(v, vec3(0, 0, 1), tmp, -landmarkAngles[1]);
 }
 
 export function SP_target_changelevel(ent: EdictT): void {

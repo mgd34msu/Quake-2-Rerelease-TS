@@ -292,6 +292,26 @@ export function PlayerNoise(who: EdictT, where: Vec3, noiseType: number): void {
 
   if (cvarNum(gameCvars.deathmatch)) return;
 
+  // RERELEASE CONTENT PORT -- landmark level transitions.
+  // src/kexgame/p_weapon.ts:598 / p_weapon.cpp: the landing noise a player
+  // makes arriving through a landmark must not wake the destination map's
+  // monsters, so PNOISE_SELF is suppressed while the free-fall ticket is
+  // unspent and for 100ms after P_FallingDamage spends it. Both fields are
+  // only ever set by a landmark spawn, so a 1997 map never takes this arm.
+  // The `landmark_noise_time !== 0` half is this module's, not the
+  // rerelease's: the rerelease writes `landmark_noise_time >= level.time`
+  // bare, which is TRUE for an untouched 0 field at level.time 0 and would
+  // therefore swallow a 1997 map's first-frame PNOISE_SELF. Since the field
+  // is only ever assigned `level.time + 0.1` (strictly positive), excluding
+  // 0 cannot change anything after an actual landmark arrival.
+  const noiseClient = who.client;
+  if (
+    noiseType === PNOISE_SELF &&
+    noiseClient !== null &&
+    (noiseClient.landmark_free_fall || (noiseClient.landmark_noise_time !== 0 && noiseClient.landmark_noise_time >= level.time))
+  )
+    return;
+
   if (who.flags & FL_NOTARGET) return;
 
   // ROGUE -- a disguised entity firing a weapon marks the disguise as

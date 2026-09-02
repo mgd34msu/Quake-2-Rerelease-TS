@@ -5,7 +5,7 @@
 // actual tree shows every one of these functions is defined in p_client.c,
 // so that is where they are ported from.
 
-import { vec3, type Vec3, vec3_origin, VectorClear, VectorCopy, VectorLength, VectorSubtract } from "../shared/math";
+import { RotatePointAroundVector, vec3, type Vec3, vec3_origin, VectorAdd, VectorClear, VectorCopy, VectorLength, VectorSubtract } from "../shared/math";
 import {
   ANGLE2SHORT,
   type CvarT,
@@ -133,7 +133,7 @@ import {
   svc_stufftext,
   world,
 } from "./g_local";
-import { G_Find, G_FreeEdict, G_InitEdict, G_Spawn, G_TouchTriggers, KillBox } from "./g_utils";
+import { G_FixStuckObject_Generic, G_Find, G_FreeEdict, G_InitEdict, G_PickTarget, G_Spawn, G_TouchTriggers, KillBox, StuckResultT } from "./g_utils";
 // RERELEASE CONTENT PORT
 import { CTFDeadDropFlag } from "./g_ctf";
 import { SP_misc_teleporter_dest, ThrowClientHead, ThrowGib } from "./g_misc";
@@ -1320,13 +1320,151 @@ function SelectSingleSpawnPoint(): EdictT | null {
 }
 
 /*
+=============================================================================
+RERELEASE CONTENT PORT -- landmark level transitions
+
+g_target.ts's use_target_changelevel stored, on the way OUT of the previous
+map, where the player stood relative to the info_landmark that map's
+target_changelevel pointed at (client.landmark_name / landmark_rel_pos, plus
+the un-rotated oldvelocity and oldviewangles). This is the other half: the
+destination map's identically-named info_landmark rotates that offset into
+its own frame and puts the player there instead of on the spawn point.
+
+Transcribed from this port's own rerelease copy, src/kexgame/p_client.ts:
+1887-1941 (`bool TryLandmarkSpawn(edict_t*, vec3_t&, vec3_t&)`,
+p_client.cpp:1374-1426).
+
+THE GATE, restated from the entity side: `client.landmark_name` is null
+unless a target_changelevel with a `target` fired on this client, and no
+1997 map has one. On top of that the destination has to actually contain an
+entity by that name. Both misses return false here, and the caller is left
+holding exactly the origin and angles vanilla's SelectSpawnPoint computed.
+
+THREE DELIBERATE DIFFERENCES FROM src/kexgame/p_client.ts, all forced by the
+classic module's own shape and none of them observable on a 1997 map:
+
+  1. The rerelease's SelectSpawnPoint hands TryLandmarkSpawn the spawn
+     point's raw origin; vanilla's has already added its `origin[2] += 9`
+     by then. `spotOrigin` is therefore passed separately, so KEEP_Z below
+     reads the same z the rerelease reads (the raw spot z) rather than
+     vanilla's already-nudged one.
+  2. The rerelease restores `old_origin` into the caller's box when the
+     stuck-fix gives up. Here the caller's `origin`/`angles` are simply left
+     untouched until success is certain, which is the same thing.
+  3. `ent.velocity` is rotated here exactly as the rerelease does it, but
+     PutClientInServer's vanilla `VectorClear(ent.velocity)` runs LATER, so
+     that clear is the one gated on the landmark (see there).
+
+OPEN QUESTION, REPORTED NOT SILENTLY DECIDED -- SPAWNFLAG_LANDMARK_KEEP_Z.
+src/kexgame/p_client.ts:1915 tests bit 12 (0x1000) for this flag, with a
+comment conceding the constant was never located and the literal was
+inferred. The shipped content disagrees with that inference: across the
+rerelease tree's 245 info_landmarks, 47 carry spawnflags 1 and ZERO carry
+0x1000, so bit 12 makes the flag dead code on every shipped map. base1's own
+transition is the clearest case -- base1's lm_base1 sits at z 136 and
+base2's at z -216, an 88-unit vertical offset from the exit trigger that
+only lands the player on the floor of base2's arrival room if z is taken
+from the spawn point instead of carried. Both of base1/base2's lm_base1
+landmarks carry spawnflags 1. This module therefore uses bit 0, which is
+what the content encodes; src/kexgame is out of this unit's scope and its
+0x1000 is reported for a ruling rather than edited here.
+
+Driving the real thing settles it. Walking base1's exit under both modules
+(retail rerelease tree, `+set game baseq2` vs `+set game kex`):
+
+  classic, bit 0        -> base2, landmark spawn, org 899.875 2296 -174.844
+  kex, 0x1000 as-is     -> base2, NO landmark spawn, org 848 2292 -223
+                           (the plain info_player_start -- without KEEP_Z the
+                           computed spot is ~78 units under base2's floor and
+                           G_FixStuckObject_Generic returns NO_GOOD_POSITION,
+                           so TryLandmarkSpawn gives up entirely)
+  kex, patched to bit 0 -> base2, landmark spawn, org 899.969 2296 -174.844
+
+So bit 12 does not merely make the flag dead -- it makes the whole landmark
+transition fail on this map. The two modules agree to 0.1 units once the
+constant matches.
+=============================================================================
+*/
+
+/** g_local.h's `SPAWNFLAG_LANDMARK_KEEP_Z` -- see the note above. */
+export const SPAWNFLAG_LANDMARK_KEEP_Z = 1;
+
+// The player bbox, as PutClientInServer's own local `mins`/`maxs` below
+// already spell it out. Named here because TryLandmarkSpawn needs the same
+// two vectors and the rerelease has them as file-scope PLAYER_MINS /
+// PLAYER_MAXS constants.
+const PLAYER_MINS: Vec3 = vec3(-16, -16, -24);
+const PLAYER_MAXS: Vec3 = vec3(16, 16, 32);
+
+/**
+ * The rerelease's three-axis rotation into the destination landmark's frame.
+ * The axis order (x by angles[0], y by angles[2], z by angles[1]) is the
+ * C's; g_target.ts's unrotateByLandmark is its exact inverse.
+ */
+function rotateByLandmark(v: Vec3, landmarkAngles: Vec3): void {
+  const tmp = vec3();
+  RotatePointAroundVector(tmp, vec3(1, 0, 0), v, landmarkAngles[0]);
+  RotatePointAroundVector(v, vec3(0, 1, 0), tmp, landmarkAngles[2]);
+  VectorCopy(v, tmp);
+  RotatePointAroundVector(v, vec3(0, 0, 1), tmp, landmarkAngles[1]);
+}
+
+/**
+ * p_client.cpp:1374-1426 / src/kexgame/p_client.ts:1887-1941.
+ *
+ * Returns true and overwrites `origin`/`angles` when this client arrived
+ * through a landmark and the destination map has the matching one; returns
+ * false and leaves both untouched otherwise.
+ */
+export function TryLandmarkSpawn(ent: EdictT, origin: Vec3, angles: Vec3, spotOrigin: Vec3): boolean {
+  const client = ent.client;
+  if (client === null) return false;
+
+  if (client.landmark_name === null || client.landmark_name.length === 0) return false;
+
+  const landmark = G_PickTarget(client.landmark_name);
+  if (landmark === null) return false;
+
+  const newOrigin = vec3(client.landmark_rel_pos[0], client.landmark_rel_pos[1], client.landmark_rel_pos[2]);
+
+  // rotate our relative landmark into our new landmark's frame of reference
+  rotateByLandmark(newOrigin, landmark.s.angles);
+  VectorAdd(newOrigin, landmark.s.origin, newOrigin);
+
+  const newAngles = vec3();
+  VectorAdd(client.oldviewangles, landmark.s.angles, newAngles);
+
+  if ((landmark.spawnflags & SPAWNFLAG_LANDMARK_KEEP_Z) !== 0) newOrigin[2] = spotOrigin[2];
+
+  // sometimes, landmark spawns can cause slight inconsistencies in
+  // collision; we'll do a bit of tracing to make sure the bbox is clear
+  // src/kexgame/p_client.ts traces with `MASK_PLAYERSOLID & ~CONTENTS_PLAYER`.
+  // CONTENTS_PLAYER is a rerelease content bit that vanilla's MASK_PLAYERSOLID
+  // (SOLID|PLAYERCLIP|WINDOW|MONSTER|DEADMONSTER) does not contain in the
+  // first place, so the plain mask here is the same set of bits.
+  const stuck = G_FixStuckObject_Generic(newOrigin, PLAYER_MINS, PLAYER_MAXS, (start, mins, maxs, end) =>
+    gi.trace(start, mins, maxs, end, ent, MASK_PLAYERSOLID),
+  );
+  if (stuck === StuckResultT.NO_GOOD_POSITION) return false;
+
+  VectorCopy(newOrigin, ent.s.origin);
+
+  // rotate the velocity that we grabbed from the map
+  if (ent.velocity[0] !== 0 || ent.velocity[1] !== 0 || ent.velocity[2] !== 0) rotateByLandmark(ent.velocity, landmark.s.angles);
+
+  VectorCopy(newOrigin, origin);
+  VectorCopy(newAngles, angles);
+  return true;
+}
+
+/*
 ===========
 SelectSpawnPoint
 
 Chooses a player start, deathmatch start, coop start, etc
 ============
 */
-export function SelectSpawnPoint(ent: EdictT, origin: Vec3, angles: Vec3): void {
+export function SelectSpawnPoint(ent: EdictT, origin: Vec3, angles: Vec3, landmarkOut?: [boolean]): void {
   let spot: EdictT | null = null;
 
   if (cvarNum(gameCvars.deathmatch) !== 0) {
@@ -1343,8 +1481,22 @@ export function SelectSpawnPoint(ent: EdictT, origin: Vec3, angles: Vec3): void 
   }
 
   VectorCopy(spot.s.origin, origin);
+  // Vanilla p_client.c:911 `origin[2] += 9;`. The re-release dropped this
+  // for the single-player and coop paths and kept it only for deathmatch
+  // (p_client.cpp SelectSpawnPoint's DM branch, `spot->s.origin + vec3_t{
+  // 0, 0, 9 }`), which is why a classic session starts the player 9 units
+  // higher than a re-release one on the same map. Kept as vanilla: the
+  // player falls those 9 units on the first frame either way.
   origin[2] += 9;
   VectorCopy(spot.s.angles, angles);
+
+  // RERELEASE CONTENT PORT: check landmark (p_client.cpp:1511 /
+  // src/kexgame/p_client.ts:1997). No-op unless a target_changelevel with
+  // a landmark `target` sent this client here AND this map has the
+  // matching info_landmark; `origin`/`angles` above are then vanilla's.
+  // The spot's RAW origin is passed alongside for SPAWNFLAG_LANDMARK_KEEP_Z,
+  // which reads the spawn point's own z, not vanilla's +9 nudge.
+  if (TryLandmarkSpawn(ent, origin, angles, spot.s.origin) && landmarkOut !== undefined) landmarkOut[0] = true;
 }
 
 //======================================================================
@@ -1524,10 +1676,24 @@ export function PutClientInServer(ent: EdictT): void {
   const spawn_origin = vec3();
   const spawn_angles = vec3();
 
+  // RERELEASE CONTENT PORT -- landmark level transitions, part 1 of 3.
+  // src/kexgame/p_client.ts:2258-2261 clears velocity FIRST, then restores
+  // the previous map's (already un-rotated) velocity when this client came
+  // through a landmark, because SelectSpawnPoint -> TryLandmarkSpawn rotates
+  // ent.velocity into the new landmark's frame as part of placing us. Note
+  // the rerelease keys this on landmark_name alone, not on the landmark
+  // actually being found in this map -- so does this.
+  // landmark_name is null on every 1997 map, leaving `keepVelocity` false
+  // and the whole block equivalent to vanilla's single VectorClear below.
+  const keepVelocity = ent.client !== null && ent.client.landmark_name !== null;
+  VectorClear(ent.velocity);
+  if (keepVelocity && ent.client !== null) VectorCopy(ent.client.oldvelocity, ent.velocity);
+
   // find a spawn point
   // do it before setting health back up, so farthest
   // ranging doesn't count this client
-  SelectSpawnPoint(ent, spawn_origin, spawn_angles);
+  const landmarkSpawn: [boolean] = [false];
+  SelectSpawnPoint(ent, spawn_origin, spawn_angles, landmarkSpawn);
 
   const index = EDICT_NUM(ent) - 1;
   if (ent.client === null) return; // defensive; C assumes ent->client is already set
@@ -1593,7 +1759,14 @@ export function PutClientInServer(ent: EdictT): void {
 
   VectorCopy(mins, ent.mins);
   VectorCopy(maxs, ent.maxs);
-  VectorClear(ent.velocity);
+
+  // RERELEASE CONTENT PORT -- landmark level transitions, part 2 of 3.
+  // Vanilla clears velocity unconditionally here. The rerelease has no
+  // clear at this point at all: it did its clearing at the top of the
+  // function (see part 1) precisely so a landmark arrival keeps the
+  // velocity it carried in and had rotated. `keepVelocity` is false on
+  // every 1997 map, so this stays vanilla's unconditional clear there.
+  if (!keepVelocity) VectorClear(ent.velocity);
 
   // clear playerstate values
   client.ps = new PlayerStateT();
@@ -1633,11 +1806,32 @@ export function PutClientInServer(ent: EdictT): void {
     client.ps.pmove.delta_angles[i] = ANGLE2SHORT(spawn_angles[i] - client.resp.cmd_angles[i]);
   }
 
-  ent.s.angles[PITCH] = 0;
-  ent.s.angles[YAW] = spawn_angles[YAW];
-  ent.s.angles[ROLL] = 0;
+  // RERELEASE CONTENT PORT -- landmark level transitions, part 3 of 3.
+  // Vanilla throws the spawn point's pitch and roll away and keeps only
+  // yaw, which is right for a spawn point (they are always 0 there anyway)
+  // and wrong for a landmark arrival, where `spawn_angles` is the player's
+  // own view direction carried over from the previous map plus the
+  // destination landmark's angles. src/kexgame/p_client.ts:2237-2240's
+  // PutClientOnSpawnPoint keeps all three and divides PITCH by 3; that
+  // divide is a rerelease quirk with no vanilla counterpart, reproduced
+  // here so the two modules put the camera in the same place.
+  if (landmarkSpawn[0]) {
+    VectorCopy(spawn_angles, ent.s.angles);
+    ent.s.angles[PITCH] /= 3;
+  } else {
+    ent.s.angles[PITCH] = 0;
+    ent.s.angles[YAW] = spawn_angles[YAW];
+    ent.s.angles[ROLL] = 0;
+  }
   VectorCopy(ent.s.angles, client.ps.viewangles);
   VectorCopy(ent.s.angles, client.v_angle);
+
+  // src/kexgame/p_client.ts:2521 hands every ClientBegin spawn "one (1)
+  // free fall ticket" whether or not it came from a landmark. Doing that
+  // unconditionally would change 1997 fall damage on the first landing
+  // after every level load, so this module arms it only for the arrival it
+  // exists for -- p_view.ts's P_FallingDamage is where it is spent.
+  if (landmarkSpawn[0]) client.landmark_free_fall = true;
 
   // spawn a spectator
   if (client.pers.spectator) {

@@ -1328,6 +1328,46 @@ export interface GameJSON {
   cross_unit_flags?: number;
   num_items: number;
   clients: ClientPersistantJSON[];
+  // RERELEASE CONTENT PORT -- landmark level transitions.
+  //
+  // WHY THIS IS HERE AT ALL. A landmark transition parks four values on
+  // GClientT (not on `pers`) between the exiting map's use_target_changelevel
+  // and the destination map's PutClientInServer. In-session that is safe on
+  // its own -- SpawnEntities never touches game.clients[]. It is NOT safe
+  // across a save/load, because a save can be written while the client is
+  // sitting in the exit intermission holding exactly those four values, and
+  // this module's serializeGame writes only `pers` per client. Vanilla's
+  // g_save.c WriteClient fwrites the whole gclient_t and so has no such hole;
+  // src/kexgame/g_save.ts:1907-1927 likewise carries landmark_name,
+  // landmark_rel_pos, landmark_free_fall and landmark_noise_time in its own
+  // gclient field table. Without this array, saving during an exit
+  // intermission and loading it back drops the player on the destination's
+  // spawn point instead of the landmark.
+  //
+  // Optional, and parallel to `clients` by index, so a savegame written
+  // before this existed still loads (every field then keeps its GClientT
+  // default, which is the correct "no landmark pending" state).
+  clientLandmarks?: ClientLandmarkJSON[];
+}
+
+/**
+ * The GClientT state a landmark transition carries across the map change,
+ * per client, by index into `clients`.
+ *
+ * `oldvelocity`/`oldviewangles` are 1997 fields, but use_target_changelevel
+ * overwrites both with the un-rotated values TryLandmarkSpawn and
+ * PutClientInServer read on arrival, so they are part of the same carried
+ * state and are written here for the same reason. (Vanilla's whole-struct
+ * WriteClient already covered them; this module's pers-only game file did
+ * not.)
+ */
+export interface ClientLandmarkJSON {
+  landmark_name: string | null;
+  landmark_rel_pos: [number, number, number];
+  landmark_free_fall: boolean;
+  landmark_noise_time: number;
+  oldvelocity: [number, number, number];
+  oldviewangles: [number, number, number];
 }
 
 // There is no compile-time `__DATE__` in TS; a fixed stamp string plays the
@@ -1353,6 +1393,14 @@ export function serializeGame(autosave: boolean): GameJSON {
     cross_unit_flags: game.cross_unit_flags,
     num_items: game.num_items,
     clients: game.clients.map((c) => serializeClientPersistant(c.pers)),
+    clientLandmarks: game.clients.map((c) => ({
+      landmark_name: c.landmark_name,
+      landmark_rel_pos: [c.landmark_rel_pos[0], c.landmark_rel_pos[1], c.landmark_rel_pos[2]] as [number, number, number],
+      landmark_free_fall: c.landmark_free_fall,
+      landmark_noise_time: c.landmark_noise_time,
+      oldvelocity: [c.oldvelocity[0], c.oldvelocity[1], c.oldvelocity[2]] as [number, number, number],
+      oldviewangles: [c.oldviewangles[0], c.oldviewangles[1], c.oldviewangles[2]] as [number, number, number],
+    })),
   };
 }
 
@@ -1370,9 +1418,21 @@ export function deserializeGame(json: GameJSON): void {
   game.cross_unit_flags = json.cross_unit_flags ?? 0;
   game.num_items = json.num_items;
   game.autosaved = json.autosaved;
-  game.clients = json.clients.map((clientJson) => {
+  game.clients = json.clients.map((clientJson, i) => {
     const c = new GClientT();
     c.pers = deserializeClientPersistant(clientJson);
+    const lm = json.clientLandmarks?.[i];
+    if (lm !== undefined) {
+      c.landmark_name = lm.landmark_name;
+      c.landmark_rel_pos[0] = lm.landmark_rel_pos[0];
+      c.landmark_rel_pos[1] = lm.landmark_rel_pos[1];
+      c.landmark_rel_pos[2] = lm.landmark_rel_pos[2];
+      c.landmark_free_fall = lm.landmark_free_fall;
+      c.landmark_noise_time = lm.landmark_noise_time;
+      // Tolerate a file written before these two joined the record.
+      if (lm.oldvelocity !== undefined) c.oldvelocity.set(lm.oldvelocity);
+      if (lm.oldviewangles !== undefined) c.oldviewangles.set(lm.oldviewangles);
+    }
     return c;
   });
 }

@@ -26,7 +26,7 @@ import {
 } from "../shared/q_shared";
 import { fixedLength } from "../shared/fixed";
 import { T_Damage } from "./g_combat";
-import { type Edict, SolidT, SVF_MONSTER } from "./game";
+import { type Edict, type GTraceT, SolidT, SVF_MONSTER } from "./game";
 import {
   BODY_QUEUE_SIZE,
   DAMAGE_NO_PROTECTION,
@@ -184,6 +184,7 @@ match (string)self.target and call their .use function
 ==============================
 */
 export function G_UseTargets(ent: EdictT, activator: EdictT | null): void {
+
   //
   // check for a delay
   //
@@ -509,6 +510,174 @@ export function G_TouchSolids(ent: EdictT): void {
     if (ent.touch) ent.touch(hit, ent, null, null);
     if (!ent.inuse) break;
   }
+}
+
+/*
+==============================================================================
+
+RERELEASE CONTENT PORT -- G_FixStuckObject_Generic
+
+p_move.cpp:9-154, transcribed from this port's own rerelease copy in
+src/kexgame/p_move.ts (which carries the full C citation and the
+preserved-quirk notes). Vanilla 3.21 has no equivalent: pmove never needed
+one, because vanilla never places anything at an arbitrary computed point.
+The landmark transition does exactly that -- p_client.ts's TryLandmarkSpawn
+computes an origin from the destination landmark and the stored relative
+offset, and the two maps' geometry does not have to agree to the unit -- so
+the rerelease runs this to nudge the bbox out of whatever it clipped into,
+and gives up on the landmark entirely when it cannot.
+
+Nothing on a 1997 map reaches this function: TryLandmarkSpawn is its only
+caller and it returns before this on a null landmark_name.
+
+PRESERVED QUIRK, carried over from src/kexgame/p_move.ts's own note (1):
+the C sorts `good_positions` over the range [begin, end - 1), so the LAST
+candidate found never takes part in the sort and index 0 can therefore be a
+non-minimal distance. Reproduced exactly rather than "fixed".
+
+==============================================================================
+*/
+
+export enum StuckResultT {
+  GOOD_POSITION = 0,
+  FIXED = 1,
+  NO_GOOD_POSITION = 2,
+}
+
+/** The trace shape G_FixStuckObject_Generic probes with. */
+export type StuckObjectTraceFn = (start: Vec3, mins: Vec3, maxs: Vec3, end: Vec3) => GTraceT;
+
+interface SideCheck {
+  readonly normal: readonly [number, number, number];
+  readonly mins: readonly [number, number, number];
+  readonly maxs: readonly [number, number, number];
+}
+
+/** p_move.cpp:21-31 `side_checks[]`. */
+const SIDE_CHECKS: readonly SideCheck[] = [
+  { normal: [0, 0, 1], mins: [-1, -1, 0], maxs: [1, 1, 0] },
+  { normal: [0, 0, -1], mins: [-1, -1, 0], maxs: [1, 1, 0] },
+  { normal: [1, 0, 0], mins: [0, -1, -1], maxs: [0, 1, 1] },
+  { normal: [-1, 0, 0], mins: [0, -1, -1], maxs: [0, 1, 1] },
+  { normal: [0, 1, 0], mins: [-1, 0, -1], maxs: [1, 0, 1] },
+  { normal: [0, -1, 0], mins: [-1, 0, -1], maxs: [1, 0, 1] },
+];
+
+/**
+ * p_move.cpp:9-154. `origin` is mutated in place, matching the C++
+ * `vec3_t &origin` reference parameter.
+ */
+export function G_FixStuckObject_Generic(origin: Vec3, own_mins: Vec3, own_maxs: Vec3, trace: StuckObjectTraceFn): StuckResultT {
+  if (!trace(origin, own_mins, own_maxs, origin).startsolid) return StuckResultT.GOOD_POSITION;
+
+  const good_positions: { distance: number; origin: Vec3 }[] = [];
+
+  for (let sn = 0; sn < SIDE_CHECKS.length; sn++) {
+    const side = SIDE_CHECKS[sn]!;
+    let start = vec3(origin[0], origin[1], origin[2]);
+    const mins = vec3();
+    const maxs = vec3();
+
+    for (let n = 0; n < 3; n++) {
+      if (side.normal[n]! < 0) start[n] += own_mins[n]!;
+      else if (side.normal[n]! > 0) start[n] += own_maxs[n]!;
+
+      if (side.mins[n] === -1) mins[n] = own_mins[n]!;
+      else if (side.mins[n] === 1) mins[n] = own_maxs[n]!;
+
+      if (side.maxs[n] === -1) maxs[n] = own_mins[n]!;
+      else if (side.maxs[n] === 1) maxs[n] = own_maxs[n]!;
+    }
+
+    let tr = trace(start, mins, maxs, start);
+
+    let needed_epsilon_fix = -1;
+    let needed_epsilon_dir = 0;
+
+    if (tr.startsolid) {
+      for (let e = 0; e < 3; e++) {
+        if (side.normal[e] !== 0) continue;
+
+        const ep_start = vec3(start[0], start[1], start[2]);
+        ep_start[e] += 1;
+
+        tr = trace(ep_start, mins, maxs, ep_start);
+
+        if (!tr.startsolid) {
+          start = ep_start;
+          needed_epsilon_fix = e;
+          needed_epsilon_dir = 1;
+          break;
+        }
+
+        ep_start[e] -= 2;
+        tr = trace(ep_start, mins, maxs, ep_start);
+
+        if (!tr.startsolid) {
+          start = ep_start;
+          needed_epsilon_fix = e;
+          needed_epsilon_dir = -1;
+          break;
+        }
+      }
+    }
+
+    // no good
+    if (tr.startsolid) continue;
+
+    const opposite_start = vec3(origin[0], origin[1], origin[2]);
+    const other_side = SIDE_CHECKS[sn ^ 1]!;
+
+    for (let n = 0; n < 3; n++) {
+      if (other_side.normal[n]! < 0) opposite_start[n] += own_mins[n]!;
+      else if (other_side.normal[n]! > 0) opposite_start[n] += own_maxs[n]!;
+    }
+
+    if (needed_epsilon_fix >= 0) opposite_start[needed_epsilon_fix] += needed_epsilon_dir;
+
+    // potentially a good side; start from our center, push back to the
+    // opposite side to find how much clearance we have
+    tr = trace(start, mins, maxs, opposite_start);
+
+    // ???
+    if (tr.startsolid) continue;
+
+    // check the delta
+    const end = vec3(tr.endpos[0], tr.endpos[1], tr.endpos[2]);
+    // push us very slightly away from the wall
+    end[0] += side.normal[0] * 0.125;
+    end[1] += side.normal[1] * 0.125;
+    end[2] += side.normal[2] * 0.125;
+
+    // calculate delta
+    const delta = vec3(end[0] - opposite_start[0], end[1] - opposite_start[1], end[2] - opposite_start[2]);
+    const new_origin = vec3(origin[0] + delta[0], origin[1] + delta[1], origin[2] + delta[2]);
+
+    if (needed_epsilon_fix >= 0) new_origin[needed_epsilon_fix] += needed_epsilon_dir;
+
+    tr = trace(new_origin, own_mins, own_maxs, new_origin);
+
+    // bad
+    if (tr.startsolid) continue;
+
+    good_positions.push({ origin: new_origin, distance: delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2] });
+  }
+
+  if (good_positions.length > 0) {
+    // PRESERVED QUIRK (see this section's header): only indices
+    // [0, n-2] take part in the sort; index n-1 stays where it was pushed.
+    const n = good_positions.length;
+    if (n > 1) {
+      const sortable = good_positions.slice(0, n - 1);
+      sortable.sort((a, b) => a.distance - b.distance);
+      for (let i = 0; i < sortable.length; i++) good_positions[i] = sortable[i]!;
+    }
+
+    VectorCopy(good_positions[0]!.origin, origin);
+    return StuckResultT.FIXED;
+  }
+
+  return StuckResultT.NO_GOOD_POSITION;
 }
 
 /*

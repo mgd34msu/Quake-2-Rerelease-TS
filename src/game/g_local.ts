@@ -1032,6 +1032,30 @@ export class GClientT {
   ctf_techsndtime = 0;
   ctf_lasttechmsg = 0;
 
+  // ===================================================================
+  // RERELEASE CONTENT PORT -- landmark level transitions.
+  //
+  // A rerelease target_changelevel whose `target` names an info_landmark
+  // records where the player stood RELATIVE to that landmark, and the
+  // destination map's identically-named info_landmark re-places the
+  // player at the same relative spot instead of on the spawn point (see
+  // g_target.ts's use_target_changelevel and p_client.ts's
+  // TryLandmarkSpawn). These four fields are the carrier.
+  //
+  // They live on GClientT and NOT in `pers` on purpose, exactly as the
+  // rerelease has them: SpawnEntities() clears `level` and every edict
+  // but never touches game.clients[], so a plain client field survives
+  // the map change on its own, and PutClientInServer's client.clear()
+  // then wipes it -- which is what makes a landmark spawn one-shot.
+  //
+  // A 1997 map has no info_landmark and no target_changelevel `target`,
+  // so landmark_name stays null there and every path below is skipped.
+  // ===================================================================
+  landmark_name: string | null = null;
+  landmark_rel_pos: Vec3 = vec3(); // position relative to landmark, un-rotated from landmark angle
+  landmark_free_fall = false;
+  landmark_noise_time = 0;
+
   // this structure is cleared on each PutClientInServer(), except for 'pers'
   clear(): void {
     const pers = this.pers;

@@ -532,6 +532,20 @@ export function P_FallingDamage(ent: EdictT): void {
 
   if (delta < 1) return;
 
+  // RERELEASE CONTENT PORT -- landmark level transitions.
+  // src/kexgame/p_client.ts:3162-3166's own block, at the same point in the
+  // same function. A landmark arrival can drop the player in mid-air with
+  // the velocity they carried out of the previous map, so the first landing
+  // after one gets its fall damage capped at the 30 threshold (i.e. no
+  // damage at all) and suppresses the landing's monster-alerting noise for
+  // 100ms. p_client.ts only ever arms `landmark_free_fall` on a landmark
+  // spawn, so nothing on a 1997 map reaches either statement.
+  if (client.landmark_free_fall) {
+    delta = Math.min(30, delta);
+    client.landmark_free_fall = false;
+    client.landmark_noise_time = level.time + 0.1;
+  }
+
   if (delta < 15) {
     ent.s.event = EntityEventT.EV_FOOTSTEP;
     return;

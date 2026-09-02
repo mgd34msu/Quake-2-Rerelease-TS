@@ -275,9 +275,56 @@ export function ExitLevel(): void {
   const command = Com_sprintf('gamemap "%s"\n', level.changemap ?? "");
   gi.AddCommandString(command);
   level.changemap = null;
-  level.exitintermission = 0;
-  level.intermissiontime = 0;
-  ClientEndServerFrames();
+
+  // ===================================================================
+  // RERELEASE CONTENT PORT -- landmark level transitions.
+  //
+  // Vanilla clears level.intermissiontime and THEN runs
+  // ClientEndServerFrames(). With intermission already off, each
+  // ClientEndServerFrame takes its full path and ends with
+  //
+  //     VectorCopy(ent.velocity,        client.oldvelocity);
+  //     VectorCopy(client.ps.viewangles, client.oldviewangles);
+  //
+  // (p_view.ts) -- which overwrites the two values g_target.ts's
+  // use_target_changelevel just stored there for the destination map's
+  // TryLandmarkSpawn to read. Vanilla never notices, because nothing in
+  // 1997 reads either field across a map change.
+  //
+  // src/kexgame/g_main.ts:1137-1140 has the two statements the other way
+  // round: ClientEndServerFrames() runs FIRST, while intermissiontime is
+  // still set, so every ClientEndServerFrame takes the intermission
+  // early-return and the recorded values survive.
+  //
+  // Taking the rerelease's order unconditionally would change one frame
+  // of 1997 behavior -- the last frame of every level would run the
+  // intermission path instead of the full one -- so the order is chosen
+  // by whether a landmark transition is actually in flight. No 1997 map
+  // can set landmark_name, so this is vanilla's exact order there.
+  //
+  // LIVE DEFECT this fixes, found by driving xhangar2 -> xhangar1 under
+  // both modules: the classic module put the player in at yaw 180 where
+  // the rerelease put them in at yaw 90, because the clobbered
+  // oldviewangles had already had the source landmark's 90-degree yaw
+  // folded out of it once and then been replaced by the raw view angles.
+  // ===================================================================
+  let landmarkPending = false;
+  for (const client of game.clients) {
+    if (client.landmark_name !== null) {
+      landmarkPending = true;
+      break;
+    }
+  }
+
+  if (landmarkPending) {
+    ClientEndServerFrames();
+    level.exitintermission = 0;
+    level.intermissiontime = 0;
+  } else {
+    level.exitintermission = 0;
+    level.intermissiontime = 0;
+    ClientEndServerFrames();
+  }
 
   // clear some things before going to next level
   const maxclients = cvarNum(gameCvars.maxclients);
