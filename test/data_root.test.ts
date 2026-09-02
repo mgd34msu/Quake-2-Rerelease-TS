@@ -61,9 +61,12 @@ import {
   ResetDataTreeScanCache,
   LaunchPlanRunsInTree,
   AvailableDataTreesFor,
-  AvailableRulesetsForGameInTrees,
+  DataTreesForGame,
+  ResolveLaunchForGame,
+  GamesWithData,
+  GameListDisplayName,
+  BuildGameList,
   DiscoverGameDirsInTrees,
-  GameListDisplayNameInTrees,
   DataMountPlanFor,
   DataTreeDisplayName,
   PerformLaunch,
@@ -491,22 +494,45 @@ describe("menu_content.ts -- per-tree availability is scanned, not assumed", () 
     expect(AvailableDataTreesFor(curated("mg2"), "rerelease", scans)).toEqual(["rerelease"]);
   });
 
-  test("14. RULE (a) precondition: no rerelease tree => the kex ruleset is not offered at all", () => {
+  test("14. the ruleset row is NOT data-filtered: content with no tree still resolves both rulesets", () => {
+    // Mike's 2026-09-01 ruling. A ruleset is a built-in engine module, so no
+    // reading of the installed data may remove one -- this used to be
+    // AvailableRulesetsForGameInTrees, which emptied the ruleset row for mg2
+    // on a machine with no rerelease tree (the row then drew NO value at all).
     const classicOnly: DataTreeScans = {
       classic: scans.classic,
       rerelease: ScanDataTree(realSeam, "rerelease", ""),
     };
 
+    // The mount-planning question still answers honestly...
     expect(AvailableDataTreesFor(curated("baseq2"), "rerelease", classicOnly)).toEqual([]);
-    expect(AvailableRulesetsForGameInTrees(curated("baseq2"), classicOnly)).toEqual(["classic"]);
-    // mg2/n64 exist only under the kex ruleset, so they drop out entirely.
-    expect(AvailableRulesetsForGameInTrees(curated("mg2"), classicOnly)).toEqual([]);
-
-    // With both trees present the kex ruleset is back.
-    expect(AvailableRulesetsForGameInTrees(curated("baseq2"), scans)).toEqual(["classic", "rerelease"]);
+    // ...but every content still has a launch plan under BOTH rulesets, which
+    // is what lets the menu row cycle them unconditionally.
+    for (const id of ["baseq2", "xatrix", "rogue", "ctf", "mg2", "n64", "lmctf"] as const) {
+      for (const ruleset of ["classic", "rerelease"] as const) {
+        const plan = ResolveLaunchForGame(curated(id), ruleset, "");
+        expect(plan).not.toBeNull();
+        expect(plan?.map.length).toBeGreaterThan(0);
+        // the ruleset picks the game MODULE
+        expect(plan?.game).toBe(ruleset === "rerelease" ? "kex" : (ResolveLaunch(id, "classic")?.game ?? ""));
+      }
+    }
   });
 
-  test("15. discovered mods are listed per tree, and labelled when they exist in only one", () => {
+  test("15. DataTreesForGame: which trees hold a content's maps, ruleset-independent", () => {
+    // shared campaigns live in both fixture trees
+    expect(DataTreesForGame(curated("baseq2"), scans)).toEqual(["classic", "rerelease"]);
+    expect(DataTreesForGame(curated("xatrix"), scans)).toEqual(["classic", "rerelease"]);
+    // rerelease-only and classic-only content each name their one tree
+    expect(DataTreesForGame(curated("mg2"), scans)).toEqual(["rerelease"]);
+    expect(DataTreesForGame(curated("n64"), scans)).toEqual(["rerelease"]);
+    expect(DataTreesForGame(curated("lmctf"), scans)).toEqual(["classic"]);
+    // discovered mods are placed by the tree that actually has the directory
+    expect(DataTreesForGame({ kind: "discovered", dirname: "classicmod" }, scans)).toEqual(["classic"]);
+    expect(DataTreesForGame({ kind: "discovered", dirname: "kexmod" }, scans)).toEqual(["rerelease"]);
+  });
+
+  test("16. discovered mods are listed across both trees, with PLAIN names (no tree suffix)", () => {
     const discovered = DiscoverGameDirsInTrees(scans);
     expect(discovered).toContain("classicmod");
     expect(discovered).toContain("kexmod");
@@ -514,16 +540,46 @@ describe("menu_content.ts -- per-tree availability is scanned, not assumed", () 
     expect(discovered).not.toContain("xatrix");
     expect(discovered).not.toContain("lmctf");
 
-    const classicMod: SelectableGame = { kind: "discovered", dirname: "classicmod" };
-    const kexMod: SelectableGame = { kind: "discovered", dirname: "kexmod" };
+    // Mike's 2026-09-01 finding 2: the content row names the GAME and nothing
+    // else. "Quake II (original)" / "classicmod (original)" are gone -- the
+    // maps/data row is where the tree is chosen.
+    expect(GameListDisplayName({ kind: "discovered", dirname: "classicmod" })).toBe("classicmod");
+    expect(GameListDisplayName(curated("baseq2"))).toBe("Quake II");
+    expect(GameListDisplayName(curated("mg2"))).toBe("Call of the Machine");
+    for (const content of CONTENT_LIST) {
+      expect(content.name).not.toMatch(/\((original|re-release|map pack)\)/);
+    }
+  });
 
-    expect(AvailableDataTreesFor(classicMod, "classic", scans)).toEqual(["classic"]);
-    expect(AvailableDataTreesFor(kexMod, "classic", scans)).toEqual(["rerelease"]);
+  test("17. GamesWithData drops content no tree holds, and never empties the row", () => {
+    const all = BuildGameList(DiscoverGameDirsInTrees(scans));
+    const listed = GamesWithData(all, scans).map((g) => GameListDisplayName(g));
+    // every fixture campaign is installed somewhere, so all survive
+    expect(listed).toContain("Quake II");
+    expect(listed).toContain("Call of the Machine");
+    expect(listed).toContain("Lithium CTF");
+    expect(listed).toContain("classicmod");
 
-    expect(GameListDisplayNameInTrees(classicMod, scans)).toBe(`classicmod (${DataTreeDisplayName("classic")})`);
-    expect(GameListDisplayNameInTrees(kexMod, scans)).toBe(`kexmod (${DataTreeDisplayName("rerelease")})`);
-    // present in both trees -> no tag
-    expect(GameListDisplayNameInTrees(curated("baseq2"), scans)).toBe("Quake II");
+    // A tree pair the scan can read nothing out of must not empty the row --
+    // an optimistic list beats a blank screen.
+    const blind: DataTreeScans = {
+      classic: ScanDataTree(realSeam, "classic", ""),
+      rerelease: ScanDataTree(realSeam, "rerelease", ""),
+    };
+    expect(GamesWithData(all, blind).length).toBe(all.length);
+
+    // Curated content no tree holds IS dropped...
+    const classicOnly: DataTreeScans = { classic: scans.classic, rerelease: ScanDataTree(realSeam, "rerelease", "") };
+    const classicOnlyNames = GamesWithData(all, classicOnly).map((g) => GameListDisplayName(g));
+    expect(classicOnlyNames).toContain("Quake II");
+    expect(classicOnlyNames).not.toContain("Call of the Machine");
+
+    // ...but a DISCOVERED gamedir never is. It was found by a directory scan
+    // of basedir/homedir, which are not the data trees, so a tree that has
+    // never heard of it is not evidence that it is missing.
+    const mod: SelectableGame = { kind: "discovered", dirname: "somemod-not-in-any-tree" };
+    expect(GamesWithData([...all, mod], scans)).toContain(mod);
+    expect(GamesWithData([...all, mod], classicOnly)).toContain(mod);
   });
 });
 

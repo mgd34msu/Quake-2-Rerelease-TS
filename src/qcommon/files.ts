@@ -356,6 +356,32 @@ function contentRoot(): string {
 
 /*
 ================
+FindRereleaseTreeUnder
+
+The 2023 tree as a CHILD of another root, or null. The retail layout ships it
+that way -- "Quake 2/rerelease" sitting beside "Quake 2/baseq2" -- so a client
+launched with basedir pointing at the classic half has the rerelease half one
+directory down, not somewhere unrelated. Only immediate children are looked
+at, and only until the first hit; this runs once, during FS_InitFilesystem.
+================
+*/
+function FindRereleaseTreeUnder(root: string): string | null {
+  if (!root.length) return null;
+  let entries: string[];
+  try {
+    entries = readdirSync(root);
+  } catch {
+    return null;
+  }
+  for (const entry of entries.sort()) {
+    const candidate = `${root}/${entry}`;
+    if (FS_RootIsRerelease(candidate)) return candidate;
+  }
+  return null;
+}
+
+/*
+================
 FS_RootIsRerelease
 
 The auto-detection rule for telling the two data trees apart without
@@ -1668,7 +1694,19 @@ export function FS_InitFilesystem(): void {
     // by construction (see its comment above).
     const candidates = [basedirString(), contentRootValue].filter((p) => p.length > 0);
     if (rereleaseVar && !rereleaseVar.string.length) {
-      const found = candidates.find((p) => FS_RootIsRerelease(p));
+      // ...and, failing that, one directory down. FIX (Mike's 2026-09-01 play
+      // test): the retail Steam layout puts the 2023 tree in a "rerelease"
+      // SUBFOLDER of the classic install ("Quake 2/rerelease" next to
+      // "Quake 2/baseq2"), which is exactly how this machine is laid out --
+      // /home/buzzkill/q2rets is a classic tree whose rerelease/ child is the
+      // 2023 one. Launching the client from the parent therefore left
+      // data_root_rerelease empty, the New Game screen's rerelease scan
+      // "not present", and every re-release ruleset/data/content option
+      // unavailable: the content row read "Quake II (original)", the ruleset
+      // row went blank on Call of the Machine, and neither that row nor
+      // maps/data had a second value to move to. Nothing about that machine
+      // is actually missing -- the install just was not looked for.
+      const found = candidates.find((p) => FS_RootIsRerelease(p)) ?? candidates.map((p) => FindRereleaseTreeUnder(p)).find((p) => p !== null);
       if (found) cvar.Cvar_ForceSet("data_root_rerelease", found);
     }
     if (classicVar && !classicVar.string.length) {

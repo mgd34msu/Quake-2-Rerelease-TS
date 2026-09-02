@@ -719,10 +719,52 @@ export function Key_Init(): void {
   //
   // register our functions
   //
+  Cmd_AddCommand("menukey", Key_MenuKey_f);
   Cmd_AddCommand("bind", Key_Bind_f);
   Cmd_AddCommand("unbind", Key_Unbind_f);
   Cmd_AddCommand("unbindall", Key_Unbindall_f);
   Cmd_AddCommand("bindlist", Key_Bindlist_f);
+}
+
+/*
+===================
+Key_MenuKey_f
+
+menukey <keyname> [count] -- DEVELOPER AID (added 2026-09-01 for the New Game
+menu verification pass). Feeds a full press/release pair through Key_Event,
+exactly as the SDL event loop would, so a .cfg can drive a menu screen without
+a human at the keyboard:
+
+    menu_content ; wait ; menukey downarrow 2 ; wait ; menukey rightarrow
+
+`count` (default 1) repeats the press; the release between repeats is what
+keeps Key_Event's autorepeat filter from swallowing them. Key names are the
+ones `bind` uses (Key_StringToKeynum), so "downarrow", "rightarrow", "enter",
+"escape" and the printable characters all work.
+
+Not gated on a developer cvar: it can only do what pressing the key does, and
+that is the point -- it exists so an automated run and a player produce the
+same input path rather than a special test-only one.
+===================
+*/
+function Key_MenuKey_f(): void {
+  if (Cmd_Argc() < 2) {
+    Com_Printf("usage: menukey <keyname> [count]\n");
+    return;
+  }
+
+  const name = Cmd_Argv(1);
+  const key = Key_StringToKeynum(name);
+  if (key === -1) {
+    Com_Printf('"%s" isn\'t a valid key\n', name);
+    return;
+  }
+
+  const count = Cmd_Argc() > 2 ? Math.trunc(Number(Cmd_Argv(2))) : 1;
+  for (let i = 0; i < (Number.isFinite(count) && count > 0 ? count : 1); i++) {
+    Key_Event(key, true, 0);
+    Key_Event(key, false, 0);
+  }
 }
 
 /*

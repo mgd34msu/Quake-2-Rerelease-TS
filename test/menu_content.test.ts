@@ -52,8 +52,11 @@ import { CVAR_LATCH } from "../src/shared/q_shared";
 import { Com_SetServerState } from "../src/qcommon/common";
 import { FS_InitFilesystem } from "../src/qcommon/files";
 import { MapDB_Init, MapDB_Get, MapDB_Shutdown, MapDB_ResolveBsp, MapDB_UnitsForEpisode } from "../src/qcommon/mapdb";
-import { CONTENT_LIST, RULESETS, AvailableRulesetsFor, ResolveLaunch, PerformLaunch, type LaunchPlan } from "../src/client/menu_content";
-import { M_Menu_Game_f, M_Menu_Content_f, BeginContentFunc } from "../src/client/menu";
+import { CONTENT_LIST, RULESETS, AvailableRulesetsFor, ResolveLaunch, PerformLaunch, ResetDataTreeScanCache, type LaunchPlan } from "../src/client/menu_content";
+import { M_Menu_Game_f, M_Menu_Content_f, BeginContentFunc, Content_MenuKey, Content_MenuRowsForTests, Content_LayoutForTests } from "../src/client/menu";
+import { viddef } from "../src/client/vid";
+import { K_DOWNARROW, K_LEFTARROW, K_RIGHTARROW } from "../src/client/keys";
+import { CL_Seats_Available } from "../src/client/cl_seats";
 import { cls, KeydestT } from "../src/client/client";
 
 const SYNTHETIC_MAPDB = {
@@ -340,5 +343,182 @@ describe("PerformLaunch -- game-mode cvars (New Game never starts deathmatch)", 
     Cvar_ForceSet("maxclients", "8");
     PerformLaunch(plan, "base1", null, true);
     expect(Cvar_VariableString("maxclients")).toBe("8");
+  });
+});
+
+/*
+=============================================================================
+NEW GAME SCREEN ROWS (Mike's 2026-09-01 play test)
+
+Every one of these is a regression for something he hit with a controller in
+his hands, on a machine whose rerelease tree the data scan could not see:
+
+  finding 2  the content row read "Quake II (original)"
+  finding 3  switching content to "Call of the Machine" blanked the ruleset
+             row's VALUE -- the row drew a label and nothing else
+  finding 4  neither the ruleset nor the maps/data row would move under
+             left/right; both had been filtered down to a single entry
+  finding 5  "local players" was pinned to "1 (no split)" by the attached
+             gamepad count, so splitscreen could not be selected at all
+
+The scenario is reproduced the harsh way: data_root_classic and
+data_root_rerelease forced EMPTY, so the availability scan knows nothing about
+anything. That is the exact state his session was in, and it is now required
+to change nothing about which options the screen offers.
+=============================================================================
+*/
+describe("New Game screen -- every row shows a value and every row cycles", () => {
+  type RowT = { name: string; value: string; values: string[]; focused: boolean };
+  const rowsByName = (): Map<string, RowT> => {
+    const map = new Map<string, RowT>();
+    for (const row of Content_MenuRowsForTests()) map.set(row.name, row);
+    return map;
+  };
+
+  // Put the menu cursor on a named row with real K_DOWNARROW presses (the
+  // screen's widget state and cursor persist between opens, exactly as they do
+  // for a player reopening the menu, so nothing here may assume a position).
+  const focus = (name: string): void => {
+    for (let i = 0; i <= Content_MenuRowsForTests().length; i++) {
+      if (rowsByName().get(name)?.focused) return;
+      Content_MenuKey(K_DOWNARROW);
+    }
+    throw new Error(`could not focus row "${name}"`);
+  };
+
+  // Wind the focused spincontrol back to its first value with K_LEFTARROW,
+  // which clamps at index 0 (SpinControl_DoSlide).
+  const rewind = (name: string): void => {
+    focus(name);
+    for (let i = 0; i <= (rowsByName().get(name)?.values.length ?? 0); i++) Content_MenuKey(K_LEFTARROW);
+  };
+
+  beforeEach(() => {
+    Com_SetServerState(0);
+    // The blind-scan scenario: no data tree is configured at all.
+    Cvar_ForceSet("data_root_classic", "");
+    Cvar_ForceSet("data_root_rerelease", "");
+    ResetDataTreeScanCache();
+    M_Menu_Content_f();
+  });
+
+  test("no row is ever blank, on a machine the scan knows nothing about", () => {
+    for (const row of Content_MenuRowsForTests()) {
+      expect(row.value.length).toBeGreaterThan(0);
+    }
+  });
+
+  test("finding 3: the ruleset row keeps a value on Call of the Machine", () => {
+    // walk the content row to Call of the Machine
+    rewind("content");
+    const target = rowsByName().get("content")?.values.indexOf("Call of the Machine") ?? -1;
+    expect(target).toBeGreaterThanOrEqual(0);
+    for (let i = 0; i < target; i++) Content_MenuKey(K_RIGHTARROW);
+
+    const after = rowsByName();
+    expect(after.get("content")?.value).toBe("Call of the Machine");
+    // the row that used to go blank
+    expect(after.get("ruleset")?.value.length).toBeGreaterThan(0);
+    expect(after.get("ruleset")?.values.length).toBe(RULESETS.length);
+    // ...and the maps/data row still names a tree
+    expect(after.get("maps/data")?.value.length).toBeGreaterThan(0);
+  });
+
+  test("finding 4: the ruleset row cycles both engine modules, for every content", () => {
+    const content = rowsByName().get("content");
+    const contentCount = content?.values.length ?? 0;
+    expect(contentCount).toBeGreaterThan(0);
+
+    for (let c = 0; c < contentCount; c++) {
+      rewind("content");
+      for (let i = 0; i < c; i++) Content_MenuKey(K_RIGHTARROW);
+
+      expect(rowsByName().get("ruleset")?.values).toEqual(RULESETS.map((r) => r.name));
+
+      // and it really moves, both ways
+      rewind("ruleset");
+      expect(rowsByName().get("ruleset")?.value).toBe(RULESETS[0]?.name);
+      Content_MenuKey(K_RIGHTARROW);
+      expect(rowsByName().get("ruleset")?.value).toBe(RULESETS[1]?.name);
+      Content_MenuKey(K_LEFTARROW);
+      expect(rowsByName().get("ruleset")?.value).toBe(RULESETS[0]?.name);
+    }
+  });
+
+  test("finding 2: content names carry no data-tree suffix", () => {
+    for (const name of rowsByName().get("content")?.values ?? []) {
+      expect(name).not.toMatch(/\((original|re-release)\)/);
+    }
+  });
+
+  test("finding 5: local players offers 1-4 with no gamepads attached", () => {
+    expect(rowsByName().get("local players")?.values).toEqual(["1 (no split)", "2", "3", "4"]);
+
+    rewind("local players");
+    expect(rowsByName().get("local players")?.value).toBe("1 (no split)");
+    Content_MenuKey(K_RIGHTARROW);
+    expect(rowsByName().get("local players")?.value).toBe("2");
+    Content_MenuKey(K_RIGHTARROW);
+    expect(rowsByName().get("local players")?.value).toBe("3");
+    Content_MenuKey(K_RIGHTARROW);
+    expect(rowsByName().get("local players")?.value).toBe("4");
+    // no pads are attached under `bun test`; the count is a hint, not a cap
+    expect(CL_Seats_Available()).toBe(1);
+  });
+});
+
+/*
+LAYOUT (Mike's 2026-09-01 finding 1: "the New Game title is drawn overlapping
+the first row"). The title used to be pinned to viddef.height / 2 - 60 while
+Menu_Center put the first row at viddef.height / 2 - 55 -- both measured from
+the same midpoint, so an 8-pixel-tall title always landed 5 pixels above an
+8-pixel-tall row, at EVERY resolution. The title is now placed relative to the
+menu body, so this checks the whole ladder at once: banner, title, first row,
+last row, statusbar, at every mode in the table plus the sizes the
+vid_scale/vid_scale_fit path produces (which only ever changes viddef).
+*/
+describe("New Game screen -- layout never overlaps, at any resolution", () => {
+  const SIZES: [number, number][] = [
+    [320, 240], // vanilla low mode, and what vid_scale 0.5 of 640x480 renders
+    [400, 300],
+    [512, 384],
+    [640, 480],
+    [800, 600],
+    [1024, 768],
+    [1280, 960],
+    [1920, 1080],
+    [2560, 1440],
+    [3840, 2160],
+  ];
+
+  test("the title clears the first row, and the last row clears the statusbar", () => {
+    const restore = { width: viddef.width, height: viddef.height };
+    try {
+      for (const [width, height] of SIZES) {
+        viddef.width = width;
+        viddef.height = height;
+        M_Menu_Content_f();
+
+        const layout = Content_LayoutForTests();
+        const first = layout.rows[0];
+        const last = layout.rows[layout.rows.length - 1];
+        expect(first).toBeDefined();
+        expect(last).toBeDefined();
+
+        // the actual defect: title glyphs must end before the first row starts
+        expect(layout.titleY + layout.titleHeight).toBeLessThanOrEqual(first?.y ?? 0);
+        // ...and the title must not run off the top of the screen either
+        expect(layout.titleY).toBeGreaterThanOrEqual(0);
+        // the body must fit above the statusbar strip
+        expect((last?.y ?? 0) + 8).toBeLessThanOrEqual(layout.statusbarY);
+        // rows keep their authored 20-unit rhythm, in order
+        for (let i = 1; i < layout.rows.length; i++) {
+          expect(layout.rows[i]?.y ?? 0).toBeGreaterThan(layout.rows[i - 1]?.y ?? 0);
+        }
+      }
+    } finally {
+      viddef.width = restore.width;
+      viddef.height = restore.height;
+    }
   });
 });

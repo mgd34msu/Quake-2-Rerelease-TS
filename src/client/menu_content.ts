@@ -122,7 +122,7 @@ export const CONTENT_LIST: ReadonlyArray<ContentDef> = [
   { id: "ctf", name: "Capture the Flag", needsSkillSelect: false, mapdbEpisodeId: null },
   { id: "mg2", name: "Call of the Machine", needsSkillSelect: true, mapdbEpisodeId: "mg2" },
   { id: "n64", name: "Quake II 64", needsSkillSelect: true, mapdbEpisodeId: "n64" },
-  { id: "lmctf", name: "Lithium CTF (map pack)", needsSkillSelect: false, mapdbEpisodeId: null },
+  { id: "lmctf", name: "Lithium CTF", needsSkillSelect: false, mapdbEpisodeId: null },
 ];
 
 export interface LaunchPlan {
@@ -626,8 +626,40 @@ export function LaunchPlanForDiscovered(dirname: string, firstMap: string): Laun
 
 // One-call launch-plan resolution for either branch of a SelectableGame --
 // menu.ts's BeginContentFunc no longer needs its own kind-branch.
+//
+// EVERY CONTENT UNDER EVERY RULESET (Mike, 2026-09-01): the New Game screen's
+// ruleset row cycles both engine modules for everything on the content row, so
+// this has to answer for pairs LAUNCH_TABLE has no row for -- "Call of the
+// Machine under the classic module", say. There is nothing conditional left to
+// decide there: the ruleset picks the game MODULE, the content picks the MAP,
+// and CrossRulesetPlan below simply says so. A pair whose map the chosen
+// module cannot cope with is an engine bug to go and fix, which is exactly
+// what Mike wants to be able to reach from the menu; it is not the menu's job
+// to refuse.
 export function ResolveLaunchForGame(game: SelectableGame, ruleset: RulesetId, firstMap: string): LaunchPlan | null {
-  return game.kind === "curated" ? ResolveLaunch(game.content.id, ruleset) : LaunchPlanForDiscovered(game.dirname, firstMap);
+  if (game.kind !== "curated") return LaunchPlanForDiscovered(game.dirname, firstMap);
+  return ResolveLaunch(game.content.id, ruleset) ?? CrossRulesetPlan(game.content.id, ruleset);
+}
+
+/*
+===============
+CrossRulesetPlan
+
+The launch plan for a (content, ruleset) pair the table has no row for: the
+content's map, run by the OTHER ruleset's game module.
+
+Which module that is, is the whole of the mapping. "rerelease" is always the
+single "kex" module. "classic" is the content's own legacy gamedir when the
+content HAS one in the table (it would have been found by ResolveLaunch), so
+in practice it is baseq2 -- the "" gamedir -- which is where the legacy binding
+runs anything it was not shipped a mission pack for.
+===============
+*/
+function CrossRulesetPlan(content: ContentId, ruleset: RulesetId): LaunchPlan | null {
+  const entry = LAUNCH_TABLE[content];
+  const source = RULESETS.map((r) => entry[r.id]).find((plan) => plan !== undefined);
+  if (!source) return null;
+  return { game: ruleset === "rerelease" ? "kex" : "", map: source.map, startItems: "", ctf: source.ctf };
 }
 
 /*
@@ -863,13 +895,15 @@ AvailableDataTreesFor
 Which data trees a (game, ruleset) selection can actually run out of, in
 DATA_TREES' fixed display order.
 
-Rule (a) is enforced here as a PRECONDITION rather than as a forced choice:
-the kex ruleset needs the rerelease tree mounted either way (primary, or
-beneath the classic tree as the asset fallback), so if there is no rerelease
-tree on this machine at all, the kex ruleset offers no data trees -- and
-AvailableRulesetsForGameInTrees below therefore drops the ruleset entirely,
-instead of letting the player pick a combination that would reproduce
-finding 2's spam.
+Rule (a) is enforced here as a PRECONDITION: the kex ruleset needs the
+rerelease tree mounted either way (primary, or beneath the classic tree as the
+asset fallback), so with no rerelease tree on the machine it has no data tree
+to name.
+
+NOTE (2026-09-01): the New Game screen's "maps/data" row no longer calls this
+-- it asks DataTreesForGame, which is ruleset-independent -- and its ruleset
+row never did filter on data again. This stays as the mount-planning question
+it always was: given a ruleset, which trees hold the content.
 ===============
 */
 export function AvailableDataTreesFor(game: SelectableGame, ruleset: RulesetId, scans: DataTreeScans): DataTreeId[] {
@@ -891,28 +925,18 @@ export function AvailableDataTreesFor(game: SelectableGame, ruleset: RulesetId, 
 
 /*
 ===============
-AvailableRulesetsForGameInTrees
+AvailableRulesetsForGameInTrees -- DELETED (Mike, 2026-09-01)
 
-AvailableRulesetsForGame with rule (a)'s ONE precondition applied: the kex
-ruleset needs a rerelease tree to exist, because it is mounted either way
-(primary, or beneath the classic tree as the asset fallback). On a
-classic-only install there is nothing to mount, so the ruleset is not
-offered -- which is precisely the combination that produced Mike's finding-2
-asset spam.
-
-Deliberately NOT narrowed any further than that. An earlier revision also
-dropped any ruleset whose content the scan could not find in either tree;
-that made the whole screen depend on the scan being right about every
-install layout, and an unconfigured data_root_classic/data_root_rerelease
-pair (both scans "not present") left the player with no selectable ruleset
-at all and a "begin" that silently did nothing. The scan drives the DATA
-row, where being wrong costs a greyed spincontrol; it does not get to veto
-the ruleset row, where being wrong costs the ability to start a game.
+This used to drop the "rerelease" ruleset from the New Game screen whenever
+the rerelease data tree was not visible to the scan. Mike's play test killed
+it: a ruleset is a built-in engine game module, not data, so no reading of the
+player's install gets to remove one. The filter is also what emptied the
+ruleset row's item list on Call of the Machine (the row drew no value at all)
+and left every other content with a single entry that left/right could not
+move off. The row now lists RULESETS unconditionally -- see menu.ts's
+RebuildRulesets.
 ===============
 */
-export function AvailableRulesetsForGameInTrees(game: SelectableGame, scans: DataTreeScans): RulesetId[] {
-  return AvailableRulesetsForGame(game).filter((ruleset) => ruleset !== "rerelease" || scanFor(scans, "rerelease").present);
-}
 
 /*
 ===============
@@ -948,8 +972,7 @@ DiscoverGameDirsInTrees
 The discovered-mod list across BOTH trees, deduped by name and sorted --
 the per-tree replacement for DiscoverGameDirs' single root list. A mod that
 exists in both trees appears once; AvailableDataTreesFor reports which trees
-it can be played from, and GameListDisplayNameInTrees labels the
-single-tree case.
+it can be played from.
 ===============
 */
 export function DiscoverGameDirsInTrees(scans: DataTreeScans): string[] {
@@ -966,22 +989,61 @@ export function DiscoverGameDirsInTrees(scans: DataTreeScans): string[] {
 
 /*
 ===============
-GameListDisplayNameInTrees
+DataTreesForGame
 
-The menu row's label, with a tree tag when the game exists in only one of
-the two trees ("lmctf (original)") so the player can tell at a glance which
-data a discovered mod belongs to. Games present in both trees keep their
-plain name -- the "maps/data" spincontrol is where that choice is made.
+Which data trees actually hold this content's maps, in DATA_TREES' fixed
+display order -- the whole basis of the New Game screen's "maps/data" row.
+
+Deliberately ruleset-INDEPENDENT (Mike's 2026-09-01 ruling). A ruleset is a
+built-in engine game module, not data: the classic and kex modules are both
+compiled into this client and neither is something a data tree can be missing.
+So which tree a piece of content can be played out of is a question about
+MAPS alone, and the answer is the same whichever module runs them. An empty
+result means no tree on this machine has that content's maps at all, which is
+what keeps such content off the content row entirely (GamesWithData below)
+rather than putting a dead entry in it.
 ===============
 */
-export function GameListDisplayNameInTrees(game: SelectableGame, scans: DataTreeScans): string {
-  const name = GameListDisplayName(game);
-  const trees = new Set<DataTreeId>();
-  for (const ruleset of AvailableRulesetsForGame(game)) {
-    for (const treeId of AvailableDataTreesFor(game, ruleset, scans)) trees.add(treeId);
-  }
-  if (trees.size !== 1) return name;
-  const only = [...trees][0];
-  if (only === undefined) return name;
-  return `${name} (${DataTreeDisplayName(only)})`;
+export function DataTreesForGame(game: SelectableGame, scans: DataTreeScans): DataTreeId[] {
+  return DATA_TREES.map((t) => t.id).filter((treeId) => {
+    const scan = scanFor(scans, treeId);
+    if (!scan.present) return false;
+    if (game.kind === "discovered") return scan.gamedirs.includes(game.dirname);
+    return AvailableRulesetsFor(game.content.id).some((ruleset) => {
+      const plan = ResolveLaunch(game.content.id, ruleset);
+      return plan !== null && LaunchPlanRunsInTree(plan, scan);
+    });
+  });
+}
+
+/*
+===============
+GamesWithData
+
+The content row's list: every game whose data is actually installed in one of
+the trees this machine has. Content with no maps anywhere is dropped, so the
+row never offers something that cannot load.
+
+The one guard: if that leaves NOTHING -- neither data_root_* resolved to a
+readable tree, so the scan knows nothing about anything -- the full list is
+returned unfiltered. An empty content row would be a worse answer than an
+optimistic one, and the scan being blind is not evidence that the player's
+install is empty.
+===============
+*/
+export function GamesWithData(games: readonly SelectableGame[], scans: DataTreeScans): SelectableGame[] {
+  // DISCOVERED games are never filtered. They exist because a directory scan
+  // just found them on disk (menu.ts's DiscoverGameDirs over basedir and
+  // homedir, which are NOT the data trees), so asking a data tree whether it
+  // has heard of them answers the wrong question -- and answering "no" would
+  // drop an installed mod off the row, which is what this filter exists to
+  // prevent, not to cause.
+  const curated = games.filter((game) => game.kind === "curated");
+  const withData = curated.filter((game) => DataTreesForGame(game, scans).length > 0);
+  // Blind scan (neither data_root_* resolved to a readable tree): keep the
+  // whole curated list. An empty content row would be a worse answer than an
+  // optimistic one, and the scan being blind is not evidence that the
+  // player's install is empty.
+  const keep = withData.length ? withData : curated;
+  return games.filter((game) => game.kind !== "curated" || keep.includes(game));
 }

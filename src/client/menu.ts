@@ -90,7 +90,7 @@ import { Cmd_AddCommand } from "../qcommon/cmd";
 import { Cbuf_AddText, Cbuf_InsertText, Cbuf_Execute } from "../qcommon/cmd";
 import { Cvar_Get, Cvar_Set, Cvar_SetValue, Cvar_VariableValue, Cvar_VariableString, Cvar_ForceSet } from "../qcommon/cvar";
 import { Com_Printf, Com_Error, Com_ServerState } from "../qcommon/common";
-import { CL_Seats_Available } from "./cl_seats";
+import { CL_Seats_Available, MAX_LOCAL_SEATS } from "./cl_seats";
 import { SDL_GamepadDevices, SDL_GamepadDeviceGeneration, SDL_GamepadRefreshAssignments, type GamepadDeviceInfoT } from "../platform/sdl";
 import {
   DEVICE_AUTO,
@@ -186,13 +186,12 @@ import {
   StartPointsForSelection,
   ResolveLaunchForGame,
   DataTreeDisplayName,
-  EffectiveDataTreeFor,
   DataMountPlanFor,
   CachedScanDataTree,
-  AvailableDataTreesFor,
-  AvailableRulesetsForGameInTrees,
   DiscoverGameDirsInTrees,
-  GameListDisplayNameInTrees,
+  DataTreesForGame,
+  GamesWithData,
+  GameListDisplayName,
   type SelectableGame,
   type GameFsSeam,
   type RulesetId,
@@ -2133,63 +2132,85 @@ function bootedDataTree(): DataTreeId {
 }
 
 function currentDataTree(): DataTreeId | null {
-  const picked = content_data_trees[s_content_data_list.curvalue] ?? null;
-  if (picked) return picked;
-  // Nothing selectable: EffectiveDataTreeFor decides whether that means "no
-  // remount" (classic) or "rerelease anyway" (kex -- rule (a)).
-  const ruleset = currentRuleset();
-  return ruleset ? EffectiveDataTreeFor(ruleset, content_data_trees, bootedDataTree()) : null;
+  return content_data_trees[s_content_data_list.curvalue] ?? null;
 }
 
-// The third rung of the cascade (game -> ruleset -> DATA TREE -> start
-// points): which trees the current (game, ruleset) pair can run out of.
-// A selection that exists in only one tree gets that tree forced and the
-// row greyed -- the player is shown what will happen rather than being
-// offered a choice with one legal value.
+/*
+The third rung of the cascade (game -> ruleset -> DATA TREE -> start points):
+which trees hold this content's maps.
+
+FIX (Mike's 2026-09-01 play test, finding 4 "could not switch maps/data at
+all"). Two things made this row read as a dead control. It was built from
+AvailableDataTreesFor, which is RULESET-filtered -- and the ruleset filter
+dropped every rerelease answer whenever the rerelease tree was not visible to
+the scan, which on Mike's machine it never was (see FS_InitFilesystem's
+data_root_rerelease auto-fill: his rerelease install is a SUBFOLDER of his
+basedir, so it went undetected and the whole rerelease column read empty).
+Whatever survived was then greyed whenever it held fewer than two entries.
+
+The row is now a plain question about MAPS -- menu_content.ts's
+DataTreesForGame, which does not consult the ruleset at all, because a ruleset
+is a built-in engine module and not something a data tree can be missing. With
+both of Mike's trees detected, Quake II offers both; expansion content offers
+whichever trees actually carry it. One tree means one value, shown plainly and
+never greyed; the row is never empty, because content with no maps in any tree
+is not on the content row to begin with (GamesWithData).
+*/
 function RebuildDataTrees(): void {
   const game = currentSelectableGame();
-  const ruleset = currentRuleset();
 
-  content_data_trees = ruleset ? AvailableDataTreesFor(game, ruleset, currentScans()) : [];
-  s_content_data_list.itemnames = content_data_trees.length ? content_data_trees.map(DataTreeDisplayName) : [DataTreeDisplayName(bootedDataTree())];
-  // Default to the tree the engine booted against, when this selection is
-  // available in it -- not to list position 0.
+  content_data_trees = DataTreesForGame(game, currentScans());
+  if (!content_data_trees.length) content_data_trees = [bootedDataTree()];
+  s_content_data_list.itemnames = content_data_trees.map(DataTreeDisplayName);
   if (s_content_data_list.curvalue >= s_content_data_list.itemnames.length) s_content_data_list.curvalue = 0;
+
+  // Default to the tree the engine booted against when this content is in it,
+  // so opening the screen and pressing "begin" keeps playing out of the tree
+  // the client was launched with -- not to list position 0.
   const bootedIndex = content_data_trees.indexOf(bootedDataTree());
   if (bootedIndex >= 0) s_content_data_list.curvalue = bootedIndex;
-  // Same QMF_GRAYED-as-honest-marker convention as the skill row above.
-  s_content_data_list.generic.flags = content_data_trees.length > 1 ? 0 : QMF_GRAYED;
+
+  s_content_data_list.generic.flags = 0;
+  s_content_data_list.generic.statusbar = "which install the maps and assets come from";
 }
 
-// Rebuilds the ruleset spincontrol for whichever game is now selected,
-// then cascades into RebuildStartPoints (the unit browser depends on both
-// game AND ruleset -- a classic-ruleset selection never has mapdb units to
-// browse, only the rerelease side does).
+/*
+The ruleset row: ALWAYS every ruleset the engine has, for every content.
+
+FIX (Mike's 2026-09-01 play test, findings 3 and 4). The list used to be
+AvailableRulesetsForGameInTrees, which filtered the rulesets by what the data
+scan believed was installed. Two failures came out of that one filter. For
+"Call of the Machine" -- whose only table entry is the rerelease one -- the
+filtered list came back EMPTY on a machine whose rerelease tree the scan could
+not see, so itemnames was empty and SpinControl_Draw had nothing to draw: the
+row's value vanished. For every other content it left exactly one entry, so
+left/right moved nothing and the row read as locked.
+
+Mike's ruling: the two rulesets are built-in engine game modules (the frozen
+3.21 binding and the 2023 kex binding), both compiled into this client. Data
+cannot make one of them unavailable, so nothing about the player's install
+gets a vote here -- the row cycles both, for everything, and any combination
+that does not run yet is an engine bug to go fix, not a control to disable.
+*/
 function RebuildRulesets(): void {
-  const game = currentSelectableGame();
-  // Tree-aware: a ruleset with no usable data tree on this machine is not
-  // offered at all (menu_content.ts's AvailableRulesetsForGameInTrees) --
-  // that is what keeps the kex ruleset off a classic-only install, where
-  // selecting it used to produce Mike's finding-2 asset spam.
-  content_rulesets = AvailableRulesetsForGameInTrees(game, currentScans());
-  s_content_ruleset_list.itemnames = content_rulesets.map((id) => RULESETS.find((r) => r.id === id)?.name ?? id);
+  content_rulesets = RULESETS.map((r) => r.id);
+  s_content_ruleset_list.itemnames = RULESETS.map((r) => r.name);
   if (s_content_ruleset_list.curvalue >= content_rulesets.length) s_content_ruleset_list.curvalue = 0;
+  s_content_ruleset_list.generic.flags = 0;
+  s_content_ruleset_list.generic.statusbar = "which game rules run this content";
 
   // FIX (2026-08-30 audit): this used to OR in QMF_LEFT_JUSTIFY on both
   // branches. QMF_LEFT_JUSTIFY has no rendering effect on a MTYPE_SPINCONTROL
-  // (SpinControl_Draw never reads generic.flags -- only Action_Draw does),
-  // but qmenu_impl.ts's Menu_Draw cursor-draw branch DOES read it for every
-  // widget type: `menu.x + item.x - 24 + cursor_offset` when set, vs. plain
+  // (SpinControl_Draw never reads it -- only Action_Draw does), but
+  // qmenu_impl.ts's Menu_Draw cursor-draw branch DOES read it for every widget
+  // type: `menu.x + item.x - 24 + cursor_offset` when set, vs. plain
   // `menu.x + cursor_offset` when not. Since every sibling spincontrol here
-  // (content/ruleset/start) and the begin action (x=24, so its -24 cancels)
-  // all resolve to cursor x == menu.x, setting LEFT_JUSTIFY only on this one
-  // row shifted its blinking cursor 24px left of every other row's cursor
-  // whenever the player tabbed onto "skill". QMF_GRAYED alone is also a
-  // no-op on a spincontrol's own draw (same as vanilla: qmenu.c's
-  // SpinControl_Draw ignores QMF_GRAYED too, it's an MTYPE_ACTION-only
-  // flag) -- kept anyway as a harmless, honest "this row doesn't apply"
-  // marker, matching the pre-existing intent without the side effect.
-  s_content_skill_list.generic.flags = NeedsSkillSelectForGame(game) ? 0 : QMF_GRAYED;
+  // and the begin action (x=24, so its -24 cancels) all resolve to cursor
+  // x == menu.x, setting LEFT_JUSTIFY only on this one row shifted its
+  // blinking cursor 24px left of every other row's whenever the player tabbed
+  // onto "skill".
+  s_content_skill_list.generic.flags = 0;
+  s_content_skill_list.generic.statusbar = "difficulty the campaign starts on";
 
   RebuildSeats();
   RebuildDataTrees();
@@ -2197,29 +2218,37 @@ function RebuildRulesets(): void {
 }
 
 /*
-The seat row. Offered under EVERY ruleset (see s_content_seats_list's own
-comment for the removed kex-only gate), and capped at what the machine can
-actually drive: seat 0 is the keyboard/mouse, every seat past it needs its
-own gamepad, so with no second pad plugged in the row shows a single greyed
-"1" instead of offering a choice that would silently come up short. Same
-"forced single value, greyed" idiom the data-tree row already uses when only
-one tree holds the selection. That cap and the greyed-at-"1" behavior are
-UNCHANGED by the gate removal -- only the ruleset condition went away.
+The seat row (src/client/cl_seats.ts). Offered under EVERY ruleset, and, as of
+Mike's 2026-09-01 ruling, at EVERY count the engine supports: 1 through
+MAX_LOCAL_SEATS, whatever is plugged in.
+
+WAS: capped at CL_Seats_Available() -- one seat per attached, assigned
+gamepad. That made splitscreen unselectable, and untestable, on a machine with
+no pads: the row was a single greyed "1 (no split)" and there was no way to
+even see what two players would look like. The cap was also the wrong model. A
+seat with no controller is not an error; cl_seats.ts already spawns it, gives
+it a pane and a HUD, and feeds it an idle command every frame
+(CL_Seats_SendCmds' `if (!pad || !ps)` branch), so it simply sits there until a
+pad is plugged in and assigned -- at which point it starts moving, with no
+restart. How many pads are attached is a hint in the statusbar, not a cap.
 */
 function RebuildSeats(): void {
-  const available = CL_Seats_Available();
-
   const names: string[] = [];
-  for (let n = 1; n <= available; n++) names.push(n === 1 ? "1 (no split)" : String(n));
+  for (let n = 1; n <= MAX_LOCAL_SEATS; n++) names.push(n === 1 ? "1 (no split)" : String(n));
   s_content_seats_list.itemnames = names;
   if (s_content_seats_list.curvalue >= names.length) s_content_seats_list.curvalue = 0;
-  s_content_seats_list.generic.flags = names.length > 1 ? 0 : QMF_GRAYED;
-  // QMF_GRAYED draws nothing on a spin control in this codebase (see this
-  // function's own comment above and s_content_skill_list's), so when the row
-  // is stuck at "1" the statusbar is the only place that can say WHY and what
-  // to do about it. Points at the Controllers screen, which is where a player
-  // whose second pad is plugged in but unassigned goes to fix it.
-  s_content_seats_list.generic.statusbar = names.length > 1 ? "Options > Controllers assigns a pad to each player" : "one controller per extra player -- see Options > Controllers";
+  s_content_seats_list.generic.flags = 0;
+  UpdateSeatsHint();
+}
+
+// Plain hint: how many pads the client can see right now, and where to assign
+// them. Nothing here caps the row -- it is information. Re-run on every slide
+// of the row (its callback) so the count is current even if a pad was plugged
+// in while the menu was open.
+function UpdateSeatsHint(): void {
+  // CL_Seats_Available() is 1 (the keyboard/mouse seat) + assigned pads.
+  const pads = Math.max(0, CL_Seats_Available() - 1);
+  s_content_seats_list.generic.statusbar = `${pads} pad(s) found -- Options > Controllers`;
 }
 
 /** Seat count the "begin" action should launch with: the row's index plus
@@ -2269,6 +2298,10 @@ function RebuildStartPoints(): void {
 
   s_content_start_list.itemnames = content_units.length ? content_units.map((u) => u.title) : ["Start"];
   if (s_content_start_list.curvalue >= s_content_start_list.itemnames.length) s_content_start_list.curvalue = 0;
+  // Every row on this screen says what it is or why it cannot move (2026-09-01
+  // audit): with one entry there is no unit list for this selection, which is
+  // a fact about the content, not a broken control.
+  s_content_start_list.generic.statusbar = s_content_start_list.itemnames.length > 1 ? "where in the campaign to begin" : "this content has one starting point";
 }
 
 function ContentChangeFunc(): void {
@@ -2276,12 +2309,15 @@ function ContentChangeFunc(): void {
 }
 
 function ContentRulesetChangeFunc(): void {
-  RebuildDataTrees();
   RebuildStartPoints();
 }
 
 function ContentDataChangeFunc(): void {
   RebuildStartPoints();
+}
+
+function ContentSeatsChangeFunc(): void {
+  UpdateSeatsHint();
 }
 
 export function BeginContentFunc(): void {
@@ -2312,6 +2348,18 @@ export function BeginContentFunc(): void {
   M_ForceMenuOff();
 }
 
+// Vertical gap between the drawn "New Game" title and the first menu row. Two
+// 10-unit rows: one for the 8-pixel-tall title glyphs, one of clear space.
+const CONTENT_TITLE_GAP = 20;
+
+// Height of the banner pic this screen shares with the Game menu, 0 when the
+// data set has no such asset (nothing is drawn then, so nothing to clear).
+function ContentBannerHeight(): number {
+  if (!re) return 0;
+  const { h } = re.DrawGetPicSize("m_banner_game");
+  return h > 0 ? h : 0;
+}
+
 function Content_MenuInit(): void {
   MapDB_Init();
 
@@ -2328,7 +2376,12 @@ function Content_MenuInit(): void {
   // from still shows up. Deduped and re-sorted so the list is stable.
   content_scans = currentDataTreeScans();
   const discovered = [...new Set([...DiscoverGameDirs(gameFsSeam, gamedirScanRoots()), ...DiscoverGameDirsInTrees(content_scans)])].sort();
-  game_list = BuildGameList(discovered);
+  // Only content whose data is actually installed somewhere (Mike's
+  // 2026-09-01 ruling for this row): the content row cycles everything the
+  // machine can load and nothing it cannot. GamesWithData falls back to the
+  // full list if the scan came up blind, so a misconfigured data_root_* pair
+  // can never empty the row.
+  game_list = GamesWithData(BuildGameList(discovered), content_scans);
 
   s_content_menu.x = viddef.width * 0.5;
   s_content_menu.nitems = 0;
@@ -2337,11 +2390,15 @@ function Content_MenuInit(): void {
   s_content_list.generic.x = 0;
   s_content_list.generic.y = 0;
   s_content_list.generic.name = "content";
-  // Tree-tagged labels: a game that exists in only one tree says so
-  // ("Lithium CTF (map pack) (original)"), since its "maps/data" row will be
-  // a forced, greyed single value.
-  s_content_list.itemnames = game_list.map((g) => GameListDisplayNameInTrees(g, currentScans()));
+  // Plain content names, no tree tag. FIX (Mike's 2026-09-01 play test,
+  // finding 2): the row used to read "Quake II (original)" -- a data-tree name
+  // welded onto the content name, answering a question the "maps/data" row
+  // below already asks, and contradicting it whenever the scan was wrong about
+  // a tree. The content row names the GAME; the tree is the maps/data row's
+  // business.
+  s_content_list.itemnames = game_list.map((g) => GameListDisplayName(g));
   s_content_list.generic.callback = ContentChangeFunc;
+  s_content_list.generic.statusbar = "which game or map pack to play";
 
   s_content_ruleset_list.generic.type = MTYPE_SPINCONTROL;
   s_content_ruleset_list.generic.x = 0;
@@ -2371,11 +2428,13 @@ function Content_MenuInit(): void {
   s_content_coop_list.generic.y = 100;
   s_content_coop_list.generic.name = "coop";
   s_content_coop_list.itemnames = ["no", "yes"];
+  s_content_coop_list.generic.statusbar = "co-operative campaign rules";
 
   s_content_seats_list.generic.type = MTYPE_SPINCONTROL;
   s_content_seats_list.generic.x = 0;
   s_content_seats_list.generic.y = 120;
   s_content_seats_list.generic.name = "local players";
+  s_content_seats_list.generic.callback = ContentSeatsChangeFunc;
 
   s_content_begin_action.generic.type = MTYPE_ACTION;
   s_content_begin_action.generic.flags = QMF_LEFT_JUSTIFY;
@@ -2383,6 +2442,7 @@ function Content_MenuInit(): void {
   s_content_begin_action.generic.y = 140;
   s_content_begin_action.generic.name = "begin";
   s_content_begin_action.generic.callback = BeginContentFunc;
+  s_content_begin_action.generic.statusbar = "start the game";
 
   Menu_AddItem(s_content_menu, s_content_list);
   Menu_AddItem(s_content_menu, s_content_ruleset_list);
@@ -2396,9 +2456,25 @@ function Content_MenuInit(): void {
   Menu_Center(s_content_menu);
   // Owner request (2026-08-31): the centered menu body (and the drawn
   // "New Game" title above it) sat flush under the banner image -- push
-  // both down a couple of text rows of breathing room. The title offset
-  // in Content_MenuDraw moves with this.
+  // both down a couple of text rows of breathing room.
   s_content_menu.y += 20;
+
+  // LAYOUT FIX (Mike's 2026-09-01 play test, finding 1: "the title is drawn
+  // ON TOP of the first row"). The title used to be pinned to
+  // viddef.height / 2 - 60 while Menu_Center put the first row at
+  // (viddef.height - 150) / 2 + 20 == viddef.height / 2 - 55. Both are
+  // measured from the same midpoint, so the title sat 5 pixels above an
+  // 8-pixel-tall row and collided with it at EVERY resolution -- 320x240 and
+  // 1280x960 alike, and under vid_scale_fit, since the whole layout is in one
+  // scaled coordinate space. It was never a small-window problem.
+  //
+  // The title is now placed RELATIVE TO THE MENU BODY (CONTENT_TITLE_GAP above
+  // the first row, drawn by Content_MenuDraw), so the two cannot converge
+  // however the body moves, and the body is pushed down if the banner pic
+  // would otherwise reach the title's row.
+  const titleTop = s_content_menu.y - CONTENT_TITLE_GAP;
+  const bannerBottom = viddef.height / 2 - 110 + ContentBannerHeight();
+  if (titleTop < bannerBottom + 8) s_content_menu.y += bannerBottom + 8 - titleTop;
 
   // set proper initial state, same call-now pattern StartServer_MenuInit
   // uses for RulesChangeFunc
@@ -2418,10 +2494,9 @@ function Content_MenuDraw(): void {
   // fully custom screen.
   if (re) {
     const title = "New Game";
-    // -60 (was -80): moved down with the +20 menu-body offset in
-    // Content_MenuInit so the banner image keeps two clear rows above
-    // any text (owner request 2026-08-31).
-    Menu_DrawString(viddef.width / 2 - (title.length * 8) / 2, viddef.height / 2 - 60, title);
+    // Two text rows clear of the first menu row, wherever Content_MenuInit put
+    // the body -- see the layout note there for the overlap this replaced.
+    Menu_DrawString(viddef.width / 2 - (title.length * 8) / 2, s_content_menu.y - CONTENT_TITLE_GAP, title);
   }
 
   Menu_AdjustCursor(s_content_menu, 1);
@@ -2434,6 +2509,40 @@ function Content_MenuDraw(): void {
 // into this module's private widget state directly.
 export function Content_MenuKey(key: number): string | null {
   return Default_MenuKey(s_content_menu, key);
+}
+
+/** Exported test seam (same precedent as Content_MenuKey above): the New Game
+ *  screen's rows as a player sees them -- each row's label, the value
+ *  currently displayed, and every value it can be cycled to. Lets a suite
+ *  assert "no row is ever blank" and "this row really does cycle" without
+ *  reaching into this module's private widget objects. */
+export function Content_MenuRowsForTests(): { name: string; value: string; values: string[]; focused: boolean }[] {
+  const rows: { name: string; value: string; values: string[]; focused: boolean }[] = [];
+  for (let i = 0; i < s_content_menu.nitems; i++) {
+    const item = s_content_menu.items[i];
+    if (!item) continue;
+    const name = item.generic.name ?? "";
+    const focused = s_content_menu.cursor === i;
+    if (isMenuList(item)) rows.push({ name, value: item.itemnames[item.curvalue] ?? "", values: [...item.itemnames], focused });
+    else rows.push({ name, value: name, values: [name], focused });
+  }
+  return rows;
+}
+
+/** Exported test seam: the New Game screen's real drawn GEOMETRY in viddef
+ *  coordinates -- where the "New Game" title line goes, and where each row
+ *  goes -- so a suite can assert the title never lands on a row at any
+ *  resolution (Mike's 2026-09-01 finding 1). Same numbers Content_MenuDraw
+ *  and qmenu_impl.ts's draw path use, read from the live widgets rather than
+ *  recomputed, so a layout change that reintroduces the overlap fails here. */
+export function Content_LayoutForTests(): { titleY: number; titleHeight: number; rows: { name: string; y: number }[]; statusbarY: number } {
+  const rows: { name: string; y: number }[] = [];
+  for (let i = 0; i < s_content_menu.nitems; i++) {
+    const item = s_content_menu.items[i];
+    if (!item) continue;
+    rows.push({ name: item.generic.name ?? "", y: s_content_menu.y + item.generic.y });
+  }
+  return { titleY: s_content_menu.y - CONTENT_TITLE_GAP, titleHeight: 8, rows, statusbarY: viddef.height - 8 };
 }
 
 export function M_Menu_Content_f(): void {
