@@ -150,8 +150,12 @@ describe("gl_image.ts GL_FindImage -- real retail bytes (skipped if the retail i
     expect(image?.height).toBeGreaterThan(0);
     // resolution order (default r_texture_formats "png jpg tga",
     // images.c:2258): pcx (miss) -> png (hit). jpg/tga are never probed
-    // once png succeeds.
-    expect(loadCalls).toEqual(["pics/conchars.pcx", "pics/conchars.png"]);
+    // once png succeeds. A truecolor hit for an 8-bit request is followed
+    // by GL_RecoverLogicalDimensions re-reading the requested .pcx for its
+    // header (the logical size a drop-in replacement must keep); here it
+    // misses again, which is fine.
+    expect(loadCalls.slice(0, 2)).toEqual(["pics/conchars.pcx", "pics/conchars.png"]);
+    expect(loadCalls.slice(2).every((n) => n === "pics/conchars.pcx")).toBe(true);
   });
 
   test.skipIf(!havePak)("sprites/s_bfg1_0.pcx (real dual-format pcx+tga sprite frame) resolves the exact name, never scanning the .tga sibling", () => {
