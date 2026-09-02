@@ -1548,9 +1548,12 @@ export function CG_GetActiveCgamePmove(): CgamePmoveFn | null {
 // classic vs. kex from the connected server's declared ruleset) is the real
 // caller this seam is waiting on. Now called for real from two sites:
 // cl_parse.ts's CL_ParseServerData (picks "kex" when the freshly-read
-// protocol is PROTOCOL_VERSION_RERELEASE/1038, "classic" otherwise -- mirrors
-// q2repro's cgame.c:425-437 "rerelease server -> load the game's cgame;
-// classic server -> builtin classic" precedent) and cl_main.ts's
+// protocol says the server runs the RERELEASE game module -- cls.gameFamily,
+// see client.ts; note that is not the same as "the protocol is wide", since a
+// classic-module session widens its configstring space whenever the map needs
+// it and must keep the classic HUD -- mirrors q2repro's cgame.c:425-437
+// "rerelease server -> load the game's cgame; classic server -> builtin
+// classic" precedent) and cl_main.ts's
 // CL_Disconnect (resets to "classic", the module's own default, on
 // disconnect so a dropped kex connection doesn't leave a stale kex cgame
 // active for the next, possibly-classic, connection).

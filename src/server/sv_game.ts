@@ -21,7 +21,7 @@
 
 import { type Vec3, VectorCopy, vec3_origin } from "../shared/math";
 import { MulticastT, CHAN_RELIABLE } from "../shared/q_shared";
-import { ERR_DROP, SvcOpsT } from "../qcommon/qcommon";
+import { ERR_DROP, SvcOpsT, PROTOCOL_VERSION_RERELEASE } from "../qcommon/qcommon";
 import { Com_Error, Com_Printf } from "../qcommon/common";
 import {
   SZ_Clear,
@@ -386,12 +386,46 @@ Called when either the entire server is being killed, or
 it is changing to a different game directory.
 ===============
 */
+/*
+===============
+SV_SetGamePostFrameHook / SV_RunGamePostFrameHook
+
+A seam for engine-side bookkeeping that has to happen after the loaded game
+module has had a chance to change player state -- i.e. after SpawnEntities
+and after every RunFrame.
+
+It exists as a hook rather than as a wrapper around the GameExports the
+binding returns because the base legacy track's GameExports is handed back
+UNWRAPPED, function identity intact (bindings/legacy.ts's LoadLegacyGame:
+`GetGameAPI(importsObj)` with no adapter, unlike the ctf/xatrix/rogue/lmctf
+packs), and test/ctf_boot.test.ts checks exactly that -- `expect(geHolder.ge
+?.Init).toBe(BaseInitGame)`. Replacing ge.Init/ge.SpawnEntities/ge.RunFrame
+with closures would quietly break that invariant for every legacy track.
+
+Currently the one registrant is bindings/legacy.ts's raw-configstring-index
+stat fixup (see its own doc comment); the hook is null for the kex binding,
+which has no such translation to do, and is cleared on every game-library
+load and shutdown so a previous track's fixup can never run against the next
+one's edicts.
+===============
+*/
+let gamePostFrameHook: (() => void) | null = null;
+
+export function SV_SetGamePostFrameHook(fn: (() => void) | null): void {
+  gamePostFrameHook = fn;
+}
+
+export function SV_RunGamePostFrameHook(): void {
+  if (gamePostFrameHook) gamePostFrameHook();
+}
+
 export function SV_ShutdownGameProgs(): void {
   if (!geHolder.ge) return;
   geHolder.ge.Shutdown();
   // Sys_UnloadGame() -- omitted: no DLL boundary in this port (see this
   // file's header comment and SV_InitGameProgs below).
   geHolder.ge = null;
+  SV_SetGamePostFrameHook(null);
   // game.c:1068-1071 nulls the single `ge` global here, which is also the
   // array src/server/nav.ts's Nav_SetupEntities walks (nav.c:1425-1426's
   // `ge->num_edicts`/`EDICT_NUM(n)`). This port reaches that array through
@@ -460,6 +494,7 @@ export function SV_InitGameProgs(): void {
   // PF_Configstring are already family-aware (keyed off svs.csr.*, not a
   // hardcoded constant) -- the only missing piece was actually choosing
   // cs_remap_rerelease for the kex module, done here.
+  SV_SetGamePostFrameHook(null); // a previous track's fixup must never run against this one's edicts
   const gameName = Cvar_VariableString("game");
   const family = currentGameFamily();
   // "lmctf-kex" (bindings/legacy_kex.ts, .orch/followups.md's "kex-family
@@ -483,6 +518,16 @@ export function SV_InitGameProgs(): void {
   // full multi-protocol negotiation (a legacy-34 client and a kex-1038
   // client connected to the same server simultaneously) is future work.
   svs.codec = family === "kex" || lmctfKex ? Q2REPRO_CODEC : VANILLA_CODEC;
+  // Which protocol this session demands of connecting clients (server.ts's
+  // ServerStaticT.sessionProtocol doc comment has the full three-value
+  // table). The kex families demand 1038; the legacy family demands nothing
+  // yet -- it negotiates 34/35/36 per client, and only escalates to
+  // PROTOCOL_VERSION_RERELEASE_CLASSIC later, if and when the map it is about
+  // to load turns out to need more configstring slots than the classic
+  // layout has (sv_init.ts's SV_WidenConfigstringSpace). Re-set here on every
+  // game-library load so a previous level's escalation never leaks into the
+  // next one.
+  svs.sessionProtocol = family === "kex" || lmctfKex ? PROTOCOL_VERSION_RERELEASE : 0;
   const ge = lmctfKex ? LoadLmctfKexGame() : family === "kex" ? LoadKexGame() : LoadLegacyGame(gameName);
 
   if (ge.apiversion !== GAME_API_VERSION) {

@@ -234,6 +234,12 @@ function setupServer(gclient: unknown): void {
   if (!maxclients) throw new Error("maxclients not initialized");
   maxclients.value = 1;
   svs.csr = CS_REMAP_RERELEASE; // kex family -- only 1038 is accepted, matches driveKexLoopbackConnect
+  // The kex family also demands one specific wire protocol; since the
+  // configstring width became a SESSION property (server.ts's
+  // ServerStaticT.sessionProtocol), that demand lives on its own field
+  // rather than being inferred from svs.csr -- a classic-module session
+  // can be wide too. Set both, the way SV_InitGameProgs does.
+  svs.sessionProtocol = PROTOCOL_VERSION_RERELEASE;
   svs.clients = [new ClientT()];
   svs.demofile = null;
   sv.state = ServerStateT.ss_game;

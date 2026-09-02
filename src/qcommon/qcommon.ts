@@ -36,6 +36,37 @@ export const PROTOCOL_VERSION = 34;
 // writes onto the wire.
 export const PROTOCOL_VERSION_RERELEASE = 1038;
 
+// PROTOCOL_VERSION_RERELEASE_CLASSIC -- THIS ENGINE'S OWN protocol number, not
+// one q2proto/Q2PRO/R1Q2/q2repro ever defines. It is byte-for-byte the SAME
+// wire format as 1038 (the exact same q2repro.ts codec writes and reads every
+// message; only the protocol long inside svc_serverdata differs), and exists
+// for one reason: to tell a connecting client "this server carries wide model/
+// sound/image/entity indices, but the game module producing them is the
+// CLASSIC one (src/game), not the rerelease module (src/kexgame)".
+//
+// WHY THAT NEEDS ITS OWN NUMBER. The configstring layout (svs.csr / cls.csr)
+// and the game module used to be the same axis in this engine, so the client
+// could infer the module from the layout: wide layout => kex module. This
+// engine now separates them -- a classic-module session escalates to the wide
+// configstring layout whenever the map it is loading needs more than the
+// classic family's 256 models/sounds/images (sv_init.ts's
+// SV_WidenConfigstringSpace) -- so the inference no longer holds, and two
+// client-side decisions that genuinely depend on WHICH GAME MODULE is running
+// (cl_fx.ts's monster_flash_offset table, and which cgame/HUD cl_parse.ts
+// activates) would silently pick the rerelease answers for a classic session.
+// Carrying the fact in the protocol number is the only channel that (a) our
+// client sees BEFORE it must make those decisions (it is the first long of
+// svc_serverdata) and (b) cannot corrupt any other implementation: a real
+// q2repro/Q2PRO/R1Q2/vanilla client that does not know this number rejects
+// the connection cleanly with its own version check instead of misparsing a
+// stream it was never meant to read.
+//
+// The value is deliberately far outside every published protocol number
+// (34/35/36/37, R1Q2 1903-1905, Q2PRO 1015-1024+, q2repro 1038, KEX demos
+// 2022/2023, MVD 2009-2013/3038) so it cannot collide with a future upstream
+// bump.
+export const PROTOCOL_VERSION_RERELEASE_CLASSIC = 4038;
+
 // R1Q2 protocol family (protocol 35) and Q2PRO protocol family (protocol 36)
 // -- v1.0.0 wire cluster (task board #23), Mike's ruling: our server accepts
 // classic community clients and our client joins classic community servers.

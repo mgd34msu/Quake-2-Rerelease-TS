@@ -234,6 +234,7 @@ import {
   ComError,
   ERR_DROP,
   PROTOCOL_VERSION_RERELEASE,
+  PROTOCOL_VERSION_RERELEASE_CLASSIC,
 } from "../qcommon";
 import { net_message } from "../net_chan";
 import { SvcFogDataBitsT, type SvcFogDataT } from "../../kexapi/game";
@@ -466,8 +467,21 @@ export function readEntityBitsWide(): { number: number; bits: number } {
 // this engine implements none of q2pro's extended-protocol features, so
 // advertising them enabled would be a lie the client could act on.
 function writeServerData(msg: SizeBuf, params: ServerDataParamsT): void {
+  writeServerDataAs(PROTOCOL_Q2REPRO, msg, params);
+}
+
+// The classic-module variant of the same handshake -- see
+// PROTOCOL_VERSION_RERELEASE_CLASSIC's doc comment in qcommon.ts. Identical
+// bytes except for the protocol long, which is the whole point: the number is
+// how the client learns that the wide indices it is about to read come from
+// the CLASSIC game module rather than the rerelease one.
+function writeServerDataClassic(msg: SizeBuf, params: ServerDataParamsT): void {
+  writeServerDataAs(PROTOCOL_VERSION_RERELEASE_CLASSIC, msg, params);
+}
+
+function writeServerDataAs(protocol: number, msg: SizeBuf, params: ServerDataParamsT): void {
   MSG_WriteByte(msg, SvcOpsT.svc_serverdata);
-  MSG_WriteLong(msg, PROTOCOL_Q2REPRO);
+  MSG_WriteLong(msg, protocol);
   MSG_WriteLong(msg, params.servercount);
   MSG_WriteByte(msg, params.attractloop ? 1 : 0);
   MSG_WriteString(msg, params.gamedir);
@@ -1648,4 +1662,20 @@ export const Q2REPRO_CODEC: ProtocolCodec = {
   writeBatchMove,
   readUserinfoDelta,
   readClientSetting,
+};
+
+// Q2REPRO_CLASSIC_CODEC -- the SAME wire format as Q2REPRO_CODEC above, with
+// one byte-level difference: svc_serverdata announces
+// PROTOCOL_VERSION_RERELEASE_CLASSIC (4038) instead of 1038. Selected by the
+// server when a CLASSIC-module session has escalated to the wide configstring
+// layout (sv_init.ts's SV_WidenConfigstringSpace) and by the client when it
+// reads that number back (cl_parse.ts's selectServerCodec). Every other
+// function is shared by reference with Q2REPRO_CODEC -- there is deliberately
+// no second implementation to keep in sync, because there is no second wire
+// format: see PROTOCOL_VERSION_RERELEASE_CLASSIC's doc comment in qcommon.ts
+// for why the number alone has to differ.
+export const Q2REPRO_CLASSIC_CODEC: ProtocolCodec = {
+  ...Q2REPRO_CODEC,
+  name: "q2repro-classic",
+  writeServerData: writeServerDataClassic,
 };

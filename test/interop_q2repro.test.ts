@@ -21,7 +21,7 @@
 // file order alongside the rest of the suite.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { NetadrT, NetadrtypeT, NetsrcT } from "../src/qcommon/qcommon";
+import { NetadrT, NetadrtypeT, NetsrcT, PROTOCOL_VERSION_RERELEASE } from "../src/qcommon/qcommon";
 import { MSG_BeginReading, MSG_ReadLong, MSG_WriteLong, SizeBuf, SZ_Init } from "../src/qcommon/sizebuf";
 import {
   NetchanT,
@@ -67,13 +67,21 @@ function sendGetChallenge(): void {
 
 describe("SVC_GetChallenge protocol-list suffix (phase-8 q2repro interop)", () => {
   const savedCsr = svs.csr;
+  const savedSessionProtocol = svs.sessionProtocol;
 
   beforeEach(() => {
     NET_ClearLoopback(); // rule 13: earlier suites may have used the rings
   });
 
+  // The advertised list is driven by svs.sessionProtocol (server.ts) rather
+  // than by svs.csr: which protocols a session offers and how wide its
+  // configstring space is became two separate facts once a CLASSIC-module
+  // session gained the ability to widen (sv_init.ts's
+  // SV_WidenConfigstringSpace). The kex family sets both, the way
+  // SV_InitGameProgs does, so these two cases are unchanged in substance.
   test("kex family (svs.csr === CS_REMAP_RERELEASE) advertises exactly p=1038", () => {
     svs.csr = CS_REMAP_RERELEASE;
+    svs.sessionProtocol = PROTOCOL_VERSION_RERELEASE;
     try {
       sendGetChallenge();
       expect(NET_GetPacket(NetsrcT.NS_SERVER, net_from, net_message)).toBe(true);
@@ -88,11 +96,13 @@ describe("SVC_GetChallenge protocol-list suffix (phase-8 q2repro interop)", () =
       expect(rest.endsWith(" p=1038")).toBe(true);
     } finally {
       svs.csr = savedCsr;
+      svs.sessionProtocol = savedSessionProtocol;
     }
   });
 
   test("legacy family (svs.csr === CS_REMAP_OLD) advertises p=34,35,36 ascending", () => {
     svs.csr = CS_REMAP_OLD;
+    svs.sessionProtocol = 0;
     try {
       sendGetChallenge();
       expect(NET_GetPacket(NetsrcT.NS_SERVER, net_from, net_message)).toBe(true);

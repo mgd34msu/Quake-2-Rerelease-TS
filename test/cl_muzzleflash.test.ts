@@ -4,9 +4,15 @@ table dispatch (cl_fx.ts's activeMonsterFlashOffset()). Self-sufficient per
 .orch/preferences.md rule 13: every test resets cl/cls/net_message/dlights
 itself rather than relying on execution order.
 
-Family is keyed off cls.csr (CS_REMAP_OLD = classic, CS_REMAP_RERELEASE =
-kex), the same signal cl_parse.ts's CL_ParseServerData already uses right
-next to it to call CG_SetActiveCgameKind. Ground truth for "what offset
+Family is keyed off cls.gameFamily ("classic" | "kex"), the same signal
+cl_parse.ts's CL_ParseServerData uses right next to it to call
+CG_SetActiveCgameKind. It used to be keyed off cls.csr, because the wide
+configstring layout only ever meant the kex module -- that stopped being true
+when a classic-module session gained the ability to widen its configstring
+space for a map that needs it (sv_init.ts's SV_WidenConfigstringSpace), so
+the two signals are now distinct and this dispatch follows the GAME MODULE
+one. The "wide layout, classic module" case has its own test below. Ground
+truth for "what offset
 should this resolve to" is read directly from the real tables
 (src/game/m_flash.ts, src/kexgame/m_flash.ts) rather than hand-transcribed
 magic numbers, so these tests can't silently drift from the data they're
@@ -72,7 +78,7 @@ function dlightOriginForEnt(ent: number): [number, number, number] {
 
 beforeEach(() => {
   cl.clear();
-  cls.clear(); // resets cls.csr to CS_REMAP_OLD (classic), matching a fresh connection
+  cls.clear(); // resets cls.csr to CS_REMAP_OLD and cls.gameFamily to "classic", matching a fresh connection
   CL_ClearDlights();
   resetNetMessage();
 
@@ -92,6 +98,7 @@ describe("CL_ParseMuzzleFlash2 -- family-aware monster_flash_offset dispatch", (
 
   test("kex family resolves the SAME shared index through the kex table, at a different offset", () => {
     cls.csr = CS_REMAP_RERELEASE;
+    cls.gameFamily = "kex";
     writeMuzzleFlash2(ENT, SHARED_INDEX);
     CL_ParseMuzzleFlash2();
 
@@ -107,6 +114,7 @@ describe("CL_ParseMuzzleFlash2 -- family-aware monster_flash_offset dispatch", (
     expect(kexMonsterFlashOffset()[KEX_ONLY_INDEX]).toBeDefined();
 
     cls.csr = CS_REMAP_RERELEASE;
+    cls.gameFamily = "kex";
     writeMuzzleFlash2(ENT, KEX_ONLY_INDEX);
     CL_ParseMuzzleFlash2();
 
@@ -144,11 +152,27 @@ describe("CL_ParseMuzzleFlash2 -- family-aware monster_flash_offset dispatch", (
     expect(dlightOriginForEnt(ENT)).toEqual(expectedOrigin(classicMonsterFlashOffset()[SHARED_INDEX]!));
 
     cls.csr = CS_REMAP_RERELEASE;
+    cls.gameFamily = "kex";
     CL_ClearDlights();
     resetNetMessage();
     writeMuzzleFlash2(ENT, SHARED_INDEX);
     CL_ParseMuzzleFlash2();
     expect(dlightOriginForEnt(ENT)).toEqual(expectedOrigin(kexMonsterFlashOffset()[SHARED_INDEX]!));
+  });
+
+  test("WIDE LAYOUT, CLASSIC MODULE: a widened classic session keeps resolving through the CLASSIC table", () => {
+    // What a classic-ruleset session looks like after sv_init.ts's
+    // SV_WidenConfigstringSpace fires and the client reconnects on
+    // PROTOCOL_VERSION_RERELEASE_CLASSIC: the wide configstring layout, but
+    // the classic game module still producing the flash numbers. Reading the
+    // layout instead of the family here would resolve every classic monster's
+    // muzzle flash through the rerelease table, at the wrong offsets.
+    cls.csr = CS_REMAP_RERELEASE;
+    cls.gameFamily = "classic";
+    writeMuzzleFlash2(ENT, SHARED_INDEX);
+    CL_ParseMuzzleFlash2();
+
+    expect(dlightOriginForEnt(ENT)).toEqual(expectedOrigin(classicMonsterFlashOffset()[SHARED_INDEX]!));
   });
 
   test("a byte value at the extreme high end (255, out of range for both tables' reachable data) still falls back safely under classic", () => {

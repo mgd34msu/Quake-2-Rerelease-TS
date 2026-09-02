@@ -81,6 +81,7 @@ import {
   PROTOCOL_VERSION_Q2PRO,
   PROTOCOL_VERSION_Q2PRO_CURRENT,
   PROTOCOL_VERSION_RERELEASE,
+  PROTOCOL_VERSION_RERELEASE_CLASSIC,
   PORT_SERVER,
   MAX_MSGLEN,
 } from "../qcommon/qcommon";
@@ -478,7 +479,18 @@ connect.
 // Protocols this client can actually speak, for challenge p= negotiation
 // (see the "challenge" connectionless case): vanilla 34, R1Q2 35, Q2PRO 36,
 // kex/q2repro 1038.
-const SUPPORTED_CONNECT_PROTOCOLS = [PROTOCOL_VERSION, PROTOCOL_VERSION_R1Q2, PROTOCOL_VERSION_Q2PRO, PROTOCOL_VERSION_RERELEASE];
+const SUPPORTED_CONNECT_PROTOCOLS = [
+  PROTOCOL_VERSION,
+  PROTOCOL_VERSION_R1Q2,
+  PROTOCOL_VERSION_Q2PRO,
+  PROTOCOL_VERSION_RERELEASE,
+  // This engine's own number for a classic-module session that widened its
+  // configstring space (qcommon.ts's PROTOCOL_VERSION_RERELEASE_CLASSIC).
+  // Listed so the challenge-driven selection below can pick it when such a
+  // server advertises it; the loopback path takes it from the
+  // Com_ServerConnectProtocol bridge instead.
+  PROTOCOL_VERSION_RERELEASE_CLASSIC,
+];
 // The p= list from the most recent challenge reply; cleared when a new
 // server connection begins (CL_Disconnect).
 let challenge_protocols: number[] = [];
@@ -551,7 +563,7 @@ export function CL_SendConnectPacket(): void {
     // has_zlib=1: this port DOES implement svc_r1q2_zpacket unwrap
     // (qcommon/protocol/zpacket.ts), so advertising support is accurate.
     tail = ` ${packetLength} 1 1 ${PROTOCOL_VERSION_Q2PRO_CURRENT}`;
-  } else if (protocol === PROTOCOL_VERSION_RERELEASE) {
+  } else if (protocol === PROTOCOL_VERSION_RERELEASE || protocol === PROTOCOL_VERSION_RERELEASE_CLASSIC) {
     // q2repro's own connect tail for 1038 (q2proto_q2repro_connect_tail:
     // "%d %d" = packet_length, has_zlib) -- no netchan_type field at all,
     // because kex/1038 always implies NETCHAN_NEW unconditionally on both
@@ -1033,7 +1045,16 @@ export function CL_ConnectionlessPacket(): void {
     // shifting every payload byte -- the post-connect "unknown command
     // char" reconnect loop.
     const connectProtocol = cls.serverProtocol || (clCvars.cl_protocol ? clCvars.cl_protocol.value : PROTOCOL_VERSION);
-    const chanType = connectProtocol === PROTOCOL_VERSION_RERELEASE || connectProtocol === PROTOCOL_VERSION_Q2PRO ? NETCHAN_NEW : NETCHAN_OLD;
+    // PROTOCOL_VERSION_RERELEASE_CLASSIC is 1038's wire under a different
+    // number (qcommon.ts), so it takes 1038's framing too -- sv_main.ts's
+    // SVC_DirectConnect picks NETCHAN_NEW for every wide session, this side
+    // has to agree or every payload byte shifts.
+    const chanType =
+      connectProtocol === PROTOCOL_VERSION_RERELEASE ||
+      connectProtocol === PROTOCOL_VERSION_RERELEASE_CLASSIC ||
+      connectProtocol === PROTOCOL_VERSION_Q2PRO
+        ? NETCHAN_NEW
+        : NETCHAN_OLD;
     // connectProtocol is load-bearing beyond chanType: under NETCHAN_OLD the
     // qport field is a 16-bit short below R1Q2 and a single byte from R1Q2 up
     // (net_chan.ts's NETCHAN_NEW doc comment), so protocol 35 needs it to pick

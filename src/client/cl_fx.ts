@@ -299,7 +299,6 @@ import { MSG_ReadShort, MSG_ReadByte } from "../qcommon/sizebuf";
 // same precedent extended to the second family, not a new leak.
 import { monsterFlashOffset as classicMonsterFlashOffset } from "../game/m_flash";
 import { monsterFlashOffset as kexMonsterFlashOffset } from "../kexgame/m_flash";
-import { CS_REMAP_RERELEASE } from "../shared/cs_remap";
 import { CL_SmokeAndFlash, CL_AddMuzzleFX, CL_PlayFootstepSfx, FOOTSTEP_ID_LADDER, MuzzlefxT, cl_mod_muzzles } from "./cl_tent";
 import { fixedLength } from "../shared/fixed";
 
@@ -323,15 +322,22 @@ import { fixedLength } from "../shared/fixed";
 // this exact value-cycle, just applied to an enum instead of a function.
 
 // Which monster_flash_offset table CL_ParseMuzzleFlash2 resolves `flash_number`
-// through. Keyed off cls.csr (set by cl_parse.ts's CL_ParseServerData from the
-// connection's negotiated protocol -- CS_REMAP_RERELEASE for the kex family,
-// CS_REMAP_OLD otherwise), the same signal cl_parse.ts already uses right next
-// to it for CG_SetActiveCgameKind. Not routed through CG_GetActiveCgameKind
-// (host.ts): that seam exists for HUD/cgame-export selection, and coupling
-// this unrelated data-table lookup to it would trade one direct, already-
-// precedented import (see above) for a dependency on the cgame subsystem.
+// through. Keyed off cls.gameFamily (set by cl_parse.ts's CL_ParseServerData,
+// see that field's doc comment in client.ts), the same signal cl_parse.ts
+// uses right next to it for CG_SetActiveCgameKind. This is a GAME MODULE
+// question, not a wire question: the flash numbers on the wire are indices
+// into whichever m_flash table the server's game module compiled them from,
+// and src/game and src/kexgame number them differently. It used to read
+// `cls.csr === CS_REMAP_RERELEASE` because the wide layout only ever meant
+// the kex module; a classic-module session now widens its configstring space
+// whenever the map needs it, and reading csr here would resolve every classic
+// monster's muzzle flash through the rerelease table. Not routed through
+// CG_GetActiveCgameKind (host.ts): that seam exists for HUD/cgame-export
+// selection, and coupling this unrelated data-table lookup to it would trade
+// one direct, already-precedented import (see above) for a dependency on the
+// cgame subsystem.
 function activeMonsterFlashOffset(): readonly Vec3[] {
-  return cls.csr === CS_REMAP_RERELEASE ? kexMonsterFlashOffset() : classicMonsterFlashOffset();
+  return cls.gameFamily === "kex" ? kexMonsterFlashOffset() : classicMonsterFlashOffset();
 }
 
 // C's raw rand() (0..0x7fff), used directly (rather than through frand()/
@@ -1060,10 +1066,14 @@ export function CL_ParseMuzzleFlash2(): void {
       dl.color[1] = 1;
       dl.color[2] = 0;
 
-      // q2repro effects.c:543-551: under the extended/kex protocol family,
-      // BOSS2_MACHINEGUN_L2 specifically is re-themed as a blaster shot
-      // instead of the classic machinegun burst.
-      if (cls.csr.extended && flash_number === MZ2_BOSS2_MACHINEGUN_L2) {
+      // q2repro effects.c:543-551: under the rerelease game, BOSS2_MACHINEGUN_L2
+      // specifically is re-themed as a blaster shot instead of the classic
+      // machinegun burst. Keyed off cls.gameFamily rather than cls.csr.extended
+      // because this is a re-theme of the RERELEASE GAME's boss2, not a wire
+      // capability -- a classic-module session that widened its configstring
+      // space (client.ts's cls.gameFamily doc comment) still spawns the
+      // classic Hornet and must keep the classic machinegun burst.
+      if (cls.gameFamily === "kex" && flash_number === MZ2_BOSS2_MACHINEGUN_L2) {
         S_StartSound(null, ent, CHAN_WEAPON, S_RegisterSound("flyer/flyatck3.wav"), 1, ATTN_NONE, 0);
         CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_BLAST, 0, 12.0 * mz2_scale);
       } else {
@@ -1316,9 +1326,10 @@ export function CL_ParseMuzzleFlash2(): void {
     case MZ2_BOSS2_MACHINEGUN_R5:
     case MZ2_CARRIER_MACHINEGUN_R1: // PMM
     case MZ2_CARRIER_MACHINEGUN_R2: // PMM
-      // q2repro effects.c:780-788: same extended/kex re-theme as the L-side
-      // group above, keyed on BOSS2_MACHINEGUN_R2 instead of _L2.
-      if (cls.csr.extended && flash_number === MZ2_BOSS2_MACHINEGUN_R2) {
+      // q2repro effects.c:780-788: same rerelease-game re-theme as the L-side
+      // group above (see its comment for why this reads cls.gameFamily rather
+      // than cls.csr.extended), keyed on BOSS2_MACHINEGUN_R2 instead of _L2.
+      if (cls.gameFamily === "kex" && flash_number === MZ2_BOSS2_MACHINEGUN_R2) {
         S_StartSound(null, ent, CHAN_WEAPON, S_RegisterSound("flyer/flyatck3.wav"), 1, ATTN_NONE, 0);
         CL_AddMuzzleFX(flash_origin, cl_entities[ent].current.angles, MuzzlefxT.MFLASH_BLAST, 0, 12.0 * mz2_scale);
       } else {

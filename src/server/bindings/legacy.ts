@@ -28,6 +28,9 @@ import { g_edicts as xatrixGEdicts } from "../../xatrix/g_local";
 import { g_edicts as rogueGEdicts } from "../../rogue/g_local";
 import { g_edicts as lmctfGEdicts } from "../../lmctf/g_local";
 import type { Vec3 } from "../../shared/math";
+import { CS_REMAP_OLD, remapLegacyConfigstringIndex } from "../../shared/cs_remap";
+import { PlayerStateT, STAT_PICKUP_STRING, STAT_CHASE, MAX_ITEMS, MAX_CLIENTS } from "../../shared/q_shared";
+import { svs } from "../server";
 import { Nav_SetEdictSource, type NavGameEdictView } from "../nav";
 // The C engine picks the game DLL by loading gamex86.dll (or the platform
 // equivalent) out of the mod directory named by the "game" cvar (FS_Gamedir()
@@ -70,6 +73,7 @@ import {
   PF_WritePos,
   PF_WriteDir,
   PF_WriteAngle,
+  SV_SetGamePostFrameHook,
 } from "../sv_game";
 
 // Runtime game-track selection (see LoadLegacyGame below): src/ctf/game.ts's
@@ -265,7 +269,7 @@ export function BuildLegacyImports(): GameImports {
     soundindex: SV_SoundIndex,
     imageindex: SV_ImageIndex,
 
-    configstring: PF_Configstring,
+    configstring: PF_LegacyConfigstring,
     sound: PF_StartSound,
     positioned_sound: SV_StartSound,
 
@@ -328,6 +332,95 @@ geHolder assignment.
 // drives FS_SetGamedir("lmctf") (cvar.ts's "game" latch hook) the same way
 // it always did; the only change here is which compiled game module serves
 // the resulting traffic.
+/*
+===============
+PF_LegacyConfigstring
+
+Every `gi.configstring(index, str)` call a legacy (API v3) game tree makes
+computes its index against that tree's own frozen, hardcoded CS_* constants
+(shared/q_shared.ts -- numerically CS_REMAP_OLD's values, always: the frozen
+GameImports contract has no CsRemapT awareness, svs.csr is an engine-side
+concept). That is exactly right while the session is on the classic layout,
+and exactly wrong once it has widened (sv_init.ts's
+SV_WidenConfigstringSpace) -- e.g. a raw CS_ITEMS index (1056) lands inside
+the wide layout's SOUNDS block (62..8253) and would clobber a precached
+sound name.
+
+Translating here, at the engine/module boundary, against the LIVE svs.csr
+keeps both cases correct with one code path: when svs.csr is still
+CS_REMAP_OLD the translation is the identity (remapLegacyConfigstringIndex
+returns its input when the two families are the same table), so an unwidened
+classic session writes exactly the bytes it always did.
+
+bindings/legacy_kex.ts does the same translation with both families spelled
+out statically, because LMCTF-under-kex is wide from the first frame and can
+never be anything else.
+===============
+*/
+function PF_LegacyConfigstring(index: number, str: string): void {
+  PF_Configstring(remapLegacyConfigstringIndex(index, CS_REMAP_OLD, svs.csr), str);
+}
+
+// The live `g_edicts` module singleton of whichever legacy tree `gameName`
+// selects -- read directly rather than through `ge.edicts` for the
+// live-binding reason this file's Nav_SetEdictSource comment already
+// documents (that field is fixed at GetGameAPI-return time and never
+// reassigned when InitGame allocates the real array).
+function legacyTreeEdicts(gameName: string): { client: unknown }[] {
+  if (gameName === "lmctf") return lmctfGEdicts;
+  if (gameName === "ctf") return ctfGEdicts;
+  if (gameName === "xatrix") return xatrixGEdicts;
+  if (gameName === "rogue") return rogueGEdicts;
+  return baseGEdicts;
+}
+
+function isPlayerStateHolder(client: unknown): client is { ps: PlayerStateT } {
+  return typeof client === "object" && client !== null && "ps" in client && (client as { ps: unknown }).ps instanceof PlayerStateT;
+}
+
+/*
+===============
+fixupRawConfigstringStats
+
+The one class of cross-boundary leak PF_LegacyConfigstring above cannot
+catch: a raw configstring index the game tree embeds as PLAYER-STATE DATA
+instead of passing to gi.configstring(), so there is no import-table seam to
+intercept. Grepped exhaustively across src/game (`= CS_`, `CS_X +`); there
+are exactly two, both stock id Software behavior shared by every legacy tree:
+
+  g_items.ts  Pickup_General  stats[STAT_PICKUP_STRING] = CS_ITEMS + ITEM_INDEX(item)
+  p_hud.ts    G_SetStats      stats[STAT_CHASE]         = CS_PLAYERSKINS + (number - 1)
+
+(bindings/legacy_kex.ts documents the first for LMCTF; the second is real
+here too, because the base tree has a chase camera LMCTF's grep predated.)
+
+Run after every entry point that can change a client's stats -- pickups and
+chase-cam updates both happen inside RunFrame's think/touch dispatch, not at
+a call this binding otherwise observes. The range checks make it idempotent:
+a remapped value lands far outside CS_REMAP_OLD's block, so a later pass
+leaves it alone instead of remapping twice. Returns immediately on an
+unwidened session, which is the overwhelmingly common case.
+===============
+*/
+function fixupRawConfigstringStats(edicts: { client: unknown }[]): void {
+  if (svs.csr === CS_REMAP_OLD) return; // classic layout: the raw indices are already correct
+
+  for (const edict of edicts) {
+    if (!isPlayerStateHolder(edict.client)) continue;
+    const stats = edict.client.ps.stats;
+
+    const pickup = stats[STAT_PICKUP_STRING];
+    if (pickup >= CS_REMAP_OLD.items && pickup < CS_REMAP_OLD.items + MAX_ITEMS) {
+      stats[STAT_PICKUP_STRING] = remapLegacyConfigstringIndex(pickup, CS_REMAP_OLD, svs.csr);
+    }
+
+    const chase = stats[STAT_CHASE];
+    if (chase >= CS_REMAP_OLD.playerskins && chase < CS_REMAP_OLD.playerskins + MAX_CLIENTS) {
+      stats[STAT_CHASE] = remapLegacyConfigstringIndex(chase, CS_REMAP_OLD, svs.csr);
+    }
+  }
+}
+
 export function LoadLegacyGame(gameName: string): GameExports {
   const importsObj = BuildLegacyImports();
 
@@ -374,6 +467,18 @@ export function LoadLegacyGame(gameName: string): GameExports {
               : baseGEdicts,
     ),
   );
+
+  // Keep the two raw configstring indices a legacy tree embeds in PLAYER
+  // STATE (rather than passing to gi.configstring()) in step with the layout
+  // the engine is actually using -- see fixupRawConfigstringStats. Registered
+  // as an engine-side post-frame hook rather than by wrapping ge.Init/
+  // ge.SpawnEntities/ge.RunFrame, because the base track's GameExports is
+  // returned unwrapped with its function identities intact (see
+  // SV_SetGamePostFrameHook's own doc comment in sv_game.ts). A no-op for
+  // every session that never widens, which is every session whose map fits
+  // the classic limits.
+  const treeEdicts = legacyTreeEdicts(gameName);
+  SV_SetGamePostFrameHook(() => fixupRawConfigstringStats(treeEdicts));
 
   return ge;
 }

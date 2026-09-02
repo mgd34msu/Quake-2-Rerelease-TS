@@ -572,6 +572,27 @@ export class ClStaticT {
   // "every csr.end/csr.models/etc bound momentarily wrong" between clears).
   csr: CsRemapT = CS_REMAP_OLD;
 
+  // Which GAME MODULE the connected server is running, as distinct from which
+  // configstring layout/wire protocol it speaks (`csr`/`codec` above).
+  //
+  // These used to be the same question -- the wide layout only ever meant the
+  // rerelease module -- and two client decisions were keyed off `csr ===
+  // CS_REMAP_RERELEASE` because of it: which monster_flash_offset table
+  // CL_ParseMuzzleFlash2 resolves flash numbers through (cl_fx.ts), and which
+  // cgame/HUD is activated (cl_parse.ts's CG_SetActiveCgameKind). The engine
+  // now also runs the CLASSIC module over the wide layout when a map needs
+  // more configstring slots than the classic family has (server-side:
+  // sv_init.ts's SV_WidenConfigstringSpace), so that inference no longer
+  // holds and both decisions read this field instead. Set by
+  // CL_ParseServerData from the protocol number, which is the only signal
+  // available before those decisions have to be made -- see qcommon.ts's
+  // PROTOCOL_VERSION_RERELEASE_CLASSIC doc comment for why the fact travels
+  // as a protocol number.
+  //
+  // Bounds/limits questions keep reading `csr`: those genuinely are about the
+  // layout, and a widened classic session has the wide layout's bounds.
+  gameFamily: "classic" | "kex" = "classic";
+
   challenge = 0; // from the server to use for connecting
 
   download: number | null = null; // FILE* -- file transfer from server
@@ -612,6 +633,7 @@ export class ClStaticT {
     this.serverProtocol = 0;
     this.codec = VANILLA_CODEC;
     this.csr = CS_REMAP_OLD;
+    this.gameFamily = "classic";
     this.challenge = 0;
     this.download = null;
     this.downloadtempname = "";

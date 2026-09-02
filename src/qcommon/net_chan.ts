@@ -65,8 +65,29 @@ import { NET_SendPacket, NET_AdrToString } from "../platform/net_udp";
 // top of this file's eager init, below); cl_main.ts's CL_Init still has no
 // equivalent call, so this file's eager init remains load-bearing on the
 // client side.
+// Hoisted above net_message_buffer (which is sized off it); the rest of
+// q2repro's packet-size ladder stays together further down this file.
+export const MAX_PACKETLEN = 4096; // max length of a single packet
+
 export const net_from: NetadrT = new NetadrT();
-export const net_message_buffer: Uint8Array = new Uint8Array(MAX_MSGLEN);
+// Sized to MAX_PACKETLEN (4096, declared below), not MAX_MSGLEN (1400) -- the
+// receive-side counterpart of Netchan_Transmit's own `send_buf` sizing and
+// its comment further down this file. This is the buffer every INBOUND
+// datagram is copied into, and a connection that negotiated a packet_length
+// above 1400 (any loopback client asks for MAX_PACKETLEN_WRITABLE = 4086,
+// per cl_main.ts's CL_SendConnectPacket, mirroring client/main.c:461) can
+// legitimately be sent one that large. At 1400 the send side would happily
+// emit a 4086-byte datagram that the receive side could not hold, and
+// net_udp.ts's NET_GetLoopPacket died on `message.data.set(packet, 0)` with
+// "Range consisting of offset and length are out of bounds". Found live: a
+// classic-ruleset session on maps/mgu4trial that had widened its
+// configstring space (sv_init.ts's SV_WidenConfigstringSpace) and therefore
+// sent a large enough signon burst to cross 1400 in one packet. Latent on
+// the kex family for the same reason -- nothing about it is specific to the
+// widening, that map just happened to be the first content big enough to
+// reach it. q2repro has no such mismatch: its own MAX_MSGLEN is 0x8000,
+// comfortably above every packet length it will negotiate.
+export const net_message_buffer: Uint8Array = new Uint8Array(MAX_PACKETLEN);
 export const net_message: SizeBuf = new SizeBuf();
 SZ_Init(net_message, net_message_buffer, net_message_buffer.length);
 
@@ -78,7 +99,7 @@ export let qport: CvarT | null = null;
 // because NETCHAN_NEW splits any write larger than maxpacketlen into
 // fragments, so "how big may one datagram's payload be" becomes a real
 // per-connection number rather than an implicit MAX_MSGLEN.
-export const MAX_PACKETLEN = 4096; // max length of a single packet
+// MAX_PACKETLEN is declared above (net_message_buffer needs it first).
 export const PACKET_HEADER = 10; // two ints and a short (worst case)
 export const MAX_PACKETLEN_DEFAULT = 1400; // default quake2 limit
 export const MAX_PACKETLEN_WRITABLE_DEFAULT = MAX_PACKETLEN_DEFAULT - PACKET_HEADER;

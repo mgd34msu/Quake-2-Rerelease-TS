@@ -19,6 +19,7 @@ import {
   ClcOpsT,
   PROTOCOL_VERSION,
   PROTOCOL_VERSION_RERELEASE,
+  PROTOCOL_VERSION_RERELEASE_CLASSIC,
   PROTOCOL_VERSION_R1Q2,
   PROTOCOL_VERSION_R1Q2_CURRENT,
   PROTOCOL_VERSION_Q2PRO,
@@ -31,7 +32,7 @@ import { cl, cls, ConnstateT, svc_strings, clCvars, cl_entities, type Clientinfo
 import type { ImageS } from "./ref";
 import type { ProtocolCodec } from "../qcommon/protocol/codec";
 import { VANILLA_CODEC } from "../qcommon/protocol/vanilla";
-import { Q2REPRO_CODEC } from "../qcommon/protocol/q2repro";
+import { Q2REPRO_CODEC, Q2REPRO_CLASSIC_CODEC } from "../qcommon/protocol/q2repro";
 import { createR1Q2Codec, setR1Q2FrameExtrabits } from "../qcommon/protocol/r1q2";
 import { createQ2ProCodec, noteQ2ProFrameOpcodeExtrabits } from "../qcommon/protocol/q2pro";
 import { readZPacketPayload } from "../qcommon/protocol/zpacket";
@@ -476,7 +477,7 @@ export function CL_ParseDownload(): void {
 // report). Returning a function-scoped `never` from Com_Error satisfies
 // TypeScript's definite-assignment analysis for the fallthrough return below
 // without needing an explicit unreachable branch.
-export function selectServerCodec(protocol: number): { codec: ProtocolCodec; csr: CsRemapT } {
+export function selectServerCodec(protocol: number): { codec: ProtocolCodec; csr: CsRemapT; gameFamily: "classic" | "kex" } {
   // KEX demo playback unit (.orch/RESUME.md "v1.0.0 REQUIRES ... KEX demo
   // playback"): protocol numbers 2022 (PROTOCOL_KEX_DEMOS, real recorded
   // demos) and 2023 (PROTOCOL_KEX, live native-engine traffic -- never
@@ -491,10 +492,21 @@ export function selectServerCodec(protocol: number): { codec: ProtocolCodec; csr
   // origin/old_origin/SND_POS precision (see that file's own header).
   if (protocol === PROTOCOL_KEX_DEMOS || protocol === PROTOCOL_KEX) {
     setKexProtocol(protocol);
-    return { codec: KEX_DEMO_CODEC, csr: CS_REMAP_RERELEASE };
+    return { codec: KEX_DEMO_CODEC, csr: CS_REMAP_RERELEASE, gameFamily: "kex" };
   }
   if (protocol === PROTOCOL_VERSION_RERELEASE) {
-    return { codec: Q2REPRO_CODEC, csr: CS_REMAP_RERELEASE };
+    return { codec: Q2REPRO_CODEC, csr: CS_REMAP_RERELEASE, gameFamily: "kex" };
+  }
+  // This engine's own number for "1038's wire, classic game module" -- a
+  // classic-ruleset session whose map needed more than the classic family's
+  // 256 model/sound/image slots, so the server widened its configstring
+  // space (sv_init.ts's SV_WidenConfigstringSpace). Same codec bytes as 1038
+  // in every message; the WIDE layout for bounds and block offsets; and the
+  // CLASSIC game family, so the classic monster-flash table and the classic
+  // cgame/HUD stay selected. See qcommon.ts's
+  // PROTOCOL_VERSION_RERELEASE_CLASSIC doc comment.
+  if (protocol === PROTOCOL_VERSION_RERELEASE_CLASSIC) {
+    return { codec: Q2REPRO_CLASSIC_CODEC, csr: CS_REMAP_RERELEASE, gameFamily: "classic" };
   }
   // v1.0.0 wire cluster (task board #23): R1Q2 (35) and Q2PRO (36) use the
   // same legacy configstring layout as vanilla (CS_REMAP_OLD) -- only the
@@ -507,19 +519,19 @@ export function selectServerCodec(protocol: number): { codec: ProtocolCodec; csr
   // ceiling) is only used to parse that one handshake message, whose shape
   // does not itself vary by minor version.
   if (protocol === PROTOCOL_VERSION_R1Q2) {
-    return { codec: createR1Q2Codec(PROTOCOL_VERSION_R1Q2_CURRENT), csr: CS_REMAP_OLD };
+    return { codec: createR1Q2Codec(PROTOCOL_VERSION_R1Q2_CURRENT), csr: CS_REMAP_OLD, gameFamily: "classic" };
   }
   if (protocol === PROTOCOL_VERSION_Q2PRO) {
-    return { codec: createQ2ProCodec(PROTOCOL_VERSION_Q2PRO_CURRENT), csr: CS_REMAP_OLD };
+    return { codec: createQ2ProCodec(PROTOCOL_VERSION_Q2PRO_CURRENT), csr: CS_REMAP_OLD, gameFamily: "classic" };
   }
   if (Com_ServerState() && PROTOCOL_VERSION === 34) {
     // no-op; see C source
-    return { codec: VANILLA_CODEC, csr: CS_REMAP_OLD };
+    return { codec: VANILLA_CODEC, csr: CS_REMAP_OLD, gameFamily: "classic" };
   }
   if (protocol !== PROTOCOL_VERSION) {
     Com_Error(ERR_DROP, "Server returned version %i, not %i", protocol, PROTOCOL_VERSION);
   }
-  return { codec: VANILLA_CODEC, csr: CS_REMAP_OLD };
+  return { codec: VANILLA_CODEC, csr: CS_REMAP_OLD, gameFamily: "classic" };
 }
 
 /*
@@ -539,19 +551,24 @@ export function CL_ParseServerData(): void {
   const i = MSG_ReadLong(net_message);
   cls.serverProtocol = i;
 
-  const { codec, csr } = selectServerCodec(i);
+  const { codec, csr, gameFamily } = selectServerCodec(i);
   cls.codec = codec;
   cls.csr = csr;
+  cls.gameFamily = gameFamily;
 
-  // Activate the cgame that matches the family this connection just
+  // Activate the cgame that matches the GAME MODULE this connection just
   // selected -- q2repro's cgame.c:425-437 precedent ("rerelease server ->
   // load the game's cgame; classic server -> builtin classic"). Keyed off
-  // `csr` (the actual family selectServerCodec chose), not the raw
-  // `protocol` number read above: CS_REMAP_RERELEASE is the one value
-  // selectServerCodec ever returns for the kex family, so this stays correct
-  // even through the "BIG HACK" listen-server demo-compat branch above,
-  // which can return CS_REMAP_OLD for reasons unrelated to `i`'s own value.
-  CG_SetActiveCgameKind(csr === CS_REMAP_RERELEASE ? "kex" : "classic");
+  // `gameFamily`, not off `csr`: those two used to be interchangeable (only
+  // the kex module ever ran wide) but a classic-module session now widens its
+  // configstring space whenever the map needs it, and it must keep the
+  // CLASSIC HUD -- the classic module writes the classic STAT_* layout, which
+  // is what the classic cgame reads. Going through selectServerCodec's own
+  // return value (rather than the raw `protocol` number read above) also
+  // keeps this correct through the "BIG HACK" listen-server demo-compat
+  // branch, which can return the classic family for reasons unrelated to
+  // `i`'s own value.
+  CG_SetActiveCgameKind(gameFamily);
 
   const sd = codec.readServerData();
 

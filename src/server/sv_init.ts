@@ -1,7 +1,8 @@
 // sv_init.c
 
-import { SysError, SvcOpsT, PORT_MASTER, UPDATE_BACKUP, PROTOCOL_VERSION_RERELEASE } from "../qcommon/qcommon";
-import { CS_REMAP_RERELEASE } from "../shared/cs_remap";
+import { SysError, SvcOpsT, PORT_MASTER, UPDATE_BACKUP, PROTOCOL_VERSION_RERELEASE_CLASSIC } from "../qcommon/qcommon";
+import { CS_REMAP_OLD, CS_REMAP_RERELEASE, remapLegacyConfigstringIndex } from "../shared/cs_remap";
+import { Q2REPRO_CLASSIC_CODEC } from "../qcommon/protocol/q2repro";
 import { CM_LoadMap, CM_InlineModel, CM_NumInlineModels, CM_EntityString } from "../qcommon/cmodel";
 import { Cvar_Set, Cvar_FullSet, Cvar_VariableValue, Cvar_GetLatchedVars } from "../qcommon/cvar";
 import { CL_DropHook, SCR_BeginLoadingPlaqueHook, Com_Printf, Com_DPrintf, Com_Error, Com_SetServerState, Com_SetServerConnectProtocol, dedicated } from "../qcommon/common";
@@ -25,10 +26,10 @@ import {
 import { vec3_origin, VectorCopy } from "../shared/math";
 import { cloneEntityState } from "../shared/state_copy";
 import type { GameExports } from "../game/game";
-import { sv, svs, master_adr, ServerStateT, ClientStateT, ClientT, sv_airaccelerate, sv_noreload, maxclients, sv_tick_rate } from "./server";
+import { sv, svs, master_adr, ServerStateT, ClientStateT, ClientT, ServerEntityT, SV_MaxModels, SV_MaxEdicts, sv_airaccelerate, sv_noreload, maxclients, sv_tick_rate } from "./server";
 import { SV_Shutdown } from "./sv_main";
 import { SV_Multicast, SV_BroadcastCommand, SV_SendClientMessages } from "./sv_send";
-import { geHolder, SV_InitGameProgs, currentGameFamily } from "./sv_game";
+import { geHolder, SV_InitGameProgs, currentGameFamily, SV_RunGamePostFrameHook } from "./sv_game";
 import { SV_ReadLevelFile } from "./sv_ccmds";
 import { SV_ClearWorld } from "./sv_world";
 import { SetPmAirAccelerate } from "../qcommon/pmove";
@@ -47,7 +48,7 @@ SV_FindIndex
 
 ================
 */
-export function SV_FindIndex(name: string, start: number, max: number, create: boolean): number {
+export function SV_FindIndex(name: string, start: number, max: number, create: boolean, reportOverflow = true): number {
   if (!name || !name.length) return 0;
 
   let i = 1;
@@ -57,7 +58,15 @@ export function SV_FindIndex(name: string, start: number, max: number, create: b
 
   if (!create) return 0;
 
-  if (i === max) Com_Error(ERR_DROP, "*Index: overflow");
+  if (i === max) {
+    // `reportOverflow = false` is the widening path's probe (see
+    // SV_FindIndexWidening below): the caller wants to know the block is full
+    // so it can try to widen the session and retry, not to kill the server.
+    // Every pre-existing caller leaves the default true and gets the original
+    // Com_Error verbatim.
+    if (!reportOverflow) return -1;
+    Com_Error(ERR_DROP, "*Index: overflow");
+  }
 
   sv.configstrings[start + i] = name;
 
@@ -73,16 +82,122 @@ export function SV_FindIndex(name: string, start: number, max: number, create: b
   return i;
 }
 
+/*
+================
+SV_WidenConfigstringSpace
+
+Move this session from the classic configstring layout (CS_REMAP_OLD: 256
+models, 256 sounds, 256 images, 1024 edicts) to the wide one
+(CS_REMAP_RERELEASE: 8192/2048/512/8192), mid-spawn, and keep the classic
+game module running on top of it.
+
+WHY THIS EXISTS. The 256-model ceiling is a property of the classic
+CONFIGSTRING LAYOUT and of protocol 34's byte-wide modelindex field -- not of
+the classic game module. That module stores modelindex/sound/image as plain
+numbers and never sees a CsRemapT at all (it is an engine-side concept). So
+there is nothing in the module that stops the engine hosting it over the wide
+layout when the CONTENT needs it, which is exactly what the Call of the
+Machine maps need under the classic ruleset: mgu4m1 alone precaches ~730
+distinct model paths and used to die on SV_FindIndex's "*Index: overflow".
+
+WHY IT IS AN ESCALATION AND NOT A SETTING. Choosing the wide layout up front
+for every classic session would change the wire format of every classic game
+this engine plays, including the ones that fit in the classic limits
+perfectly well -- protocol 34 demos, vanilla clients, the lot. Escalating only
+at the moment a block actually fills means a session whose content fits is
+byte-for-byte the session it always was (still CS_REMAP_OLD, still
+VANILLA_CODEC, still negotiating 34/35/36 per client), and only a session that
+genuinely cannot be expressed in the classic layout pays for the wide one.
+
+WHAT MOVES AND WHAT DOES NOT. The two layouts agree on every index below
+`airaccel` (CS_NAME..CS_STATUSBAR), so those stay put. Everything at or above
+it lives in one of the named blocks whose START index differs between the
+families (CS_MODELS is 32 classic / 62 wide, CS_ITEMS 1056 / 11326, ...), so
+the already-written contents of those blocks are relocated here, descending by
+source index -- every destination is >= its source, so a descending pass never
+overwrites a slot it has not yet copied out.
+
+Crucially, what the game module holds onto does NOT move: modelindex, sound
+and image values are offsets WITHIN their block (1, 2, 3, ...), and the block
+contents move together with their offsets, so every index the module already
+handed out stays valid. The two places a classic tree does embed a RAW
+configstring index in data rather than passing it to gi.configstring()
+(g_items.ts's STAT_PICKUP_STRING and p_hud.ts's STAT_CHASE) are remapped by
+bindings/legacy.ts's own per-frame fixup pass, the same shim
+bindings/legacy_kex.ts already uses for LMCTF.
+
+WHEN IT REFUSES. Only during map load (ss_loading/ss_dead), and only from the
+classic layout. Once clients are connected they have been told the classic
+layout, so a late overflow must stay the hard error it always was rather than
+silently relocating the space out from under them.
+================
+*/
+export function SV_WidenConfigstringSpace(): boolean {
+  if (svs.csr !== CS_REMAP_OLD) return false; // already wide (kex family, or a previous escalation this level)
+  if (sv.state !== ServerStateT.ss_loading && sv.state !== ServerStateT.ss_dead) return false;
+
+  // Relocate every already-written configstring into its wide-layout home.
+  // Descending source order; see the header for why that is collision-free.
+  for (let i = CS_REMAP_OLD.end - 1; i >= CS_REMAP_OLD.airaccel; i--) {
+    const value = sv.configstrings[i];
+    const dst = remapLegacyConfigstringIndex(i, CS_REMAP_OLD, CS_REMAP_RERELEASE);
+    if (dst === i) continue;
+    sv.configstrings[i] = "";
+    sv.configstrings[dst] = value;
+  }
+
+  svs.csr = CS_REMAP_RERELEASE;
+  // The wire from here on is 1038's, announced under this engine's own
+  // protocol number so the client knows the module producing these wide
+  // indices is the classic one -- see qcommon.ts's
+  // PROTOCOL_VERSION_RERELEASE_CLASSIC doc comment.
+  svs.codec = Q2REPRO_CLASSIC_CODEC;
+  svs.sessionProtocol = PROTOCOL_VERSION_RERELEASE_CLASSIC;
+
+  // sv.models/baselines/entities were allocated for the classic family by
+  // sv.clear() (server.ts, sized off SV_MaxModels()/SV_MaxEdicts(), which
+  // both read the live svs.csr). Grow them to the family that is now active
+  // rather than relying on JS arrays extending themselves on write -- a read
+  // past the old length would hand back `undefined` where the element types
+  // promise `CmodelT | null` / a real EntityStateT.
+  for (let i = sv.models.length; i < SV_MaxModels(); i++) sv.models[i] = null;
+  for (let i = sv.baselines.length; i < SV_MaxEdicts(); i++) sv.baselines[i] = new EntityStateT();
+  for (let i = sv.entities.length; i < SV_MaxEdicts(); i++) sv.entities[i] = new ServerEntityT();
+
+  Com_Printf("Map exceeds the classic configstring limits; widening this session (protocol %i).\n", PROTOCOL_VERSION_RERELEASE_CLASSIC);
+  return true;
+}
+
+// Shared body of SV_ModelIndex/SV_SoundIndex/SV_ImageIndex: look the name up
+// in its block and, if the block is full, try to widen the whole session once
+// and look again in the (relocated, much larger) block. `pick` is re-invoked
+// after the widening because the block's start index and size both change
+// with svs.csr.
+function SV_FindIndexWidening(name: string, pick: () => { start: number; max: number }): number {
+  const first = pick();
+  const found = SV_FindIndex(name, first.start, first.max, true, false);
+  if (found >= 0) return found;
+
+  if (!SV_WidenConfigstringSpace()) {
+    // Not widenable (already wide, or clients are already live on this
+    // layout) -- the original hard error, unchanged.
+    Com_Error(ERR_DROP, "*Index: overflow");
+  }
+
+  const wide = pick();
+  return SV_FindIndex(name, wide.start, wide.max, true);
+}
+
 export function SV_ModelIndex(name: string): number {
-  return SV_FindIndex(name, svs.csr.models, svs.csr.max_models, true);
+  return SV_FindIndexWidening(name, () => ({ start: svs.csr.models, max: svs.csr.max_models }));
 }
 
 export function SV_SoundIndex(name: string): number {
-  return SV_FindIndex(name, svs.csr.sounds, svs.csr.max_sounds, true);
+  return SV_FindIndexWidening(name, () => ({ start: svs.csr.sounds, max: svs.csr.max_sounds }));
 }
 
 export function SV_ImageIndex(name: string): number {
-  return SV_FindIndex(name, svs.csr.images, svs.csr.max_images, true);
+  return SV_FindIndexWidening(name, () => ({ start: svs.csr.images, max: svs.csr.max_images }));
 }
 
 /*
@@ -311,6 +426,7 @@ export function SV_SpawnServer(server: string, spawnpoint: string, serverstate: 
   // load and spawn all other entities
   const ge = requireGe();
   ge.SpawnEntities(sv.name, CM_EntityString(), spawnpoint);
+  SV_RunGamePostFrameHook();
 
   // run two frames to allow everything to settle -- mainLoop=false per
   // q2repro init.c's explicit ge->RunFrame(false) here, bypassing the kex
@@ -319,20 +435,27 @@ export function SV_SpawnServer(server: string, spawnpoint: string, serverstate: 
   // init.c:202-203 also advances sv.framenum alongside each of these two
   // calls (`for (i = 0; i < 2; i++, sv.framenum++) ge->RunFrame(false);`).
   ge.RunFrame(false);
+  SV_RunGamePostFrameHook();
   sv.framenum++;
   ge.RunFrame(false);
+  SV_RunGamePostFrameHook();
   sv.framenum++;
 
   // all precaches are complete
   sv.state = serverstate;
   Com_SetServerState(sv.state);
-  // Tell the in-process client which protocol this server's family demands
-  // (SVC_DirectConnect: kex accepts only 1038; legacy negotiates per
-  // client, signaled as 0). The localhost connect path skips getchallenge
-  // entirely, so this bridge is its only source of that fact -- see
-  // Com_ServerConnectProtocol's doc comment for the campaign-start connect
-  // loop this fixes.
-  Com_SetServerConnectProtocol(svs.csr === CS_REMAP_RERELEASE ? PROTOCOL_VERSION_RERELEASE : 0);
+  // Tell the in-process client which protocol this SESSION demands
+  // (SVC_DirectConnect: kex accepts only 1038; a classic session that had to
+  // widen accepts only PROTOCOL_VERSION_RERELEASE_CLASSIC; an unwidened
+  // classic session negotiates per client, signaled as 0). The localhost
+  // connect path skips getchallenge entirely, so this bridge is its only
+  // source of that fact -- see Com_ServerConnectProtocol's doc comment for
+  // the campaign-start connect loop this fixes.
+  //
+  // Read AFTER SpawnEntities and the two settle frames above, which is what
+  // makes the escalation visible here: SV_WidenConfigstringSpace can only
+  // fire while those are running, so svs.sessionProtocol is final by now.
+  Com_SetServerConnectProtocol(svs.sessionProtocol);
 
   // create a baseline for more efficient communications
   SV_CreateBaseline();

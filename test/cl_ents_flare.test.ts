@@ -176,6 +176,35 @@ describe("CL_AddPacketEntities -- RF_FLARE distance fade", () => {
     expect(Array.from(e?.scale ?? [])).toEqual([0, 0, 0]);
     expect(e?.alpha).toBe(0);
   });
+
+  test("a WIDENED CLASSIC session takes the flare branch: the gate is the wire's capability, not the game module", () => {
+    // A classic-ruleset session on rerelease content that outgrew the classic
+    // configstring limits (sv_init.ts's SV_WidenConfigstringSpace) reconnects
+    // on PROTOCOL_VERSION_RERELEASE_CLASSIC: the WIDE layout (so
+    // cls.csr.extended is true and RF_FLARE means what it says on the wire)
+    // with cls.gameFamily still "classic" (so the monster-flash table and the
+    // HUD stay classic -- see client.ts's cls.gameFamily doc comment).
+    //
+    // This branch must follow the layout, not the family. Rerelease flares set
+    // s.modelindex = 1; without the flare branch that resolves to the WORLD
+    // model and gets handed to the renderer, which is the documented trap this
+    // whole code path exists to avoid.
+    cls.csr = CS_REMAP_RERELEASE;
+    cls.gameFamily = "classic";
+    const world = { world: true };
+    cl.model_draw[1] = world;
+    seatFlare({ origin: [4000, 0, 0] });
+
+    CL_AddEntities();
+
+    // The world model was NOT drawn for this entity...
+    expect(r_entities.slice(0, r_numentities).find((x) => x.model === world)).toBeUndefined();
+    // ...it took the flare path instead: no model, translucent, alpha set.
+    const flare = r_entities.slice(0, r_numentities).find((x) => (x.flags & RF_FLARE) !== 0);
+    expect(flare).toBeDefined();
+    expect((flare?.flags ?? 0) & RF_TRANSLUCENT).toBe(RF_TRANSLUCENT);
+    expect(flare?.alpha).toBe(1);
+  });
 });
 
 describe("CL_AddPacketEntities -- RF_FLARE field threading onto EntityT", () => {

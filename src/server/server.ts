@@ -398,6 +398,33 @@ export class ServerStaticT {
   // for call sites that are not about one specific client's own traffic.
   codec: ProtocolCodec = VANILLA_CODEC;
 
+  // Which wire protocol THIS SESSION requires of every connecting client, or
+  // 0 for "no single requirement -- negotiate per client" (the classic
+  // family's 34/35/36 mix, sv_main.ts's SVC_DirectConnect).
+  //
+  // This is the field that makes the configstring width a property of the
+  // SESSION rather than of the game module. Three values occur:
+  //   0                                 legacy family, classic layout: a
+  //                                     vanilla/R1Q2/Q2PRO client negotiates
+  //                                     its own protocol, exactly as before.
+  //   PROTOCOL_VERSION_RERELEASE        the kex family (and "lmctf-kex"):
+  //                                     1038 only, matching q2repro's server.
+  //   PROTOCOL_VERSION_RERELEASE_CLASSIC
+  //                                     a CLASSIC-module session that had to
+  //                                     escalate to the wide configstring
+  //                                     layout because the map exceeded the
+  //                                     classic family's 256 model/sound/
+  //                                     image slots (sv_init.ts's
+  //                                     SV_WidenConfigstringSpace). The wire
+  //                                     is 1038's, but the number tells the
+  //                                     client the game module is classic --
+  //                                     see qcommon.ts's doc comment.
+  // Set alongside `csr`/`codec` by sv_game.ts's SV_InitGameProgs, re-set by
+  // SV_WidenConfigstringSpace, and read by sv_main.ts (SVC_GetChallenge's p=
+  // list and SVC_DirectConnect's accept/refuse gate) and sv_init.ts (the
+  // Com_SetServerConnectProtocol bridge the loopback client reads).
+  sessionProtocol = 0;
+
   mapcmd = ""; // ie: *intro.cin+base
 
   spawncount = 0; // incremented each server start
@@ -428,6 +455,7 @@ export class ServerStaticT {
     // every csr.end/csr.models/etc bound momentarily wrong).
     this.csr = CS_REMAP_OLD;
     this.codec = VANILLA_CODEC;
+    this.sessionProtocol = 0;
     this.mapcmd = "";
     this.spawncount = 0;
     this.clients = [];

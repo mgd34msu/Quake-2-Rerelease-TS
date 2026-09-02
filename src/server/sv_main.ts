@@ -5,7 +5,7 @@ import {
   NetadrT,
   SysError,
   PROTOCOL_VERSION,
-  PROTOCOL_VERSION_RERELEASE,
+  PROTOCOL_VERSION_RERELEASE_CLASSIC,
   PROTOCOL_VERSION_R1Q2,
   PROTOCOL_VERSION_R1Q2_MINIMUM,
   PROTOCOL_VERSION_R1Q2_CURRENT,
@@ -22,7 +22,6 @@ import { VANILLA_CODEC } from "../qcommon/protocol/vanilla";
 import { Q2REPRO_CODEC } from "../qcommon/protocol/q2repro";
 import { createR1Q2Codec } from "../qcommon/protocol/r1q2";
 import { createQ2ProCodec } from "../qcommon/protocol/q2pro";
-import { CS_REMAP_RERELEASE } from "../shared/cs_remap";
 import {
   Netchan_OutOfBandPrint,
   Netchan_Setup,
@@ -60,6 +59,7 @@ import {
   CVAR_CHEAT,
   DF_INSTANT_ITEMS,
   type CvarT,
+  MAX_MODELS,
 } from "../shared/q_shared";
 import type { GameExports } from "../game/game";
 import {
@@ -85,7 +85,7 @@ import {
   setSvEnforcetime,
   setSvTickRate,
 } from "./server";
-import { geHolder, SV_ShutdownGameProgs } from "./sv_game";
+import { geHolder, SV_ShutdownGameProgs, SV_RunGamePostFrameHook } from "./sv_game";
 import { SV_BroadcastPrintf, SV_SendClientMessages, SV_FlushRedirect } from "./sv_send";
 import { SV_ExecuteClientMessage } from "./sv_user";
 import { SV_RecordDemoMessage } from "./sv_ents";
@@ -337,14 +337,16 @@ export function SVC_GetChallenge(): void {
   // built from the exact protocol list that server instance accepts (q2repro's
   // own dedicated server hardcodes q2repro_accepted_protocols = {Q2P_PROTOCOL_
   // Q2REPRO} only -- it never serves vanilla/R1Q2/Q2PRO). This server mirrors
-  // that: the kex family (svs.csr === CS_REMAP_RERELEASE) advertises only
-  // 1038 (SVC_DirectConnect's own isKexFamily gate already only accepts
-  // that version); the legacy family advertises 34/35/36 ascending, matching
+  // that: a session that demands one protocol advertises exactly that one
+  // (the kex family's 1038 -- SVC_DirectConnect's own gate already accepts
+  // nothing else -- or PROTOCOL_VERSION_RERELEASE_CLASSIC for a classic
+  // session that had to widen its configstring space for the map); a session
+  // that negotiates advertises 34/35/36 ascending, matching
   // q2proto_get_challenge_extras' qsort-ascending order, so real q2proto
   // clients can negotiate any of the three instead of falling into the same
   // broken implicit-vanilla path.
-  const protocolExtras = svs.csr === CS_REMAP_RERELEASE
-    ? `p=${PROTOCOL_VERSION_RERELEASE}`
+  const protocolExtras = svs.sessionProtocol !== 0
+    ? `p=${svs.sessionProtocol}`
     : `p=${PROTOCOL_VERSION},${PROTOCOL_VERSION_R1Q2},${PROTOCOL_VERSION_Q2PRO}`;
 
   // send it back
@@ -412,17 +414,22 @@ export function SVC_DirectConnect(): void {
   Com_DPrintf("SVC_DirectConnect ()\n");
 
   // v1.0.0 wire cluster (task board #23), Mike's ruling: our server accepts
-  // classic community clients. Family gate first (matches q2repro's own
-  // rejection -- svs.csr === CS_REMAP_RERELEASE, set once at game-library
-  // init by sv_game.ts's SV_InitGameProgs, means "kex family": only 1038 is
-  // ever accepted there, no per-client variance). The "legacy" family
-  // (svs.csr === CS_REMAP_OLD) now accepts 34, 35 (R1Q2), or 36 (Q2PRO) and
-  // negotiates per CLIENT (not per server, unlike svs.codec's own family-
-  // default role -- see server.ts's ClientT.codec doc comment), because a
-  // single legacy-family server can serve a mix of vanilla/R1Q2/Q2PRO clients
-  // at once.
+  // classic community clients. SESSION gate first (server.ts's
+  // ServerStaticT.sessionProtocol doc comment has the three-value table):
+  // a session that demands one specific protocol accepts only that one, with
+  // no per-client variance -- the kex family (1038, matching q2repro's own
+  // rejection) and a classic session that had to widen its configstring
+  // space to fit the map (PROTOCOL_VERSION_RERELEASE_CLASSIC). A session
+  // demanding nothing (sessionProtocol 0 -- the classic family on the classic
+  // layout) accepts 34, 35 (R1Q2), or 36 (Q2PRO) and negotiates per CLIENT
+  // (not per server, unlike svs.codec's own family-default role -- see
+  // server.ts's ClientT.codec doc comment), because one such server can serve
+  // a mix of vanilla/R1Q2/Q2PRO clients at once. That path is completely
+  // untouched by the widening work: a classic map that fits the classic
+  // limits negotiates exactly as it always did.
   const version = atoi(Cmd_Argv(1));
-  const isKexFamily = svs.csr === CS_REMAP_RERELEASE;
+  const requiredProtocol = svs.sessionProtocol;
+  const isWideSession = requiredProtocol !== 0;
 
   // RULE-17 FINDING (phase-8 q2repro interop): a real client speaking kex
   // (1038) or Q2PRO (36) always transmits with NETCHAN_NEW framing (single
@@ -431,7 +438,7 @@ export function SVC_DirectConnect(): void {
   // doc comment for the exact wire difference and how it was confirmed
   // against the real q2repro binary (matrix cell a). Vanilla and R1Q2 stay
   // NETCHAN_OLD, matching q2repro's own client/main.c CL_CheckForResend.
-  const chanType = isKexFamily || version === PROTOCOL_VERSION_Q2PRO ? NETCHAN_NEW : NETCHAN_OLD;
+  const chanType = isWideSession || version === PROTOCOL_VERSION_Q2PRO ? NETCHAN_NEW : NETCHAN_OLD;
 
   // main.c:756's `NET_IsLocalAddress(&net_from)` -- computed once, read by
   // SV_ParsePacketLength for every negotiating family below.
@@ -446,13 +453,34 @@ export function SVC_DirectConnect(): void {
   // and the only value vanilla can ever get.
   let negotiatedPacketLength: number = MAX_PACKETLEN_WRITABLE_DEFAULT;
 
-  if (isKexFamily) {
-    if (version !== PROTOCOL_VERSION_RERELEASE) {
-      Netchan_OutOfBandPrint(NetsrcT.NS_SERVER, adr, "print\nServer is version %4.2f.\n", VERSION);
-      Com_DPrintf("    rejected connect from version %i\n", version);
+  if (isWideSession) {
+    if (version !== requiredProtocol) {
+      // Refuse clearly rather than corrupt. A widened classic session is the
+      // interesting case: the client asked for a protocol whose model/sound/
+      // image index fields are too narrow to carry this map at all (protocol
+      // 34 sends modelindex as a single byte), so there is no degraded mode
+      // to fall back to -- say why, in the one line the out-of-band print
+      // gives us, instead of letting the client connect and then read
+      // truncated indices.
+      if (requiredProtocol === PROTOCOL_VERSION_RERELEASE_CLASSIC) {
+        Netchan_OutOfBandPrint(
+          NetsrcT.NS_SERVER,
+          adr,
+          "print\nThis map needs more than %i models/sounds/images, so the server is running protocol %i. Your client speaks protocol %i, whose indices are too narrow to carry it.\n",
+          MAX_MODELS,
+          requiredProtocol,
+          version,
+        );
+      } else {
+        Netchan_OutOfBandPrint(NetsrcT.NS_SERVER, adr, "print\nServer is version %4.2f.\n", VERSION);
+      }
+      Com_DPrintf("    rejected connect from version %i (session requires %i)\n", version, requiredProtocol);
       return;
     }
-    negotiatedCodec = Q2REPRO_CODEC;
+    // Same wire format either way; the codec differs only in the protocol
+    // number it announces in svc_serverdata (q2repro.ts's
+    // Q2REPRO_CLASSIC_CODEC).
+    negotiatedCodec = svs.codec;
     // Connect-string tail (q2proto_q2repro_connect_tail): "<packet_length>
     // <has_zlib>" after the four standard fields (Cmd_Argv(5)/(6)).
     // has_zlib (Cmd_Argv(6)) IS now parsed (q2proto_q2repro_parse_connect:
@@ -971,6 +999,7 @@ export function SV_RunGameFrame(): void {
   if (!paused || (maxclients ? maxclients.value > 1 : false)) {
     const ge = requireGe();
     ge.RunFrame();
+    SV_RunGamePostFrameHook();
 
     // never get more than one tic behind
     if (sv.time < svs.realtime) {
