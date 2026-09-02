@@ -112,13 +112,28 @@ guessed at:
     mover_origin and the spawn_usetargets rows. Likewise func_timer fires
     on a different phase in the two modules (SP_func_timer is identical in
     both), which accounts for most of usetargets_classic_only.
-  - SPAWNFLAG_NOT_COOP. The classic module deliberately keeps vanilla's
-    commented-out semantics for it (see the commit that added
-    SPAWNFLAG_COOP_ONLY's arm), so in a coop session it keeps entities the
-    re-release module frees -- the drop-pod script on the six Call of the
-    Machine entry maps is the visible case (an extra info_player_start,
-    trigger_push, trigger_teleport and info_teleport_destination each).
-    That is a standing decision, not an open defect.
+  - SPAWNFLAG_NOT_COOP IS NO LONGER ONE OF THEM. This sweep boots in coop
+    (see the driver's header for why), and the classic module now honors
+    the re-release's `coop && NOT_COOP -> inhibit` arm on any session
+    carrying re-release presentation -- gated on gi.extended_layout(), i.e.
+    on SV_ContentNeedsWideLayout's verdict, so it can never fire on 1997
+    content (656 classic-tree entity lumps, zero matches). All 31 shipped
+    maps that carry the bit are now on the right side of that gate, so the
+    NOT_COOP share of this table is zero; src/game/g_spawn.ts's own comment
+    carries the measurement. That is what moved spawn_count 305 -> 168 and
+    mover_presence 235 -> 26 across 20-odd maps.
+
+  - THE COOP SPAWN-POINT CHAIN, which is a separate rule and is what is
+    left on mgu6m1. Vanilla's SelectCoopSpawnPoint returns NULL outright
+    for client 0 ("player 0 starts in normal player spawn point"); the
+    re-release rewrote the routine (p_client.cpp:1270-1372) so every coop
+    client falls back to the map's info_player_coop spots when the
+    info_player_start chain comes up empty. mgu6m1 is the one shipped map
+    where that is observable -- it is the only map whose every
+    info_player_start carries SPAWNFLAG_NOT_COOP, so once the arm above
+    honors the bit the classic module has no start left and lands on the
+    world origin while the re-release takes one of mgu6m1's four
+    info_player_coop spots. Follow-up, and it lives in p_client.ts.
 */
 
 import { describe, test, expect, beforeAll } from "bun:test";
@@ -249,22 +264,22 @@ function rec(map: string, game: string): RecordT {
  */
 const RESIDUAL_BASELINE: Readonly<Record<string, number>> = {
   final_count: 22,
-  mover_origin: 454,
-  mover_presence: 235,
-  mover_state: 39,
-  player_origin: 7,
-  spawn_count: 305,
-  spawn_usetargets_classic_only: 228,
+  mover_origin: 440,
+  mover_presence: 26,
+  mover_state: 38,
+  player_origin: 6,
+  spawn_count: 168,
+  spawn_usetargets_classic_only: 216,
   spawn_usetargets_kex_only: 104,
-  usetargets_classic_only: 617,
-  usetargets_kex_only: 126,
+  usetargets_classic_only: 571,
+  usetargets_kex_only: 131,
 };
 
 /** Documented, deliberate rule differences -- see C1/C2/C3 in the header. */
 const CLASSIFIED_BASELINE: Readonly<Record<string, number>> = {
   C1_player_trail: 222,
-  C2_classname_rewrite: 110,
-  C3_spawn_z_plus9: 215,
+  C2_classname_rewrite: 112,
+  C3_spawn_z_plus9: 216,
 };
 
 function moversByModel(movers: MoverT[]): Map<string, MoverT[]> {

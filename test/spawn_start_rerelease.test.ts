@@ -18,11 +18,27 @@ Two separate rules produce that difference, and this file gates both.
   whichever the map listed first -- the coop one, on all six of them. The
   same flag also gates map scripting: mgu4m1 arms its drop-pod teleporter
   from a COOP_ONLY trigger_always, so the classic module used to teleport
-  the player out of the pod on the first frame too. src/game/g_spawn.ts now
-  reproduces the SPAWNFLAG_COOP_ONLY half; see its own long comment for why
-  the SPAWNFLAG_NOT_COOP half is deliberately left off (it is a 1997 flag
-  whose vanilla semantics are "check disabled", so honoring it would change
-  coop on original content) and for the two coop cells that gap leaves open.
+  the player out of the pod on the first frame too.
+
+  src/game/g_spawn.ts now reproduces BOTH halves, but on different gates,
+  and that split is the thing these tests exist to pin:
+
+    * SPAWNFLAG_COOP_ONLY is gated on nothing, because the bit itself is
+      the gate -- vanilla assigns it no meaning and no 1997 map sets it.
+    * SPAWNFLAG_NOT_COOP is a 1997 flag whose vanilla semantics are "check
+      disabled", so honoring it unconditionally would rewrite coop on
+      original content (15 maps in a 1997 install carry the bit, 961
+      entities between them). It is honored only on a WIDE session --
+      gi.extended_layout(), i.e. the map carries rerelease presentation
+      that the classic wire cannot deliver, settled by sv_init.ts's
+      SV_ContentNeedsWideLayout before ge.SpawnEntities runs. No map in a
+      1997 install matches that predicate, so the arm is unreachable
+      there. See g_spawn.ts's own long comment for the measurement behind
+      the gate choice.
+
+  The `wide` field on Ruleset below is that session axis; it defaults to
+  false, so every test that does not mention it is asserting the 1997
+  behavior.
 
   RULE 2 -- what happens when nothing matches. p_client.cpp:1199-1228's
   SelectSingleSpawnPoint falls back to any untargeted start and then to any
@@ -57,6 +73,7 @@ import { EdictT, g_edicts, game, gameCvars, globals, level, SetGEdicts, st } fro
 import { SpawnEntities } from "../src/game/g_spawn";
 import { InitItems } from "../src/game/g_items";
 import { SelectSpawnPoint } from "../src/game/p_client";
+import { SV_ContentNeedsWideLayout } from "../src/server/sv_init";
 
 const RETAIL_PAK = "/home/buzzkill/q2rets/rerelease/baseq2/pak0.pak";
 const haveRetail = existsSync(RETAIL_PAK);
@@ -84,6 +101,21 @@ function fakeCvar(value: number, str = ""): CvarT {
  *  "<n> entities inhibited" line -- the only place the classic module
  *  reports the count. */
 let dprints: string[] = [];
+
+/*
+The session's configstring layout, which SpawnEntities reads through
+gi.extended_layout() and uses as the content gate on its SPAWNFLAG_NOT_COOP
+arm (src/game/g_spawn.ts). In a real session sv_init.ts's
+SV_ContentNeedsWideLayout answers this from the map's own entity lump before
+ge.SpawnEntities runs, so the game module sees a settled value; here it is
+set per test by setupWorld from the Ruleset's `wide` field.
+
+The engine leaves the import OPTIONAL (src/game/game.ts's GameImports marks
+it `?`), so a fixture that omits it is a valid narrow session -- which is
+exactly what every pre-existing test in this file is, and why they all keep
+vanilla's coop behavior unchanged.
+*/
+let sessionIsWide = false;
 
 function buildFakeImports(): GameImports {
   const trace: GTraceT = {
@@ -137,6 +169,7 @@ function buildFakeImports(): GameImports {
     WritePosition: () => {},
     WriteDir: () => {},
     WriteAngle: () => {},
+    extended_layout: () => sessionIsWide,
     cvar: () => fakeCvar(0),
     cvar_set: (_n: string, value: string) => fakeCvar(0, value),
     cvar_forceset: (_n: string, value: string) => fakeCvar(0, value),
@@ -152,9 +185,22 @@ interface Ruleset {
   skill: number;
   deathmatch: number;
   coop: number;
+  /**
+   * Is the session on the WIDE configstring layout, i.e. is it carrying
+   * re-release presentation? Defaults to false everywhere it is left off,
+   * which is the 1997-content case: no map in the classic tree matches
+   * SV_ContentNeedsWideLayout's predicate (656 entity lumps scanned, zero
+   * matches), so a classic-tree session is always narrow and the classic
+   * module's SPAWNFLAG_NOT_COOP arm can never fire there.
+   */
+  wide?: boolean;
 }
 
 const SINGLE_PLAYER: Ruleset = { skill: 1, deathmatch: 0, coop: 0 };
+/** Coop on a NARROW session -- 1997 content. Vanilla's rules, unchanged. */
+const COOP_NARROW: Ruleset = { skill: 1, deathmatch: 0, coop: 1 };
+/** Coop on a WIDE session -- re-release content. The re-release's rules. */
+const COOP_WIDE: Ruleset = { skill: 1, deathmatch: 0, coop: 1, wide: true };
 
 function setupWorld(rules: Ruleset): void {
   dprints = [];
@@ -174,6 +220,7 @@ function setupWorld(rules: Ruleset): void {
   gameCvars.skill = fakeCvar(rules.skill);
   gameCvars.deathmatch = fakeCvar(rules.deathmatch);
   gameCvars.coop = fakeCvar(rules.coop);
+  sessionIsWide = rules.wide === true;
   gameCvars.dmflags = fakeCvar(0);
 
   globals.num_edicts = MAXCLIENTS + 1;
@@ -440,10 +487,19 @@ describe("classic module: 1997-shaped maps select exactly what vanilla selected"
     }
   });
 
-  test("SPAWNFLAG_NOT_COOP on a start still does NOT inhibit it -- vanilla left that check off", () => {
-    // The deliberate half of rule 1 that src/game/g_spawn.ts does not adopt.
+  test("SPAWNFLAG_NOT_COOP on a start does NOT inhibit it on a NARROW session -- vanilla left that check off", () => {
+    // Vanilla's own decision, and the one this module keeps for 1997
+    // content: g_spawn.c's ED_LoadFromFile has the coop check commented
+    // out. A narrow session is what every classic-tree map produces.
     const map = WORLD + ent("info_player_start", { origin: "4 4 4", spawnflags: String(SPAWNFLAG_NOT_COOP) });
-    expect(describeSelection(classicSelection("v_notcoop", map, "", { skill: 1, deathmatch: 0, coop: 1 }))).toBe("4 4 13 @ 0 0 0");
+    expect(describeSelection(classicSelection("v_notcoop", map, "", COOP_NARROW))).toBe("4 4 13 @ 0 0 0");
+  });
+
+  test("...and single player never reads the bit either, wide session or not", () => {
+    // SPAWNFLAG_NOT_COOP is a coop-only rule in both games; the wide gate
+    // must not leak it into a non-coop session.
+    const map = WORLD + ent("info_player_start", { origin: "4 4 4", spawnflags: String(SPAWNFLAG_NOT_COOP) });
+    expect(describeSelection(classicSelection("v_notcoop_sp", map, "", { ...SINGLE_PLAYER, wide: true }))).toBe("4 4 13 @ 0 0 0");
   });
 });
 
@@ -457,6 +513,41 @@ describe("classic module: the rerelease keys, and only those, change the selecti
 
     expect(describeSelection(classicSelection("r_pair", map, "", SINGLE_PLAYER))).toBe("200 0 9 @ 0 0 0");
     expect(describeSelection(classicSelection("r_pair", map, "", { skill: 1, deathmatch: 0, coop: 1 }))).toBe("100 0 9 @ 0 0 0");
+  });
+
+  test("SPAWNFLAG_NOT_COOP IS honored in coop on a wide session -- the rerelease's arm, gated on rerelease content", () => {
+    // The COOP_ONLY/NOT_COOP pair again, but in coop and on a wide session.
+    // The rerelease frees the NOT_COOP start and keeps the COOP_ONLY one;
+    // the classic module now does the same, and the two starts here are far
+    // enough apart that picking the wrong one is unmissable.
+    const map =
+      WORLD +
+      ent("info_player_start", { origin: "100 0 0", spawnflags: String(SPAWNFLAG_COOP_ONLY) }) +
+      ent("info_player_start", { origin: "200 0 0", spawnflags: String(SPAWNFLAG_NOT_COOP) });
+
+    // narrow (1997 content): both starts survive, vanilla takes the first.
+    expect(describeSelection(classicSelection("r_pair", map, "", COOP_NARROW))).toBe("100 0 9 @ 0 0 0");
+    // wide (rerelease content): identical to the above here, because the
+    // COOP_ONLY start already wins on map order -- the difference is which
+    // ENTITIES exist, which the inhibit-count test below pins down.
+    expect(describeSelection(classicSelection("r_pair", map, "", COOP_WIDE))).toBe("100 0 9 @ 0 0 0");
+  });
+
+  test("the wide gate changes the coop ENTITY SET, not just the start -- inhibit counts, both layouts", () => {
+    // Order reversed from the test above so the NOT_COOP start is the one
+    // vanilla would take: on a wide session it is gone and the COOP_ONLY
+    // start is selected instead, which is exactly the mgu4m1 defect shape.
+    const map =
+      WORLD +
+      ent("info_player_start", { origin: "200 0 0", spawnflags: String(SPAWNFLAG_NOT_COOP) }) +
+      ent("info_player_start", { origin: "100 0 0", spawnflags: String(SPAWNFLAG_COOP_ONLY) }) +
+      ent("monster_soldier", { origin: "0 0 0", spawnflags: String(SPAWNFLAG_NOT_COOP) });
+
+    expect(describeSelection(classicSelection("r_rev", map, "", COOP_NARROW))).toBe("200 0 9 @ 0 0 0");
+    expect(dprints.filter((m) => m.endsWith(" entities inhibited\n"))).toEqual(["0 entities inhibited\n"]);
+
+    expect(describeSelection(classicSelection("r_rev", map, "", COOP_WIDE))).toBe("100 0 9 @ 0 0 0");
+    expect(dprints.filter((m) => m.endsWith(" entities inhibited\n"))).toEqual(["2 entities inhibited\n"]);
   });
 
   test("a lone COOP_ONLY start leaves single player with no start at all -- same entity set as the rerelease", () => {
@@ -560,6 +651,115 @@ describe.skipIf(!haveRetail)("shipped maps: classic selects the rerelease's star
     }
     expect(mismatches).toEqual([]);
   }, 600_000);
+
+  test("COOP: the whole inhibition pass agrees with the rerelease's on every wide map", () => {
+    // The coop counterpart of the single-player test above, and the thing
+    // the SPAWNFLAG_NOT_COOP arm was added for. On a WIDE session the two
+    // rulesets' inhibition passes are now the same rule in coop as well, so
+    // the counts must match exactly, map for map.
+    const mismatches: string[] = [];
+    let wideMaps = 0;
+    for (const map of shippedMaps()) {
+      if (!SV_ContentNeedsWideLayout(map.entityString).needed) continue;
+      wideMaps++;
+      setupWorld(COOP_WIDE);
+      SpawnEntities(map.name, map.entityString, "");
+      const line = dprints.find((m) => m.endsWith(" entities inhibited\n"));
+      const mine = Number.parseInt(line ?? "-1", 10);
+
+      const theirs = map.entities.filter((e, i) => i !== 0 && kexInhibits(e.spawnflags, COOP_WIDE)).length;
+      if (mine !== theirs) mismatches.push(`${map.name}: classic inhibited ${mine}, rerelease ${theirs}`);
+    }
+    expect(mismatches).toEqual([]);
+    // Guards the gate against passing vacuously. Deliberately a FLOOR and a
+    // named set rather than an exact count: SV_ContentNeedsWideLayout's
+    // predicate grows as more re-release presentation gets ported (it has
+    // already gained the fog and world-text entries), and this test is
+    // about the coop rule agreeing wherever the gate fires, not about how
+    // many maps that is today.
+    expect(wideMaps).toBeGreaterThanOrEqual(116);
+    for (const name of ["mgu1m1", "mgu4m1", "mgu6m1"]) {
+      const m = shippedMaps().find((x) => x.name === name);
+      expect(SV_ContentNeedsWideLayout(m!.entityString).needed).toBe(true);
+    }
+  }, 600_000);
+
+  test("COOP: a NARROW session keeps vanilla's counts on the very same maps", () => {
+    // The other half of the gate. Re-run of the maps above with the session
+    // narrow: the classic module must now DISAGREE with the rerelease by
+    // exactly the number of SPAWNFLAG_NOT_COOP entities each map carries,
+    // because that is the 1997 behavior it keeps for 1997 content.
+    const wrong: string[] = [];
+    for (const name of ["mgu4m1", "mgu1m1", "mgu6m1"]) {
+      const map = shippedMaps().find((m) => m.name === name);
+      expect(map).toBeDefined();
+      setupWorld(COOP_NARROW);
+      SpawnEntities(map!.name, map!.entityString, "");
+      const mine = Number.parseInt(dprints.find((m) => m.endsWith(" entities inhibited\n")) ?? "-1", 10);
+      const theirs = map!.entities.filter((e, i) => i !== 0 && kexInhibits(e.spawnflags, COOP_WIDE)).length;
+      const notCoop = map!.entities.filter((e, i) => i !== 0 && (e.spawnflags & SPAWNFLAG_NOT_COOP) !== 0).length;
+      if (theirs - mine !== notCoop) wrong.push(`${name}: rerelease ${theirs}, classic-narrow ${mine}, NOT_COOP ents ${notCoop}`);
+    }
+    expect(wrong).toEqual([]);
+  }, 600_000);
+
+  test("COOP: mgu1m1 now selects the rerelease's start -- one of the two cells the old gap left open", () => {
+    // Was: the classic module took the NOT_COOP start at -496 2576 1352,
+    // 1100 units up and most of the map away from where the rerelease puts
+    // a coop player. Now both select the COOP_ONLY start at 2336 2192 232.
+    // Both sides are reported through the same describe* pair the
+    // single-player sweep above uses, so the z carries vanilla's
+    // `origin[2] += 9` on both (describeReference lifts the reference to
+    // match; test/parity_map_sweep.test.ts classifies the real 9-unit
+    // difference as C3). The point here is the START, not the nudge.
+    const map = shippedMaps().find((m) => m.name === "mgu1m1");
+    expect(map).toBeDefined();
+    const mine = describeSelection(classicSelection("mgu1m1", map!.entityString, "", COOP_WIDE));
+    expect(mine).toBe("2336 2192 241 @ 0 -180 0");
+    expect(describeReference(kexSelection(map!.entities, "", COOP_WIDE))).toBe(mine);
+
+    // ...and it really was different before the arm: on a narrow session
+    // the NOT_COOP start survives and vanilla's map-order rule takes it.
+    expect(describeSelection(classicSelection("mgu1m1", map!.entityString, "", COOP_NARROW))).toBe("-496 2576 1361 @ 0 -180 0");
+  });
+
+  test("COOP: mgu6m1's entity set now matches, and its remaining start difference is a DIFFERENT rule", () => {
+    // The second of the two cells. mgu6m1's only info_player_start carries
+    // SPAWNFLAG_NOT_COOP, so once the arm honors it BOTH modules'
+    // info_player_start chain comes up empty -- they agree, and that
+    // agreement is what this test pins.
+    //
+    // Where they still differ is what happens NEXT, and it is not this
+    // rule: vanilla's SelectCoopSpawnPoint (p_client.c) returns NULL
+    // outright for client 0 ("player 0 starts in normal player spawn
+    // point"), so the classic module falls through to its no-start
+    // recovery and puts the player at the world origin. The rerelease
+    // rewrote that routine (p_client.cpp:1270-1372, transcribed at
+    // src/kexgame/p_client.ts's SelectCoopSpawnPoint): EVERY coop client,
+    // client 0 included, tries SelectSingleSpawnPoint and then falls back
+    // to the map's info_player_coop spots, of which mgu6m1 has four. That
+    // fallback lives in p_client.ts, not g_spawn.ts, and is the one map of
+    // all 222 where the difference is observable -- it is the only wide map
+    // whose every info_player_start is NOT_COOP.
+    const map = shippedMaps().find((m) => m.name === "mgu6m1");
+    expect(map).toBeDefined();
+
+    // Same entity set: the inhibition passes agree.
+    setupWorld(COOP_WIDE);
+    SpawnEntities(map!.name, map!.entityString, "");
+    const mine = Number.parseInt(dprints.find((m) => m.endsWith(" entities inhibited\n")) ?? "-1", 10);
+    const theirs = map!.entities.filter((e, i) => i !== 0 && kexInhibits(e.spawnflags, COOP_WIDE)).length;
+    expect(mine).toBe(theirs);
+
+    // Same info_player_start chain result: nothing survives, on both sides.
+    expect(kexSelection(map!.entities, "", COOP_WIDE)).toBeNull();
+    expect(describeSelection(classicSelection("mgu6m1", map!.entityString, "", COOP_WIDE))).toBe("0 0 0 @ 0 0 0");
+
+    // And the four info_player_coop spots the rerelease would fall back to
+    // really are there, so this stays a live follow-up rather than a
+    // hypothetical one.
+    expect(map!.entities.filter((e) => e.classname === "info_player_coop").length).toBe(4);
+  });
 
   test("no shipped 1997/Xatrix/Rogue map places SPAWNFLAG_COOP_ONLY on a start", () => {
     // Why the flag is a safe gate: the bit only ever appears on

@@ -955,6 +955,16 @@ export function SpawnEntities(mapname: string, entities: string, spawnpoint: str
   let ent: EdictT | null = null;
   let inhibit = 0;
 
+  // Is this session delivering re-release presentation? Read ONCE, here,
+  // rather than per entity: SV_SpawnServer settles the layout before it
+  // calls ge.SpawnEntities (sv_init.ts's "CONTENT-DRIVEN LAYOUT CHOICE"
+  // block), but a mid-parse *Index overflow can still widen the session
+  // while this loop runs, and half a map inhibited under one answer and
+  // half under the other would be a rule that depends on precache order.
+  // This is the content gate on the SPAWNFLAG_NOT_COOP arm below -- see
+  // its comment for why this signal and not the other candidate.
+  const rereleaseContent = gi.extended_layout?.() === true;
+
   // Mike's ruling (2026-08-31): "quiet it" -- reset the unknown-field/
   // unknown-classname counters (see the deviation comment above C_atoi) for
   // this map's parse pass before ED_ParseEdict/ED_CallSpawn can add to them.
@@ -1002,15 +1012,15 @@ export function SpawnEntities(mapname: string, entities: string, spawnpoint: str
           continue;
         }
       } else {
-        // RERELEASE-ONLY ARM. g_spawn.cpp's G_InhibitEntity (ported verbatim
+        // RERELEASE-ONLY ARMS. g_spawn.cpp's G_InhibitEntity (ported verbatim
         // as src/kexgame/g_spawn.ts's own G_InhibitEntity) has a coop pair
         // vanilla 3.21 does not:
         //
         //     if ( coop && spawnflags & SPAWNFLAG_NOT_COOP)  -> inhibit
         //     if (!coop && spawnflags & SPAWNFLAG_COOP_ONLY) -> inhibit
         //
-        // Only the second half is reproduced here, and that is a deliberate
-        // split, not an omission:
+        // Both are reproduced here, but they are gated differently, and that
+        // is a deliberate split, not an omission:
         //
         //   SPAWNFLAG_COOP_ONLY (0x00004000, g_local.h:262 /
         //   src/kexgame/g_local.ts:192) is a bit vanilla assigns no meaning
@@ -1025,21 +1035,76 @@ export function SpawnEntities(mapname: string, entities: string, spawnpoint: str
         //   Machine maps -- and NONE in base1/base2/..., whose inhibit
         //   counts stay exactly where they were.
         //
-        //   SPAWNFLAG_NOT_COOP (0x00001000) is the opposite case: it is a
-        //   1997 flag with 1997 semantics, and vanilla's own decision was to
-        //   leave the check commented out (the `/* ((coop->value) && ... */`
-        //   in g_spawn.c's ED_LoadFromFile, preserved below by its absence).
-        //   Turning it on here would change coop on original content, so it
-        //   stays off. Known consequence, measured against the shipped maps:
-        //   in coop, mgu1m1 and mgu6m1 select a player start the rerelease
-        //   would have inhibited. Single player is exact on all 222 maps.
+        //   SPAWNFLAG_NOT_COOP (0x00001000) is the opposite case, and needs
+        //   a gate of its own. It is a 1997 flag with 1997 semantics, and
+        //   vanilla's own decision was to leave the check commented out (the
+        //   `/* ((coop->value) && ... */` in g_spawn.c's ED_LoadFromFile).
+        //   Honoring it unconditionally would rewrite coop on original
+        //   content -- 15 maps in a 1997 install carry the bit, 961 entities
+        //   between them, every one of which vanilla spawns in coop -- so it
+        //   is honored only when the session is carrying RE-RELEASE content,
+        //   which is what `rereleaseContent` (gi.extended_layout(), settled
+        //   by sv_init.ts's SV_ContentNeedsWideLayout before this runs) says.
         //
-        // This is what makes rerelease single player play correctly under
-        // this ruleset. Live case that found it: mgu4m1 places an
-        // info_player_start AND a trigger_always that fires the drop-pod
-        // teleporter, both COOP_ONLY; without this arm the classic ruleset
-        // both started the player at the coop spot and immediately ran the
-        // coop-only landing script.
+        //   WHY THAT SIGNAL AND NOT "THE MAP CARRIES A COOP_ONLY ENTITY".
+        //   Both candidates were measured against the two installs on this
+        //   machine by running SV_ContentNeedsWideLayout itself over every
+        //   map's entity lump. 31 of the 222 shipped re-release maps carry
+        //   NOT_COOP entities. The COOP_ONLY-presence gate reaches 20 of
+        //   them and CANNOT reach the rest at any threshold: mgu6m1,
+        //   q64/command and q64/jail use NOT_COOP without placing a single
+        //   COOP_ONLY entity anywhere, so there is nothing for it to key
+        //   on. mgu6m1 is not a corner case -- the bit is on its
+        //   info_player_start, its trigger_teleport and its
+        //   info_teleport_destination, the same start/drop-pod scripting
+        //   mgu4m1 has. The wide-session gate reaches all 31.
+        //
+        //   WHY IT CANNOT FIRE ON 1997 CONTENT. The predicate is a
+        //   statement about re-release-only presentation entities and keys,
+        //   and no 1997-authored map has any: all 656 readable map entity
+        //   lumps in this machine's classic tree (baseq2/ctf/rogue/xatrix/
+        //   lmctf paks plus loose maps) were run through
+        //   SV_ContentNeedsWideLayout and produced zero matches, so a
+        //   classic-tree session never widens and this arm is dead code
+        //   there. Re-run, not inherited: sv_init.ts's own header records
+        //   the same scan for the WIRE choice, and this arm now leans on it
+        //   as a GAME RULE. Confirmed empirically as well -- 27 maps booted
+        //   from the 1997 tree under both builds (all 15 rogue maps that
+        //   carry the bit, 961 entities between them) produced byte-
+        //   identical spawn records.
+        //
+        //   THE PREDICATE IS SHARED, AND IT GROWS. SV_ContentNeedsWideLayout
+        //   gains entries as more re-release presentation gets ported (the
+        //   fog and world-text entries were added after this arm landed,
+        //   which is what took its coverage from 24 of 31 maps to all 31).
+        //   That is the intended direction -- every map it newly recognises
+        //   is a map it just proved carries re-release authoring -- but it
+        //   does mean this arm's reach is not local to this file. Its ONE
+        //   invariant is the 1997 scan above, which the predicate's own
+        //   header re-checks on every addition.
+        //
+        //   KNOWN CONSEQUENCE, one map. mgu6m1's only info_player_start
+        //   carries NOT_COOP, so once it is honored the classic module has
+        //   no start left for client 0 and falls back to the world origin.
+        //   The re-release lands in the map instead, but for a DIFFERENT
+        //   rule this arm does not touch: vanilla's SelectCoopSpawnPoint
+        //   returns NULL outright for client 0, where p_client.cpp:1270-1372
+        //   falls back to the map's info_player_coop spots (mgu6m1 has
+        //   four). That fallback belongs in p_client.ts and is the open
+        //   follow-up; test/spawn_start_rerelease.test.ts pins both halves.
+        //
+        // Together these two arms are what makes re-release content play
+        // correctly under this ruleset. Live case that found the pair:
+        // mgu4m1 places an info_player_start AND a trigger_always that fires
+        // the drop-pod teleporter, both COOP_ONLY; without them the classic
+        // ruleset both started the player at the coop spot and immediately
+        // ran the coop-only landing script.
+        if (rereleaseContent && (current.spawnflags & SPAWNFLAG_NOT_COOP) !== 0 && cvarNum(gameCvars.coop) !== 0) {
+          G_FreeEdict(current);
+          inhibit++;
+          continue;
+        }
+
         if ((current.spawnflags & SPAWNFLAG_COOP_ONLY) !== 0 && cvarNum(gameCvars.coop) === 0) {
           G_FreeEdict(current);
           inhibit++;
