@@ -107,6 +107,27 @@ export interface GTraceT extends Omit<TraceT, "ent"> {
 //
 // functions provided by the main engine
 //
+/**
+ * One player's fog state as p_client.cpp's P_ForceFogTransition carries it.
+ * Colour channels and `sky_factor` are 0..1 (the engine scales them to the
+ * bytes svc_fog puts on the wire); `hf_start`/`hf_end` are
+ * [r, g, b, distance] with the colour 0..1 and the distance in world units.
+ */
+export interface FogStateT {
+  density: number;
+  r: number;
+  g: number;
+  b: number;
+  sky_factor: number;
+  hf_falloff: number;
+  hf_density: number;
+  hf_start: readonly [number, number, number, number];
+  hf_end: readonly [number, number, number, number];
+}
+
+/** RGBA 0..1, the colour argument info_world_text's draw calls take. */
+export type FogRgbaT = readonly [number, number, number, number];
+
 export interface GameImports {
   // special messages
   bprintf(printlevel: number, fmt: string): void;
@@ -167,6 +188,32 @@ export interface GameImports {
   // legacy-index translation. `slot` is 0-based within the block; the engine
   // adds the live layout's base and bounds-checks.
   shadowlight?(slot: number, value: string): void;
+
+  // One player's fog state, exactly the set p_client.cpp's
+  // P_ForceFogTransition carries: global fog (density; r/g/b and sky factor
+  // all 0..1) plus the height-fog gradient (falloff, density, and a
+  // start/end pair whose first three slots are colour 0..1 and whose fourth
+  // is a world-unit distance).
+  //
+  // Publish one player's fog transition. The engine writes the re-release
+  // svc_fog message -- a bitmask packet carrying only the fields that differ
+  // between `current` and `wanted` -- and unicasts it reliably to `ent`.
+  // `transitionMs` is the lerp duration the client should take to get there,
+  // or null for "no BIT_TIME field" (an instant change, or a trigger_fog
+  // with no delay).
+  //
+  // Silently does nothing on a narrow session: protocol 34 has no svc_fog
+  // and a vanilla client would desync on the unknown opcode. Callers may
+  // therefore call unconditionally, exactly as with shadowlight() above.
+  fog?(ent: Edict, current: FogStateT, wanted: FogStateT, transitionMs: number | null): void;
+
+  // info_world_text's two draw calls (g_misc.cpp:2276-2325). The re-release
+  // routes these straight into the client renderer's debug-primitive list;
+  // this engine's server-side equivalent is src/server/sv_debugdraw.ts, the
+  // same buffer bindings/kex.ts hands the kex module. `size` is the text
+  // height, `lifeTime` is in seconds.
+  draw_oriented_world_text?(origin: Vec3, text: string, color: FogRgbaT, size: number, lifeTime: number, depthTest: boolean): void;
+  draw_static_world_text?(origin: Vec3, angles: Vec3, text: string, color: FogRgbaT, size: number, lifeTime: number, depthTest: boolean): void;
 
   // Com_Error(ERR_DROP, ...) never returns to the caller (see PORTING.md
   // idiom map: ComError is thrown and caught in Qcommon_Frame).

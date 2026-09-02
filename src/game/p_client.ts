@@ -348,6 +348,7 @@ function EDICT_NUM(e: EdictT): number {
 }
 
 import { Cmd_Help_f } from "./p_hud";
+import { P_SetupWorldFog } from "./g_kextrig";
 
 //
 // Gross, ugly, disgustuing hack section
@@ -1867,6 +1868,16 @@ export function PutClientInServer(ent: EdictT): void {
   // after every level load, so this module arms it only for the arrival it
   // exists for -- p_view.ts's P_FallingDamage is where it is spent.
   if (landmarkSpawn[0]) client.landmark_free_fall = true;
+
+  // RERELEASE CONTENT PORT -- per-client fog.
+  // src/kexgame/p_client.ts:2476-2483's "[Paril-KEX] set up world fog & send
+  // it instantly", at the same point in the function (right after the spawn
+  // point is applied, before the spectator branch). g_kextrig.ts holds the
+  // per-client fog state and the transition; on a narrow session the whole
+  // thing converges silently and puts nothing on the wire, so 1997 content is
+  // untouched (no 1997 map carries a fog_* or heightfog_* worldspawn key, so
+  // `wanted` is all-zero there and the guard returns before even that).
+  P_SetupWorldFog(ent, g_edicts[0]);
 
   // spawn a spectator
   if (client.pers.spectator) {

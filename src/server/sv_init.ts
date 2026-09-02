@@ -234,6 +234,14 @@ key/value pairing and produced zero matches. The pairing matters -- a naive
 substring search hits `"team" "alpha"` in baseq2's dlite.bsp, where "alpha"
 is a team NAME in value position, which is why this parses key/value pairs
 rather than grepping.
+
+RE-CHECKED when the fog and world-text entries were added (trigger_fog,
+info_world_text, and the 18 worldspawn fog_* / heightfog_* keys): 583 maps
+across this machine's baseq2/ctf/lmctf paks carry none of them, so the
+1997-data answer is still "never widen". Those additions are about MESSAGES
+the classic wire has no opcode for (svc_fog) and engine hooks that only exist
+on the wide layout (the info_world_text draw pair), rather than entity-state
+fields -- the same question, one layer out.
 ================
 */
 
@@ -261,12 +269,53 @@ const WIDE_LAYOUT_CLASSNAMES: ReadonlyMap<string, string> = new Map([
   // g_kextarg.ts target_camera_dummy_think / update_target_camera: the
   // HACKFLAG_TELEPORT_OUT fade writes s.alpha on the cutscene dummy.
   ["target_camera", "s.alpha"],
+  // g_kextrig.ts trigger_fog_touch: writes the toucher's wanted fog, which
+  // p_view.ts's P_ForceFogTransition publishes as an svc_fog message. That
+  // opcode exists only in protocol 1038 -- the classic wire has no fog
+  // message at all, so on a narrow session the volume fires, holds correct
+  // state, and the view stays unfogged.
+  ["trigger_fog", "svc_fog"],
+  // g_kexmisc.ts info_world_text_think: gi.draw_oriented_world_text /
+  // gi.draw_static_world_text, engine hooks that exist only on the wide
+  // layout (bindings/legacy.ts gates both on svs.csr.extended).
+  ["info_world_text", "world text draw hooks"],
 ]);
 
 // Spawn keys that reach the same fields on any entity at all.
 // g_save.ts fields[]: "alpha"/"scale" -> target "edict_s"; "shadowlightradius"
 // -> spawntemp, and setup_dynamic_light keys its whole path on it being > 0.
-const WIDE_LAYOUT_KEYS: ReadonlySet<string> = new Set(["alpha", "scale", "shadowlightradius"]);
+// The worldspawn fog block is the other half of the svc_fog story:
+// p_client.ts's PutClientInServer turns these keys into the spawning player's
+// fog and sends one instant transition, so a map can be fogged from the first
+// frame without owning a single trigger_fog. g_spawn.ts routes all 18 onto
+// worldspawn's fog/heightfog structs.
+const WIDE_LAYOUT_FOG_KEYS: readonly string[] = [
+  "fog_color",
+  "fog_color_off",
+  "fog_density",
+  "fog_density_off",
+  "fog_sky_factor",
+  "fog_sky_factor_off",
+  "heightfog_falloff",
+  "heightfog_falloff_off",
+  "heightfog_density",
+  "heightfog_density_off",
+  "heightfog_start_color",
+  "heightfog_start_color_off",
+  "heightfog_start_dist",
+  "heightfog_start_dist_off",
+  "heightfog_end_color",
+  "heightfog_end_color_off",
+  "heightfog_end_dist",
+  "heightfog_end_dist_off",
+];
+
+const WIDE_LAYOUT_KEYS: ReadonlySet<string> = new Set([
+  "alpha",
+  "scale",
+  "shadowlightradius",
+  ...WIDE_LAYOUT_FOG_KEYS,
+]);
 
 export function SV_ContentNeedsWideLayout(entityString: string): { needed: boolean; reason: string } {
   // Entity-lump grammar: `{ "key" "value" "key" "value" ... }` repeated.

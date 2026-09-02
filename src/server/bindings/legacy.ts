@@ -19,7 +19,8 @@
 // refactor -- see that file for the apiversion check and geHolder storage
 // that remain on the caller's side of this boundary.
 
-import type { GameExports, GameImports } from "../../game/game";
+import type { Edict, FogRgbaT, FogStateT, GameExports, GameImports } from "../../game/game";
+import { SV_DebugDraw_OrientedWorldText, SV_DebugDraw_StaticWorldText } from "../sv_debugdraw";
 import { GetGameAPI } from "../../game/g_main";
 import { g_edicts as baseGEdicts } from "../../game/g_local";
 import type { GameExports as CtfGameExports } from "../../ctf/game";
@@ -272,6 +273,9 @@ export function BuildLegacyImports(): GameImports {
     configstring: PF_LegacyConfigstring,
     extended_layout: PF_ExtendedLayout,
     shadowlight: PF_ShadowLight,
+    fog: PF_Fog,
+    draw_oriented_world_text: PF_DrawOrientedWorldText,
+    draw_static_world_text: PF_DrawStaticWorldText,
     sound: PF_StartSound,
     positioned_sound: SV_StartSound,
 
@@ -396,6 +400,228 @@ function PF_ExtendedLayout(): boolean {
 function PF_ShadowLight(slot: number, value: string): void {
   if (svs.csr.shadowlights < 0 || slot < 0 || slot >= svs.csr.max_shadowlights) return;
   PF_Configstring(svs.csr.shadowlights + slot, value);
+}
+
+/*
+===============
+PF_Fog
+
+The engine half of game.ts's optional `fog()` import: the svc_fog write, so
+the classic module can publish per-client fog on a session that widened onto
+the re-release wire.
+
+This is a deliberate byte-for-byte mirror of the kex module's own writer,
+src/kexgame/p_view.ts's `sendFogTransition` (itself the port of
+p_client.cpp:1794-1910). The kex module writes the packet inline with
+gi.WriteByte/WriteShort/WriteFloat/WriteLong because the re-release game DLL
+does; the classic module cannot, because the bit constants and the svc_fog
+opcode are re-release wire vocabulary that the frozen v3 GameImports has no
+way to name. So the module hands over the two fog states and the engine does
+the diff and the encode here, against the same read-side decoder
+(qcommon/protocol/q2repro.ts's `readFog`) the kex path targets.
+
+Field order, matching that decoder exactly: bits byte (or a 16-bit bits word
+when BIT_MORE_BITS is set), then density(float)+skyfactor(byte), r/g/b(byte
+each), time(short), hf_falloff(float), hf_density(float), start r/g/b(byte
+each), start_dist(long), end r/g/b(byte each), end_dist(long) -- each present
+only when its bit is set.
+
+THE NARROW GATE. `svs.csr.extended` is false on a 1997-content classic
+session, and protocol 34 has no svc_fog: writing the opcode there would feed
+a vanilla client a byte it cannot parse and desync the connection. So a
+narrow session emits nothing at all and the call is a silent no-op, the same
+contract PF_ShadowLight has. The module is free to call unconditionally.
+===============
+*/
+// The svc_fog opcode and its bit assignments, from protocol 1038. Spelled
+// here rather than imported from src/kexapi/game.ts so this binding (and the
+// src/game module behind it) takes no dependency on the kex API surface;
+// test/wide_classic_fog.test.ts pins these against kexapi's own constants so
+// the two cannot drift.
+export const SVC_FOG = 27; // ServerCommandT.svc_fog, protocol 1038's opcode table
+export const FOG_BIT_DENSITY = 1 << 0;
+export const FOG_BIT_R = 1 << 1;
+export const FOG_BIT_G = 1 << 2;
+export const FOG_BIT_B = 1 << 3;
+export const FOG_BIT_TIME = 1 << 4;
+export const FOG_BIT_HEIGHTFOG_FALLOFF = 1 << 5;
+export const FOG_BIT_HEIGHTFOG_DENSITY = 1 << 6;
+export const FOG_BIT_MORE_BITS = 1 << 7;
+export const FOG_BIT_HEIGHTFOG_START_R = 1 << 8;
+export const FOG_BIT_HEIGHTFOG_START_G = 1 << 9;
+export const FOG_BIT_HEIGHTFOG_START_B = 1 << 10;
+export const FOG_BIT_HEIGHTFOG_START_DIST = 1 << 11;
+export const FOG_BIT_HEIGHTFOG_END_R = 1 << 12;
+export const FOG_BIT_HEIGHTFOG_END_G = 1 << 13;
+export const FOG_BIT_HEIGHTFOG_END_B = 1 << 14;
+export const FOG_BIT_HEIGHTFOG_END_DIST = 1 << 15;
+
+export function PF_Fog(ent: Edict, current: FogStateT, wanted: FogStateT, transitionMs: number | null): void {
+  if (!svs.csr.extended) return;
+
+  let bits = 0;
+  let density = 0;
+  let skyfactor = 0;
+  let red = 0;
+  let green = 0;
+  let blue = 0;
+  let time = 0;
+  let hf_falloff = 0;
+  let hf_density = 0;
+  let hf_start_r = 0;
+  let hf_start_g = 0;
+  let hf_start_b = 0;
+  let hf_start_dist = 0;
+  let hf_end_r = 0;
+  let hf_end_g = 0;
+  let hf_end_b = 0;
+  let hf_end_dist = 0;
+
+  // check regular fog -- density and sky factor share one bit, exactly as
+  // sendFogTransition pairs wanted_fog[0] with wanted_fog[4].
+  if (wanted.density !== current.density || wanted.sky_factor !== current.sky_factor) {
+    bits |= FOG_BIT_DENSITY;
+    density = wanted.density;
+    skyfactor = wanted.sky_factor * 255;
+  }
+  if (wanted.r !== current.r) {
+    bits |= FOG_BIT_R;
+    red = wanted.r * 255;
+  }
+  if (wanted.g !== current.g) {
+    bits |= FOG_BIT_G;
+    green = wanted.g * 255;
+  }
+  if (wanted.b !== current.b) {
+    bits |= FOG_BIT_B;
+    blue = wanted.b * 255;
+  }
+
+  if (transitionMs !== null) {
+    bits |= FOG_BIT_TIME;
+    time = transitionMs;
+  }
+
+  // check heightfog stuff
+  if (current.hf_falloff !== wanted.hf_falloff) {
+    bits |= FOG_BIT_HEIGHTFOG_FALLOFF;
+    hf_falloff = wanted.hf_falloff ? wanted.hf_falloff : 0;
+  }
+  if (current.hf_density !== wanted.hf_density) {
+    bits |= FOG_BIT_HEIGHTFOG_DENSITY;
+    hf_density = wanted.hf_density ? wanted.hf_density : 0;
+  }
+
+  if (current.hf_start[0] !== wanted.hf_start[0]) {
+    bits |= FOG_BIT_HEIGHTFOG_START_R;
+    hf_start_r = wanted.hf_start[0] * 255;
+  }
+  if (current.hf_start[1] !== wanted.hf_start[1]) {
+    bits |= FOG_BIT_HEIGHTFOG_START_G;
+    hf_start_g = wanted.hf_start[1] * 255;
+  }
+  if (current.hf_start[2] !== wanted.hf_start[2]) {
+    bits |= FOG_BIT_HEIGHTFOG_START_B;
+    hf_start_b = wanted.hf_start[2] * 255;
+  }
+  if (current.hf_start[3] !== wanted.hf_start[3]) {
+    bits |= FOG_BIT_HEIGHTFOG_START_DIST;
+    hf_start_dist = wanted.hf_start[3];
+  }
+
+  if (current.hf_end[0] !== wanted.hf_end[0]) {
+    bits |= FOG_BIT_HEIGHTFOG_END_R;
+    hf_end_r = wanted.hf_end[0] * 255;
+  }
+  if (current.hf_end[1] !== wanted.hf_end[1]) {
+    bits |= FOG_BIT_HEIGHTFOG_END_G;
+    hf_end_g = wanted.hf_end[1] * 255;
+  }
+  if (current.hf_end[2] !== wanted.hf_end[2]) {
+    bits |= FOG_BIT_HEIGHTFOG_END_B;
+    hf_end_b = wanted.hf_end[2] * 255;
+  }
+  if (current.hf_end[3] !== wanted.hf_end[3]) {
+    bits |= FOG_BIT_HEIGHTFOG_END_DIST;
+    hf_end_dist = wanted.hf_end[3];
+  }
+
+  if (bits & 0xff00) bits |= FOG_BIT_MORE_BITS;
+
+  PF_WriteByte(SVC_FOG);
+
+  if (bits & FOG_BIT_MORE_BITS) PF_WriteShort(bits);
+  else PF_WriteByte(bits);
+
+  if (bits & FOG_BIT_DENSITY) {
+    PF_WriteFloat(density);
+    PF_WriteByte(skyfactor);
+  }
+  if (bits & FOG_BIT_R) PF_WriteByte(red);
+  if (bits & FOG_BIT_G) PF_WriteByte(green);
+  if (bits & FOG_BIT_B) PF_WriteByte(blue);
+  if (bits & FOG_BIT_TIME) PF_WriteShort(time);
+
+  if (bits & FOG_BIT_HEIGHTFOG_FALLOFF) PF_WriteFloat(hf_falloff);
+  if (bits & FOG_BIT_HEIGHTFOG_DENSITY) PF_WriteFloat(hf_density);
+
+  if (bits & FOG_BIT_HEIGHTFOG_START_R) PF_WriteByte(hf_start_r);
+  if (bits & FOG_BIT_HEIGHTFOG_START_G) PF_WriteByte(hf_start_g);
+  if (bits & FOG_BIT_HEIGHTFOG_START_B) PF_WriteByte(hf_start_b);
+  if (bits & FOG_BIT_HEIGHTFOG_START_DIST) PF_WriteLong(hf_start_dist);
+
+  if (bits & FOG_BIT_HEIGHTFOG_END_R) PF_WriteByte(hf_end_r);
+  if (bits & FOG_BIT_HEIGHTFOG_END_G) PF_WriteByte(hf_end_g);
+  if (bits & FOG_BIT_HEIGHTFOG_END_B) PF_WriteByte(hf_end_b);
+  if (bits & FOG_BIT_HEIGHTFOG_END_DIST) PF_WriteLong(hf_end_dist);
+
+  PF_Unicast(ent, true);
+}
+
+/*
+===============
+PF_DrawOrientedWorldText / PF_DrawStaticWorldText
+
+The engine half of game.ts's two optional info_world_text draw imports.
+bindings/kex.ts routes the kex module's Draw_OrientedWorldText /
+Draw_StaticWorldText into src/server/sv_debugdraw.ts's buffer; these route
+the classic module's into the SAME buffer, so info_world_text produces
+identical server-side draw records under either module.
+
+Gated on the wide layout for the same reason PF_Fog is: info_world_text is
+re-release content, a 1997-tree session never spawns one, and a narrow
+session should produce no re-release presentation traffic of any kind.
+
+NOTE ON WHAT THIS DOES AND DOES NOT DO: sv_debugdraw.ts is a buffer with no
+consumer -- see its own header ruling. Nothing drains it and nothing renders
+it, under EITHER module. So this hook reaches exact parity with the kex path
+and still draws nothing on screen; the missing piece is a renderer/transport
+for the debug-primitive list, not this seam.
+===============
+*/
+export function PF_DrawOrientedWorldText(
+  origin: Vec3,
+  text: string,
+  color: FogRgbaT,
+  size: number,
+  lifeTime: number,
+  depthTest: boolean,
+): void {
+  if (!svs.csr.extended) return;
+  SV_DebugDraw_OrientedWorldText(origin, text, { r: color[0], g: color[1], b: color[2], a: color[3] }, size, lifeTime, depthTest);
+}
+
+export function PF_DrawStaticWorldText(
+  origin: Vec3,
+  angles: Vec3,
+  text: string,
+  color: FogRgbaT,
+  size: number,
+  lifeTime: number,
+  depthTest: boolean,
+): void {
+  if (!svs.csr.extended) return;
+  SV_DebugDraw_StaticWorldText(origin, angles, text, { r: color[0], g: color[1], b: color[2], a: color[3] }, size, lifeTime, depthTest);
 }
 
 // The live `g_edicts` module singleton of whichever legacy tree `gameName`

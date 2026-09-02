@@ -190,7 +190,29 @@ type KexClientFogState = {
   fog_transition_time: number;
   wanted_fog: KexWantedFog | null;
   wanted_heightfog: KexWantedHeightFog | null;
+  // The state the client has already been told about -- p_client.cpp's
+  // `client->fog` / `client->heightfog`, the other half of
+  // P_ForceFogTransition's converged-state guard. Zeroed on first use, the
+  // same value kexgame's ClientPersistantT starts these at.
+  fog: KexWantedFog;
+  heightfog: KexWantedHeightFog;
 };
+
+const ZERO_FOG: KexWantedFog = { density: 0, r: 0, g: 0, b: 0, sky_factor: 0 };
+const ZERO_HEIGHTFOG: KexWantedHeightFog = { start: [0, 0, 0, 0], end: [0, 0, 0, 0], falloff: 0, density: 0 };
+
+function copyFog(f: KexWantedFog): KexWantedFog {
+  return { density: f.density, r: f.r, g: f.g, b: f.b, sky_factor: f.sky_factor };
+}
+
+function copyHeightFog(h: KexWantedHeightFog): KexWantedHeightFog {
+  return {
+    falloff: h.falloff,
+    density: h.density,
+    start: [h.start[0], h.start[1], h.start[2], h.start[3]],
+    end: [h.end[0], h.end[1], h.end[2], h.end[3]],
+  };
+}
 
 const kexClientFog = new Map<number, KexClientFogState>();
 
@@ -199,10 +221,144 @@ export function KexClientFogState(player: EdictT): KexClientFogState {
   const key = player.s.number;
   let s = kexClientFog.get(key);
   if (s === undefined) {
-    s = { fog_transition_time: 0, wanted_fog: null, wanted_heightfog: null };
+    s = {
+      fog_transition_time: 0,
+      wanted_fog: null,
+      wanted_heightfog: null,
+      fog: copyFog(ZERO_FOG),
+      heightfog: copyHeightFog(ZERO_HEIGHTFOG),
+    };
     kexClientFog.set(key, s);
   }
   return s;
+}
+
+/**
+ * p_client.cpp:1788-1910 -- `[Paril-KEX] void P_ForceFogTransition(edict_t *ent, bool instant)`,
+ * the classic module's copy of src/kexgame/p_view.ts's function of the same
+ * name.
+ *
+ * Two halves in the re-release: a converged-state guard (return early when
+ * the client already has the fog it wants) and, when they differ, the svc_fog
+ * packet write. The guard is ported here verbatim; the packet write goes
+ * through the optional `gi.fog()` import instead of inline gi.Write* calls,
+ * because the svc_fog opcode and its bit assignments are re-release wire
+ * vocabulary the frozen v3 GameImports cannot name -- src/server/bindings/
+ * legacy.ts's PF_Fog holds the encoder, and mirrors kexgame's
+ * `sendFogTransition` byte for byte.
+ *
+ * THERE IS NO INTERPOLATION HERE, in this module or in kexgame's. The server
+ * sends the destination state plus a BIT_TIME duration and the CLIENT lerps
+ * from what it currently has toward it; the game module only ever tracks the
+ * two endpoints. `transitionMs` is that duration, or null when the change is
+ * instant (a spawn, or the INSTANTANEOUS spawnflag) or the trigger carries no
+ * delay -- exactly kexgame's `!instant && Gtime_nonzero(fog_transition_time)`
+ * condition, with its same trunc-to-milliseconds and 0..65535 clamp.
+ *
+ * On a narrow session gi.fog() is a no-op (PF_Fog's own gate), so nothing
+ * reaches the wire and a vanilla client never sees an opcode it cannot parse.
+ * The state still converges either way, so a client's tracked fog is correct
+ * regardless of whether the session could transmit it.
+ */
+export function P_ForceFogTransition(ent: EdictT, instant: boolean): void {
+  if (ent.client === null) return;
+
+  const cs = KexClientFogState(ent);
+  const wantedFog = cs.wanted_fog ?? ZERO_FOG;
+  const wantedHf = cs.wanted_heightfog ?? ZERO_HEIGHTFOG;
+
+  if (fogEquals(cs.fog, wantedFog) && heightFogEquals(cs.heightfog, wantedHf)) return;
+
+  const rawMs = Math.trunc(cs.fog_transition_time * 1000);
+  const transitionMs = instant || rawMs === 0 ? null : Math.min(Math.max(rawMs, 0), 65535);
+
+  gi.fog?.(
+    ent,
+    {
+      density: cs.fog.density,
+      r: cs.fog.r,
+      g: cs.fog.g,
+      b: cs.fog.b,
+      sky_factor: cs.fog.sky_factor,
+      hf_falloff: cs.heightfog.falloff,
+      hf_density: cs.heightfog.density,
+      hf_start: cs.heightfog.start,
+      hf_end: cs.heightfog.end,
+    },
+    {
+      density: wantedFog.density,
+      r: wantedFog.r,
+      g: wantedFog.g,
+      b: wantedFog.b,
+      sky_factor: wantedFog.sky_factor,
+      hf_falloff: wantedHf.falloff,
+      hf_density: wantedHf.density,
+      hf_start: wantedHf.start,
+      hf_end: wantedHf.end,
+    },
+    transitionMs,
+  );
+
+  // `ent->client->fog = ent->client->pers.wanted_fog;` -- a C struct copy.
+  // Copied field-by-field for the same reason kexgame's sendFogTransition
+  // does it: these are reference types here, and aliasing them would let a
+  // later trigger_fog touch mutate the acknowledged state too, breaking the
+  // guard above.
+  cs.fog = copyFog(wantedFog);
+  cs.heightfog = copyHeightFog(wantedHf);
+}
+
+function fogEquals(a: KexWantedFog, b: KexWantedFog): boolean {
+  return a.density === b.density && a.r === b.r && a.g === b.g && a.b === b.b && a.sky_factor === b.sky_factor;
+}
+
+function heightFogEquals(a: KexWantedHeightFog, b: KexWantedHeightFog): boolean {
+  return (
+    a.falloff === b.falloff &&
+    a.density === b.density &&
+    a.start[0] === b.start[0] &&
+    a.start[1] === b.start[1] &&
+    a.start[2] === b.start[2] &&
+    a.start[3] === b.start[3] &&
+    a.end[0] === b.end[0] &&
+    a.end[1] === b.end[1] &&
+    a.end[2] === b.end[2] &&
+    a.end[3] === b.end[3]
+  );
+}
+
+/**
+ * p_client.cpp:2476-2483 -- the `[Paril-KEX] set up world fog & send it
+ * instantly` block PutClientInServer runs after placing the player. Mirrors
+ * src/kexgame/p_client.ts's copy: the worldspawn fog_* / heightfog_* keys
+ * become this client's wanted state and go out in one instant transition.
+ */
+export function P_SetupWorldFog(ent: EdictT, world: EdictT): void {
+  const cs = KexClientFogState(ent);
+  cs.wanted_fog = {
+    density: world.fog.density,
+    r: world.fog.color[0] ?? 0,
+    g: world.fog.color[1] ?? 0,
+    b: world.fog.color[2] ?? 0,
+    sky_factor: world.fog.sky_factor,
+  };
+  cs.wanted_heightfog = {
+    start: [
+      world.heightfog.start_color[0] ?? 0,
+      world.heightfog.start_color[1] ?? 0,
+      world.heightfog.start_color[2] ?? 0,
+      world.heightfog.start_dist,
+    ],
+    end: [
+      world.heightfog.end_color[0] ?? 0,
+      world.heightfog.end_color[1] ?? 0,
+      world.heightfog.end_color[2] ?? 0,
+      world.heightfog.end_dist,
+    ],
+    falloff: world.heightfog.falloff,
+    density: world.heightfog.density,
+  };
+  P_ForceFogTransition(ent, true);
 }
 
 /** g_trigger.cpp: `lerp(from, to, t)`. */

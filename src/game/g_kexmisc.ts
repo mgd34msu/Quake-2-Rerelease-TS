@@ -685,26 +685,25 @@ function info_world_text_think(self: EdictT): void {
     );
   }
 
-  // The rerelease ends here with one of:
-  //   gi.Draw_OrientedWorldText(self.s.origin, self.message, color,
-  //                             self.size[2], frame_time, true)
-  //   gi.Draw_StaticWorldText(self.s.origin, textAngle, self.message, color,
-  //                           self.size[2], frame_time, true)
-  // Neither exists in the classic GameImports, so both arguments are computed
-  // and then discarded -- see this function's degradation note.
-  const textAngle = vec3();
-  if (self.s.angles[YAW] !== -3.0) {
+  // g_misc.cpp:2318-2324's two draw calls, routed through the optional
+  // gi.draw_oriented_world_text / gi.draw_static_world_text imports
+  // (src/server/bindings/legacy.ts) into src/server/sv_debugdraw.ts -- the
+  // SAME server-side buffer bindings/kex.ts hands the kex module's
+  // Draw_OrientedWorldText / Draw_StaticWorldText, so this entity now
+  // produces identical draw records under either module.
+  //
+  // Both hooks are no-ops on a narrow session, and nothing drains
+  // sv_debugdraw's buffer under EITHER module (see its header ruling), so
+  // this reaches parity with the kex path and still puts nothing on screen.
+  // The missing piece is a renderer for the debug-primitive list.
+  if (self.s.angles[YAW] === -3.0) {
+    gi.draw_oriented_world_text?.(self.s.origin, self.message, color, self.size[2] ?? 0, FRAMETIME, true);
+  } else {
+    const textAngle = vec3();
     textAngle[YAW] = anglemod(self.s.angles[YAW] ?? 0) + 180;
     if ((textAngle[YAW] ?? 0) > 360.0) textAngle[YAW] = (textAngle[YAW] ?? 0) - 360.0;
+    gi.draw_static_world_text?.(self.s.origin, textAngle, self.message, color, self.size[2] ?? 0, FRAMETIME, true);
   }
-  const drawArgs: readonly [Vec3, Vec3, string, KexRgba, number] = [
-    self.s.origin,
-    textAngle,
-    self.message,
-    color,
-    self.size[2] ?? 0,
-  ];
-  void drawArgs;
 
   self.nextthink = level.time + FRAMETIME;
 }

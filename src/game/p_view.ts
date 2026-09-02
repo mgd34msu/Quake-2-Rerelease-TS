@@ -82,6 +82,7 @@ import { T_Damage } from "./g_combat";
 import { PowerArmorType } from "./g_items";
 import { DeathmatchScoreboardMessage, G_CheckChaseStats, G_SetSpectatorStats, G_SetStats } from "./p_hud";
 import { PlayerNoise } from "./p_weapon";
+import { P_ForceFogTransition } from "./g_kextrig";
 
 // a per-file local mirrors other units' own cvarNum (module-local
 // everywhere in this codebase, not a shared export) per the established
@@ -895,6 +896,13 @@ export function ClientEndServerFrame(ent: EdictT): void {
 
   current_player = ent;
   current_client = client;
+
+  // RERELEASE CONTENT PORT -- per-client fog.
+  // src/kexgame/p_view.ts's ClientEndServerFrame opens with the same
+  // "check fog changes" call. A trigger_fog touch this frame set the
+  // client's wanted fog; this is where the change is published (and where
+  // the converged-state guard makes it free on every other frame).
+  P_ForceFogTransition(ent, false);
 
   //
   // If the origin or velocity have changed since ClientThink(),
