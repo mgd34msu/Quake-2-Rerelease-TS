@@ -103,7 +103,7 @@ describe("retail-data survey -- sprites/flare_NN.tga in the real rerelease pak0.
     // "sprites/*" straight to an image loader for exactly this reason.
     expect(extractFromPak(PAK_PATH, "sprites/flare.sp2")).toBeNull();
     expect(extractFromPak(PAK_PATH, "sprites/flare_01.sp2")).toBeNull();
-  });
+  }, 60_000); // reads the real 700MB retail pak; bun's 5s default trips under gate load
 });
 
 describe("gl_image.ts LoadTGA -- decodes the REAL retail sprites/flare_01.tga bytes (skipped if the retail install isn't present)", () => {
@@ -166,5 +166,5 @@ describe("gl_image.ts LoadTGA -- decodes the REAL retail sprites/flare_01.tga by
     const mean = sum / n;
     const variance = sumSq / n - mean * mean;
     expect(variance).toBeGreaterThan(0);
-  });
+  }, 60_000); // reads the real 700MB retail pak; bun's 5s default trips under gate load
 });
