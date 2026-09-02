@@ -673,6 +673,13 @@ export const clCvars: {
   // real muzzle-flash MODEL rendering. Was registered bare (return value
   // discarded) in cl_main.ts pending this consumer; now wired.
   cl_muzzleflashes: CvarT | null;
+  // q2repro src/client/tent.c:1750: `cl_compass_time = Cvar_Get(...)` --
+  // how many SECONDS one objective-compass breadcrumb lives before it fades
+  // out and frees its explosion slot (tent.c:600's ex_marker case divides
+  // the marker's age by `cl_compass_time->value * 1000`). Was registered
+  // bare in cl_main.ts pending this consumer; cl_tent.ts's CL_AddExplosions
+  // reads it now.
+  cl_compass_time: CvarT | null;
   cl_noskins: CvarT | null;
   cl_autoskins: CvarT | null;
   cl_upspeed: CvarT | null;
@@ -720,6 +727,7 @@ export const clCvars: {
   cl_predict: null,
   cl_footsteps: null,
   cl_muzzleflashes: null,
+  cl_compass_time: null,
   cl_noskins: null,
   cl_autoskins: null,
   cl_upspeed: null,

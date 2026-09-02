@@ -709,6 +709,31 @@ export function GL_DrawAliasSkeletonShadow(model: Md5ModelT): void {
 }
 
 /*
+** GL_EntityScale / GL_ScaleForEntity
+**
+** q2repro src/refresh/main.c:290-297 -- an entity's per-axis `scale` field
+** (ref.ts's EntityT.scale) multiplies the model's axes inside
+** R_RotateForEntity, so a model can be drawn bigger or smaller than the
+** size its md2 frame data bakes in. Zero means "unscaled", exactly as in
+** the C (`e->scale[0] ? e->scale[0] : 1.0f`, main.c:347), so every entity
+** that has never heard of the field keeps vanilla geometry.
+**
+** Lives here rather than inside gl_rmain.ts's R_RotateForEntity (where the
+** C puts it) because that function is also the transform for brush models
+** and sprites, neither of which this port scales; keeping the scale in the
+** alias path means nothing else changes shape. cl_tent.ts's ex_marker
+** (2.5x) is the only caller that sets it on an alias model today.
+*/
+function GL_EntityScale(e: EntityT): [number, number, number] {
+  return [e.scale[0] || 1, e.scale[1] || 1, e.scale[2] || 1];
+}
+
+function GL_ScaleForEntity(e: EntityT): void {
+  const [sx, sy, sz] = GL_EntityScale(e);
+  if (sx !== 1 || sy !== 1 || sz !== 1) qgl.qglScalef(sx, sy, sz);
+}
+
+/*
 ** R_CullAliasModel
 */
 function R_CullAliasModel(bbox: Vec3[], e: EntityT): boolean {
@@ -754,6 +779,21 @@ function R_CullAliasModel(bbox: Vec3[], e: EntityT): boolean {
       mins[i] = thismins[i] < oldmins[i] ? thismins[i] : oldmins[i];
       maxs[i] = thismaxs[i] > oldmaxs[i] ? thismaxs[i] : oldmaxs[i];
     }
+  }
+
+  // The box above is in unscaled model space; GL_ScaleForEntity will draw
+  // the mesh at `e.scale` (see that function). q2repro folds the same factor
+  // into its own cull test through `glr.entscale` (src/refresh/main.c:169,
+  // mesh.c:487, which scale a bounding RADIUS -- this port culls with a
+  // rotated box instead, so the factor goes on the box).
+  const [esx, esy, esz] = GL_EntityScale(e);
+  if (esx !== 1 || esy !== 1 || esz !== 1) {
+    mins[0] *= esx;
+    maxs[0] *= esx;
+    mins[1] *= esy;
+    maxs[1] *= esy;
+    mins[2] *= esz;
+    maxs[2] *= esz;
   }
 
   //
@@ -969,6 +1009,7 @@ export function R_DrawAliasModel(e: EntityT): void {
   qgl.qglPushMatrix();
   e.angles[PITCH] = -e.angles[PITCH]; // sigh.
   R_RotateForEntity(e);
+  GL_ScaleForEntity(e);
   e.angles[PITCH] = -e.angles[PITCH]; // sigh.
 
   // q2repro src/refresh/mesh.c:1092-1095 (`#if USE_MD5`) -- prefer the

@@ -80,12 +80,12 @@ import { CL_ClearState, CL_RequestNextDownload, CL_WriteDemoMessage } from "./cl
 import { HTTP_QueueDownload, HTTP_RescanQueue, type HttpDlType } from "./cl_http";
 import { CG_SetActiveCgameKind } from "./cgame/host";
 import { SCR_PlayCinematic } from "./cl_cin";
-import { SCR_CenterPrint, SCR_AddToDamageDisplay, SCR_AddPOI, SCR_RemovePOI, SCR_AddHelpPath } from "./cl_scrn";
+import { SCR_CenterPrint, SCR_AddToDamageDisplay, SCR_AddPOI, SCR_RemovePOI } from "./cl_scrn";
 import { con } from "./console";
 import { CL_FogParamsChanged, CL_ClearFog } from "./cl_fog";
 import { CL_ClearWorldText } from "./cl_worldtext";
 import { S_StartSound, S_StartLocalSound, S_BeginRegistration, S_RegisterSound, S_EndRegistration } from "./snd_dma";
-import { CL_RegisterTEntSounds, CL_ParseTEnt } from "./cl_tent";
+import { CL_RegisterTEntSounds, CL_ParseTEnt, CL_AddHelpPath } from "./cl_tent";
 import { CL_ParseMuzzleFlash, CL_ParseMuzzleFlash2, CL_SetLightstyle, CL_ParseShadowLightConfigstring } from "./cl_fx";
 import { CL_ParseInventory } from "./cl_inv";
 import { CL_ParseEntityBits, CL_ParseDelta, CL_ParseFrame } from "./cl_ents";
@@ -106,9 +106,10 @@ const DEFAULT_SOUND_PACKET_ATTENUATION = 1.0;
 
 // svc_strings[256] -- static array initializer (`char *svc_strings[256] = {...}`).
 // Populated here (cl_parse.c's true owning file) into client.ts's holder
-// array; entries past svc_frame stay "" (client.h's implicit NULL, which
-// `if (!svc_strings[cmd])` treats identically to an empty string).
-const SVC_STRING_NAMES: string[] = fixedLength("SVC_STRING_NAMES", 21, [
+// array; every entry left "" is client.h's implicit NULL, which
+// `if (!svc_strings[cmd])` treats identically to an empty string and reports
+// as "BAD CMD <n>" under cl_shownet 2.
+const SVC_STRING_NAMES: string[] = fixedLength("SVC_STRING_NAMES", 32, [
   "svc_bad",
   "svc_muzzleflash",
   "svc_muzzlflash2",
@@ -130,6 +131,22 @@ const SVC_STRING_NAMES: string[] = fixedLength("SVC_STRING_NAMES", 21, [
   "svc_packetentities",
   "svc_deltapacketentities",
   "svc_frame",
+  // Entries 21-29 stay "" (client.h's implicit NULL). 30 and 31 are named
+  // because this client PARSES both -- see svc_poi/svc_help_path in
+  // CL_ParseServerMessage below -- and without a name here cl_shownet 2
+  // reported the objective compass's own traffic as "BAD CMD 30/31" on a
+  // message it had just decoded correctly.
+  "", // 21 svc_splitclient
+  "", // 22 svc_configblast
+  "", // 23 svc_spawnbaselineblast
+  "", // 24 svc_level_restart
+  "", // 25 svc_damage
+  "", // 26 svc_locprint
+  "", // 27 svc_fog
+  "", // 28 svc_waitingforplayers
+  "", // 29 svc_bot_chat
+  "svc_poi",
+  "svc_help_path",
 ]);
 for (let i = 0; i < SVC_STRING_NAMES.length; i++) svc_strings[i] = SVC_STRING_NAMES[i];
 
@@ -1287,12 +1304,12 @@ function CL_ParseServerMessageLoop(): void {
       }
 
       case ServerCommandT.svc_help_path: {
-        // q2repro parse.c:1378's CL_AddHelpPath call -- routed to
-        // cl_scrn.ts's SCR_AddHelpPath (see that file's own "Help path"
-        // section for the store, and cl_view.ts's V_AddHelpPathMarkers for
-        // the adapted draw side), previously decode-only here.
+        // q2repro parse.c:1378's CL_AddHelpPath call, straight through to
+        // cl_tent.ts's CL_AddHelpPath (tent.c:477) -- one ex_marker
+        // explosion-pool entry per waypoint, riding the normal 3D entity
+        // refresh like every other explosion type.
         const helpPath = readHelpPathKex();
-        SCR_AddHelpPath(helpPath.pos, helpPath.dir, helpPath.start);
+        CL_AddHelpPath(helpPath.pos, helpPath.dir, helpPath.start);
         break;
       }
 

@@ -13,6 +13,7 @@ import {
   VectorNormalize,
   VectorLength,
   VectorCompare,
+  VectorSet,
   AngleVectors,
 } from "../shared/math";
 import { frand, crand } from "../qcommon/common";
@@ -21,6 +22,7 @@ import {
   SPLASH_SPARKS,
   RF_TRANSLUCENT,
   RF_FULLBRIGHT,
+  RF_MINLIGHT,
   RF_NOSHADOW,
   RF_BEAM,
   CHAN_WEAPON,
@@ -61,6 +63,7 @@ import {
   CL_Nukeblast,
   CL_WidowSplash,
   CL_DebugTrail,
+  vectoangles2,
 } from "./cl_newfx";
 
 // cl_fx.ts and cl_tent.ts close a value cycle (cl_fx.c's CL_ParseMuzzleFlash2
@@ -139,6 +142,14 @@ export enum ExptypeT {
   ex_mflash,
   ex_poly,
   ex_poly2,
+  // [Paril-KEX] q2repro tent.c:348 -- one breadcrumb of the objective
+  // compass trail (CL_AddHelpPath below). Appended rather than slotted in
+  // where the C has it (between ex_poly and ex_light) because this enum's
+  // numbering is already this port's own and cannot be matched to the C's
+  // anyway: it keeps vanilla's ex_explosion, which q2repro dropped, and has
+  // no ex_light, which q2repro added and nothing here allocates. Appending
+  // leaves every existing ordinal where it is.
+  ex_marker,
 }
 
 export class ExplosionT {
@@ -152,7 +163,14 @@ export class ExplosionT {
   baseframe = 0;
 }
 
-const MAX_EXPLOSIONS = 32;
+// q2repro tent.c:338 raised vanilla's 32 to 256, and the compass trail is
+// why: CL_AddHelpPath allocates ONE explosion per waypoint and a base1 path
+// from the spawn to the level objective is 35 of them, all alive at once for
+// cl_compass_time seconds. At 32 the trail would evict its own head (and
+// every unrelated blast/muzzle-flash in flight) as it was still being laid
+// down. The pool is a plain preallocated array of otherwise-idle structs, so
+// the larger ceiling costs nothing while no marker is up.
+const MAX_EXPLOSIONS = 256;
 export const cl_explosions: ExplosionT[] = Array.from({ length: MAX_EXPLOSIONS }, () => new ExplosionT());
 
 class BeamT {
@@ -223,6 +241,13 @@ export let cl_mod_lightning: ModelS | null = null;
 export let cl_mod_heatbeam: ModelS | null = null;
 export let cl_mod_monster_heatbeam: ModelS | null = null;
 export let cl_mod_explo4_big: ModelS | null = null;
+
+// [Paril-KEX] q2repro src/client/tent.c:58 `qhandle_t cl_mod_marker`,
+// registered at tent.c:320 -- the small floor arrow one help-path breadcrumb
+// draws (CL_AddHelpPath below). Retail data: models/objects/pointer/tris.md2,
+// a single-frame 4x6x0.8-unit md2 that the marker's own 2.5x entity scale
+// takes to roughly 10x15 units on the floor.
+export let cl_mod_marker: ModelS | null = null;
 // ROGUE
 
 // [Sam-KEX] q2repro src/client/tent.c:51 `qhandle_t cl_img_flare` -- the
@@ -616,6 +641,9 @@ export function CL_RegisterTEntModels(): void {
   // recovered at draw time from the image's own name (ref_gl/gl_rmain.ts's
   // R_DrawFlare).
   cl_img_flare = re.RegisterSkin("misc/flare.tga");
+
+  // q2repro tent.c:320 -- the objective-compass breadcrumb model.
+  cl_mod_marker = re.RegisterModel("models/objects/pointer/tris.md2");
 }
 
 /*
@@ -751,6 +779,54 @@ export function CL_AddMuzzleFX(origin: Vec3, angles: Vec3, fx: MuzzlefxT, skin: 
   ex.ent.model = model;
   ex.ent.skinnum = skin;
   if (fx !== MFLASH_BOOMER) ex.ent.angles[2] = clFxMod().rand() % 360;
+}
+
+/*
+=================
+CL_AddHelpPath
+
+[Paril-KEX] q2repro src/client/tent.c:477-502 -- one breadcrumb of the
+objective compass trail, spawned per svc_help_path message
+(cl_parse.ts's svc_help_path case, which is tent.c's own parse.c:1378 call
+site). `first` is the server saying "this is the head of a NEW path", which
+frees every marker still standing from the previous one.
+
+Each breadcrumb is an explosion-pool entry of the new ex_marker type: the
+retail floor-arrow model at 2.5x entity scale, lit with RF_MINLIGHT so it
+stays readable in a dark corridor, translucent so the trail does not wall
+off the view, shadowless, and pointed along its own segment of the path by
+the direction the server sent. CL_AddExplosions' ex_marker case below does
+the rest (the drop-in from 512 units up, the fade, the timeout).
+
+TWO FIELDS ARE REUSED AS SCRATCH, exactly as the C reuses them:
+  * `ex.lightcolor[0]` holds the marker's FINAL floor Z, because the render
+    case overwrites `ent.origin[2]` every frame while the marker drops in
+    and needs somewhere to keep the value it is dropping toward. Nothing
+    reads lightcolor as a colour for this type -- `ex.light` stays 0, so the
+    V_AddLight call the shared tail would make never runs for a marker.
+  * `ex.start` is the spawn time, in the port's `cl.frame.servertime - 100`
+    spelling of the C's `cl.servertime - CL_FRAMETIME` (the same substitution
+    CL_AddMuzzleFX and CL_SmokeAndFlash already make).
+=================
+*/
+export function CL_AddHelpPath(origin: Vec3, dir: Vec3, first: boolean): void {
+  if (first) {
+    for (const old of cl_explosions) {
+      if (old.type === ExptypeT.ex_marker) old.type = ExptypeT.ex_free;
+    }
+  }
+
+  const ex = CL_AllocExplosion();
+  VectorCopy(origin, ex.ent.origin);
+  ex.ent.origin[2] += 16.0;
+  ex.lightcolor[0] = ex.ent.origin[2];
+  vectoangles2(dir, ex.ent.angles);
+  ex.type = ExptypeT.ex_marker;
+  ex.ent.flags = RF_NOSHADOW | RF_MINLIGHT | RF_TRANSLUCENT;
+  ex.ent.alpha = 1.0;
+  ex.start = cl.frame.servertime - 100;
+  ex.ent.model = cl_mod_marker;
+  VectorSet(ex.ent.scale, 2.5, 2.5, 2.5);
 }
 
 /*
@@ -1930,6 +2006,67 @@ function CL_AddExplosions(): void {
         ent.skinnum = 0;
         ent.flags |= RF_TRANSLUCENT;
         break;
+      case ExptypeT.ex_marker: {
+        // [Paril-KEX] q2repro tent.c:599-624 -- one objective-compass
+        // breadcrumb (CL_AddHelpPath above). Two independent clocks:
+        //
+        //  * the LIFETIME clock, `cl_compass_time` seconds long, which both
+        //    fades the marker out and frees its slot at the end. The C reads
+        //    the cvar live every frame; so does this.
+        //  * the DROP-IN clock, a fixed 1 second, which slides the marker
+        //    down from 512 units above its resting Z with an eased curve
+        //    ((1-t)^8 inverted, spelled as the C spells it: square twice,
+        //    then square the result). `ex.lightcolor[0]` is where
+        //    CL_AddHelpPath parked the resting Z.
+        //
+        // `cl_compass_time 0` is guarded rather than divided by: the C would
+        // produce inf (or NaN at the spawn frame, which its `frac > 1.0f`
+        // test does NOT catch, leaving a stuck marker at NaN alpha). Treating
+        // a zero lifetime as "already expired" is the outcome the C reaches
+        // for every frame but that one.
+        const markerLife = (clCvars.cl_compass_time?.value ?? 10) * 1000;
+        const markerFrac = markerLife > 0 ? (cl.time - ex.start) / markerLife : 1.1;
+
+        if (markerFrac > 1.0) {
+          ex.type = ExptypeT.ex_free;
+          break;
+        }
+
+        let z_frac = (cl.time - ex.start) / 1000.0;
+        if (z_frac < 1) {
+          z_frac = 1.0 - z_frac;
+          z_frac = z_frac * z_frac * z_frac * z_frac;
+          z_frac *= z_frac;
+          z_frac = 1.0 - z_frac;
+          // FASTLERP(a, b, c) == a + c * (b - a) (shared.h:216)
+          const restZ = ex.lightcolor[0];
+          ent.origin[2] = restZ + 512.0 + z_frac * (restZ - (restZ + 512.0)); // a=restZ+512, b=restZ, c=z_frac
+        } else {
+          ent.origin[2] = ex.lightcolor[0];
+        }
+
+        ent.alpha = (1.0 - markerFrac) * 0.5;
+
+        // The C falls out of the switch here with `f = 0.0f`, so the shared
+        // tail below hands the renderer `frame = baseframe + f + 1 = 1` and
+        // `oldframe = 0` on a model that has exactly ONE frame. q2repro's
+        // renderer silently clamps that back to 0 (src/refresh/mesh.c:987,
+        // Com_DPrintf), but this port's gl_mesh.ts kept vanilla ref_gl's
+        // louder `ri.Con_Printf(PRINT_ALL, "... no such frame 1")` -- which
+        // would spray one console line per marker per frame across a 35-step
+        // trail. Submitting from here with the frame pair the C's own
+        // renderer resolves to (0/0, no interpolation between two copies of
+        // the same frame) is the identical picture without the spam. The
+        // shared tail's other two jobs are done here too: the oldorigin copy,
+        // and V_AddEntity. Its V_AddLight is not, and must not be -- `ex.light`
+        // is 0 for a marker and `lightcolor` is holding a Z coordinate.
+        VectorCopy(ent.origin, ent.oldorigin);
+        ent.frame = 0;
+        ent.oldframe = 0;
+        ent.backlerp = 0;
+        V_AddEntity(ent);
+        continue;
+      }
       default:
         break;
     }

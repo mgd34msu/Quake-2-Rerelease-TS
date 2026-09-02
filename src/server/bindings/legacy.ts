@@ -684,8 +684,9 @@ NOT GATED ON `svs.csr.extended`, unlike PF_Poi/PF_HelpPath/PF_Fog above.
 Those three write re-release opcodes onto the wire and must stay silent on a
 narrow session; this one writes nothing to any client. What it depends on is
 the server having called Nav_Load for this map, which for the legacy family
-is the opt-in `sv_nav_legacy` cvar (sv_init.ts's SV_SpawnServer; nav.ts's
-header records the ruling and the default-off posture). With nav never
+is gated on the `sv_nav_legacy` cvar (sv_init.ts's SV_SpawnServer; nav.ts's
+header records the original default-off ruling and why it now defaults to
+1). With nav never
 loaded this returns `found: false` with a `NoStartNode`/`NoNavAvailable`
 return code and the module's own fallback path runs -- exactly what happened
 before this hook existed, so a 1997-tree session is unaffected.

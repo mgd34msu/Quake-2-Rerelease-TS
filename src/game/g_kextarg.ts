@@ -935,8 +935,8 @@ export function P_SendLevelPOI(ent: EdictT): void {
  * src/server/nav.ts, `poi_points` was null for every client under BOTH
  * modules and this returned at the "deleted for some reason" guard, putting
  * no bytes on the wire from either. Both light up together now, and on a map
- * with no nav data (or with `sv_nav_legacy` off, the legacy family's default
- * -- see nav.ts's header) both go quiet together again.
+ * with no nav data (or with `sv_nav_legacy` set to 0 -- it defaults to 1 for
+ * the legacy family now, see nav.ts's header) both go quiet together again.
  */
 export function Compass_Update(ent: EdictT, first: boolean): void {
   if (ent.client === null) return;

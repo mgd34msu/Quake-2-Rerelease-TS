@@ -1105,15 +1105,19 @@ export function SCR_TouchPics(): void {
 /*
 ===============================================================================
 
-DAMAGE INDICATORS / POINTS OF INTEREST / HELP PATH -- the kex on-screen
-indicator systems. q2repro src/client/screen.c's SCR_AddToDamageDisplay/
+DAMAGE INDICATORS / POINTS OF INTEREST -- the kex on-screen indicator
+systems. q2repro src/client/screen.c's SCR_AddToDamageDisplay/
 SCR_DrawDamageDisplays (damage-direction wedges fading around the
 crosshair) and SCR_AddPOI/SCR_RemovePOI/SCR_DrawPOIs (world-projected
-compass markers), plus a documented adaptation of tent.c's CL_AddHelpPath
-(the compass "help path" breadcrumb trail). Decode-side already existed
-(qcommon/protocol/kexdemo.ts's readDamageKex/readPoiKex/readHelpPathKex,
-routed here from cl_parse.ts's svc_damage/svc_poi/svc_help_path cases) --
-this section is the store+draw consumer that was missing.
+compass markers). Decode-side already existed (qcommon/protocol/
+kexdemo.ts's readDamageKex/readPoiKex, routed here from cl_parse.ts's
+svc_damage/svc_poi cases) -- this section is the store+draw consumer that
+was missing.
+
+The third indicator on the same wire, svc_help_path (the compass
+breadcrumb trail), is NOT here: it is a 3D world effect, not an on-screen
+one, and lives where the C puts it -- cl_tent.ts's CL_AddHelpPath and its
+ex_marker explosion type.
 
 Drawn from cl_view.ts's SCR_DrawCrosshair (that file's own home for the
 crosshair pic itself, cl_view.c in the original) rather than from this
@@ -1515,60 +1519,6 @@ export function SCR_ClearDamageAndPOIs(): void {
     poi.time = 0;
     poi.imageName = "";
   }
-  scr_help_path_markers = [];
-}
-
-// -----------------------------------------------------------------------
-// Help path (tent.c:477-502's CL_AddHelpPath) -- ADAPTED, not a byte-for-
-// byte port. The real function spawns a chain of `ex_marker`-typed
-// explosion_t entries (cl_tent.c's own explosion pool: CL_AllocExplosion,
-// a `models/.../marker` md2 model at scale 2.5, RF_MINLIGHT|RF_TRANSLUCENT)
-// that ride the normal 3D entity refresh. Neither the explosion pool nor
-// an `ex_marker` ExptypeT variant exist in this port's cl_tent.ts (checked:
-// its own ExptypeT enum has ex_free/explosion/misc/flash/mflash/poly/poly2
-// only) -- and cl_tent.ts is explicitly out of this unit's territory
-// (queued unit; see this file's own task report). Reproducing the C exactly
-// would mean adding a new explosion type AND its CL_AddTEnts render-loop
-// case there, which this unit may not touch.
-//
-// Adapted instead: the same waypoint stream (position + direction + "first
-// of a new path" reset flag) is stored here, then submitted into the 3D
-// scene as plain particles via cl_view.ts's already-public V_AddParticle
-// (that file's own existing scene-building primitive, called once per
-// frame from V_RenderView right after CL_AddEntities -- see cl_view.ts's
-// SCR_AddHelpPathMarkers call site) instead of a textured/lit marker model.
-// This keeps the waypoint trail's actual signal (a visible breadcrumb path
-// through the world leading toward the compass objective) without touching
-// cl_tent.ts's explosion pool or ExptypeT enum. Reported deviation, not a
-// silent one.
-// -----------------------------------------------------------------------
-
-export interface ScrHelpPathMarkerT {
-  position: Vec3;
-  dir: Vec3;
-}
-
-const MAX_HELP_PATH_MARKERS = 64;
-let scr_help_path_markers: ScrHelpPathMarkerT[] = [];
-
-/** Routed from cl_parse.ts's svc_help_path case (readHelpPathKex). `first`
- *  clears any previous path before adding this waypoint, matching
- *  tent.c:479-489's own "if (first) free every ex_marker" reset. The
- *  origin's `+16` Z offset matches tent.c:493's own `ex->ent.origin[2] +=
- *  16.0f;` (lifts the marker up off the floor). */
-export function SCR_AddHelpPath(origin: Vec3, dir: Vec3, first: boolean): void {
-  if (first) scr_help_path_markers = [];
-  if (scr_help_path_markers.length >= MAX_HELP_PATH_MARKERS) scr_help_path_markers.shift();
-  scr_help_path_markers.push({ position: vec3(origin[0], origin[1], origin[2] + 16.0), dir: vec3(dir[0], dir[1], dir[2]) });
-}
-
-/** Read-only accessor for cl_view.ts's per-frame V_AddParticle submission
- *  loop (SCR_AddHelpPathMarkers there) -- kept here since the STORE lives
- *  in this file (this unit's own territory split: cl_scrn.ts owns state,
- *  cl_ents-adjacent code it also owns -- cl_view.ts -- owns the per-frame
- *  scene submission, since that is where V_AddParticle already lives). */
-export function SCR_GetHelpPathMarkers(): readonly ScrHelpPathMarkerT[] {
-  return scr_help_path_markers;
 }
 
 /*

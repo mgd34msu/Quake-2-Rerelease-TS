@@ -49,21 +49,59 @@ const SPAWNFLAG_POI_DUMMY = 2;
 const SPAWNFLAG_POI_DYNAMIC = 4;
 const SPAWNFLAG_POI_DISABLED = 8;
 
+/** kexapi/game.ts's `PathFlags.All` (`static_cast<uint32_t>(-1)`), spelled
+ *  as a local literal because nothing in this tree imports from src/kexapi --
+ *  the same rule src/game/g_kextarg.ts follows for the identical constant. */
+const PATH_FLAGS_ALL = 0xffffffff;
+
+/** kexapi/game.ts's `PathReturnCode::NoNavAvailable` (8) -- "no nav file
+ *  available for this map", the one failure distance_to_poi treats
+ *  differently from every other. Spelled locally, same reason. */
+const PATH_RETURN_NO_NAV_AVAILABLE = 8;
+
+/**
+ * The node-search settings the re-release path query at this call site uses
+ * (g_target.cpp:1604-1607): ignore node flags, a 128-unit vertical band, a
+ * 1024-unit radius, and a 64-unit move distance under PathFlags::All.
+ * Identical to src/game/g_kextarg.ts's compassPathQueryDefaults().
+ */
+function compassPathQueryDefaults(): { moveDist: number; pathFlags: number; ignoreNodeFlags: boolean; minHeight: number; maxHeight: number; radius: number } {
+  return { moveDist: 64, pathFlags: PATH_FLAGS_ALL, ignoreNodeFlags: true, minHeight: 128, maxHeight: 128, radius: 1024 };
+}
+
 /**
  * g_target.cpp:1599-1621 -- `static float distance_to_poi(...)`.
  *
- * The rerelease asks the engine's nav mesh (`gi.GetPathToGoal`) for a walked
- * path length and, WHEN THE ENGINE REPORTS NO NAV DATA
- * (`PathReturnCode::NoNavAvailable`), falls back to the straight-line squared
- * distance. The Xatrix GameImports has no nav-mesh entry point at all, which
- * is precisely the "no nav available" case -- so this is the rerelease's own
- * documented fallback path, not an invented one.
+ * The re-release asks the engine's nav mesh for a WALKED path length, so a
+ * teamed target_poi carrying SPAWNFLAG_POI_NEAREST picks the one that is
+ * actually nearest to walk to rather than the one nearest through a wall.
+ * Three outcomes, exactly as in the C++:
+ *   - path found              -> its squared length (`info.pathDistSqr`)
+ *   - no nav data for the map -> straight-line squared distance
+ *   - nav data, but no route  -> infinity (this POI is unreachable)
+ *
+ * `gi.get_path_to_goal` being ABSENT is the second case, not the third: an
+ * import table with no nav-mesh entry point is precisely "no nav available",
+ * and that was this function's whole behavior before the hook was named in
+ * this tree's game.ts. Body identical to src/game/g_kextarg.ts's -- copied in,
+ * not imported, per this file's header.
  */
 function distance_to_poi(start: Vec3, end: Vec3): number {
-  const dx = (end[0] ?? 0) - (start[0] ?? 0);
-  const dy = (end[1] ?? 0) - (start[1] ?? 0);
-  const dz = (end[2] ?? 0) - (start[2] ?? 0);
-  return dx * dx + dy * dy + dz * dz;
+  const straightLine = (): number => {
+    const dx = (end[0] ?? 0) - (start[0] ?? 0);
+    const dy = (end[1] ?? 0) - (start[1] ?? 0);
+    const dz = (end[2] ?? 0) - (start[2] ?? 0);
+    return dx * dx + dy * dy + dz * dz;
+  };
+
+  const query = gi.get_path_to_goal;
+  if (query === undefined) return straightLine();
+
+  const result = query({ ...compassPathQueryDefaults(), start, goal: end, points: null, maxPoints: 0 });
+
+  if (result.found) return result.pathDistSqr;
+  if (result.returnCode === PATH_RETURN_NO_NAV_AVAILABLE) return straightLine();
+  return Infinity;
 }
 
 /** g_target.cpp:1623-1759 -- `USE(target_poi_use)`. */

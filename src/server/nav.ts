@@ -1260,31 +1260,74 @@ export function Nav_Frame(): void {
 // classname` mirrors kex.c's `sv_entity_t` exactly, and nothing populated it
 // for the legacy family until this cvar's provider was added below).
 //
-// Mike's ruling (2026-08-31, quoted verbatim for the ledger): "add it to the
-// legacy one but default it to off. that way we don't disrupt having bots
-// and things like that." Rather than reproduce the real engine's proxy
-// limitation byte-for-bug (this port has NO DLL/proxy boundary --
-// bindings/legacy.ts holds the legacy game's real edicts directly, classname
-// included, so the resolution failure is not structurally forced here the
-// way it is upstream), this port makes nav loading for the legacy family
-// FAMILY-AWARE and opt-in:
+// Rather than reproduce the real engine's proxy limitation byte-for-bug
+// (this port has NO DLL/proxy boundary -- bindings/legacy.ts holds the legacy
+// game's real edicts directly, classname included, so the resolution failure
+// is not structurally forced here the way it is upstream), this port makes
+// nav loading for the legacy family FAMILY-AWARE and cvar-controlled:
 //   - kex family: unchanged, unconditional (matches init.c:163-166 exactly).
-//   - legacy family: Nav_Load only runs when `sv_nav_legacy` is nonzero (see
-//     sv_init.ts's SV_SpawnServer). Default "0" preserves today's silence on
-//     every legacy campaign/DM boot (no bot nav data is ever meaningfully
-//     used by any legacy game tree -- Nav_GetPathToGoal is a kex-only PF_*
-//     import, see kexapi/game.ts -- so skipping the load changes no
-//     observable legacy gameplay). Setting it to "1" opts back into loading
-//     bots/navigation/<map>.nav AND gets a working resolution, not the
-//     upstream-faithful failure: bindings/legacy.ts registers a real
-//     Nav_SetEdictSource provider over the active legacy tree's own edicts
-//     (classname included), so turning this on does not just reproduce the
-//     noise -- it actually resolves the same nav links a kex boot resolves.
+//   - legacy family: Nav_Load runs when `sv_nav_legacy` is nonzero (see
+//     sv_init.ts's SV_SpawnServer), and when it does it gets a WORKING
+//     resolution, not the upstream-faithful failure: bindings/legacy.ts
+//     registers a real Nav_SetEdictSource provider over the active legacy
+//     tree's own edicts (classname included), so the same nav links a kex
+//     boot resolves are the ones this resolves.
+//
 // This is the FIDELITY RAZOR (rule 17) in the direction rule 16 explicitly
 // allows: a documented, deliberate departure from literal source behavior
 // because the platform difference (no DLL boundary here) removes the reason
-// the original bug existed, and Mike ruled the safer default (off) is the
-// right ship posture regardless.
+// the original bug existed.
+//
+// THE DEFAULT, AND WHY IT CHANGED
+//
+// 2026-08-31, Mike's ruling, quoted verbatim for the ledger: "add it to the
+// legacy one but default it to off. that way we don't disrupt having bots
+// and things like that." The default was "0". That was the right call ON THE
+// FACTS AS THEY STOOD: at the time NOTHING under the classic module consumed
+// nav data at all. There was no classic path query -- src/game/game.ts's
+// GameImports had no nav entry point, and Nav_GetPathToGoal was reachable
+// only through the kex-only PF_* import table -- so loading a .nav file for a
+// legacy spawn bought exactly nothing and risked the upstream "Nav entity
+// appears to be missing" noise for no gain. Off was the cheap, safe posture.
+//
+// 2026-09-02: those facts no longer hold. The classic module now HAS a nav
+// consumer. src/game/game.ts carries an optional `get_path_to_goal()` import,
+// bindings/legacy.ts backs it with PF_GetPathToGoal over this very module,
+// and src/game/g_kextarg.ts's Cmd_Compass_f and distance_to_poi both call it
+// -- the objective compass's breadcrumb trail and its NEAREST-flag target_poi
+// ranking. With the default at "0" the classic compass silently degrades:
+// `compass` sends the objective marker and its sound and no trail, and a
+// teamed target_poi ranks by straight-line distance through walls. The owner's
+// charter is that every re-release feature works under the classic ruleset,
+// and a feature that only works after the player finds an undocumented cvar
+// does not meet it.
+//
+// The original ruling's actual concern -- disrupting bots with upstream's
+// binding noise -- does not apply to this port, and did not apply even when
+// the ruling was made: it is the DLL/proxy boundary that breaks binding
+// upstream, and this port has none. bindings/legacy.ts resolves nav edicts
+// off the live legacy tree correctly, so turning the load on adds a resolved
+// graph, not a page of warnings.
+//
+// So the default is now "1" and the cvar keeps its full value as the OPT-OUT:
+// `sv_nav_legacy 0` restores the 2026-08-31 behavior exactly (no legacy-family
+// Nav_Load at all) for anyone who wants it.
+//
+// WHAT THE FLIP DOES ON A MAP WITH NO .nav FILE. Nothing at boot: Nav_Load's
+// "file not found" branch prints nothing at all, so a 1997-tree spawn is as
+// silent at "1" as it was at "0" (verified frame-for-frame against a control
+// build). It does move ONE observable thing, and it moves it toward the
+// reference. Because that branch leaves `loaded` TRUE with zero nodes -- the
+// preserved upstream quirk this file's header spells out at length -- a path
+// query on such a map now fails with NoStartNode rather than NoNavAvailable,
+// and g_kextarg.ts's distance_to_poi maps those two differently: NoNavAvailable
+// falls back to straight-line distance, anything else is "unreachable"
+// (Infinity), which a teamed SPAWNFLAG_POI_NEAREST scan skips. That is
+// precisely what a q2repro server does on the same map -- its init.c:163-166
+// calls Nav_Load unconditionally for every ss_game spawn, so every nav-less
+// map there is already in the loaded-but-empty state -- and what the kex
+// family here has always done. The exposure is narrow in practice: target_poi
+// is a re-release-only entity, and all 174 re-release maps ship nav data.
 let sv_nav_legacy: CvarT | null = null;
 
 /*
@@ -1312,10 +1355,11 @@ export function Nav_Init(): void {
   Cvar_Get("nav_debug_range", "512", 0); // nav.c:1472
 
   // NOT in nav.c -- see this file's "A DELIBERATE, DOCUMENTED DEVIATION"
-  // comment immediately above. Plain "0" flags (no CVAR_LATCH): the value is
-  // only ever consulted at SV_SpawnServer time, which already only takes
-  // effect on the next map load regardless of latch semantics.
-  sv_nav_legacy = Cvar_Get("sv_nav_legacy", "0", 0);
+  // comment above, including "THE DEFAULT, AND WHY IT CHANGED" for why this
+  // is "1" and not the "0" it shipped with. Plain flags (no CVAR_LATCH): the
+  // value is only ever consulted at SV_SpawnServer time, which already only
+  // takes effect on the next map load regardless of latch semantics.
+  sv_nav_legacy = Cvar_Get("sv_nav_legacy", "1", 0);
 }
 
 // nav.c:1476-1479. Note: q2repro itself never calls this from anywhere in

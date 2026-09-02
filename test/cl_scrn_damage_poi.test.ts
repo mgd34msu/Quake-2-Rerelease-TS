@@ -1,12 +1,12 @@
 // Test for the kex on-screen indicator systems' store+draw side (wave B
 // task): src/client/cl_scrn.ts's SCR_AddToDamageDisplay/SCR_DrawDamageDisplays
 // (q2repro screen.c:1675-1745) and SCR_AddPOI/SCR_RemovePOI/SCR_DrawPOIs
-// (screen.c:1747-1958), plus the help-path store (SCR_AddHelpPath/
-// SCR_GetHelpPathMarkers, an ADAPTED port of tent.c's CL_AddHelpPath -- see
-// cl_scrn.ts's own "Help path" section header for why). All three were
-// previously decode-only in cl_parse.ts (readDamageKex/readPoiKex/
-// readHelpPathKex results were thrown away) -- this exercises the real
-// store+draw consumers now wired to those decode paths.
+// (screen.c:1747-1958). Both were previously decode-only in cl_parse.ts
+// (readDamageKex/readPoiKex results were thrown away) -- this exercises the
+// real store+draw consumers now wired to those decode paths. The third
+// indicator on that wire, svc_help_path, is a 3D world effect and lives in
+// cl_tent.ts (CL_AddHelpPath / the ex_marker explosion type); its tests are
+// in test/cl_helppath_marker.test.ts.
 //
 // Self-sufficient per PORTING.md rule 13: `re` is a fresh spying fake per
 // test (precedent: test/cl_scrn_centerprint.test.ts's makeFakeRe), cl/cls
@@ -24,8 +24,6 @@ import {
   SCR_AddPOI,
   SCR_RemovePOI,
   SCR_DrawPOIs,
-  SCR_AddHelpPath,
-  SCR_GetHelpPathMarkers,
   SCR_ClearDamageAndPOIs,
 } from "../src/client/cl_scrn";
 import { cl, cls, setRe, ConnstateT } from "../src/client/client";
@@ -233,25 +231,5 @@ describe("SCR_AddPOI / SCR_RemovePOI / SCR_DrawPOIs", () => {
     SCR_AddPOI(0, 3000, vec3(50, 0, 0), 5, 3, 0);
     SCR_DrawPOIs();
     expect(fake.drawColorPicCalls.length).toBe(1);
-  });
-});
-
-describe("SCR_AddHelpPath / SCR_GetHelpPathMarkers (adapted store)", () => {
-  test("first=true resets the trail; subsequent waypoints accumulate", () => {
-    SCR_AddHelpPath(vec3(0, 0, 0), vec3(1, 0, 0), true);
-    SCR_AddHelpPath(vec3(10, 0, 0), vec3(1, 0, 0), false);
-    SCR_AddHelpPath(vec3(20, 0, 0), vec3(1, 0, 0), false);
-    expect(SCR_GetHelpPathMarkers().length).toBe(3);
-
-    SCR_AddHelpPath(vec3(0, 0, 0), vec3(0, 1, 0), true); // a new path replaces the old one
-    expect(SCR_GetHelpPathMarkers().length).toBe(1);
-  });
-
-  test("stored position is lifted 16 units in Z, matching tent.c's own `ex->ent.origin[2] += 16.0f`", () => {
-    SCR_AddHelpPath(vec3(1, 2, 3), vec3(1, 0, 0), true);
-    const markers = SCR_GetHelpPathMarkers();
-    expect(markers[0]!.position[0]).toBe(1);
-    expect(markers[0]!.position[1]).toBe(2);
-    expect(markers[0]!.position[2]).toBe(19);
   });
 });

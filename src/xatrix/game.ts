@@ -96,6 +96,59 @@ export interface GTraceT extends Omit<TraceT, "ent"> {
 //
 // functions provided by the main engine
 //
+/**
+ * One nav-mesh path query, this module's spelling of the re-release
+ * `PathRequest`. IDENTICAL to src/game/game.ts's PathQueryT and copied in for
+ * the same reason every other shared shape in this file is: this tree is a
+ * HARD FORK of src/game with its own Edict and its own GameImports, and there
+ * is no cross-module import anywhere in the tree.
+ *
+ * Flattened on purpose: the re-release struct nests four sub-structs
+ * (debugging / nodeSearch / traversals / pathPoints), and the only fields any
+ * consumer here ever sets are the four node-search knobs and the output
+ * buffer. The engine half (src/server/bindings/legacy.ts's PF_GetPathToGoal)
+ * fills the untouched sub-structs with the C++ struct's own member-initializer
+ * defaults.
+ *
+ * `points` is the caller's output buffer and `maxPoints` its length; pass
+ * `null`/`0` when only `pathDistSqr` is wanted, which is exactly what
+ * g_kextarg.ts's distance_to_poi does -- the only caller in this module.
+ */
+export interface PathQueryT {
+  start: Vec3;
+  goal: Vec3;
+  moveDist: number;
+  /** PathFlags bitfield; 0xffffffff is the re-release's `PathFlags::All`. */
+  pathFlags: number;
+  ignoreNodeFlags: boolean;
+  /** 0 = "use the engine default" for each of the three, as in the C++. */
+  minHeight: number;
+  maxHeight: number;
+  radius: number;
+  points: Vec3[] | null;
+  maxPoints: number;
+}
+
+/**
+ * The result half of a `get_path_to_goal` query -- the re-release's
+ * `PathInfo`, returned by value instead of filled through an out-parameter.
+ * Same copy-in rationale as PathQueryT above.
+ *
+ * `found` is the C++ call's own boolean return (`returnCode <
+ * PathReturnCode::StartPathErrors`). `returnCode` is carried through raw
+ * because distance_to_poi has to tell "no nav data for this map" (8,
+ * `PathReturnCode::NoNavAvailable`) apart from every other failure -- that
+ * one case falls back to straight-line distance instead of infinity.
+ */
+export interface PathResultT {
+  found: boolean;
+  returnCode: number;
+  numPathPoints: number;
+  pathDistSqr: number;
+  firstMovePoint: Vec3;
+  secondMovePoint: Vec3;
+}
+
 export interface GameImports {
   // special messages
   bprintf(printlevel: number, fmt: string): void;
@@ -159,6 +212,28 @@ export interface GameImports {
   unlinkentity(ent: Edict): void; // call before removing an interactive edict
   BoxEdicts(mins: Vec3, maxs: Vec3, list: Edict[], maxcount: number, areatype: number): number;
   Pmove(pmove: PmoveT): void; // player movement code common with client prediction
+
+  // The nav-mesh path query behind the re-release's compass and its
+  // NEAREST-flag target_poi ranking: this module's spelling of
+  // `gi.GetPathToGoal`. Optional because it is re-release engine vocabulary
+  // the frozen v3 GameImports cannot name, so the module calls it through a
+  // local `undefined` check.
+  //
+  // ABSENT IS NOT THE SAME AS "NO PATH". A missing hook is what the
+  // re-release calls `PathReturnCode::NoNavAvailable` -- distance_to_poi's
+  // documented straight-line fallback -- while a present hook returning
+  // `found: false` means the engine looked and found no walkable route.
+  // g_kextarg.ts's distance_to_poi distinguishes the two.
+  //
+  // Already supplied at RUNTIME to this tree: src/server/bindings/legacy.ts's
+  // BuildLegacyImports assembles ONE import object for all four legacy trees
+  // and has carried `get_path_to_goal: PF_GetPathToGoal` since the classic
+  // module gained the hook. Naming it here is what lets this tree's code
+  // actually call it. It puts nothing on the wire, so unlike a POI/help_path
+  // import it does not depend on the session having widened onto the
+  // re-release configstring layout -- only on the server having nav data
+  // loaded for this map (src/server/nav.ts's `sv_nav_legacy`).
+  get_path_to_goal?(query: PathQueryT): PathResultT;
 
   // network messaging
   multicast(origin: Vec3, to: MulticastT): void;

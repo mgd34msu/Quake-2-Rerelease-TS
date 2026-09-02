@@ -1,13 +1,17 @@
 /*
 Dedicated boots pinning the `sv_nav_legacy` family gate -- .orch/followups.md's
 finding 14 ("nav 'appears to be missing' under legacy is upstream-faithful
-(game3_proxy classname gap, triage citation)") plus Mike's ruling on top of it
-(2026-08-31, quoted verbatim for the ledger): "add it to the legacy one but
-default it to off. that way we don't disrupt having bots and things like
-that." See src/server/nav.ts's "A DELIBERATE, DOCUMENTED DEVIATION" header
-comment for the full citation trail (q2repro's init.c:163-166 unconditional
-Nav_Load call; nav.c:1436's `game_e->sv.classname` check; game3_proxy.c never
-populating that field for any legacy game DLL).
+(game3_proxy classname gap, triage citation)"). See src/server/nav.ts's "A
+DELIBERATE, DOCUMENTED DEVIATION" header comment for the full citation trail
+(q2repro's init.c:163-166 unconditional Nav_Load call; nav.c:1436's
+`game_e->sv.classname` check; game3_proxy.c never populating that field for
+any legacy game DLL), and its "THE DEFAULT, AND WHY IT CHANGED" section for
+why the cvar shipped defaulting off on 2026-08-31 and defaults ON now that
+the classic compass depends on it.
+
+BOTH cases below force the cvar explicitly rather than leaning on whatever
+the current default is, so this file pins the GATE, not the default. The
+default itself is pinned in test/nav_legacy_default.test.ts.
 
 Three boots against the same real rerelease base1.bsp used by
 test/legacy_base1_rerelease_boot.test.ts (campaign rules: coop 1,
@@ -15,7 +19,7 @@ deathmatch 0, so the door/button/elevator/nav-bound entities this file
 depends on are not deathmatch-inhibited -- see that file's own header for
 why a bare dedicated boot would otherwise force deathmatch):
 
-  1. legacy family, sv_nav_legacy "0" (the default): Nav_Load must never run
+  1. legacy family, sv_nav_legacy "0" (the opt-out): Nav_Load must never run
      at all -- asserted directly via nav.ts's Nav_DebugState() test seam
      (loaded stays false, the module's own freshNavData() default), not by
      scraping console text for absence of a message.
@@ -180,12 +184,12 @@ describe.skipIf(!havePak)("nav loading is family-aware (sv_nav_legacy) on the re
   });
 
   test(
-    "legacy family, sv_nav_legacy off (default): nav never loads, no missing-entity spam",
+    "legacy family, sv_nav_legacy off (the opt-out): nav never loads, no missing-entity spam",
     async () => {
       Cvar_ForceSet("game", "");
-      // Exercise the real default: register with Cvar_Get exactly like
-      // Nav_Init does, at "0", rather than assuming no prior test in this
-      // process already forced it on.
+      // Force the opt-out explicitly (register first, exactly like Nav_Init
+      // does, in case nothing in this process has yet) rather than assuming
+      // any particular default or that no prior test forced it the other way.
       Cvar_Get("sv_nav_legacy", "0", 0);
       Cvar_ForceSet("sv_nav_legacy", "0");
 

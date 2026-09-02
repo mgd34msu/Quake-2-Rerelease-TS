@@ -1794,7 +1794,10 @@ export function CL_InitLocal(): void {
   Cvar_Get("cl_railcore_width", "2", 0); // tent.c:1744
   Cvar_Get("cl_railspiral_color", "blue", 0); // tent.c:1745
   Cvar_Get("cl_railspiral_radius", "3", 0); // tent.c:1749
-  Cvar_Get("cl_compass_time", "10", 0); // tent.c:1750
+  // tent.c:1750. Captured into clCvars (like cl_muzzleflashes above) rather
+  // than registered bare: cl_tent.ts's ex_marker case reads it every frame a
+  // compass breadcrumb is alive.
+  clCvars.cl_compass_time = Cvar_Get("cl_compass_time", "10", 0);
   Cvar_Get("cl_lerp_lightstyles", "1", 0); // effects.c:1905
   Cvar_Get("cl_rerelease_effects", "1", 0); // effects.c:1906
   Cvar_Get("cl_muzzlelight_time", "100", 0); // effects.c:1907

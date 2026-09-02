@@ -31,9 +31,14 @@ const vidref_val: number = 0;
 /*
 ======
 vectoangles2 - this is duplicated in the game DLL, but I need it here.
+
+Exported (the C's own copy is file-static) for cl_tent.ts's CL_AddHelpPath,
+which needs the same math.c:29 function q2repro's tent.c:494 calls to point
+a help-path marker along its segment. Copying the body a second time into
+cl_tent.ts would be the only alternative, and the two would be free to drift.
 ======
 */
-function vectoangles2(value1: Vec3, angles: Vec3): void {
+export function vectoangles2(value1: Vec3, angles: Vec3): void {
   let yaw: number;
   let pitch: number;
 
