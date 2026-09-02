@@ -39,7 +39,7 @@
 //  * target_music / target_gravity / target_soundfx / target_autosave /
 //    target_crossunit_* -- no degradation.
 
-import { VectorCopy, VectorLength, VectorNormalize, VectorSet, VectorSubtract, vec3, type Vec3 } from "../shared/math";
+import { AngleVectors, DotProduct, VectorAdd, VectorCopy, VectorLength, VectorMA, VectorNormalize, VectorScale, VectorSet, VectorSubtract, vec3, type Vec3 } from "../shared/math";
 import {
   ATTN_NORM,
   BUTTON_ANY,
@@ -51,6 +51,7 @@ import {
   CS_SKYAXIS,
   CS_SKYROTATE,
   EntityEventT,
+  MASK_SOLID,
   MAX_CLIENTS,
   PITCH,
   PRINT_HIGH,
@@ -628,21 +629,63 @@ const SPAWNFLAG_POI_DUMMY = 2;
 const SPAWNFLAG_POI_DYNAMIC = 4;
 const SPAWNFLAG_POI_DISABLED = 8;
 
+/** kexapi/game.ts's `PathFlags.All` (`static_cast<uint32_t>(-1)`), spelled
+ *  locally for the same reason POI_OBJECTIVE below is: this module names no
+ *  kex API symbol. */
+const PATH_FLAGS_ALL = 0xffffffff;
+
+/** kexapi/game.ts's `PathReturnCode::NoNavAvailable` (8) -- "no nav file
+ *  available for this map", the one failure distance_to_poi treats
+ *  differently from every other. Spelled locally, same reason. */
+const PATH_RETURN_NO_NAV_AVAILABLE = 8;
+
+/** g_items.cpp:1495: `constexpr size_t MAX_TEMP_POI_POINTS = 128;`. */
+const MAX_TEMP_POI_POINTS = 128;
+
+/**
+ * The node-search settings BOTH re-release path queries in this file's
+ * porting targets use, byte-identical between them
+ * (g_target.cpp:1604-1607 and g_items.cpp:1571-1574): ignore node flags,
+ * a 128-unit vertical band, a 1024-unit radius, and a 64-unit move
+ * distance under PathFlags::All. Spelled once here so the two call sites
+ * below cannot drift apart the way they could if each repeated the
+ * literals.
+ */
+function compassPathQueryDefaults(): { moveDist: number; pathFlags: number; ignoreNodeFlags: boolean; minHeight: number; maxHeight: number; radius: number } {
+  return { moveDist: 64, pathFlags: PATH_FLAGS_ALL, ignoreNodeFlags: true, minHeight: 128, maxHeight: 128, radius: 1024 };
+}
+
 /**
  * g_target.cpp:1599-1621 -- `static float distance_to_poi(...)`.
  *
- * The rerelease asks the engine's nav mesh (`gi.GetPathToGoal`) for a walked
- * path length and, WHEN THE ENGINE REPORTS NO NAV DATA
- * (`PathReturnCode::NoNavAvailable`), falls back to the straight-line squared
- * distance. The classic GameImports has no nav-mesh entry point at all, which
- * is precisely the "no nav available" case -- so this is the rerelease's own
- * documented fallback path, not an invented one.
+ * The re-release asks the engine's nav mesh for a WALKED path length, so a
+ * teamed target_poi picking by SPAWNFLAG_POI_NEAREST picks the one that is
+ * actually nearest to walk to rather than the one nearest through a wall.
+ * Three outcomes, exactly as in the C++:
+ *   - path found            -> its squared length (`info.pathDistSqr`)
+ *   - no nav data for the map -> straight-line squared distance
+ *   - nav data, but no route  -> infinity (this POI is unreachable)
+ *
+ * `gi.get_path_to_goal` being ABSENT is the second case, not the third: a
+ * binding with no nav-mesh entry point is precisely "no nav available", and
+ * that has been this function's whole behavior until the hook landed.
  */
 function distance_to_poi(start: Vec3, end: Vec3): number {
-  const dx = (end[0] ?? 0) - (start[0] ?? 0);
-  const dy = (end[1] ?? 0) - (start[1] ?? 0);
-  const dz = (end[2] ?? 0) - (start[2] ?? 0);
-  return dx * dx + dy * dy + dz * dz;
+  const straightLine = (): number => {
+    const dx = (end[0] ?? 0) - (start[0] ?? 0);
+    const dy = (end[1] ?? 0) - (start[1] ?? 0);
+    const dz = (end[2] ?? 0) - (start[2] ?? 0);
+    return dx * dx + dy * dy + dz * dz;
+  };
+
+  const query = gi.get_path_to_goal;
+  if (query === undefined) return straightLine();
+
+  const result = query({ ...compassPathQueryDefaults(), start, goal: end, points: null, maxPoints: 0 });
+
+  if (result.found) return result.pathDistSqr;
+  if (result.returnCode === PATH_RETURN_NO_NAV_AVAILABLE) return straightLine();
+  return Infinity;
 }
 
 /** g_target.cpp:1623-1759 -- `USE(target_poi_use)`. */
@@ -886,15 +929,14 @@ export function P_SendLevelPOI(ent: EdictT): void {
  * the nav mesh for, emitting one svc_help_path per step plus a refreshed
  * objective marker and the marker sound.
  *
- * WHY THIS IS INERT TODAY, under BOTH modules: the breadcrumb path only
- * exists once `poi_points` has been filled, and the only thing that fills it
- * is a successful nav-mesh query. The classic GameImports has no
- * GetPathToGoal at all, and the kex binding's is `GetPathToGoal: () => false`
- * (src/server/bindings/kex.ts, ARCHITECTURE.md phase 7) -- so `poi_points`
- * is null for every client under either ruleset and this returns at the
- * "deleted for some reason" guard, exactly as src/kexgame/g_items.ts's own
- * Compass_Update does. Both modules therefore take the same path and put the
- * same bytes (none) on the wire; when nav lands, both light up together.
+ * WHAT FILLS `poi_points`: a successful nav-mesh query in Cmd_Compass_f
+ * below, through the optional `gi.get_path_to_goal` import. Until that hook
+ * and src/server/bindings/kex.ts's GetPathToGoal were wired to
+ * src/server/nav.ts, `poi_points` was null for every client under BOTH
+ * modules and this returned at the "deleted for some reason" guard, putting
+ * no bytes on the wire from either. Both light up together now, and on a map
+ * with no nav data (or with `sv_nav_legacy` off, the legacy family's default
+ * -- see nav.ts's header) both go quiet together again.
  */
 export function Compass_Update(ent: EdictT, first: boolean): void {
   if (ent.client === null) return;
@@ -965,12 +1007,33 @@ export function Compass_Update(ent: EdictT, first: boolean): void {
  * That one stays exactly as it is; this is the rerelease objective compass
  * and the two must not be confused for each other.
  *
- * DEVIATION, forced: the rerelease asks `gi.GetPathToGoal` for a walked path
- * and, only when that succeeds, fills poi_points and starts the breadcrumb
- * trail. The classic GameImports has no nav-mesh import, so this always
- * takes the C++'s own else-branch (g_items.cpp:1617-1623): send the objective
- * marker and play the marker sound. That is byte-identical to what the kex
- * module does today, because its GetPathToGoal always returns false too.
+ * The nav-mesh query behind the breadcrumb trail goes through the optional
+ * `gi.get_path_to_goal` import (game.ts) -- the classic spelling of the
+ * re-release's `gi.GetPathToGoal`, backed by the SAME src/server/nav.ts A*
+ * the kex module reaches (src/server/bindings/legacy.ts's PF_GetPathToGoal).
+ * With the hook absent, or with no nav data loaded for this map, the query
+ * fails and this falls through to the C++'s own else-branch
+ * (g_items.cpp:1617-1623): send the objective marker, play the marker sound,
+ * no trail. That is exactly the behavior this function had before the hook
+ * existed, so a map with no .nav file is unchanged.
+ *
+ * TWO SUBSTITUTIONS, both structural, neither changing the points produced:
+ *
+ *  - THE POINT BUFFER. The C++ lazily TagMallocs
+ *    `vec3_t[MAX_TEMP_POI_POINTS + 1]` per player at TAG_LEVEL and hands
+ *    `points + 1` straight to GetPathToGoal as the output pointer, so the
+ *    engine writes into `points[1..]` and index 0 stays reserved for the
+ *    "extra point in front of us" write near the end. There is no `+ 1`
+ *    pointer view over a JS array, so this passes a fresh scratch array and
+ *    copies into `points[1..]` afterward -- the same index-1-based layout.
+ *    src/kexgame/g_items.ts's Use_Compass does the identical thing for the
+ *    identical reason; the two produce the same buffer.
+ *
+ *  - THE FACING VECTOR. The re-release reads `client->v_forward`, a cached
+ *    forward vector its gclient_t carries. The classic gclient_t has no such
+ *    field, so the same vector is recomputed here with AngleVectors over
+ *    `client.v_angle` -- which is precisely what the re-release's own
+ *    ClientThink stores into v_forward each frame.
  */
 export function Cmd_Compass_f(ent: EdictT): void {
   const lvl = kexLevel();
@@ -985,18 +1048,90 @@ export function Cmd_Compass_f(ent: EdictT): void {
     if (dynamicPoi.use !== null) dynamicPoi.use(dynamicPoi, ent, ent);
   }
 
-  if (ent.client === null) return;
+  const client = ent.client;
+  if (client === null) return;
 
   const kc = kexClient(ent);
   VectorCopy(lvl.current_poi, kc.help_poi_location);
   kc.help_poi_image = lvl.current_poi_image;
 
-  // g_items.cpp:1617-1623 -- the "no path" branch. It is the only branch
-  // reachable here: the C++'s other branch is gated on gi.GetPathToGoal,
-  // which the classic GameImports does not have at all (and which the kex
-  // binding stubs to false), so the breadcrumb trail is never started and
-  // kexClient(ent).poi_points stays null. See this function's DEVIATION note
-  // and Compass_Update above.
+  // g_items.cpp:1561-1566 -- lazily allocate this player's point buffer.
+  let points = kc.poi_points;
+  if (points === null) {
+    points = Array.from({ length: MAX_TEMP_POI_POINTS + 1 }, () => vec3());
+    kc.poi_points = points;
+  }
+
+  const query = gi.get_path_to_goal;
+  const pathScratch: Vec3[] = query === undefined ? [] : Array.from({ length: MAX_TEMP_POI_POINTS }, () => vec3());
+
+  const result =
+    query === undefined
+      ? null
+      : query({
+          ...compassPathQueryDefaults(),
+          start: ent.s.origin,
+          goal: lvl.current_poi,
+          points: pathScratch,
+          maxPoints: MAX_TEMP_POI_POINTS,
+        });
+
+  if (result !== null && result.found) {
+    // g_items.cpp:1590 -- "TODO: optimize points?" (upstream's own note).
+    for (let i = 0; i < pathScratch.length; i++) points[i + 1] = pathScratch[i]!;
+
+    kc.help_draw_points = true;
+    kc.help_draw_count = Math.min(result.numPathPoints, MAX_TEMP_POI_POINTS);
+    kc.help_draw_index = 1;
+
+    // g_items.cpp:1596-1602 -- remove points too close to the player so they
+    // don't have to backtrack.
+    for (let i = 1; i < 1 + kc.help_draw_count; i++) {
+      const delta = vec3();
+      VectorSubtract(points[i]!, ent.s.origin, delta);
+      if (VectorLength(delta) > 192) break;
+      kc.help_draw_index = i;
+    }
+
+    // g_items.cpp:1604-1615 -- create an extra point in front of us if we're
+    // facing away from the first real point.
+    const forward = vec3();
+    AngleVectors(client.v_angle, forward, null, null);
+
+    const toFirst = vec3();
+    VectorSubtract(points[kc.help_draw_index]!, ent.s.origin, toFirst);
+    VectorNormalize(toFirst);
+
+    if (DotProduct(toFirst, forward) < 0.3) {
+      const p = vec3();
+      VectorMA(ent.s.origin, 64, forward, p);
+
+      const traceStart = vec3();
+      VectorCopy(ent.s.origin, traceStart);
+      traceStart[2] += ent.viewheight;
+
+      const tr = gi.trace(traceStart, null, null, p, null, MASK_SOLID);
+
+      kc.help_draw_index--;
+      kc.help_draw_count++;
+
+      const endpos = vec3();
+      VectorCopy(tr.endpos, endpos);
+      if (tr.fraction < 1.0) {
+        const off = vec3();
+        VectorScale(tr.plane.normal, 8, off);
+        VectorAdd(endpos, off, endpos);
+      }
+
+      points[kc.help_draw_index] = endpos;
+    }
+
+    kc.help_draw_time = 0;
+    Compass_Update(ent, true);
+    return;
+  }
+
+  // g_items.cpp:1617-1623 -- the "no path" branch.
   P_SendLevelPOI(ent);
   gi.sound(ent, CHAN_AUTO, gi.soundindex("misc/help_marker.wav"), 1.0, ATTN_NORM, 0.0);
 }

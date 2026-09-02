@@ -19,7 +19,7 @@
 // refactor -- see that file for the apiversion check and geHolder storage
 // that remain on the caller's side of this boundary.
 
-import type { Edict, FogRgbaT, FogStateT, GameExports, GameImports } from "../../game/game";
+import type { Edict, FogRgbaT, FogStateT, GameExports, GameImports, PathQueryT, PathResultT } from "../../game/game";
 import { SV_DebugDraw_OrientedWorldText, SV_DebugDraw_StaticWorldText } from "../sv_debugdraw";
 import { GetGameAPI } from "../../game/g_main";
 import { g_edicts as baseGEdicts } from "../../game/g_local";
@@ -28,11 +28,11 @@ import { g_edicts as ctfGEdicts } from "../../ctf/g_local";
 import { g_edicts as xatrixGEdicts } from "../../xatrix/g_local";
 import { g_edicts as rogueGEdicts } from "../../rogue/g_local";
 import { g_edicts as lmctfGEdicts } from "../../lmctf/g_local";
-import type { Vec3 } from "../../shared/math";
+import { vec3, type Vec3 } from "../../shared/math";
 import { CS_REMAP_OLD, remapLegacyConfigstringIndex } from "../../shared/cs_remap";
 import { PlayerStateT, STAT_PICKUP_STRING, STAT_CHASE, MAX_ITEMS, MAX_CLIENTS } from "../../shared/q_shared";
 import { svs } from "../server";
-import { Nav_SetEdictSource, type NavGameEdictView } from "../nav";
+import { Nav_SetEdictSource, Nav_GetPathToGoal, type NavGameEdictView } from "../nav";
 // The C engine picks the game DLL by loading gamex86.dll (or the platform
 // equivalent) out of the mod directory named by the "game" cvar (FS_Gamedir()
 // / Sys_GetGameAPI(), sv_main.c/sys_*.c) -- there is no DLL boundary in this
@@ -276,6 +276,7 @@ export function BuildLegacyImports(): GameImports {
     fog: PF_Fog,
     poi: PF_Poi,
     help_path: PF_HelpPath,
+    get_path_to_goal: PF_GetPathToGoal,
     draw_oriented_world_text: PF_DrawOrientedWorldText,
     draw_static_world_text: PF_DrawStaticWorldText,
     sound: PF_StartSound,
@@ -656,6 +657,95 @@ export function PF_HelpPath(ent: Edict, first: boolean, pos: Vec3, dir: Vec3): v
   PF_WriteDir(dir);
   // g_items.cpp:1531's `gi.unicast(ent, false, 0)` -- unreliable.
   PF_Unicast(ent, false);
+}
+
+/*
+===============
+PF_GetPathToGoal
+
+The engine half of game.ts's optional `get_path_to_goal()` import: the same
+src/server/nav.ts A* query bindings/kex.ts hands the re-release module
+through `gi.GetPathToGoal`, reached from the classic module's flattened
+PathQueryT instead of the re-release PathRequest struct.
+
+WHY A TRANSLATION AND NOT A DIRECT FORWARD. src/game takes no dependency on
+src/kexapi -- that is the standing rule this file's SVC_POI/SVC_HELP_PATH
+constants already follow -- so the classic module cannot name PathRequest,
+PathInfo, PathFlags or PathReturnCode. The translation below is the whole of
+the difference: every field the classic query does not carry is filled with
+the value the C++ struct's own default member initializer would have given
+it (debugging.drawTime = 0, traversals.dropHeight/jumpHeight = 0), and every
+field it does carry is copied straight across. `pathLinkType` is dropped on
+the way back out because nothing in the classic module reads it (the
+re-release reads it only in m_move.cpp's monster traversal handling, which
+has no classic counterpart).
+
+NOT GATED ON `svs.csr.extended`, unlike PF_Poi/PF_HelpPath/PF_Fog above.
+Those three write re-release opcodes onto the wire and must stay silent on a
+narrow session; this one writes nothing to any client. What it depends on is
+the server having called Nav_Load for this map, which for the legacy family
+is the opt-in `sv_nav_legacy` cvar (sv_init.ts's SV_SpawnServer; nav.ts's
+header records the ruling and the default-off posture). With nav never
+loaded this returns `found: false` with a `NoStartNode`/`NoNavAvailable`
+return code and the module's own fallback path runs -- exactly what happened
+before this hook existed, so a 1997-tree session is unaffected.
+
+THE POINT BUFFER IS WRITTEN IN PLACE. nav.ts's Nav_PushPathPoint does
+`VectorCopy(p, request.pathPoints.array[n])` -- it mutates the Vec3 objects
+already in the array rather than replacing them -- so `query.points` is
+handed straight through as `pathPoints.array` with no copy, and the caller
+sees its own Vec3s filled. That is the same aliasing contract the C++ has
+when it passes `points + 1` as a raw pointer.
+===============
+*/
+// kexapi/game.ts's `PathLinkType.Walk` (0) and `PathReturnCode`
+// `StartPathErrors` (5) -- the two initial values a fresh PathInfo carries.
+// Spelled here rather than imported for the same reason SVC_POI/SVC_HELP_PATH
+// above are: nothing on the classic side of this binding names the kex API
+// surface. The PathRequest/PathInfo objects below are handed to
+// Nav_GetPathToGoal as bare object literals, so TypeScript checks them
+// structurally against nav.ts's imported types without this file having to
+// name them either. test/nav_classic_hook.test.ts pins both ordinals against
+// kexapi's own enums so they cannot drift.
+export const PATH_LINK_TYPE_WALK = 0;
+export const PATH_RETURN_START_PATH_ERRORS = 5;
+
+export function PF_GetPathToGoal(query: PathQueryT): PathResultT {
+  const request = {
+    start: query.start,
+    goal: query.goal,
+    pathFlags: query.pathFlags,
+    moveDist: query.moveDist,
+    debugging: { drawTime: 0 },
+    nodeSearch: {
+      ignoreNodeFlags: query.ignoreNodeFlags,
+      minHeight: query.minHeight,
+      maxHeight: query.maxHeight,
+      radius: query.radius,
+    },
+    traversals: { dropHeight: 0, jumpHeight: 0 },
+    pathPoints: { array: query.points, count: query.maxPoints },
+  };
+
+  const info = {
+    numPathPoints: 0,
+    pathDistSqr: 0,
+    firstMovePoint: vec3(),
+    secondMovePoint: vec3(),
+    pathLinkType: PATH_LINK_TYPE_WALK,
+    returnCode: PATH_RETURN_START_PATH_ERRORS,
+  };
+
+  const found = Nav_GetPathToGoal(request, info);
+
+  return {
+    found,
+    returnCode: info.returnCode,
+    numPathPoints: info.numPathPoints,
+    pathDistSqr: info.pathDistSqr,
+    firstMovePoint: info.firstMovePoint,
+    secondMovePoint: info.secondMovePoint,
+  };
 }
 
 /*

@@ -238,13 +238,20 @@
 //   matches whichever family is active instead of always being the legacy 1024.
 // - `GetPathToGoal`/`Bot_RegisterEdict`/`Bot_UnRegisterEdict`: real A*
 //   pathfinding and edict registration, ported to src/server/nav.ts
-//   (server/nav.c) as of ARCHITECTURE.md phase 7's nav-mesh unit. See
-//   nav.ts's own header for the file-format/scope details (debug
-//   visualization dropped, headless boot has no renderer to draw into).
-//   `Bot_MoveToPoint`/`Bot_FollowActor` remain `GoalReturnCode.Error`
-//   unconditionally -- matching q2repro's OWN `PF_Bot_MoveToPoint`/
-//   `PF_Bot_FollowActor` stubs (server/game.c:762-770), not a gap in this
-//   port.
+//   (server/nav.c) as of ARCHITECTURE.md phase 7's nav-mesh unit, and
+//   forwarded straight through by this binding (see their entries in the
+//   import table below). Until that wiring landed all three were `() => {}`
+//   / `() => false` stubs even though nav.ts was complete, which is what
+//   kept the re-release compass trail (svc_help_path) dark end to end: the
+//   engine hooks, `Compass_Update` and the client draw all existed, but
+//   `Use_Compass`'s `if (gi.GetPathToGoal(...))` could never be true, so
+//   `level.poi_points` was never filled and not one breadcrumb was ever
+//   written to the wire. See nav.ts's own header for the file-format/scope
+//   details (debug visualization dropped, headless boot has no renderer to
+//   draw into). `Bot_MoveToPoint`/`Bot_FollowActor` remain
+//   `GoalReturnCode.Error` unconditionally -- matching q2repro's OWN
+//   `PF_Bot_MoveToPoint`/`PF_Bot_FollowActor` stubs (server/game.c:762-770),
+//   not a gap in this port.
 // - `Loc_Print`: real localization ($key resolution, loc_file cvar, {0}/{1}
 //   positional substitution) now goes through `Loc_Localize`
 //   (src/qcommon/loc.ts, ported from q2repro's src/common/loc.c), then
@@ -960,14 +967,37 @@ export function BuildKexImports(): KexGameImports {
 
     GetExtension: () => null,
 
-    // Bots: ARCHITECTURE.md phase 7. No-ops / GoalReturnCode.Error.
-    Bot_RegisterEdict: () => {},
-    Bot_UnRegisterEdict: () => {},
+    // Bots. `Bot_RegisterEdict`/`Bot_UnRegisterEdict` are q2repro's
+    // PF_Bot_RegisterEdict/PF_Bot_UnRegisterEdict (server/game.c:752-760),
+    // which are one-line forwards into nav.c's registered-edict table. That
+    // table has exactly one consumer, here and upstream:
+    // Nav_UpdateConditionalNode's CheckForHazard branch (nav.ts) walks it
+    // every frame looking for live SVFL_TRAP_DANGER entities (laser beams,
+    // hurt triggers) overlapping a conditional node's bounds, and disables
+    // the node while one does. Left as no-ops these two silently emptied
+    // that table, so hazard-flagged nodes never went Disabled and the A*
+    // happily routed a compass trail straight through a laser. Forwarded
+    // for real now; `Nav_RegisterEdict` is idempotent per edict (it scans
+    // for an existing entry first) so the game module's per-spawn calls
+    // cost nothing extra.
+    //
+    // `Bot_MoveToPoint`/`Bot_FollowActor` stay GoalReturnCode.Error
+    // unconditionally -- matching q2repro's OWN PF_Bot_MoveToPoint/
+    // PF_Bot_FollowActor stubs (server/game.c:762-770), not a gap here.
+    Bot_RegisterEdict: (edict) => Nav_RegisterEdict(edict),
+    Bot_UnRegisterEdict: (edict) => Nav_UnRegisterEdict(edict),
     Bot_MoveToPoint: () => GoalReturnCode.Error,
     Bot_FollowActor: () => GoalReturnCode.Error,
 
-    // Nav: ARCHITECTURE.md phase 7.
-    GetPathToGoal: () => false,
+    // Nav. q2repro's PF_GetPathToGoal (server/game.c:772-782) is precisely
+    // this forward into nav.c's Nav_GetPathToGoal, which fills the caller's
+    // PathInfo in place and returns `returnCode < StartPathErrors`. Both
+    // kexgame consumers pass a PathRequest whose `pathPoints.array` is the
+    // buffer they want written (g_items.ts's Use_Compass, m_move.ts's
+    // monster navigation) or null when only `pathDistSqr` matters
+    // (g_target.ts's distance_to_poi), and nav.ts honors both through
+    // Nav_PushPathPoint's `count`/`array` guard -- no adapter needed.
+    GetPathToGoal: (request, info) => Nav_GetPathToGoal(request, info),
 
     // Localization: real Loc_Localize (src/qcommon/loc.ts), same
     // allow_in_place=true call site q2repro's PF_Loc_Print uses

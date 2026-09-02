@@ -128,6 +128,62 @@ export interface FogStateT {
 /** RGBA 0..1, the colour argument info_world_text's draw calls take. */
 export type FogRgbaT = readonly [number, number, number, number];
 
+/**
+ * One nav-mesh path query, the classic module's spelling of the re-release
+ * `PathRequest` (src/kexapi/game.ts). Flattened on purpose: the re-release
+ * struct nests four sub-structs (debugging / nodeSearch / traversals /
+ * pathPoints), and of those the only fields any consumer in this module ever
+ * sets are the four node-search knobs and the output buffer -- `debugging`
+ * is the USE_REF draw-time this port has no renderer for, and `traversals`
+ * is monster-movement policy the compass never uses. The engine half
+ * (src/server/bindings/kex.ts's PF_GetPathToGoal for the classic family)
+ * fills the untouched sub-structs with the same defaults the C++ struct's
+ * own member initializers carry, so a query built here is byte-equivalent to
+ * the one src/kexgame builds for the same call site.
+ *
+ * `points` is the caller's output buffer and `maxPoints` its length; pass
+ * `null`/`0` when only `pathDistSqr` is wanted (target_poi's
+ * distance_to_poi does exactly that). The engine writes at most `maxPoints`
+ * entries IN PLACE into the Vec3 objects already in the array -- it never
+ * replaces them -- matching the pointer-into-caller-memory contract the
+ * re-release's `PathRequest::PathArray::array` has.
+ */
+export interface PathQueryT {
+  start: Vec3;
+  goal: Vec3;
+  moveDist: number;
+  /** PathFlags bitfield; 0xffffffff is the re-release's `PathFlags::All`. */
+  pathFlags: number;
+  ignoreNodeFlags: boolean;
+  /** 0 = "use the engine default" for each of the three, as in the C++. */
+  minHeight: number;
+  maxHeight: number;
+  radius: number;
+  points: Vec3[] | null;
+  maxPoints: number;
+}
+
+/**
+ * The result half of a `get_path_to_goal` query -- the re-release's
+ * `PathInfo` (src/kexapi/game.ts) returned by value instead of filled
+ * through an out-parameter, since nothing in this module needs to reuse a
+ * PathInfo across calls the way m_move.cpp's monster navigation does.
+ *
+ * `found` is the C++ call's own boolean return (`returnCode <
+ * PathReturnCode::StartPathErrors`). `returnCode` is carried through raw
+ * because distance_to_poi has to tell "no nav data for this map" (8,
+ * `PathReturnCode::NoNavAvailable`) apart from every other failure -- that
+ * one case falls back to straight-line distance instead of infinity.
+ */
+export interface PathResultT {
+  found: boolean;
+  returnCode: number;
+  numPathPoints: number;
+  pathDistSqr: number;
+  firstMovePoint: Vec3;
+  secondMovePoint: Vec3;
+}
+
 export interface GameImports {
   // special messages
   bprintf(printlevel: number, fmt: string): void;
@@ -227,6 +283,26 @@ export interface GameImports {
   // position and `dir` the direction to the following marker. Unreliable,
   // matching the re-release's own `gi.unicast(ent, false, 0)`.
   help_path?(ent: Edict, first: boolean, pos: Vec3, dir: Vec3): void;
+
+  // The nav-mesh path query behind the compass trail: the classic module's
+  // spelling of the re-release's `gi.GetPathToGoal`
+  // (src/kexapi/game.ts's GameImports). Optional for exactly the reason
+  // poi()/help_path()/fog() are: it is re-release engine vocabulary the
+  // frozen v3 GameImports cannot name, so the module calls it with `?.()`
+  // and copes with `undefined`.
+  //
+  // ABSENT IS NOT THE SAME AS "NO PATH". A missing hook is what the
+  // re-release calls `PathReturnCode::NoNavAvailable` -- distance_to_poi's
+  // documented straight-line fallback -- while a present hook returning
+  // `found: false` means the engine looked and found no walkable route.
+  // g_kextarg.ts's two call sites distinguish the two.
+  //
+  // Unlike poi()/help_path(), this one does NOT depend on the session having
+  // widened onto the re-release configstring layout: it puts nothing on the
+  // wire. It depends only on the server having nav data loaded for this map,
+  // which for the legacy family is the opt-in `sv_nav_legacy` cvar
+  // (src/server/nav.ts's header records the ruling and the default).
+  get_path_to_goal?(query: PathQueryT): PathResultT;
 
   // info_world_text's two draw calls (g_misc.cpp:2276-2325). The re-release
   // routes these straight into the client renderer's debug-primitive list;
