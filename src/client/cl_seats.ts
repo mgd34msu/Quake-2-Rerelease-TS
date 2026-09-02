@@ -47,6 +47,7 @@ import { SizeBuf, SZ_Init, MSG_BeginReading, MSG_ReadByte, MSG_ReadShort, MSG_Re
 import { ButtonT, PrintTypeT } from "../kexapi/game";
 import { GamepadAxisNormalize, SDL_CONTROLLER_BUTTON_A, SDL_CONTROLLER_BUTTON_B, SDL_CONTROLLER_BUTTON_X, SDL_CONTROLLER_BUTTON_Y, SDL_CONTROLLER_BUTTON_LEFTSHOULDER, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, GAMEPAD_TRIGGER_THRESHOLD } from "../platform/gamepad_map";
 import { SDL_GamepadSeatState, SDL_GamepadSeatCount, type GamepadSeatStateT } from "../platform/sdl";
+import { PlayerTuning } from "../platform/gamepad_assign";
 import { viddef } from "./vid";
 import { cl, cls, ConnstateT, KeydestT, clCvars } from "./client";
 import { SCR_CenterPrintSeat } from "./cl_scrn";
@@ -238,6 +239,12 @@ export interface SeatCmdCvarsT {
   sidesensitivity: number;
   yawsensitivity: number;
   pitchsensitivity: number;
+  /** +1 normally, -1 when this seat's player has invert-pitch on. Kept as a
+   *  pre-multiplied sign rather than a boolean so the axis math below stays
+   *  one multiply and the whole struct stays plain numbers -- see
+   *  platform/gamepad_assign.ts's PlayerTuningT, which is where it comes
+   *  from. */
+  pitchsign: number;
 }
 
 /*
@@ -247,9 +254,14 @@ whole of seat input is testable without SDL, a window, or a server.
 
 Stick handling mirrors IN_JoyMove (platform/sdl.ts) exactly -- same
 GamepadAxisNormalize deadzone, same "SDL's Y axis is positive down so
-negative Y is forward" convention, same cvar set and the same
+negative Y is forward" convention, same cvar SHAPE and the same
 frametime-scaled look integration -- so seat 1 and seat 0 feel identical on
-identical hardware.
+identical hardware AND identical settings. The values themselves are now
+per-player (platform/gamepad_assign.ts's in_playerN_* set) rather than the
+one global joy_* set every seat used to share: two people on one couch do not
+have the same thumbs, and the Controllers menu exists to let them say so.
+Every per-player cvar defaults to the matching global's live value, so a
+session where nobody touches the new screen behaves exactly as before.
 */
 export function CL_Seat_BuildCmd(state: SeatInputStateT, pad: GamepadSeatStateT, frametime: number, msec: number, cvars: SeatCmdCvarsT, deltaAnglePitch: number): UsercmdT {
   const cmd = new UsercmdT();
@@ -265,7 +277,7 @@ export function CL_Seat_BuildCmd(state: SeatInputStateT, pad: GamepadSeatStateT,
   cmd.sidemove = cvars.sidespeed * cvars.sidesensitivity * lx;
 
   state.viewangles[YAW] -= frametime * cvars.yawspeed * cvars.yawsensitivity * rx;
-  state.viewangles[PITCH] += frametime * cvars.pitchspeed * cvars.pitchsensitivity * ry;
+  state.viewangles[PITCH] += frametime * cvars.pitchspeed * cvars.pitchsensitivity * cvars.pitchsign * ry;
   state.viewangles[ROLL] = 0;
 
   CL_Seat_ClampPitch(state, deltaAnglePitch);
@@ -840,6 +852,39 @@ export function CL_Seats_WidenServerCvars(want: number): void {
   if (Cvar_VariableValue("maxclients") < want) Cvar_Set("maxclients", String(want));
 }
 
+/** The half of SeatCmdCvarsT that is the same for every seat: the client's
+ *  movement speeds, plus the two joy_* sensitivities that stay global (see
+ *  gamepad_assign.ts on why forward/side speed is not a per-seat knob). */
+type SeatSharedCvarsT = Pick<SeatCmdCvarsT, "forwardspeed" | "sidespeed" | "upspeed" | "yawspeed" | "pitchspeed" | "forwardsensitivity" | "sidesensitivity">;
+
+/** The half that belongs to whoever is sitting in the seat. */
+type SeatPlayerCvarsT = Pick<SeatCmdCvarsT, "deadzone" | "yawsensitivity" | "pitchsensitivity" | "pitchsign">;
+
+export function CL_Seat_SharedCvars(): SeatSharedCvarsT {
+  return {
+    forwardspeed: clCvars.cl_forwardspeed ? clCvars.cl_forwardspeed.value : 0,
+    sidespeed: clCvars.cl_sidespeed ? clCvars.cl_sidespeed.value : 0,
+    upspeed: clCvars.cl_upspeed ? clCvars.cl_upspeed.value : 0,
+    yawspeed: clCvars.cl_yawspeed ? clCvars.cl_yawspeed.value : 0,
+    pitchspeed: clCvars.cl_pitchspeed ? clCvars.cl_pitchspeed.value : 0,
+    forwardsensitivity: Cvar_Get("joy_forwardsensitivity", "1", 0)?.value ?? 1,
+    sidesensitivity: Cvar_Get("joy_sidesensitivity", "1", 0)?.value ?? 1,
+  };
+}
+
+/** Seat `seat`'s own tuning, i.e. player `seat + 1`'s in_playerN_* cvars.
+ *  Exported for the same reason CL_Seat_BuildCmd is: the suite drives the
+ *  axis math directly, with no SDL and no server. */
+export function CL_Seat_PlayerCvars(seat: number): SeatPlayerCvarsT {
+  const tuning = PlayerTuning(seat);
+  return {
+    deadzone: tuning.deadzone,
+    yawsensitivity: tuning.yawsensitivity,
+    pitchsensitivity: tuning.pitchsensitivity,
+    pitchsign: tuning.pitchsign,
+  };
+}
+
 /*
 ==================
 CL_Seats_SendCmds
@@ -857,24 +902,17 @@ export function CL_Seats_SendCmds(): void {
   // session is paused/attention is elsewhere.
   if (cls.key_dest !== KeydestT.key_game) return;
 
-  const cvars: SeatCmdCvarsT = {
-    forwardspeed: clCvars.cl_forwardspeed ? clCvars.cl_forwardspeed.value : 0,
-    sidespeed: clCvars.cl_sidespeed ? clCvars.cl_sidespeed.value : 0,
-    upspeed: clCvars.cl_upspeed ? clCvars.cl_upspeed.value : 0,
-    yawspeed: clCvars.cl_yawspeed ? clCvars.cl_yawspeed.value : 0,
-    pitchspeed: clCvars.cl_pitchspeed ? clCvars.cl_pitchspeed.value : 0,
-    deadzone: Cvar_Get("joy_deadzone", "0.15", 0)?.value ?? 0.15,
-    forwardsensitivity: Cvar_Get("joy_forwardsensitivity", "1", 0)?.value ?? 1,
-    sidesensitivity: Cvar_Get("joy_sidesensitivity", "1", 0)?.value ?? 1,
-    yawsensitivity: Cvar_Get("joy_yawsensitivity", "1", 0)?.value ?? 1,
-    pitchsensitivity: Cvar_Get("joy_pitchsensitivity", "1", 0)?.value ?? 1,
-  };
-
   const msec = Math.trunc(cls.frametime * 1000);
 
   for (let i = 1; i < active_seats; i++) {
     const state = seat_input[i];
-    // Pad slot i-1 is the first EXTRA pad: seat 0 owns the primary
+    // Per-SEAT cvars, rebuilt inside the loop rather than hoisted: the
+    // movement speeds are shared client cvars, but the deadzone, look
+    // sensitivities and pitch inversion belong to the individual player
+    // sitting in this seat (platform/gamepad_assign.ts). Seat i is player
+    // i + 1 in the menu's numbering, so seat 1 reads in_player2_*.
+    const cvars: SeatCmdCvarsT = { ...CL_Seat_SharedCvars(), ...CL_Seat_PlayerCvars(i) };
+    // Pad slot i-1 is the first EXTRA pad: seat 0 owns player 1's
     // controller (and the keyboard/mouse), seat 1 the next one, and so on.
     const pad = pad_source.state(i - 1);
     const ps = SV_LocalSeatPlayerState(i - 1);
@@ -918,9 +956,21 @@ export function CL_Seats_Shutdown(): void {
   }
 }
 
-/** How many seats the hardware can actually drive right now: seat 0 plus one
- *  per extra pad. The menu uses this to tell the player why picking four
- *  seats with one pad plugged in will not give them four. */
+/*
+How many seats the hardware AND the controller assignments can actually drive
+right now: seat 0 (always -- it has the keyboard and mouse) plus every
+consecutive seat after it that a controller is routed to. The menu uses this
+to tell the player why picking four seats with one pad plugged in will not
+give them four.
+
+pad_source.count() is the whole of the assignment-awareness here:
+SDL_GamepadSeatCount counts seats that resolve to a device (gamepad_assign.ts's
+SeatsDrivable), not raw open pads, so a controller explicitly assigned to a
+player who is not seated does not inflate the cap, and a controller assigned
+out of plug order still counts for the seat it was assigned to. With every
+player left on "auto" this is arithmetically identical to the old
+`1 + number of extra pads`.
+*/
 export function CL_Seats_Available(): number {
   return Math.min(1 + pad_source.count(), MAX_LOCAL_SEATS);
 }

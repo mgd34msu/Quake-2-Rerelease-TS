@@ -224,6 +224,10 @@ const TEST_CVARS: SeatCmdCvarsT = {
   sidesensitivity: 1,
   yawsensitivity: 1,
   pitchsensitivity: 1,
+  // Per-player invert-pitch (platform/gamepad_assign.ts): +1 is "not
+  // inverted", which is what every case in this file assumes. The inverted
+  // case has its own coverage in test/gamepad_assign.test.ts.
+  pitchsign: 1,
 };
 
 // Reading through a call defeats TypeScript's assignment narrowing: after a

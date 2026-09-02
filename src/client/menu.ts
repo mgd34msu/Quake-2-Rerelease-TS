@@ -91,6 +91,17 @@ import { Cbuf_AddText, Cbuf_InsertText, Cbuf_Execute } from "../qcommon/cmd";
 import { Cvar_Get, Cvar_Set, Cvar_SetValue, Cvar_VariableValue, Cvar_VariableString, Cvar_ForceSet } from "../qcommon/cvar";
 import { Com_Printf, Com_Error, Com_ServerState } from "../qcommon/common";
 import { CL_Seats_Available } from "./cl_seats";
+import { SDL_GamepadDevices, SDL_GamepadDeviceGeneration, SDL_GamepadRefreshAssignments, type GamepadDeviceInfoT } from "../platform/sdl";
+import {
+  DEVICE_AUTO,
+  DEVICE_KBM,
+  IsAutoSpec,
+  IsKbmSpec,
+  MAX_LOCAL_PLAYERS,
+  PlayerDeviceCvarName,
+  PlayerTuningCvarNames,
+  RegisterPlayerCvars,
+} from "../platform/gamepad_assign";
 import { ERR_DROP } from "../qcommon/qcommon";
 import type { NetadrT } from "../qcommon/qcommon";
 import { NET_AdrToString } from "../platform/net_udp";
@@ -770,6 +781,10 @@ let win_noalttab = Cvar_Get("win_noalttab", "0", CVAR_ARCHIVE);
 const s_options_menu = new MenuframeworkS();
 const s_options_defaults_action = new MenuactionS();
 const s_options_customize_options_action = new MenuactionS();
+// Controllers screen (this file's CONTROLLERS MENU block below). Sits with
+// "customize controls" because it is the other half of the same question --
+// that row says what each button does, this one says whose controller it is.
+const s_options_controllers_action = new MenuactionS();
 const s_options_sensitivity_slider = new MenusliderS();
 const s_options_freelook_box = new MenulistS();
 const s_options_alwaysrun_box = new MenulistS();
@@ -790,6 +805,10 @@ function CrosshairFunc(): void {
 
 function JoystickFunc(): void {
   Cvar_SetValue("in_joystick", s_options_joystick_box.curvalue);
+}
+
+function ControllersFunc(): void {
+  M_Menu_Controllers_f();
 }
 
 function CustomizeControlsFunc(): void {
@@ -1032,6 +1051,13 @@ function Options_MenuInit(): void {
   s_options_joystick_box.generic.callback = JoystickFunc;
   s_options_joystick_box.itemnames = yesno_names;
 
+  s_options_controllers_action.generic.type = MTYPE_ACTION;
+  s_options_controllers_action.generic.x = 0;
+  s_options_controllers_action.generic.y = 130;
+  s_options_controllers_action.generic.name = "controllers";
+  s_options_controllers_action.generic.callback = ControllersFunc;
+  s_options_controllers_action.generic.statusbar = "assign controllers to players 1-4 and tune each one";
+
   s_options_customize_options_action.generic.type = MTYPE_ACTION;
   s_options_customize_options_action.generic.x = 0;
   s_options_customize_options_action.generic.y = 140;
@@ -1064,6 +1090,7 @@ function Options_MenuInit(): void {
   Menu_AddItem(s_options_menu, s_options_freelook_box);
   Menu_AddItem(s_options_menu, s_options_crosshair_box);
   Menu_AddItem(s_options_menu, s_options_joystick_box);
+  Menu_AddItem(s_options_menu, s_options_controllers_action);
   Menu_AddItem(s_options_menu, s_options_customize_options_action);
   Menu_AddItem(s_options_menu, s_options_defaults_action);
   Menu_AddItem(s_options_menu, s_options_console_action);
@@ -1092,6 +1119,390 @@ VIDEO MENU
 function M_Menu_Video_f(): void {
   VID_MenuInit();
   M_PushMenu(VID_MenuDraw, VID_MenuKey);
+}
+
+/*
+=======================================================================
+CONTROLLERS MENU
+
+Which controller drives which local player, and each player's own stick
+tuning. An ORIGINAL screen -- there is no menu.c original and no q2repro
+equivalent, because neither engine has splitscreen; see
+platform/gamepad_assign.ts's header for the model this screen edits and why
+every rule in it is this port's own design rather than a port of somebody
+else's.
+
+Layout, top to bottom: the controllers SDL currently sees and who has each
+one, then one block per player (device, look sensitivities, invert, dead
+zone), then back. Every row writes its cvar immediately, the way the options
+menu's own sliders do -- there is no "apply", because nothing here needs a
+restart or a device reopen: changing an assignment just re-runs the
+resolver.
+
+Two conventions this screen is careful about:
+
+  * QMF_GRAYED is an MTYPE_ACTION-only visual in this codebase (see
+    s_content_skill_list's note above, and vid_menu.ts's shadow rows). On a
+    spin control or slider the flag draws nothing at all, so an unavailable
+    or unassigned state has to be said in the text the player is actually
+    looking at -- the row's own value, or the player heading. That is why
+    "[no controller]" and "[not connected]" are strings and not flags.
+
+  * The screen rebuilds itself when SDL's device list changes
+    (SDL_GamepadDeviceGeneration), so plugging a pad in while looking at
+    this screen fills it in, rather than showing a stale list until the
+    player backs out and returns.
+=======================================================================
+*/
+const s_controllers_menu = new MenuframeworkS();
+const s_controllers_devices_header = new MenuseparatorS();
+const s_controllers_device_rows: MenuseparatorS[] = Array.from({ length: MAX_LOCAL_PLAYERS }, () => new MenuseparatorS());
+const s_controllers_player_header: MenuseparatorS[] = Array.from({ length: MAX_LOCAL_PLAYERS }, () => new MenuseparatorS());
+export const s_controllers_device_box: MenulistS[] = Array.from({ length: MAX_LOCAL_PLAYERS }, () => new MenulistS());
+export const s_controllers_yaw_slider: MenusliderS[] = Array.from({ length: MAX_LOCAL_PLAYERS }, () => new MenusliderS());
+export const s_controllers_pitch_slider: MenusliderS[] = Array.from({ length: MAX_LOCAL_PLAYERS }, () => new MenusliderS());
+export const s_controllers_invert_box: MenulistS[] = Array.from({ length: MAX_LOCAL_PLAYERS }, () => new MenulistS());
+export const s_controllers_deadzone_slider: MenusliderS[] = Array.from({ length: MAX_LOCAL_PLAYERS }, () => new MenusliderS());
+const s_controllers_back_action = new MenuactionS();
+
+/*
+Slider step scales. Every one of these is an integer slider curvalue times a
+fixed step, the same shape vid_menu.ts's scale/screensize/brightness sliders
+use -- MenusliderS has no fractional stepping, and inventing one here would
+change a widget every other screen shares.
+
+Sensitivity: 0.1 .. 3.0 in 0.1 steps, default 1.0 (curvalue 10).
+Dead zone:   0.00 .. 0.50 in 0.05 steps, default 0.15 (curvalue 3). The ten
+             steps land exactly on the ten-character slider track, so every
+             keypress visibly moves the thumb.
+*/
+const CONTROLLER_SENS_STEP = 0.1;
+const CONTROLLER_SENS_MIN = 1;
+const CONTROLLER_SENS_MAX = 30;
+const CONTROLLER_DEADZONE_STEP = 0.05;
+const CONTROLLER_DEADZONE_MIN = 0;
+const CONTROLLER_DEADZONE_MAX = 10;
+
+/** Slider readouts. Each mirrors the write its own callback performs, so the
+ *  number on screen is the number that reaches the cvar -- a formatter that
+ *  drifts from the real write shows the player a false value (vid_menu.ts's
+ *  own formatter block makes the same point). Exported for the suite. */
+export function ControllerSensitivityFormatter(curvalue: number): string {
+  return `${(curvalue * CONTROLLER_SENS_STEP).toFixed(1)}x`;
+}
+
+export function ControllerDeadzoneFormatter(curvalue: number): string {
+  return (curvalue * CONTROLLER_DEADZONE_STEP).toFixed(2);
+}
+
+/** Cvar value -> slider curvalue, clamped to the offered range. A config or
+ *  console value outside the range still SHOWS at the nearest end rather
+ *  than snapping the slider to zero; it is only actually written back if the
+ *  player moves that slider. */
+function sliderIndexFor(value: number, step: number, min: number, max: number): number {
+  const raw = Math.round(value / step);
+  return Math.max(min, Math.min(max, raw));
+}
+
+/** A controller's name as the rows show it: trimmed to fit the value column,
+ *  with the duplicate marker kept when two identical pads are plugged in
+ *  (otherwise the two rows would read identically and be unpickable). */
+function controllerShortName(info: GamepadDeviceInfoT): string {
+  const hash = info.spec.lastIndexOf("#");
+  const dup = hash >= 0 ? ` #${info.spec.slice(hash + 1)}` : "";
+  const room = 20 - dup.length;
+  const name = info.name.length > room ? `${info.name.slice(0, room - 1)}.` : info.name;
+  return `${name}${dup}`;
+}
+
+interface ControllerDeviceOptionT {
+  label: string;
+  value: string;
+}
+
+/*
+The choices one player's device row offers: "auto", then "keyboard/mouse" for
+player 1 only, then every controller SDL currently sees.
+
+Plus, when this player's saved assignment names a controller that is NOT
+plugged in right now, a trailing entry for it marked "[not connected]". That
+entry is the whole reason a saved assignment is not silently lost the first
+time somebody opens this screen without that pad attached: without it the
+spin control could not represent the saved value, would fall back to index 0,
+and the next keypress would quietly overwrite the player's choice with
+"auto".
+*/
+export function ControllerDeviceOptions(player: number, devices: readonly GamepadDeviceInfoT[], current: string): ControllerDeviceOptionT[] {
+  const options: ControllerDeviceOptionT[] = [{ label: "auto", value: DEVICE_AUTO }];
+  // Player 1 is the only one with a keyboard and mouse to fall back on, so
+  // it is the only one that can meaningfully refuse a pad (gamepad_assign.ts).
+  if (player === 0) options.push({ label: "keyboard/mouse", value: DEVICE_KBM });
+  for (const dev of devices) options.push({ label: controllerShortName(dev), value: dev.spec });
+
+  const saved = current.trim();
+  if (saved && !IsAutoSpec(saved) && !IsKbmSpec(saved) && !options.some((o) => o.value.toLowerCase() === saved.toLowerCase())) {
+    options.push({ label: "[not connected]", value: saved });
+  }
+  return options;
+}
+
+/** Row index for this player's saved value, or 0 ("auto") when the value is
+ *  not one of the offered ones. */
+export function ControllerDeviceIndexFor(options: readonly ControllerDeviceOptionT[], current: string): number {
+  const wanted = current.trim().toLowerCase() || DEVICE_AUTO;
+  for (let i = 0; i < options.length; i++) {
+    const opt = options[i];
+    if (opt && opt.value.toLowerCase() === wanted) return i;
+  }
+  return 0;
+}
+
+/** Per-player option lists, kept alongside the widgets so a callback can turn
+ *  a spin-control index back into the cvar string it stands for. */
+let controller_device_options: ControllerDeviceOptionT[][] = [];
+/** SDL device-list generation the current rows were built from. */
+let controller_device_generation = -1;
+
+/*
+The "detected controllers" block. One row per controller with the player it
+currently drives, or a single honest line when there are none -- an empty
+list with no explanation is the state a player hits when their pad is asleep
+or on the wrong cable, and "(none detected)" is what tells them the engine
+genuinely sees nothing rather than that the screen is broken.
+*/
+export function ControllerDeviceListText(devices: readonly GamepadDeviceInfoT[]): string[] {
+  if (!devices.length) return ["(none detected)"];
+  return devices.map((dev, i) => {
+    const who = dev.player < 0 ? "idle" : `player ${dev.player + 1}`;
+    return `${i + 1}. ${controllerShortName(dev)} - ${who}`;
+  });
+}
+
+/** A player heading, carrying the state the greyed-out flag cannot draw:
+ *  which controller actually reached this player after resolution. */
+export function ControllerPlayerHeadingText(player: number, devices: readonly GamepadDeviceInfoT[]): string {
+  const owned = devices.find((d) => d.player === player);
+  return owned ? `player ${player + 1} - ${controllerShortName(owned)}` : `player ${player + 1} - [no controller]`;
+}
+
+function ControllerDeviceFunc(self: MenuItemU): void {
+  const player = self.generic.localdata[0] ?? 0;
+  const options = controller_device_options[player];
+  const box = s_controllers_device_box[player];
+  if (!options || !box) return;
+  const chosen = options[box.curvalue];
+  if (!chosen) return;
+
+  Cvar_Set(PlayerDeviceCvarName(player), chosen.value);
+  // Routing is recomputed immediately, so the device list and the player
+  // headings below reflect the new assignment on this same frame rather
+  // than after a screen reopen.
+  SDL_GamepadRefreshAssignments();
+  Controllers_MenuRebuild();
+}
+
+function ControllerTuningFunc(self: MenuItemU): void {
+  const player = self.generic.localdata[0] ?? 0;
+  const names = PlayerTuningCvarNames(player);
+  const yaw = s_controllers_yaw_slider[player];
+  const pitch = s_controllers_pitch_slider[player];
+  const invert = s_controllers_invert_box[player];
+  const deadzone = s_controllers_deadzone_slider[player];
+  if (!yaw || !pitch || !invert || !deadzone) return;
+
+  Cvar_SetValue(names.yaw, yaw.curvalue * CONTROLLER_SENS_STEP);
+  Cvar_SetValue(names.pitch, pitch.curvalue * CONTROLLER_SENS_STEP);
+  Cvar_SetValue(names.invert, invert.curvalue);
+  Cvar_SetValue(names.deadzone, deadzone.curvalue * CONTROLLER_DEADZONE_STEP);
+}
+
+function ControllerBackFunc(): void {
+  M_PopMenu();
+}
+
+/*
+Build (or rebuild) every row from the live device list and the live cvars.
+Called on open, and again whenever an assignment changes or SDL reports a
+device arriving or leaving. The cursor is preserved across a rebuild: a pad
+waking up mid-adjustment should not also move the player's selection.
+*/
+function Controllers_MenuBuild(): void {
+  RegisterPlayerCvars();
+  const devices = SDL_GamepadDevices();
+  controller_device_generation = SDL_GamepadDeviceGeneration();
+  const yesno_names = ["no", "yes"];
+
+  s_controllers_menu.x = viddef.width * 0.5;
+  s_controllers_menu.y = viddef.height * 0.5 - 100;
+  s_controllers_menu.nitems = 0;
+  s_controllers_menu.statusbar = null;
+
+  // 9-unit rhythm, not the 10 most screens use: this is a long list and the
+  // keys menu (Keys_MenuInit above) already establishes 9 as what this
+  // codebase does when a screen has more rows than a comfortable 10 would
+  // fit.
+  const ROW = 9;
+  let y = 0;
+
+  s_controllers_devices_header.generic.type = MTYPE_SEPARATOR;
+  s_controllers_devices_header.generic.name = "detected controllers";
+  s_controllers_devices_header.generic.x = 0;
+  s_controllers_devices_header.generic.y = y;
+  Menu_AddItem(s_controllers_menu, s_controllers_devices_header);
+  y += ROW;
+
+  const listText = ControllerDeviceListText(devices);
+  for (let i = 0; i < s_controllers_device_rows.length; i++) {
+    const row = s_controllers_device_rows[i];
+    const text = listText[i];
+    if (!row || text === undefined) continue;
+    row.generic.type = MTYPE_SEPARATOR;
+    row.generic.name = text;
+    row.generic.x = 0;
+    row.generic.y = y;
+    Menu_AddItem(s_controllers_menu, row);
+    y += ROW;
+  }
+
+  controller_device_options = [];
+
+  for (let p = 0; p < MAX_LOCAL_PLAYERS; p++) {
+    const header = s_controllers_player_header[p];
+    const box = s_controllers_device_box[p];
+    const yaw = s_controllers_yaw_slider[p];
+    const pitch = s_controllers_pitch_slider[p];
+    const invert = s_controllers_invert_box[p];
+    const deadzone = s_controllers_deadzone_slider[p];
+    if (!header || !box || !yaw || !pitch || !invert || !deadzone) continue;
+
+    y += ROW; // one blank row between players
+
+    header.generic.type = MTYPE_SEPARATOR;
+    header.generic.name = ControllerPlayerHeadingText(p, devices);
+    header.generic.x = 0;
+    header.generic.y = y;
+    Menu_AddItem(s_controllers_menu, header);
+    y += ROW;
+
+    const current = Cvar_VariableString(PlayerDeviceCvarName(p));
+    const options = ControllerDeviceOptions(p, devices, current);
+    controller_device_options.push(options);
+
+    box.generic.type = MTYPE_SPINCONTROL;
+    box.generic.name = "device";
+    box.generic.x = 0;
+    box.generic.y = y;
+    box.generic.localdata[0] = p;
+    box.generic.callback = ControllerDeviceFunc;
+    box.generic.statusbar = p === 0 ? "player 1 always keeps the keyboard and mouse" : "auto follows plug order";
+    box.itemnames = options.map((o) => o.label);
+    box.curvalue = ControllerDeviceIndexFor(options, current);
+    Menu_AddItem(s_controllers_menu, box);
+    y += ROW;
+
+    const tuning = PlayerTuningCvarNames(p);
+
+    yaw.generic.type = MTYPE_SLIDER;
+    yaw.generic.name = "yaw sensitivity";
+    yaw.generic.x = 0;
+    yaw.generic.y = y;
+    yaw.generic.localdata[0] = p;
+    yaw.generic.callback = ControllerTuningFunc;
+    yaw.minvalue = CONTROLLER_SENS_MIN;
+    yaw.maxvalue = CONTROLLER_SENS_MAX;
+    yaw.curvalue = sliderIndexFor(Cvar_VariableValue(tuning.yaw), CONTROLLER_SENS_STEP, CONTROLLER_SENS_MIN, CONTROLLER_SENS_MAX);
+    yaw.valueFormatter = ControllerSensitivityFormatter;
+    Menu_AddItem(s_controllers_menu, yaw);
+    y += ROW;
+
+    pitch.generic.type = MTYPE_SLIDER;
+    pitch.generic.name = "pitch sensitivity";
+    pitch.generic.x = 0;
+    pitch.generic.y = y;
+    pitch.generic.localdata[0] = p;
+    pitch.generic.callback = ControllerTuningFunc;
+    pitch.minvalue = CONTROLLER_SENS_MIN;
+    pitch.maxvalue = CONTROLLER_SENS_MAX;
+    pitch.curvalue = sliderIndexFor(Cvar_VariableValue(tuning.pitch), CONTROLLER_SENS_STEP, CONTROLLER_SENS_MIN, CONTROLLER_SENS_MAX);
+    pitch.valueFormatter = ControllerSensitivityFormatter;
+    Menu_AddItem(s_controllers_menu, pitch);
+    y += ROW;
+
+    invert.generic.type = MTYPE_SPINCONTROL;
+    invert.generic.name = "invert pitch";
+    invert.generic.x = 0;
+    invert.generic.y = y;
+    invert.generic.localdata[0] = p;
+    invert.generic.callback = ControllerTuningFunc;
+    invert.itemnames = yesno_names;
+    invert.curvalue = Cvar_VariableValue(tuning.invert) !== 0 ? 1 : 0;
+    Menu_AddItem(s_controllers_menu, invert);
+    y += ROW;
+
+    deadzone.generic.type = MTYPE_SLIDER;
+    deadzone.generic.name = "dead zone";
+    deadzone.generic.x = 0;
+    deadzone.generic.y = y;
+    deadzone.generic.localdata[0] = p;
+    deadzone.generic.callback = ControllerTuningFunc;
+    deadzone.minvalue = CONTROLLER_DEADZONE_MIN;
+    deadzone.maxvalue = CONTROLLER_DEADZONE_MAX;
+    deadzone.curvalue = sliderIndexFor(Cvar_VariableValue(tuning.deadzone), CONTROLLER_DEADZONE_STEP, CONTROLLER_DEADZONE_MIN, CONTROLLER_DEADZONE_MAX);
+    deadzone.valueFormatter = ControllerDeadzoneFormatter;
+    Menu_AddItem(s_controllers_menu, deadzone);
+    y += ROW;
+  }
+
+  y += ROW;
+  s_controllers_back_action.generic.type = MTYPE_ACTION;
+  s_controllers_back_action.generic.name = "back";
+  s_controllers_back_action.generic.x = 0;
+  s_controllers_back_action.generic.y = y;
+  s_controllers_back_action.generic.callback = ControllerBackFunc;
+  Menu_AddItem(s_controllers_menu, s_controllers_back_action);
+}
+
+function Controllers_MenuRebuild(): void {
+  const cursor = s_controllers_menu.cursor;
+  Controllers_MenuBuild();
+  s_controllers_menu.cursor = Math.min(cursor, Math.max(0, s_controllers_menu.nitems - 1));
+}
+
+function Controllers_MenuDraw(): void {
+  // Hot-plug: SDL bumps its device generation from the event pump, which
+  // runs before this draw. Rebuilding here (rather than only on open) is
+  // what makes a controller plugged in while this screen is up appear in
+  // the list, and what makes one unplugged disappear from it.
+  if (SDL_GamepadDeviceGeneration() !== controller_device_generation) Controllers_MenuRebuild();
+
+  // No banner: neither the classic nor the rerelease pak ships a controller
+  // banner pic (this screen never existed in either), and the drawn title is
+  // the same "no banner asset, draw the label" idiom Content_MenuDraw and
+  // M_Credits_MenuDraw already use. It also keeps the top of a screen this
+  // tall clear, which a banner would not.
+  if (re) {
+    const title = "Controllers";
+    Menu_DrawString(viddef.width / 2 - (title.length * 8) / 2, viddef.height / 2 - 112, title);
+  }
+
+  Menu_AdjustCursor(s_controllers_menu, 1);
+  Menu_Draw(s_controllers_menu);
+}
+
+/** Exported test seam, matching this file's own Content_MenuKey precedent. */
+export function Controllers_MenuKey(key: number): string | null {
+  return Default_MenuKey(s_controllers_menu, key);
+}
+
+export function M_Menu_Controllers_f(): void {
+  Controllers_MenuBuild();
+  M_PushMenu(Controllers_MenuDraw, Controllers_MenuKey);
+}
+
+/** Test seam: the built menu, so a suite can read the rows the player sees
+ *  without a renderer (same shape as the exported widget arrays above). */
+export function Controllers_MenuForTests(): MenuframeworkS {
+  return s_controllers_menu;
 }
 
 /*
@@ -1803,6 +2214,12 @@ function RebuildSeats(): void {
   s_content_seats_list.itemnames = names;
   if (s_content_seats_list.curvalue >= names.length) s_content_seats_list.curvalue = 0;
   s_content_seats_list.generic.flags = names.length > 1 ? 0 : QMF_GRAYED;
+  // QMF_GRAYED draws nothing on a spin control in this codebase (see this
+  // function's own comment above and s_content_skill_list's), so when the row
+  // is stuck at "1" the statusbar is the only place that can say WHY and what
+  // to do about it. Points at the Controllers screen, which is where a player
+  // whose second pad is plugged in but unassigned goes to fix it.
+  s_content_seats_list.generic.statusbar = names.length > 1 ? "Options > Controllers assigns a pad to each player" : "one controller per extra player -- see Options > Controllers";
 }
 
 /** Seat count the "begin" action should launch with: the row's index plus
@@ -3457,6 +3874,7 @@ export function M_Init(): void {
   Cmd_AddCommand("menu_credits", M_Menu_Credits_f);
   Cmd_AddCommand("menu_multiplayer", M_Menu_Multiplayer_f);
   Cmd_AddCommand("menu_video", M_Menu_Video_f);
+  Cmd_AddCommand("menu_controllers", M_Menu_Controllers_f);
   Cmd_AddCommand("menu_options", M_Menu_Options_f);
   Cmd_AddCommand("menu_keys", M_Menu_Keys_f);
   Cmd_AddCommand("menu_quit", M_Menu_Quit_f);

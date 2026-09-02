@@ -24,7 +24,7 @@ offsetof program; they are ABI-stable across SDL2's lifetime because SDL2
 freezes its public struct layouts.
 */
 
-import { dlopen, FFIType, type Pointer } from "bun:ffi";
+import { CString, dlopen, FFIType, type Pointer } from "bun:ffi";
 import { VID_CalcBlitRect } from "./vid_scale";
 import {
   SDL_GamepadButtonEventToKey,
@@ -37,6 +37,17 @@ import {
   SDL_CONTROLLER_AXIS_TRIGGERLEFT,
   SDL_CONTROLLER_AXIS_TRIGGERRIGHT,
 } from "./gamepad_map";
+import {
+  DeviceOrdinals,
+  FormatDeviceSpec,
+  MAX_LOCAL_PLAYERS,
+  PlayerDevicePrefs,
+  PlayerTuning,
+  RegisterPlayerCvars,
+  ResolvePadAssignments,
+  SeatsDrivable,
+  type PadDeviceT,
+} from "./gamepad_assign";
 import { Cvar_Get, Cvar_VariableValue } from "../qcommon/cvar";
 import { Cmd_AddCommand } from "../qcommon/cmd";
 import { Com_DPrintf, Com_Printf } from "../qcommon/common";
@@ -265,6 +276,28 @@ const symbols = {
   SDL_GameControllerClose: { args: ["ptr"], returns: "void" },
   SDL_GameControllerGetJoystick: { args: ["ptr"], returns: "ptr" },
   SDL_JoystickInstanceID: { args: ["ptr"], returns: "i32" },
+
+  // Device IDENTITY, for the per-player controller assignment model
+  // (gamepad_assign.ts). SDL's own GUID accessors
+  // (SDL_JoystickGetGUID/SDL_JoystickGetGUIDString) pass and return the
+  // 16-byte SDL_JoystickGUID struct BY VALUE, which bun:ffi cannot express
+  // -- it handles primitives and pointers only. SDL_GameControllerMapping
+  // is the way around that: its returned mapping string BEGINS with the
+  // device's GUID as hex text ("03000000...,Xbox Controller,platform:Linux,
+  // a:b0,..."), which is precisely the string we want, and it comes back as
+  // an ordinary char* the FFI can carry. The buffer is malloc'd by SDL and
+  // is ours to release, hence SDL_free below.
+  //
+  // The vendor/product/version triple is the fallback for a pad with no
+  // mapping string at all: those are the same fields SDL folds INTO the
+  // GUID, so a synthesized "vpv:vvvv:pppp:rrrr" identity is stable across
+  // replugs for exactly the same reason the real GUID is.
+  SDL_GameControllerName: { args: ["ptr"], returns: "cstring" },
+  SDL_GameControllerMapping: { args: ["ptr"], returns: "ptr" },
+  SDL_GameControllerGetVendor: { args: ["ptr"], returns: "u16" },
+  SDL_GameControllerGetProduct: { args: ["ptr"], returns: "u16" },
+  SDL_GameControllerGetProductVersion: { args: ["ptr"], returns: "u16" },
+  SDL_free: { args: ["ptr"], returns: "void" },
 
   SDL_OpenAudioDevice: { args: ["cstring", "i32", "ptr", "ptr", "i32"], returns: "u32" },
   SDL_CloseAudioDevice: { args: ["u32"], returns: "void" },
@@ -762,60 +795,54 @@ let in_grab: CvarT | null = null;
 // mapping this section's runtime shell calls into (that file's own header
 // comment has the full design writeup and citations).
 
-let gpController: Pointer | bigint | null = null;
-let gpControllerInstanceId = -1;
-
-// Trigger axes are converted to a press/release Key_Event pair, not raw
-// analog data -- these are the latched button states
-// SDL_GamepadTriggerAxisEventToKey's `wasDown` hysteresis argument needs.
-let gpLeftTriggerDown = false;
-let gpRightTriggerDown = false;
-
-// Raw SDL_ControllerAxisEvent.value for the four movement-stick axes,
-// latched by the event pump and consumed once per frame by IN_JoyMove --
-// same "accumulate from events, apply once per frame" shape mx/my use for
-// the mouse above, minus the accumulation: each new axis event simply
-// replaces the previous value, matching SDL's own "this is the current
-// absolute position" semantics for a game controller axis (unlike relative
-// mouse motion, which really does need summing between frames).
-let gpLeftX = 0;
-let gpLeftY = 0;
-let gpRightX = 0;
-let gpRightY = 0;
-
 /*
-SECONDARY PADS (local splitscreen seats 1..N-1, src/client/cl_seats.ts).
+DEVICES AND PLAYERS.
 
-The primary controller above keeps its exact pre-existing role: it is the
-only pad whose buttons/triggers become Key_Event (so the bind system, the
-menu and seat 0 are driven by it alone) and the only pad IN_JoyMove reads.
-Additional physical pads are opened into these slots and their state is
-LATCHED ONLY -- nothing in the single-screen client reads it, so plugging a
-second pad in changes no observable behavior. cl_seats.ts polls
-SDL_GamepadSeatState(slot) for seats 1..N-1 while splitscreen is running.
+Every controller SDL opens goes into ONE table, `gpDevices`, in plug order,
+and every controller's raw state is latched there. Which player each device
+drives is a separate question, answered by gamepad_assign.ts's
+ResolvePadAssignments against the four in_playerN_device cvars and recomputed
+whenever a device arrives or leaves (or the menu changes a preference).
 
-Routing is by SDL joystick INSTANCE ID: before this section existed the
-event pump ignored `which` entirely, which was safe only because exactly
-one pad was ever open. Opening more pads makes `which` load-bearing -- an
-unrouted axis event from pad 2 would otherwise overwrite pad 1's stick.
+This replaced an earlier "one primary + three secondary slots" arrangement in
+which the roles were baked into where a pad was stored. They had to come
+apart: the whole point of the Controllers screen is that a pad's ROLE is a
+preference, so it cannot also be its storage location. What has NOT changed
+is the behavior with every player left on "auto" -- the resolver hands
+devices out in plug order, so player 1 gets the first pad, player 2 the
+second, and so on, exactly as before.
+
+The player-1 device keeps the old "primary controller" role in full: it is
+the only pad whose buttons and triggers become Key_Event (so the bind system,
+the menu and seat 0 are driven by one pad and cannot be fought over), and the
+only pad IN_JoyMove reads. Every other open pad is latched only; nothing in
+the single-screen client reads it, so a second pad plugged into a
+non-splitscreen session still changes no observable behavior.
+
+Routing is by SDL joystick INSTANCE ID, which is what an SDL event carries.
+The GUID identifies a device ACROSS sessions (the cvar's job); the instance
+id identifies it WITHIN one (the event pump's job). Both are needed and
+neither substitutes for the other.
 */
-const MAX_SECONDARY_PADS = 3;
+const MAX_GAMEPAD_DEVICES = MAX_LOCAL_PLAYERS;
 
-class SecondaryPadT {
+class GamepadDeviceT {
   handle: Pointer | bigint | null = null;
   instanceId = -1;
+  /** SDL joystick GUID text -- stable across replug and reboot. */
+  guid = "";
+  /** Human-readable controller name, for the menu's device list. */
+  name = "";
   leftX = 0;
   leftY = 0;
   rightX = 0;
   rightY = 0;
   triggerL = 0;
   triggerR = 0;
-  // SDL_CONTROLLER_BUTTON_* bitmask, bit N = button N held.
+  /** SDL_CONTROLLER_BUTTON_* bitmask, bit N = button N held. */
   buttons = 0;
 
-  clear(): void {
-    this.handle = null;
-    this.instanceId = -1;
+  clearState(): void {
     this.leftX = 0;
     this.leftY = 0;
     this.rightX = 0;
@@ -826,11 +853,38 @@ class SecondaryPadT {
   }
 }
 
-const gpSecondary: SecondaryPadT[] = Array.from({ length: MAX_SECONDARY_PADS }, () => new SecondaryPadT());
+/** Open controllers, in plug order. */
+const gpDevices: GamepadDeviceT[] = [];
 
-/** Raw latched state of an extra (non-primary) pad. Slot 0 here is the FIRST
- *  extra pad, i.e. splitscreen seat 1. Returns null when that slot has no
- *  controller open. */
+/** Index into gpDevices for each player (0 = player 1), or -1. Recomputed by
+ *  gpResolve; never written anywhere else. */
+let gpPlayerDevice: number[] = new Array(MAX_LOCAL_PLAYERS).fill(-1);
+
+/** Bumped on every device arrival/departure. The Controllers menu polls it
+ *  so a pad plugged in while the screen is open rebuilds the list, without
+ *  the platform layer needing to know the menu exists. */
+let gpDeviceGeneration = 0;
+
+// Trigger axes on the PLAYER 1 pad are converted to a press/release
+// Key_Event pair, not raw analog data -- these are the latched button states
+// SDL_GamepadTriggerAxisEventToKey's `wasDown` hysteresis argument needs.
+// Only player 1's pad needs them, because only player 1's pad produces key
+// events; every other pad's triggers are latched as analog values instead.
+let gpLeftTriggerDown = false;
+let gpRightTriggerDown = false;
+
+/*
+Raw SDL_ControllerAxisEvent.value for the movement-stick axes is latched on
+the device itself (GamepadDeviceT above) and consumed once per frame -- by
+IN_JoyMove for player 1, by cl_seats.ts for players 2..4. Same "latch from
+events, apply once per frame" shape mx/my use for the mouse above, minus the
+accumulation: each new axis event simply replaces the previous value,
+matching SDL's own "this is the current absolute position" semantics for a
+game controller axis (unlike relative mouse motion, which really does need
+summing between frames).
+*/
+
+/** Raw latched state of one pad. */
 export interface GamepadSeatStateT {
   leftX: number;
   leftY: number;
@@ -841,31 +895,118 @@ export interface GamepadSeatStateT {
   buttons: number;
 }
 
-export function SDL_GamepadSeatState(slot: number): GamepadSeatStateT | null {
-  const pad = gpSecondary[slot];
-  if (!pad || !pad.handle) return null;
+/** One row of the Controllers menu's "detected controllers" list. */
+export interface GamepadDeviceInfoT {
+  /** SDL joystick GUID text. */
+  guid: string;
+  /** The value an in_playerN_device cvar needs to name THIS pad -- the bare
+   *  GUID, or "<guid>#n" when an identical pad is also plugged in. */
+  spec: string;
+  name: string;
+  instanceId: number;
+  /** 0-based player this pad currently drives, or -1 when it is idle. */
+  player: number;
+}
+
+function gpDeviceByInstance(which: number): GamepadDeviceT | null {
+  for (const dev of gpDevices) if (dev.instanceId === which) return dev;
+  // Degenerate case, preserved from before this table existed: if the
+  // joystick handle could not be read for the one and only open pad, its
+  // instance id is -1 and routing by `which` is impossible -- but its events
+  // still have to reach it, which is what the old single-pad code did by
+  // never looking at `which` at all.
+  const only = gpDevices.length === 1 ? gpDevices[0] : null;
+  return only && only.instanceId < 0 ? only : null;
+}
+
+/** The device driving a player (0 = player 1), or null. */
+function gpDeviceForPlayer(player: number): GamepadDeviceT | null {
+  const idx = gpPlayerDevice[player];
+  if (idx === undefined || idx < 0) return null;
+  return gpDevices[idx] ?? null;
+}
+
+function gpSnapshot(dev: GamepadDeviceT | null): GamepadSeatStateT | null {
+  if (!dev || !dev.handle) return null;
   return {
-    leftX: pad.leftX,
-    leftY: pad.leftY,
-    rightX: pad.rightX,
-    rightY: pad.rightY,
-    triggerL: pad.triggerL,
-    triggerR: pad.triggerR,
-    buttons: pad.buttons,
+    leftX: dev.leftX,
+    leftY: dev.leftY,
+    rightX: dev.rightX,
+    rightY: dev.rightY,
+    triggerL: dev.triggerL,
+    triggerR: dev.triggerR,
+    buttons: dev.buttons,
   };
 }
 
-/** How many extra (non-primary) pads are currently open -- the number of
- *  splitscreen seats past seat 0 that a controller can actually drive. */
-export function SDL_GamepadSeatCount(): number {
-  let n = 0;
-  for (const pad of gpSecondary) if (pad.handle) n++;
-  return n;
+/*
+==================
+gpResolve
+
+Re-run the assignment rule over the current device table. Called on every
+hotplug event and from SDL_GamepadRefreshAssignments (the menu's hook), so
+the routing the event pump uses is never stale.
+
+Changing which pad is player 1's invalidates the trigger hysteresis latches
+above -- they describe a button state on a device that is no longer the one
+producing key events -- so they are released. Without this a pad that was
+holding its right trigger when it stopped being player 1's would leave
++attack stuck down on the bind system.
+==================
+*/
+function gpResolve(): void {
+  const before = gpDeviceForPlayer(0);
+  const devices: PadDeviceT[] = gpDevices.map((d) => ({ instanceId: d.instanceId, guid: d.guid, name: d.name }));
+  gpPlayerDevice = ResolvePadAssignments(devices, PlayerDevicePrefs()).players;
+  const after = gpDeviceForPlayer(0);
+  if (before !== after) {
+    gpLeftTriggerDown = false;
+    gpRightTriggerDown = false;
+  }
 }
 
-function gpSecondaryByInstance(which: number): SecondaryPadT | null {
-  for (const pad of gpSecondary) if (pad.handle && pad.instanceId === which) return pad;
-  return null;
+/** Recompute routing after something outside this file changed an
+ *  in_playerN_device cvar (the Controllers menu, or a console `set`). */
+export function SDL_GamepadRefreshAssignments(): void {
+  gpResolve();
+}
+
+/** Every open controller, in plug order, with the cvar value that names it
+ *  and the player it currently drives. The Controllers menu's device list. */
+export function SDL_GamepadDevices(): GamepadDeviceInfoT[] {
+  const ordinals = DeviceOrdinals(gpDevices.map((d) => ({ instanceId: d.instanceId, guid: d.guid, name: d.name })));
+  return gpDevices.map((dev, i) => ({
+    guid: dev.guid,
+    spec: FormatDeviceSpec(dev.guid, ordinals[i] ?? 0),
+    name: dev.name,
+    instanceId: dev.instanceId,
+    player: gpPlayerDevice.indexOf(i),
+  }));
+}
+
+/** Bumped whenever a controller arrives or leaves; the menu polls it to
+ *  rebuild its rows while the screen is open. */
+export function SDL_GamepadDeviceGeneration(): number {
+  return gpDeviceGeneration;
+}
+
+/** Raw latched state of the pad driving splitscreen seat `slot + 1`, i.e.
+ *  player `slot + 2`. Slot 0 is the first seat past seat 0. Null when no
+ *  controller is assigned to that player. */
+export function SDL_GamepadSeatState(slot: number): GamepadSeatStateT | null {
+  return gpSnapshot(gpDeviceForPlayer(slot + 1));
+}
+
+/*
+How many splitscreen seats past seat 0 can actually be driven right now.
+Counted CONSECUTIVELY from seat 1 (gamepad_assign.ts's SeatsDrivable), not as
+a raw "how many spare pads are open": seats are filled in order, so a pad
+assigned to player 4 while player 2 has none buys no extra seat. With every
+player on "auto" this is identical to the old `number of extra pads`, because
+the resolver fills players in order.
+*/
+export function SDL_GamepadSeatCount(): number {
+  return SeatsDrivable({ players: gpPlayerDevice, idle: [] }) - 1;
 }
 
 let in_joystick: CvarT | null = null;
@@ -884,81 +1025,161 @@ plumbing ... do NOT duplicate"). Returns null whenever no controller is
 currently open here (headless, backend disarmed, or genuinely unplugged);
 haptics.ts's own fallback covers that case, plus any future caller that
 arms haptics without ever arming this backend.
+
+It is PLAYER 1's pad specifically, not "any open pad": rumble is feedback for
+the player holding the client's own view, and handing it to some other
+player's controller would buzz the wrong person. A player 1 set to "kbm" (or
+whose assigned pad is unplugged) therefore has no rumble device, which is the
+honest answer rather than borrowing a seat's.
 */
 export function SDL_GetActiveGameController(): Pointer | bigint | null {
-  return gpController;
+  const dev = gpDeviceForPlayer(0);
+  return dev ? dev.handle : null;
 }
 
-function gpCloseController(l: SdlLib): void {
-  if (gpController) l.symbols.SDL_GameControllerClose(gpController);
-  gpController = null;
-  gpControllerInstanceId = -1;
+function gpCloseDevice(l: SdlLib, dev: GamepadDeviceT): void {
+  if (dev.handle) l.symbols.SDL_GameControllerClose(dev.handle);
+  dev.handle = null;
+  dev.clearState();
 }
 
-function gpCloseSecondary(l: SdlLib, pad: SecondaryPadT): void {
-  if (pad.handle) l.symbols.SDL_GameControllerClose(pad.handle);
-  pad.clear();
-}
-
+/** Drop every open controller EXCEPT the one driving player 1. */
 export function SDL_CloseSecondaryGamepads(): void {
   const l = lib();
   if (!l) return;
-  for (const pad of gpSecondary) gpCloseSecondary(l, pad);
+  const primary = gpDeviceForPlayer(0);
+  for (let i = gpDevices.length - 1; i >= 0; i--) {
+    const dev = gpDevices[i];
+    if (!dev || dev === primary) continue;
+    gpCloseDevice(l, dev);
+    gpDevices.splice(i, 1);
+  }
+  gpDeviceGeneration++;
+  gpResolve();
 }
 
-function gpOpenFirstAvailable(l: SdlLib, deviceIndex: number): void {
-  if (!l.symbols.SDL_IsGameController(deviceIndex)) return;
-  // The primary slot keeps first refusal (haptics.ts's own precedent: one
-  // shared handle for the rumble sink). Every pad past it goes to a
-  // secondary slot instead of being dropped on the floor, so a splitscreen
-  // session can find it -- see the SECONDARY PADS block above for why that
-  // does not change single-screen behavior.
-  if (!gpController) {
-    const handle = l.symbols.SDL_GameControllerOpen(deviceIndex);
-    if (!handle) return;
-    const joystick = l.symbols.SDL_GameControllerGetJoystick(handle);
-    gpController = handle;
-    gpControllerInstanceId = joystick ? l.symbols.SDL_JoystickInstanceID(joystick) : -1;
-    return;
+/*
+Device IDENTITY for an open controller: SDL's GUID as text, plus the
+human-readable name.
+
+SDL_GameControllerMapping's return value begins with the GUID hex followed by
+a comma (see the symbol table's own note on why the by-value
+SDL_JoystickGetGUIDString cannot be used through bun:ffi). The buffer is
+malloc'd by SDL, so it is read into a JS string and released immediately.
+
+Fallbacks, in order, because neither call is guaranteed to produce anything:
+a pad with no mapping string gets a synthesized identity from the same
+vendor/product/version fields SDL folds into a real GUID (equally stable
+across replugs), and a pad that reports none of those gets "unknown", which
+is honest -- an unknown identity simply cannot be assigned by name, and the
+Controllers menu still lists it and still lets "auto" use it.
+*/
+function gpReadIdentity(l: SdlLib, handle: Pointer | bigint): { guid: string; name: string } {
+  let name = "";
+  try {
+    name = l.symbols.SDL_GameControllerName(handle) ?? "";
+  } catch {
+    name = "";
   }
 
-  const free = gpSecondary.find((p) => !p.handle);
-  if (!free) return;
+  let guid = "";
+  try {
+    const mapping = l.symbols.SDL_GameControllerMapping(handle);
+    if (mapping) {
+      const text = new CString(mapping).toString();
+      l.symbols.SDL_free(mapping);
+      const comma = text.indexOf(",");
+      const head = (comma < 0 ? text : text.slice(0, comma)).trim();
+      // A mapping's leading field is the GUID; guard against a malformed one
+      // rather than trusting whatever text came back.
+      if (/^[0-9a-fA-F]{8,32}$/.test(head)) guid = head.toLowerCase();
+      if (!name) {
+        const rest = comma < 0 ? "" : text.slice(comma + 1);
+        const second = rest.indexOf(",");
+        name = (second < 0 ? rest : rest.slice(0, second)).trim();
+      }
+    }
+  } catch {
+    guid = "";
+  }
+
+  if (!guid) {
+    try {
+      const vendor = l.symbols.SDL_GameControllerGetVendor(handle);
+      const product = l.symbols.SDL_GameControllerGetProduct(handle);
+      const version = l.symbols.SDL_GameControllerGetProductVersion(handle);
+      if (vendor || product) {
+        const hex = (v: number): string => (v & 0xffff).toString(16).padStart(4, "0");
+        guid = `vpv:${hex(vendor)}:${hex(product)}:${hex(version)}`;
+      }
+    } catch {
+      guid = "";
+    }
+  }
+
+  if (!guid) guid = "unknown";
+  if (!name) name = "controller";
+  return { guid, name };
+}
+
+/*
+Open a newly-arrived controller into the device table. Every pad goes into
+the same table now; which player it drives is decided afterwards by
+gpResolve, not by which slot it landed in.
+
+A pad SDL reports twice (or whose instance id could not be read while other
+pads are already open) would alias onto an existing entry's event routing, so
+it is refused rather than allowed to corrupt a working device. The table is
+capped at one pad per player -- a fifth controller has no player to drive.
+*/
+function gpOpenDevice(l: SdlLib, deviceIndex: number): void {
+  if (!l.symbols.SDL_IsGameController(deviceIndex)) return;
+  if (gpDevices.length >= MAX_GAMEPAD_DEVICES) return;
+
   const handle = l.symbols.SDL_GameControllerOpen(deviceIndex);
   if (!handle) return;
+
   const joystick = l.symbols.SDL_GameControllerGetJoystick(handle);
   const instanceId = joystick ? l.symbols.SDL_JoystickInstanceID(joystick) : -1;
-  // A pad SDL reports twice (or whose instance id we could not read) would
-  // otherwise alias onto an existing slot's routing; refuse it rather than
-  // corrupt an open seat.
-  if (instanceId < 0 || instanceId === gpControllerInstanceId || gpSecondaryByInstance(instanceId)) {
+  if (gpDeviceByInstance(instanceId) || (instanceId < 0 && gpDevices.length > 0)) {
     l.symbols.SDL_GameControllerClose(handle);
     return;
   }
-  free.handle = handle;
-  free.instanceId = instanceId;
+
+  const dev = new GamepadDeviceT();
+  dev.handle = handle;
+  dev.instanceId = instanceId;
+  const identity = gpReadIdentity(l, handle);
+  dev.guid = identity.guid;
+  dev.name = identity.name;
+  gpDevices.push(dev);
+  gpDeviceGeneration++;
+  gpResolve();
+  Com_DPrintf("gamepad: %s (%s) connected\n", dev.name, dev.guid);
 }
 
 /*
 SDL_CONTROLLERDEVICEADDED/REMOVED (SDL_gamecontroller.h/SDL_events.h):
 `which` is a DEVICE INDEX for ADDED, an INSTANCE ID for REMOVED -- two
 different namespaces sharing one struct field, per SDL_ControllerDeviceEvent's
-own doc comment. Single-controller policy: an ADDED event is ignored while a
-controller is already open; a REMOVED event only closes OUR handle if its
-instance id matches the one we opened, so unplugging some OTHER, never-opened
-second controller can't drop the active one.
+own doc comment. A REMOVED event only closes a handle whose instance id we
+actually opened, so unplugging some other, never-opened controller cannot
+drop an active one.
 */
 function gpHandleDeviceEvent(l: SdlLib, added: boolean, which: number): void {
   if (added) {
-    gpOpenFirstAvailable(l, which);
+    gpOpenDevice(l, which);
     return;
   }
-  if (which === gpControllerInstanceId) {
-    gpCloseController(l);
+  for (let i = 0; i < gpDevices.length; i++) {
+    const dev = gpDevices[i];
+    if (!dev || dev.instanceId !== which) continue;
+    gpCloseDevice(l, dev);
+    gpDevices.splice(i, 1);
+    gpDeviceGeneration++;
+    gpResolve();
     return;
   }
-  const pad = gpSecondaryByInstance(which);
-  if (pad) gpCloseSecondary(l, pad);
 }
 
 function IN_MLookDown(): void {
@@ -1012,21 +1233,18 @@ export function IN_Init(): void {
   joy_sidesensitivity = Cvar_Get("joy_sidesensitivity", "1", 0);
   joy_yawsensitivity = Cvar_Get("joy_yawsensitivity", "1", 0);
   joy_pitchsensitivity = Cvar_Get("joy_pitchsensitivity", "1", 0);
-  gpLeftX = 0;
-  gpLeftY = 0;
-  gpRightX = 0;
-  gpRightY = 0;
+  // Per-player device assignment and stick tuning (gamepad_assign.ts).
+  // Registered HERE, right after the globals above and nowhere earlier, so
+  // each per-player tuning cvar takes its default from the global's live
+  // value -- main.ts has already exec'd config.cfg by the time IN_Init runs,
+  // so an existing `set joy_yawsensitivity 2` is what every player defaults
+  // to and nobody's aim changes because this feature was added. See
+  // gamepad_assign.ts's header.
+  RegisterPlayerCvars();
   gpLeftTriggerDown = false;
   gpRightTriggerDown = false;
-  for (const pad of gpSecondary) {
-    pad.leftX = 0;
-    pad.leftY = 0;
-    pad.rightX = 0;
-    pad.rightY = 0;
-    pad.triggerL = 0;
-    pad.triggerR = 0;
-    pad.buttons = 0;
-  }
+  for (const dev of gpDevices) dev.clearState();
+  gpResolve();
   {
     const gl = lib();
     if (gl) initSubsystem(gl, SDL_INIT_GAMECONTROLLER);
@@ -1064,8 +1282,10 @@ export function IN_Shutdown(): void {
   IN_DeactivateMouse();
   mouse_avail = false;
   const l = lib();
-  if (l && gpController) gpCloseController(l);
-  if (l) for (const pad of gpSecondary) gpCloseSecondary(l, pad);
+  if (l) for (const dev of gpDevices) gpCloseDevice(l, dev);
+  gpDevices.length = 0;
+  gpDeviceGeneration++;
+  gpResolve();
 }
 
 function IN_ActivateMouse(): void {
@@ -1199,11 +1419,24 @@ function IN_JoyMove(cmd: UsercmdT): void {
   if (!(in_joystick && in_joystick.value)) return;
   if (cls.key_dest !== KeydestT.key_game) return;
 
-  const dz = joy_deadzone ? joy_deadzone.value : 0.15;
-  const lx = GamepadAxisNormalize(gpLeftX, dz);
-  const ly = GamepadAxisNormalize(gpLeftY, dz);
-  const rx = GamepadAxisNormalize(gpRightX, dz);
-  const ry = GamepadAxisNormalize(gpRightY, dz);
+  // PLAYER 1's pad, whichever device that currently is -- not "the first pad
+  // that happened to be opened". With every player on "auto" they are the
+  // same device; once somebody assigns controllers on the Controllers
+  // screen, this is what makes the assignment real for seat 0.
+  const pad = gpDeviceForPlayer(0);
+  if (!pad) return;
+
+  // Player 1's own deadzone/sensitivity/invert, defaulted from the global
+  // joy_* values at registration (gamepad_assign.ts). joy_forwardsensitivity
+  // and joy_sidesensitivity stay global for every player: movement speed is
+  // not a per-seat preference the way aim is.
+  const tuning = PlayerTuning(0);
+
+  const dz = tuning.deadzone;
+  const lx = GamepadAxisNormalize(pad.leftX, dz);
+  const ly = GamepadAxisNormalize(pad.leftY, dz);
+  const rx = GamepadAxisNormalize(pad.rightX, dz);
+  const ry = GamepadAxisNormalize(pad.rightY, dz);
   if (lx === 0 && ly === 0 && rx === 0 && ry === 0) return;
 
   const sidespeed = clCvars.cl_sidespeed ? clCvars.cl_sidespeed.value : 0;
@@ -1213,8 +1446,8 @@ function IN_JoyMove(cmd: UsercmdT): void {
 
   const fwdSens = joy_forwardsensitivity ? joy_forwardsensitivity.value : 1;
   const sideSens = joy_sidesensitivity ? joy_sidesensitivity.value : 1;
-  const yawSens = joy_yawsensitivity ? joy_yawsensitivity.value : 1;
-  const pitchSens = joy_pitchsensitivity ? joy_pitchsensitivity.value : 1;
+  const yawSens = tuning.yawsensitivity;
+  const pitchSens = tuning.pitchsensitivity;
 
   // Left stick: SDL's Y axis is positive DOWN, so pushing the stick up
   // (negative Y) is forward -- the same sign convention CL_BaseMove's own
@@ -1224,9 +1457,10 @@ function IN_JoyMove(cmd: UsercmdT): void {
 
   // Right stick: matches IN_MouseMove's own mouse_x/mouse_y sign convention
   // directly above (stick right = look right = yaw decreases; stick down =
-  // look down = pitch increases).
+  // look down = pitch increases). tuning.pitchsign is -1 when this player has
+  // invert-pitch on, which is the whole of what that toggle does.
   cl.viewangles[YAW] -= cls.frametime * yawspeed * yawSens * rx;
-  cl.viewangles[PITCH] += cls.frametime * pitchspeed * pitchSens * ry;
+  cl.viewangles[PITCH] += cls.frametime * pitchspeed * pitchSens * tuning.pitchsign * ry;
 }
 
 // in_win.c's IN_Commands only reads the joystick's DIGITAL buttons (POV hat
@@ -1301,15 +1535,17 @@ export function SDL_PumpInput(time: number): void {
       case SDL_CONTROLLERBUTTONUP: {
         const down = type === SDL_CONTROLLERBUTTONDOWN;
         const button = eventBuf[CBUTTONEVENT_BUTTON];
-        // Route by instance id: only the PRIMARY pad's buttons become
-        // Key_Event (bind system, menu, seat 0). A secondary pad latches a
-        // raw held-button bitmask for cl_seats.ts instead -- see the
-        // SECONDARY PADS block above.
-        const seatPad = gpSecondaryByInstance(eventView.getInt32(CBUTTONEVENT_WHICH, true));
-        if (seatPad) {
+        // Route by instance id to the device that sent it, then by ROLE:
+        // only PLAYER 1's pad turns buttons into Key_Event (bind system,
+        // menu, seat 0). Every other pad latches a raw held-button bitmask
+        // for cl_seats.ts instead. An event from a device we never opened is
+        // dropped rather than treated as player 1's.
+        const dev = gpDeviceByInstance(eventView.getInt32(CBUTTONEVENT_WHICH, true));
+        if (!dev) break;
+        if (dev !== gpDeviceForPlayer(0)) {
           if (button >= 0 && button < 31) {
-            if (down) seatPad.buttons |= 1 << button;
-            else seatPad.buttons &= ~(1 << button);
+            if (down) dev.buttons |= 1 << button;
+            else dev.buttons &= ~(1 << button);
           }
           break;
         }
@@ -1320,25 +1556,25 @@ export function SDL_PumpInput(time: number): void {
       case SDL_CONTROLLERAXISMOTION: {
         const axis = eventBuf[CAXISEVENT_AXIS];
         const value = eventView.getInt16(CAXISEVENT_VALUE, true);
-        const seatPad = gpSecondaryByInstance(eventView.getInt32(CAXISEVENT_WHICH, true));
-        if (seatPad) {
-          if (axis === SDL_CONTROLLER_AXIS_LEFTX) seatPad.leftX = value;
-          else if (axis === SDL_CONTROLLER_AXIS_LEFTY) seatPad.leftY = value;
-          else if (axis === SDL_CONTROLLER_AXIS_RIGHTX) seatPad.rightX = value;
-          else if (axis === SDL_CONTROLLER_AXIS_RIGHTY) seatPad.rightY = value;
-          else if (axis === SDL_CONTROLLER_AXIS_TRIGGERLEFT) seatPad.triggerL = value;
-          else if (axis === SDL_CONTROLLER_AXIS_TRIGGERRIGHT) seatPad.triggerR = value;
-          break;
-        }
-        if (axis === SDL_CONTROLLER_AXIS_LEFTX) gpLeftX = value;
-        else if (axis === SDL_CONTROLLER_AXIS_LEFTY) gpLeftY = value;
-        else if (axis === SDL_CONTROLLER_AXIS_RIGHTX) gpRightX = value;
-        else if (axis === SDL_CONTROLLER_AXIS_RIGHTY) gpRightY = value;
-        else {
-          // trigger axes: convert to an edge-triggered Key_Event instead of
-          // storing raw analog data -- see gamepad_map.ts's own doc comment
-          // on SDL_GamepadTriggerAxisEventToKey for the threshold/hysteresis
-          // shape this implements.
+        const dev = gpDeviceByInstance(eventView.getInt32(CAXISEVENT_WHICH, true));
+        if (!dev) break;
+
+        // Sticks are latched on the device whichever player it drives:
+        // IN_JoyMove reads player 1's copy, cl_seats.ts reads the rest.
+        if (axis === SDL_CONTROLLER_AXIS_LEFTX) dev.leftX = value;
+        else if (axis === SDL_CONTROLLER_AXIS_LEFTY) dev.leftY = value;
+        else if (axis === SDL_CONTROLLER_AXIS_RIGHTX) dev.rightX = value;
+        else if (axis === SDL_CONTROLLER_AXIS_RIGHTY) dev.rightY = value;
+        else if (dev !== gpDeviceForPlayer(0)) {
+          // A seat's triggers stay analog -- cl_seats.ts thresholds them
+          // itself, since a seat has no bind table to send a key into.
+          if (axis === SDL_CONTROLLER_AXIS_TRIGGERLEFT) dev.triggerL = value;
+          else if (axis === SDL_CONTROLLER_AXIS_TRIGGERRIGHT) dev.triggerR = value;
+        } else {
+          // Player 1's trigger axes: convert to an edge-triggered Key_Event
+          // instead of storing raw analog data -- see gamepad_map.ts's own
+          // doc comment on SDL_GamepadTriggerAxisEventToKey for the
+          // threshold/hysteresis shape this implements.
           const wasDown = axis === SDL_CONTROLLER_AXIS_TRIGGERLEFT ? gpLeftTriggerDown : gpRightTriggerDown;
           const trig = SDL_GamepadTriggerAxisEventToKey(axis, value, wasDown);
           if (trig) {
@@ -1454,15 +1690,16 @@ export function SDL_ResetBackendForTests(): void {
   SDLSND_Close();
   SDLVID_Shutdown();
   const l = library;
-  if (l && gpController) gpCloseController(l);
-  for (const pad of gpSecondary) {
-    if (l && pad.handle) gpCloseSecondary(l, pad);
-    else pad.clear();
+  for (const dev of gpDevices) {
+    if (l && dev.handle) gpCloseDevice(l, dev);
+    else {
+      dev.handle = null;
+      dev.clearState();
+    }
   }
-  gpLeftX = 0;
-  gpLeftY = 0;
-  gpRightX = 0;
-  gpRightY = 0;
+  gpDevices.length = 0;
+  gpPlayerDevice = new Array(MAX_LOCAL_PLAYERS).fill(-1);
+  gpDeviceGeneration = 0;
   gpLeftTriggerDown = false;
   gpRightTriggerDown = false;
   if (l && subsystems !== 0) {
