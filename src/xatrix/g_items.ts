@@ -501,6 +501,82 @@ export function Use_Envirosuit(ent: EdictT, item: GItemT): void {
 
 //======================================================================
 
+// =========================================================================
+// RERELEASE CONTENT PORT -- the pickup/use helpers the two ported re-release
+// items need. Both items are placed by the re-release rebuilds of this
+// pack's own maps (item_flashlight in xswamp, item_invisibility in xdm7),
+// and the frozen Xatrix DLL drops both with "<classname> doesn't have a
+// spawn function". Ported from src/game/g_items.ts, which is that module's
+// translation of src/kexgame/g_items.ts. See the ITEMLIST rows below.
+// =========================================================================
+
+// `Pickup_General` -- the rerelease's plain one-of-a-kind carried-item
+// pickup. Vanilla 3.21 and Xatrix have no equivalent (every vanilla item is
+// ammo/armor/health/key/weapon/powerup), so it is ported here from
+// src/game/g_items.ts:778. Body is the vanilla Pickup_Powerup shape minus
+// the skill-level stacking rules: at most one, and it respawns in
+// deathmatch like anything else.
+export function Pickup_General(ent: EdictT, other: EdictT): boolean {
+  const client = other.client;
+  const item = ent.item;
+  if (client === null || item === null) return false;
+
+  const index = ITEM_INDEX(item);
+  if (client.pers.inventory[index] !== 0) return false;
+
+  client.pers.inventory[index]++;
+
+  if (cvarNum(gameCvars.deathmatch) !== 0) {
+    if ((ent.spawnflags & DROPPED_ITEM) === 0) SetRespawn(ent, item.quantity);
+  }
+
+  return true;
+}
+
+// item_invisibility (the rerelease cloak). Ported from src/game/g_items.ts's
+// Use_Invisibility, itself src/kexgame/g_items.ts's
+// `client.invisible_time = max(level.time, invisible_time) + 30s`.
+// This module counts powerups in server frames rather than the rerelease's
+// gtime_t, so 30 seconds is 300 frames -- the same idiom every other powerup
+// in this file already uses (quad, quadfire, invulnerability).
+//
+// DOCUMENTED DEGRADATION: the SERVER-SIDE timer runs and is readable by
+// anything that cares, and p_view.ts's G_SetClientEffects applies the same
+// RF_TRANSLUCENT the classic renderer already understands. What is NOT
+// reproduced is the rerelease's own cloak SHADER (its fade-in/fade-out ramp,
+// driven by `invisibility_fade_time`), which has no protocol-34
+// representation. The player does become visibly translucent; it just is not
+// the rerelease's exact presentation.
+export function Use_Invisibility(ent: EdictT, item: GItemT): void {
+  const client = ent.client;
+  if (client === null) return;
+
+  client.pers.inventory[ITEM_INDEX(item)]--;
+  ValidateSelectedItem(ent);
+
+  if (client.invisible_framenum > level.framenum) client.invisible_framenum += 300;
+  else client.invisible_framenum = level.framenum + 300;
+
+  gi.sound(ent, CHAN_ITEM, gi.soundindex("items/protect.wav"), 1, ATTN_NORM, 0);
+}
+
+// *** DEGRADATION, carried over verbatim from src/game/g_items.ts ***
+// src/kexgame/g_items.ts's Use_Flashlight calls `P_ToggleFlashlight(ent,
+// !(ent.flags & FL_FLASHLIGHT))`, which drives a dynamic light attached to
+// the player entity: the rerelease's p_view.cpp traces from the eye every
+// frame and emits a TE_FLASHLIGHT temp entity while the flag is set.
+// Protocol 34 has no such temp entity and this module's p_view.ts has no
+// per-frame emitter, so there is nothing client-side to draw. The item
+// spawns, is picked up, is carried and is selectable; using it does nothing.
+// Kept as an explicit empty function rather than a null `use` so the item is
+// fully wired (a null use would make it unselectable and unusable) -- same
+// call this module's sibling src/game made.
+export function Use_Flashlight(_ent: EdictT, _item: GItemT): void {
+  // intentionally empty -- see the comment above.
+}
+
+//======================================================================
+
 export function Use_Invulnerability(ent: EdictT, item: GItemT): void {
   const client = ent.client;
   if (client === null) return;
@@ -1125,10 +1201,14 @@ function mkItem(fields: Partial<GItemT>): GItemT {
 // including index 0 ("leave index 0 alone") and the trailing `{NULL}`
 // end-of-list marker. xatrix adds 6 entries to baseq2's 43 (ammo_trap,
 // weapon_boomer, weapon_phalanx, ammo_magslug, item_quadfire, key_green_key)
-// for 49 entries total; `InitItems` sets `game.num_items` to
-// `ITEMLIST.length - 1` exactly as the C `sizeof(itemlist)/sizeof(...)-1`
-// does.
-const ITEMLIST: GItemT[] = fixedLength("ITEMLIST", 49, [
+// for 49 entries; `InitItems` sets `game.num_items` to `ITEMLIST.length - 1`
+// exactly as the C `sizeof(itemlist)/sizeof(...)-1` does.
+//
+// RERELEASE CONTENT PORT: +2 (item_invisibility, item_flashlight) for 51
+// entries / game.num_items 50. Both are placed by the re-release rebuilds of
+// this pack's own maps and are registered HERE rather than in g_spawn.ts's
+// spawns[] table, because ED_CallSpawn scans the itemlist first.
+const ITEMLIST: GItemT[] = fixedLength("ITEMLIST", 51, [
   mkItem({}), // leave index 0 alone
 
   //
@@ -1698,6 +1778,55 @@ const ITEMLIST: GItemT[] = fixedLength("ITEMLIST", 49, [
     quantity: 60,
     flags: IT_POWERUP,
     precaches: "items/quadfire1.wav items/quadfire2.wav items/quadfire3.wav",
+  }),
+
+  //
+  // RE-RELEASE-ONLY POWERUPS / HELD ITEMS (via src/game/g_items.ts)
+  //
+  // ED_CallSpawn scans this table BEFORE the g_spawn.ts spawns[] table, so
+  // an itemlist row IS the registration for these two classnames -- exactly
+  // as it is for every vanilla item_*/ammo_*/weapon_* -- and they must NOT
+  // also appear in spawns[].
+  //
+
+  /*QUAKED item_invisibility (.3 .3 1) (-16 -16 -16) (16 16 16)
+   */
+  // See Use_Invisibility above: the 30-second cloak timer runs on
+  // GClientT.invisible_framenum and p_view.ts's G_SetClientEffects draws it
+  // as RF_TRANSLUCENT.
+  mkItem({
+    classname: "item_invisibility",
+    pickup: Pickup_Powerup,
+    use: Use_Invisibility,
+    drop: Drop_General,
+    pickup_sound: "items/pkup.wav",
+    world_model: "models/items/cloaker/tris.md2",
+    world_model_flags: EF_ROTATE,
+    icon: "p_cloaker",
+    pickup_name: "Invisibility",
+    count_width: 2,
+    quantity: 300,
+    flags: IT_POWERUP,
+    precaches: "items/protect.wav items/protect2.wav items/protect4.wav",
+  }),
+
+  /*QUAKED item_flashlight (.3 .3 1) (-16 -16 -16) (16 16 16)
+   */
+  // See Use_Flashlight above: carried, but protocol 34 has no
+  // player-attached dynamic light for it to switch on.
+  mkItem({
+    classname: "item_flashlight",
+    pickup: Pickup_General,
+    use: Use_Flashlight,
+    pickup_sound: "items/pkup.wav",
+    world_model: "models/items/flashlight/tris.md2",
+    world_model_flags: EF_ROTATE,
+    icon: "p_torch",
+    pickup_name: "Flashlight",
+    count_width: 2,
+    quantity: 60,
+    flags: IT_STAY_COOP,
+    precaches: "items/flashlight_on.wav items/flashlight_off.wav",
   }),
 
   /*QUAKED item_invulnerability (.3 .3 1) (-16 -16 -16) (16 16 16)

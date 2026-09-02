@@ -208,15 +208,23 @@ describe("xatrix GetGameAPI / InitGame boot", () => {
   });
 });
 
-describe("xatrix itemlist delta -- 43 baseq2 entries + 6 xatrix entries", () => {
-  test("InitItems accounts for the 6 new entries (43 base + ammo_trap + weapon_boomer + weapon_phalanx + ammo_magslug + item_quadfire + key_green_key)", () => {
+describe("xatrix itemlist delta -- 43 baseq2 entries + 6 xatrix entries + 2 rerelease", () => {
+  test("InitItems accounts for the 6 new entries (43 base + ammo_trap + weapon_boomer + weapon_phalanx + ammo_magslug + item_quadfire + key_green_key) plus the 2 rerelease items", () => {
     setupWorld();
 
     // itemlist() includes index 0 ("leave index 0 alone") and the trailing
     // end-of-list marker; game.num_items excludes the end-of-list marker,
     // matching the C `sizeof(itemlist)/sizeof(itemlist[0]) - 1` calculation.
     expect(itemlist().length).toBe(game.num_items + 1);
-    expect(game.num_items).toBe(48);
+
+    // 48 = xatrix/g_items.c's own count. The extra 2 are NOT in the C
+    // itemlist: item_invisibility (the rerelease cloak, placed by xdm7) and
+    // item_flashlight (placed by xswamp), added so The Reckoning satisfies
+    // the "any content plays under any ruleset" rule the way src/game did
+    // in commit 288484f. Before they were added, xswamp dropped 12
+    // entities. See test/g_spawn_module_coverage.test.ts for the
+    // shipped-map gate that requires them.
+    expect(game.num_items).toBe(50);
   });
 
   test("ammo_trap is wired to Weapon_Trap and tagged AMMO_TRAP", () => {

@@ -63,7 +63,7 @@ import {
 import { SolidT } from "./game";
 import { type EdictStringKey, G_FreeEdict, G_Spawn } from "./g_utils";
 import { FIELDS } from "./g_save";
-import { FindItem, PrecacheItem, SetItemNames, SP_flag, SP_item_health, SP_item_health_large, SP_item_health_mega, SP_item_health_small } from "./g_items";
+import { FindItem, itemlist, PrecacheItem, SetItemNames, SP_flag, SP_item_health, SP_item_health_large, SP_item_health_mega, SP_item_health_small } from "./g_items";
 import { InitBodyQue, SaveClientData, SP_info_player_blue, SP_info_player_coop, SP_info_player_deathmatch, SP_info_player_intermission, SP_info_player_red, SP_info_player_start } from "./p_client";
 import {
   SP_func_areaportal,
@@ -450,6 +450,35 @@ export const spawns: SpawnT[] = [
   { name: "info_position", spawn: SP_info_position },
   // END CTF CODE -- LM_JORM
 ];
+
+/*
+===============
+G_SpawnableClassnames
+
+RERELEASE CONTENT PORT -- not a C function. Returns every classname
+ED_CallSpawn can resolve in THIS module: the itemlist classnames it scans
+first, plus the spawns[] table it falls through to, in that same order.
+
+Mirrors src/game/g_spawn.ts's function of the same name so the shipped-map
+coverage gate (test/g_spawn_module_coverage.test.ts) can assert "this
+module resolves every classname its own shipped maps place" without
+booting a server or reaching into module-private state. It reads the same
+two sources ED_CallSpawn does, so it cannot drift from actual spawn
+behavior.
+
+Note this reads itemlist() unguarded by game.num_items, unlike ED_CallSpawn:
+the item table is a static array literal, so its classnames are knowable
+before InitItems has run.
+===============
+*/
+export function G_SpawnableClassnames(): string[] {
+  const out: string[] = [];
+  for (const item of itemlist()) {
+    if (item.classname !== null) out.push(item.classname);
+  }
+  for (const s of spawns) out.push(s.name);
+  return out;
+}
 
 /*
 ===============

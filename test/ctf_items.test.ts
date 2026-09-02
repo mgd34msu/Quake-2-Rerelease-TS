@@ -222,14 +222,24 @@ describe("itemlist ctf delta -- weapon_grapple/item_flag_team1/2/item_tech1-4", 
     }
   });
 
-  test("InitItems accounts for the 7 new ctf entries (42 base + grapple + 2 flags + 4 techs)", () => {
+  test("InitItems accounts for the 7 new ctf entries (42 base + grapple + 2 flags + 4 techs) plus the 17 rerelease pickups", () => {
     setupWorld({ argv: [] }, { bprintf: [], cprintf: [] });
 
     // itemlist() includes index 0 ("leave index 0 alone") and the trailing
     // end-of-list marker; game.num_items excludes the end-of-list marker,
     // exactly as InitItems()'s `ITEMLIST.length - 1` does.
     expect(itemlist().length).toBe(game.num_items + 1);
-    expect(game.num_items).toBe(49);
+
+    // 49 = ctf/g_items.c's own count. The extra 17 are NOT in the C
+    // itemlist: they are the Ground Zero and Reckoning pickups that the
+    // rerelease's own CTF maps place (q2kctf1 and q2kctf2) -- the seven
+    // ammo_* rows, item_doppleganger / item_double / item_sphere_hunter,
+    // and the seven weapon_* rows. Added so the CTF module satisfies the
+    // "any content plays under any ruleset" rule the way src/game did in
+    // commit 288484f. Before they were added, q2kctf1 alone dropped 14
+    // entities. See test/g_spawn_module_coverage.test.ts for the
+    // shipped-map gate that requires them.
+    expect(game.num_items).toBe(66);
   });
 });
 

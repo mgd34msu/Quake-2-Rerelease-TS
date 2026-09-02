@@ -367,6 +367,37 @@ export function vectoangles(vec: Vec3, angles: Vec3): void {
   angles[ROLL] = 0;
 }
 
+// RERELEASE CONTENT PORT (rogue/g_utils.c) -- same as vectoangles above,
+// but without the `(int)` truncation the C original applies to yaw/pitch.
+// Ported from src/rogue/g_utils.ts; the ported spheres and the tracker
+// bolt aim through it.
+export function vectoangles2(vec: Vec3, angles: Vec3): void {
+  let yaw: number;
+  let pitch: number;
+
+  if (vec[1] === 0 && vec[0] === 0) {
+    yaw = 0;
+    pitch = vec[2] > 0 ? 90 : 270;
+  } else {
+    if (vec[0]) {
+      yaw = (Math.atan2(vec[1], vec[0]) * 180) / M_PI;
+    } else if (vec[1] > 0) {
+      yaw = 90;
+    } else {
+      yaw = 270;
+    }
+    if (yaw < 0) yaw += 360;
+
+    const forward = Math.sqrt(vec[0] * vec[0] + vec[1] * vec[1]);
+    pitch = (Math.atan2(vec[2], forward) * 180) / M_PI;
+    if (pitch < 0) pitch += 360;
+  }
+
+  angles[PITCH] = -pitch;
+  angles[YAW] = yaw;
+  angles[ROLL] = 0;
+}
+
 // gi.TagMalloc(strlen(in)+1, TAG_LEVEL) + strcpy is the allocate-and-copy
 // idiom for C's owned char*; per PORTING.md ("Z_Malloc/... -> plain
 // allocation") and the TagMalloc-family drop, this collapses to a plain

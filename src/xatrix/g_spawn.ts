@@ -104,6 +104,17 @@ import {
   SP_target_string,
   SP_viewthing,
 } from "./g_misc";
+
+// RERELEASE CONTENT PORT -- the re-release rebuilds of this pack's own maps
+// place five entity classes that only the 2023 re-release game DLL ever had
+// (dynamic_light, info_landmark, target_poi, info_nav_lock, trigger_fog) plus
+// one Ground Zero class (func_plat2, in the re-release xcompnd2). All six are
+// ported into this module in the files below -- see each file's header for
+// provenance and the protocol-34 degradations.
+import { SP_dynamic_light, SP_info_landmark } from "./g_kexmisc";
+import { SP_target_poi } from "./g_kextarg";
+import { SP_info_nav_lock, SP_trigger_fog } from "./g_kextrig";
+import { SP_func_plat2 } from "./g_newfnc";
 import {
   SP_trigger_always,
   SP_trigger_counter,
@@ -288,6 +299,15 @@ export function ED_ParseField(key: string, value: string, ent: EdictT): void {
   for (const f of FIELDS) {
     if (Q_stricmp(f.key, key) !== 0) continue;
 
+    // RERELEASE CONTENT PORT: this switch used to assume every non-"edict"
+    // target was "spawntemp", because vanilla's fields[] only ever had those
+    // two (plus "edict_s" for origin/angles). trigger_fog's key set also
+    // writes onto the fog/heightfog sub-structs (g_local.ts's FogT /
+    // HeightFogT), and the re-release brush entities write the ten
+    // bmodel_anim_* keys onto BmodelAnimT, so the F_INT / F_FLOAT / F_VECTOR
+    // cases now dispatch on the target explicitly and F_BOOL is new.
+    // Vanilla's and Xatrix's own rows take exactly the same paths they
+    // always did.
     switch (f.type) {
       case "F_LSTRING": {
         const s = ED_NewString(value);
@@ -298,18 +318,35 @@ export function ED_ParseField(key: string, value: string, ent: EdictT): void {
       case "F_INT": {
         const n = C_atoi(value);
         if (f.target === "edict") ent[f.prop] = n;
-        else st[f.prop] = n;
+        else if (f.target === "spawntemp") st[f.prop] = n;
+        else ent.bmodel_anim[f.prop] = n;
+        break;
+      }
+      case "F_BOOL": {
+        // kexgame/g_spawn.ts parses these with `C_atoi(v) !== 0`.
+        ent.bmodel_anim[f.prop] = C_atoi(value) !== 0;
         break;
       }
       case "F_FLOAT": {
         const n = C_atof(value);
         if (f.target === "edict") ent[f.prop] = n;
-        else st[f.prop] = n;
+        else if (f.target === "spawntemp") st[f.prop] = n;
+        else if (f.target === "fog") ent.fog[f.prop] = n;
+        else ent.heightfog[f.prop] = n;
         break;
       }
       case "F_VECTOR": {
         const vec = parseVector3(value);
-        const dest = f.target === "edict" ? ent[f.prop] : f.target === "spawntemp" ? st[f.prop] : ent.s[f.prop];
+        const dest =
+          f.target === "edict"
+            ? ent[f.prop]
+            : f.target === "spawntemp"
+              ? st[f.prop]
+              : f.target === "edict_s"
+                ? ent.s[f.prop]
+                : f.target === "fog"
+                  ? ent.fog[f.prop]
+                  : ent.heightfog[f.prop];
         VectorCopy(vec, dest);
         break;
       }
@@ -550,7 +587,56 @@ const spawns: SpawnT[] = [
   { name: "turret_breach", spawn: SP_turret_breach },
   { name: "turret_base", spawn: SP_turret_base },
   { name: "turret_driver", spawn: SP_turret_driver },
+
+  // >>> RERELEASE CONTENT PORT: spawn table rows >>>
+  // ED_CallSpawn scans itemlist() BEFORE this table, so the two ported
+  // item_* classnames (item_flashlight, item_invisibility) resolve as
+  // itemlist rows in g_items.ts and deliberately do not appear here.
+
+  // --- g_kexmisc ---
+  { name: "dynamic_light", spawn: SP_dynamic_light },
+  { name: "info_landmark", spawn: SP_info_landmark },
+
+  // --- g_kextarg ---
+  { name: "target_poi", spawn: SP_target_poi },
+
+  // --- g_kextrig ---
+  { name: "info_nav_lock", spawn: SP_info_nav_lock },
+  { name: "trigger_fog", spawn: SP_trigger_fog },
+
+  // --- g_newfnc ---
+  { name: "func_plat2", spawn: SP_func_plat2 },
+  // <<< RERELEASE CONTENT PORT <<<
 ];
+
+/*
+===============
+G_SpawnableClassnames
+
+RERELEASE CONTENT PORT -- not a C function. Returns every classname
+ED_CallSpawn can resolve in THIS module: the itemlist classnames it scans
+first, plus the spawns[] table it falls through to, in that same order.
+
+Mirrors src/game/g_spawn.ts's function of the same name so the shipped-map
+coverage gate (test/g_spawn_module_coverage.test.ts) can assert "this
+module resolves every classname its own shipped maps place" without
+booting a server or reaching into module-private state. It reads the same
+two sources ED_CallSpawn does, so it cannot drift from actual spawn
+behavior.
+
+Note this reads itemlist() unguarded by game.num_items, unlike ED_CallSpawn:
+the item table is a static array literal, so its classnames are knowable
+before InitItems has run.
+===============
+*/
+export function G_SpawnableClassnames(): string[] {
+  const out: string[] = [];
+  for (const item of itemlist()) {
+    if (item.classname !== null) out.push(item.classname);
+  }
+  for (const s of spawns) out.push(s.name);
+  return out;
+}
 
 /*
 ===============

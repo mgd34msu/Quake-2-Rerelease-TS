@@ -935,6 +935,9 @@ export function player_die(self: EdictT, inflictor: EdictT, attacker: EdictT, da
   // ROGUE stuff
   if (self.client !== null) {
     self.client.double_framenum = 0;
+    // RE-RELEASE CONTENT PORT -- the cloak (item_invisibility, rdm14)
+    // expires on death like every other powerup above.
+    self.client.invisible_framenum = 0;
 
     // if there's a sphere around, let it know the player died.
     // vengeance and hunter will die if they're not attacking,

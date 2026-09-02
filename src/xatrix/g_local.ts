@@ -340,6 +340,87 @@ export class LevelLocalsT {
   }
 }
 
+// =========================================================================
+// RERELEASE CONTENT PORT -- the two sub-structs trigger_fog hangs off an
+// edict, ported from src/game/g_local.ts's FogT / HeightFogT (itself the
+// classic-module translation of src/kexgame/g_local_types.ts).
+//
+// PROTOCOL NOTE (the degradation is real and deliberate): the fog and
+// heightfog blocks are written by the ported trigger_fog (g_kextrig.ts) and
+// read back by it through its movetarget value-store indirection, and the
+// rerelease client receives the result through a dedicated fog message that
+// protocol 34 does not have. Under this module's ruleset the values are
+// parsed, stored and updated on the server exactly as the rerelease does --
+// so trigger_fog fires, targets and holds correct state -- but nothing
+// transmits them, so the view is unfogged. The entity is never dropped.
+// =========================================================================
+export class FogT {
+  color: Vec3 = vec3();
+  density = 0;
+  sky_factor = 0;
+  color_off: Vec3 = vec3();
+  density_off = 0;
+  sky_factor_off = 0;
+}
+
+export class HeightFogT {
+  falloff = 0;
+  density = 0;
+  start_color: Vec3 = vec3();
+  start_dist = 0;
+  end_color: Vec3 = vec3();
+  end_dist = 0;
+  falloff_off = 0;
+  density_off = 0;
+  start_color_off: Vec3 = vec3();
+  start_dist_off = 0;
+  end_color_off: Vec3 = vec3();
+  end_dist_off = 0;
+}
+
+/**
+ * RERELEASE CONTENT PORT -- bmodel_anim_t, ported from src/game/g_local.ts's
+ * BmodelAnimT (itself src/kexgame/g_local_types.ts's bmodel_anim_t).
+ *
+ * The re-release rebuilds of this pack's maps write the ten `bmodel_anim_*`
+ * entity keys onto ordinary brush entities (xswamp alone carries six of them
+ * twice over). Without these fields ED_ParseField logs each one as
+ * "<key> is not a field" and the brush entity spawns having silently lost its
+ * animation parameters.
+ *
+ * NO BEHAVIOR IS ATTACHED TO THEM HERE, deliberately. In the re-release the
+ * per-frame frame advance lives in the engine-side bmodel animation runner
+ * and the toggle in func_animation; The Reckoning has neither, and no xatrix
+ * map places func_animation (the classname scan over every shipped and
+ * re-release xatrix .bsp finds it only in rogue's maps). So the keys are
+ * PARSED AND STORED -- which is what stops the data loss and matches what the
+ * classic parser in src/game does with the same keys -- and nothing reads
+ * them back. `enabled` / `alternate` / `currently_alternate` / `next_tick` are
+ * carried for shape parity with src/game's declaration.
+ */
+export class BmodelAnimT {
+  // range, inclusive
+  start = 0;
+  end = 0;
+  style = 0;
+  speed = 0; // in milliseconds
+  nowrap = false;
+
+  alt_start = 0;
+  alt_end = 0;
+  alt_style = 0;
+  alt_speed = 0; // in milliseconds
+  alt_nowrap = false;
+
+  // game-only
+  enabled = false;
+  alternate = false;
+  currently_alternate = false;
+  // gtime_t in the rerelease; this module keeps level.time in plain seconds,
+  // so this is a seconds float on the same clock.
+  next_tick = 0;
+}
+
 // spawn_temp_t is only used to hold entity field values that
 // can be set from the editor, but aren't actualy present
 // in edict_t during gameplay
@@ -362,6 +443,42 @@ export class SpawnTempT {
   maxyaw = 0;
   minpitch = 0;
   maxpitch = 0;
+
+  // =====================================================================
+  // RERELEASE CONTENT PORT -- spawn_temp_t keys the re-release rebuilds of
+  // this pack's own maps carry, ported from src/game/g_local.ts's
+  // SpawnTempT (itself src/kexgame/g_local_types.ts's spawn_temp_t).
+  //
+  // These are parse-time-only scratch keys: ED_ParseField writes them into
+  // the single shared `st` and the spawn function reads them before `st` is
+  // cleared for the next entity, so adding them costs nothing at runtime
+  // and changes no Xatrix behavior (no vanilla or Xatrix entity names any
+  // of these keys).
+  //
+  // Without them every re-release map logs each one as "<key> is not a
+  // field" and -- worse -- the entity that needed the value silently spawns
+  // wrong. Only the keys the five ported classnames actually read are
+  // carried across: `image` is target_poi's icon name (g_kextarg.ts), and
+  // the eight shadowlight* keys are dynamic_light's (g_kexmisc.ts).
+  // =====================================================================
+  image: string | null = null;
+  // worldspawn's achievement id (xmoon1 writes "ACH_xatrix"). The rerelease
+  // hands it to its achievement system on level completion; this module has
+  // none, so the key is parsed and stored and nothing reads it -- same as
+  // src/game/g_local.ts. Declared so it is not logged as an unknown field.
+  achievement: string | null = null;
+  // Shadow-light keys. The classic renderer has no shadow-light pass and
+  // protocol 34 has no message that could carry one, so these are parsed
+  // and stored (so the entity spawns complete and a future renderer can
+  // read them) but have no visual effect -- see SP_dynamic_light.
+  shadowlightradius = 0;
+  shadowlightresolution = 0;
+  shadowlightintensity = 0;
+  shadowlightstartfadedistance = 0;
+  shadowlightendfadedistance = 0;
+  shadowlightstyle = 0;
+  shadowlightconeangle = 0;
+  shadowlightstyletarget: string | null = null;
 
   clear(): void {
     Object.assign(this, new SpawnTempT());
@@ -714,6 +831,12 @@ export class GClientT {
   breather_framenum = 0;
   enviro_framenum = 0;
 
+  // RERELEASE CONTENT PORT -- item_invisibility (the cloak) timer, ported
+  // from src/game/g_local.ts's GClientT.invisible_framenum. Counted in
+  // server frames like every other powerup timer above; cleared on death in
+  // p_client.ts and read by p_view.ts's G_SetClientEffects.
+  invisible_framenum = 0;
+
   grenade_blew_up = false;
   grenade_time = 0;
   // xatrix/g_local.h: `// RAFAEL` -- quadfire_framenum (quad damage's
@@ -909,6 +1032,37 @@ export class EdictT implements Edict {
   // AI, owned by the sibling XA-monsters unit; the field lives here since
   // it is a struct member added by this pack's g_local.h).
   orders = 0;
+
+  // =====================================================================
+  // RERELEASE / SIBLING-PACK CONTENT PORT -- edict_t members the five kex
+  // classnames and func_plat2 need, ported from src/game/g_local.ts and
+  // src/rogue/g_local.ts respectively. Every one of them is written and
+  // read only by the ported entities; no vanilla or Xatrix code path
+  // touches them, so their presence changes nothing that already worked.
+  // =====================================================================
+
+  /**
+   * rerelease edict_t::itemtarget. dynamic_light stores the name of the
+   * entity whose `style` drives the light here (g_misc.cpp:605). See
+   * SP_dynamic_light for why the rest of the shadow-light path is absent.
+   */
+  itemtarget: string | null = null;
+
+  /** rerelease edict_t::fog / edict_t::heightfog -- trigger_fog's value store. */
+  fog: FogT = new FogT();
+  heightfog: HeightFogT = new HeightFogT();
+
+  /**
+   * rogue edict_t::plat2flags (rogue/g_local.h). func_plat2's own
+   * CALLED/MOVING/WAITING state word, distinct from spawnflags.
+   */
+  plat2flags = 0;
+
+  /**
+   * rerelease edict_t::bmodel_anim -- the ten `bmodel_anim_*` keys the
+   * re-release brush entities carry. Parsed and stored only; see BmodelAnimT.
+   */
+  bmodel_anim: BmodelAnimT = new BmodelAnimT();
 
   clear(): void {
     Object.assign(this, new EdictT());

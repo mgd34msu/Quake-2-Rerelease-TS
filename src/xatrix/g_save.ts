@@ -25,7 +25,9 @@ import { FS_ReadRawFile, FS_WriteFile } from "../qcommon/files";
 import { type EdictStringKey } from "./g_utils";
 import {
   ClientPersistantT,
+  type BmodelAnimT,
   EdictT,
+  type FogT,
   GAMEVERSION,
   GClientT,
   gameCvars,
@@ -36,6 +38,7 @@ import {
   globals,
   level,
   MmoveT,
+  type HeightFogT,
   MonsterInfoT,
   MoveinfoT,
   type SpawnTempT,
@@ -70,6 +73,17 @@ type SpawnTempStringKey = {
 type SpawnTempNumberKey = { [K in keyof SpawnTempT]: SpawnTempT[K] extends number ? K : never }[keyof SpawnTempT];
 type SpawnTempVectorKey = { [K in keyof SpawnTempT]: SpawnTempT[K] extends Vec3 ? K : never }[keyof SpawnTempT];
 
+// RERELEASE CONTENT PORT: trigger_fog's keys write onto the edict's fog /
+// heightfog sub-structs rather than onto the edict or `st` directly, so the
+// FieldSpawn union below gains two more targets. Same arrangement as
+// src/game/g_save.ts.
+type FogVectorKey = { [K in keyof FogT]: FogT[K] extends Vec3 ? K : never }[keyof FogT];
+type FogNumberKey = { [K in keyof FogT]: FogT[K] extends number ? K : never }[keyof FogT];
+type HeightFogVectorKey = { [K in keyof HeightFogT]: HeightFogT[K] extends Vec3 ? K : never }[keyof HeightFogT];
+type HeightFogNumberKey = { [K in keyof HeightFogT]: HeightFogT[K] extends number ? K : never }[keyof HeightFogT];
+type BmodelAnimNumberKey = { [K in keyof BmodelAnimT]: BmodelAnimT[K] extends number ? K : never }[keyof BmodelAnimT];
+type BmodelAnimBoolKey = { [K in keyof BmodelAnimT]: BmodelAnimT[K] extends boolean ? K : never }[keyof BmodelAnimT];
+
 export type FieldSpawn =
   | { key: string; type: "F_LSTRING"; target: "edict"; prop: EdictStringKey }
   | { key: string; type: "F_LSTRING"; target: "spawntemp"; prop: SpawnTempStringKey }
@@ -80,6 +94,12 @@ export type FieldSpawn =
   | { key: string; type: "F_VECTOR"; target: "edict"; prop: EdictVectorKey }
   | { key: string; type: "F_VECTOR"; target: "spawntemp"; prop: SpawnTempVectorKey }
   | { key: string; type: "F_VECTOR"; target: "edict_s"; prop: EntityStateVectorKey }
+  | { key: string; type: "F_VECTOR"; target: "fog"; prop: FogVectorKey }
+  | { key: string; type: "F_FLOAT"; target: "fog"; prop: FogNumberKey }
+  | { key: string; type: "F_VECTOR"; target: "heightfog"; prop: HeightFogVectorKey }
+  | { key: string; type: "F_FLOAT"; target: "heightfog"; prop: HeightFogNumberKey }
+  | { key: string; type: "F_INT"; target: "bmodel_anim"; prop: BmodelAnimNumberKey }
+  | { key: string; type: "F_BOOL"; target: "bmodel_anim"; prop: BmodelAnimBoolKey }
   | { key: string; type: "F_ANGLEHACK"; target: "edict"; prop: EdictVectorKey }
   | { key: string; type: "F_ANGLEHACK"; target: "spawntemp"; prop: SpawnTempVectorKey }
   | { key: string; type: "F_ANGLEHACK"; target: "edict_s"; prop: EntityStateVectorKey }
@@ -136,6 +156,69 @@ export const FIELDS: FieldSpawn[] = [
   { key: "minpitch", type: "F_FLOAT", target: "spawntemp", prop: "minpitch" },
   { key: "maxpitch", type: "F_FLOAT", target: "spawntemp", prop: "maxpitch" },
   { key: "nextmap", type: "F_LSTRING", target: "spawntemp", prop: "nextmap" },
+
+  // =======================================================================
+  // RERELEASE CONTENT PORT -- the entity keys the five ported kex classnames
+  // read. Ported from src/game/g_save.ts's FIELDS table. Without these rows
+  // ED_ParseField logs "<key> is not a field" and the entity spawns having
+  // silently lost the parameter.
+  //
+  //   image            -> target_poi's compass icon      (g_kextarg.ts)
+  //   achievement      -> worldspawn's achievement id, parsed only
+  //   shadowlight*     -> dynamic_light's light data     (g_kexmisc.ts)
+  //   fog_* / heightfog_* -> trigger_fog's value store   (g_kextrig.ts)
+  //
+  // func_plat2 (g_newfnc.ts) needs no new key: it reads only speed/accel/
+  // decel/dmg/targetname plus st.lip and st.height, all of which this table
+  // already carries for vanilla func_plat.
+  // =======================================================================
+  { key: "image", type: "F_LSTRING", target: "spawntemp", prop: "image" },
+  { key: "achievement", type: "F_LSTRING", target: "spawntemp", prop: "achievement" },
+
+  { key: "shadowlightradius", type: "F_FLOAT", target: "spawntemp", prop: "shadowlightradius" },
+  { key: "shadowlightresolution", type: "F_INT", target: "spawntemp", prop: "shadowlightresolution" },
+  { key: "shadowlightintensity", type: "F_FLOAT", target: "spawntemp", prop: "shadowlightintensity" },
+  { key: "shadowlightstartfadedistance", type: "F_FLOAT", target: "spawntemp", prop: "shadowlightstartfadedistance" },
+  { key: "shadowlightendfadedistance", type: "F_FLOAT", target: "spawntemp", prop: "shadowlightendfadedistance" },
+  { key: "shadowlightstyle", type: "F_INT", target: "spawntemp", prop: "shadowlightstyle" },
+  { key: "shadowlightconeangle", type: "F_FLOAT", target: "spawntemp", prop: "shadowlightconeangle" },
+  { key: "shadowlightstyletarget", type: "F_LSTRING", target: "spawntemp", prop: "shadowlightstyletarget" },
+
+  // --- fog / heightfog (see the FogT note in g_local.ts: stored and
+  //     updated exactly as the rerelease does, never transmitted) ---
+  { key: "fog_color", type: "F_VECTOR", target: "fog", prop: "color" },
+  { key: "fog_color_off", type: "F_VECTOR", target: "fog", prop: "color_off" },
+  { key: "fog_density", type: "F_FLOAT", target: "fog", prop: "density" },
+  { key: "fog_density_off", type: "F_FLOAT", target: "fog", prop: "density_off" },
+  { key: "fog_sky_factor", type: "F_FLOAT", target: "fog", prop: "sky_factor" },
+  { key: "fog_sky_factor_off", type: "F_FLOAT", target: "fog", prop: "sky_factor_off" },
+  { key: "heightfog_falloff", type: "F_FLOAT", target: "heightfog", prop: "falloff" },
+  { key: "heightfog_density", type: "F_FLOAT", target: "heightfog", prop: "density" },
+  { key: "heightfog_start_color", type: "F_VECTOR", target: "heightfog", prop: "start_color" },
+  { key: "heightfog_start_dist", type: "F_FLOAT", target: "heightfog", prop: "start_dist" },
+  { key: "heightfog_end_color", type: "F_VECTOR", target: "heightfog", prop: "end_color" },
+  { key: "heightfog_end_dist", type: "F_FLOAT", target: "heightfog", prop: "end_dist" },
+  { key: "heightfog_falloff_off", type: "F_FLOAT", target: "heightfog", prop: "falloff_off" },
+  { key: "heightfog_density_off", type: "F_FLOAT", target: "heightfog", prop: "density_off" },
+  { key: "heightfog_start_color_off", type: "F_VECTOR", target: "heightfog", prop: "start_color_off" },
+  { key: "heightfog_start_dist_off", type: "F_FLOAT", target: "heightfog", prop: "start_dist_off" },
+  { key: "heightfog_end_color_off", type: "F_VECTOR", target: "heightfog", prop: "end_color_off" },
+  { key: "heightfog_end_dist_off", type: "F_FLOAT", target: "heightfog", prop: "end_dist_off" },
+
+  // --- bmodel animation keys (see the BmodelAnimT note in g_local.ts:
+  //     parsed and stored, with no animation runner behind them in this
+  //     module). xswamp alone writes six of these; without these rows each
+  //     one logs "<key> is not a field" and the brush entity loses it. ---
+  { key: "bmodel_anim_start", type: "F_INT", target: "bmodel_anim", prop: "start" },
+  { key: "bmodel_anim_end", type: "F_INT", target: "bmodel_anim", prop: "end" },
+  { key: "bmodel_anim_style", type: "F_INT", target: "bmodel_anim", prop: "style" },
+  { key: "bmodel_anim_speed", type: "F_INT", target: "bmodel_anim", prop: "speed" },
+  { key: "bmodel_anim_nowrap", type: "F_BOOL", target: "bmodel_anim", prop: "nowrap" },
+  { key: "bmodel_anim_alt_start", type: "F_INT", target: "bmodel_anim", prop: "alt_start" },
+  { key: "bmodel_anim_alt_end", type: "F_INT", target: "bmodel_anim", prop: "alt_end" },
+  { key: "bmodel_anim_alt_style", type: "F_INT", target: "bmodel_anim", prop: "alt_style" },
+  { key: "bmodel_anim_alt_speed", type: "F_INT", target: "bmodel_anim", prop: "alt_speed" },
+  { key: "bmodel_anim_alt_nowrap", type: "F_BOOL", target: "bmodel_anim", prop: "alt_nowrap" },
 ];
 
 // -------------------------------------------------------------------------

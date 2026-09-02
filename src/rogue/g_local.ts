@@ -440,6 +440,75 @@ export class LevelLocalsT {
 // spawn_temp_t is only used to hold entity field values that
 // can be set from the editor, but aren't actualy present
 // in edict_t during gameplay
+// =========================================================================
+// RE-RELEASE CONTENT PORT -- the three sub-structs the 2023 re-release
+// entity set hangs off an edict. Ported into this module from our own
+// sibling src/game/g_local.ts (which itself translated them from
+// src/kexgame/g_local_types.ts), the same way commit 288484f ported Ground
+// Zero's own additions the other direction. There is no cross-module import
+// anywhere in this tree -- every module owns its own EdictT -- so "shared"
+// here means "transcribed", not "referenced".
+//
+// Ground Zero's shipped maps need these: rmine2/rlava2 place trigger_fog
+// (and rlava2's `fog_values` info_notnull holds the height-fog payload it
+// reads), and rware1/rhangar2/rsewer2 place func_animation.
+//
+// PROTOCOL NOTE (the degradations are real and deliberate): the fog and
+// heightfog blocks are parsed and updated server-side exactly as the
+// re-release updates them -- trigger_fog fires, targets, and holds correct
+// state -- but the re-release ships fog to the client through a KEX-only
+// per-client fog message that protocol 34 does not have, so the view is
+// unfogged. Nothing is dropped. BmodelAnimT by contrast DOES present under
+// protocol 34: it drives `s.frame` on a brush model, and s.frame is in the
+// baseline entity state every protocol carries.
+// =========================================================================
+export class FogT {
+  color: Vec3 = vec3();
+  density = 0;
+  sky_factor = 0;
+  color_off: Vec3 = vec3();
+  density_off = 0;
+  sky_factor_off = 0;
+}
+
+export class HeightFogT {
+  falloff = 0;
+  density = 0;
+  start_color: Vec3 = vec3();
+  start_dist = 0;
+  end_color: Vec3 = vec3();
+  end_dist = 0;
+  falloff_off = 0;
+  density_off = 0;
+  start_color_off: Vec3 = vec3();
+  start_dist_off = 0;
+  end_color_off: Vec3 = vec3();
+  end_dist_off = 0;
+}
+
+export class BmodelAnimT {
+  // range, inclusive
+  start = 0;
+  end = 0;
+  style = 0;
+  speed = 0; // in milliseconds
+  nowrap = false;
+
+  alt_start = 0;
+  alt_end = 0;
+  alt_style = 0;
+  alt_speed = 0; // in milliseconds
+  alt_nowrap = false;
+
+  // game-only
+  enabled = false;
+  alternate = false;
+  currently_alternate = false;
+  // gtime_t in the re-release; this module keeps level.time in plain
+  // seconds, so this is a seconds float on the same clock.
+  next_tick = 0;
+}
+
 export class SpawnTempT {
   // world vars
   sky: string | null = null;
@@ -459,6 +528,41 @@ export class SpawnTempT {
   maxyaw = 0;
   minpitch = 0;
   maxpitch = 0;
+
+  // =====================================================================
+  // RE-RELEASE CONTENT PORT -- spawn_temp_t keys Ground Zero's own shipped
+  // maps carry once loaded from the 2023 re-release data.
+  //
+  // These are parse-time-only scratch keys: ED_ParseField writes them into
+  // the single shared `st` and the spawn function reads them before `st` is
+  // cleared for the next entity, so adding them costs nothing at runtime
+  // and changes no Ground Zero behavior (no 1998-era rogue entity names any
+  // of these keys).
+  //
+  // Without them every one is logged as "<key> is not a field" and -- worse
+  // -- the entity that needed the value silently spawns wrong. Verified
+  // against the entity lump of every shipped rogue .bsp: rmine1/rware1/
+  // rware2's dynamic_light entities carry all eight shadowlight* keys.
+  //
+  // `image` is read by SP_target_poi (g_kextarg.ts) for its compass icon.
+  // No shipped rogue map sets it -- every rogue target_poi takes the
+  // "friend" default -- but the key is parsed so a map that does set it is
+  // not silently dropped.
+  // =====================================================================
+  image: string | null = null;
+  // Shadow-light keys. This module's renderer path has no shadow-light pass
+  // and protocol 34 has no message that could carry one, so these are
+  // parsed and stored (so the entity spawns complete and a future renderer
+  // can read them) but have no visual effect -- see SP_dynamic_light's
+  // degradation note in g_kexmisc.ts.
+  shadowlightradius = 0;
+  shadowlightresolution = 0;
+  shadowlightintensity = 0;
+  shadowlightstartfadedistance = 0;
+  shadowlightendfadedistance = 0;
+  shadowlightstyle = 0;
+  shadowlightconeangle = 0;
+  shadowlightstyletarget: string | null = null;
 
   clear(): void {
     Object.assign(this, new SpawnTempT());
@@ -899,6 +1003,13 @@ export class GClientT {
   nuke_framenum = 0;
   tracker_pain_framenum = 0;
 
+  // RE-RELEASE CONTENT PORT -- the cloak (item_invisibility) timer, from
+  // src/kexgame/ via our sibling src/game/g_local.ts. rdm14 places
+  // item_invisibility. Counted in server frames like every other powerup
+  // timer above rather than the re-release's gtime_t; cleared alongside them
+  // in p_client.ts and drawn as RF_TRANSLUCENT in p_view.ts.
+  invisible_framenum = 0;
+
   owned_sphere: EdictT | null = null; // this points to the player's sphere
   // ROGUE
 
@@ -1086,6 +1197,22 @@ export class EdictT implements Edict {
   // FIXME - debug help!
   lastMoveTime = 0;
   // ROGUE
+
+  // --- RE-RELEASE CONTENT PORT -- edict fields the re-release entity set
+  // Ground Zero's own maps place reads (src/kexgame/g_local_types.ts, via
+  // our sibling src/game/g_local.ts). All default to the same null/0 a
+  // 1998-era rogue entity would leave them at, so existing content is
+  // unaffected.
+  //
+  // `itemtarget` names the entity whose `style` drives a dynamic_light
+  // (g_kexmisc.ts's setup_dynamic_light). fog/heightfog are read and written
+  // by trigger_fog (g_kextrig.ts) and parsed onto worldspawn and onto the
+  // `fog_values` info_notnull rlava2 uses as a value store. bmodel_anim is
+  // read by func_animation (g_kexmisc.ts).
+  itemtarget: string | null = null;
+  fog: FogT = new FogT();
+  heightfog: HeightFogT = new HeightFogT();
+  bmodel_anim: BmodelAnimT = new BmodelAnimT();
 
   clear(): void {
     Object.assign(this, new EdictT());

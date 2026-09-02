@@ -1666,3 +1666,26 @@ export function SP_misc_teleporter_dest(ent: EdictT): void {
   VectorSet(ent.maxs, 32, 32, -16);
   gi.linkentity(ent);
 }
+
+// ==========================================================
+// info_position -- ported from src/lmctf/g_misc.ts's SP_info_position
+// (lmctf60/g_misc.c, "LM_JORM -- COMPATIBILITY WITH ZOID'S BANNERS").
+//
+// Two shipped CTF maps in this module's own game dir (lmctf14.bsp,
+// lmctf22.bsp) place info_position; without a spawn function ED_CallSpawn
+// drops them with "info_position doesn't have a spawn function".
+//
+// The body really is empty in lmctf60's C source: info_position is a pure
+// map-editor marker. lmctf's g_replace.c looks these entities up by
+// classname while the entity string is still being parsed (see
+// src/lmctf/g_replace.ts's `positionvalid` branch), so the edict only has
+// to survive spawning with its origin/angles intact -- which ED_ParseEdict
+// has already done by the time the spawn function runs. Nothing else in
+// this module reads them, so ctf keeps the empty body rather than inventing
+// behavior lmctf's own source does not have.
+// ==========================================================
+
+/*QUAKED info_position (1 .5 0) (-8 -8 -8) (8 8 8)
+A map-editor position marker. No runtime behavior of its own.
+*/
+export function SP_info_position(_ent: EdictT): void {}

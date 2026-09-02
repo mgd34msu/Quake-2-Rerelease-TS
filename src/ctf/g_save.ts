@@ -289,6 +289,62 @@ import {
 import { G_FreeEdict, Think_Delay } from "./g_utils";
 import { bfg_explode, bfg_think, bfg_touch, blaster_touch, Grenade_Explode, Grenade_Touch, rocket_touch } from "./g_weapon";
 import { body_die, player_die, player_pain } from "./p_client";
+// RERELEASE CONTENT PORT -- the edict callbacks the mission-pack pickups
+// install. These three files deliberately do NOT call registerSaveFunction
+// at their own top level (src/rogue/ and src/game/ do); see the note at the
+// bottom of g_newweap.ts for the g_save -> p_client -> p_weapon ->
+// g_newweap initialization cycle that makes top-level registration throw.
+import {
+  Nuke_Quake,
+  Nuke_Think,
+  Prox_Explode,
+  Prox_Field_Touch,
+  Trap_Think,
+  blaster2_touch,
+  flechette_touch,
+  ionripper_sparks,
+  ionripper_touch,
+  nuke_bounce,
+  nuke_die,
+  plasma_touch,
+  prox_die,
+  prox_land,
+  prox_open,
+  prox_seek,
+  tesla_activate,
+  tesla_blow,
+  tesla_die,
+  tesla_lava,
+  tesla_remove,
+  tesla_think,
+  tesla_think_active,
+  tesla_zap,
+  tracker_fly,
+  tracker_pain_daemon_think,
+  tracker_touch,
+} from "./g_newweap";
+import {
+  body_gib,
+  defender_pain,
+  defender_think,
+  hunter_pain,
+  hunter_think,
+  hunter_touch,
+  sphere_explode,
+  sphere_fly,
+  sphere_if_idle_die,
+  sphere_think_explode,
+  sphere_touch,
+  vengeance_pain,
+  vengeance_think,
+  vengeance_touch,
+} from "./g_sphere";
+import {
+  body_think,
+  doppleganger_die,
+  doppleganger_pain,
+  doppleganger_timeout,
+} from "./g_newdm";
 
 function populateSaveRegistry(): void {
   const entries: Array<[string, Function]> = [
@@ -350,6 +406,55 @@ function populateSaveRegistry(): void {
     ["player_pain", player_pain],
     ["player_die", player_die],
     ["body_die", body_die],
+    // RERELEASE CONTENT PORT -- g_newweap.ts / g_sphere.ts / g_newdm.ts
+    // callbacks. Named with their source-file prefix, matching the keys
+    // src/rogue/ and src/game/ register the same functions under, so a
+    // savegame written by any of those modules resolves the same names.
+    ["g_newweap:flechette_touch", flechette_touch],
+    ["g_newweap:Prox_Explode", Prox_Explode],
+    ["g_newweap:prox_die", prox_die],
+    ["g_newweap:Prox_Field_Touch", Prox_Field_Touch],
+    ["g_newweap:prox_seek", prox_seek],
+    ["g_newweap:prox_open", prox_open],
+    ["g_newweap:prox_land", prox_land],
+    ["g_newweap:Nuke_Quake", Nuke_Quake],
+    ["g_newweap:nuke_die", nuke_die],
+    ["g_newweap:Nuke_Think", Nuke_Think],
+    ["g_newweap:nuke_bounce", nuke_bounce],
+    ["g_newweap:tesla_remove", tesla_remove],
+    ["g_newweap:tesla_die", tesla_die],
+    ["g_newweap:tesla_blow", tesla_blow],
+    ["g_newweap:tesla_zap", tesla_zap],
+    ["g_newweap:tesla_think_active", tesla_think_active],
+    ["g_newweap:tesla_activate", tesla_activate],
+    ["g_newweap:tesla_think", tesla_think],
+    ["g_newweap:tesla_lava", tesla_lava],
+    ["g_newweap:blaster2_touch", blaster2_touch],
+    ["g_newweap:tracker_pain_daemon_think", tracker_pain_daemon_think],
+    ["g_newweap:tracker_touch", tracker_touch],
+    ["g_newweap:tracker_fly", tracker_fly],
+    ["g_newweap:ionripper_sparks", ionripper_sparks],
+    ["g_newweap:ionripper_touch", ionripper_touch],
+    ["g_newweap:plasma_touch", plasma_touch],
+    ["g_newweap:Trap_Think", Trap_Think],
+    ["g_sphere:sphere_think_explode", sphere_think_explode],
+    ["g_sphere:sphere_explode", sphere_explode],
+    ["g_sphere:sphere_if_idle_die", sphere_if_idle_die],
+    ["g_sphere:sphere_fly", sphere_fly],
+    ["g_sphere:sphere_touch", sphere_touch],
+    ["g_sphere:vengeance_touch", vengeance_touch],
+    ["g_sphere:hunter_touch", hunter_touch],
+    ["g_sphere:body_gib", body_gib],
+    ["g_sphere:hunter_pain", hunter_pain],
+    ["g_sphere:defender_pain", defender_pain],
+    ["g_sphere:vengeance_pain", vengeance_pain],
+    ["g_sphere:defender_think", defender_think],
+    ["g_sphere:hunter_think", hunter_think],
+    ["g_sphere:vengeance_think", vengeance_think],
+    ["g_newdm:doppleganger_die", doppleganger_die],
+    ["g_newdm:doppleganger_pain", doppleganger_pain],
+    ["g_newdm:doppleganger_timeout", doppleganger_timeout],
+    ["g_newdm:body_think", body_think],
   ];
   for (const [name, fn] of entries) registerSaveFunction(name, fn);
   // No non-monster module defines an MmoveT instance (verified by search);
@@ -682,6 +787,7 @@ export interface EdictJSON {
   damage_debounce_time: number;
   fly_sound_debounce_time: number;
   last_move_time: number;
+  plat2flags: number;
   health: number;
   max_health: number;
   gib_health: number;
@@ -784,6 +890,7 @@ export function serializeEdict(ent: EdictT): EdictJSON {
     damage_debounce_time: ent.damage_debounce_time,
     fly_sound_debounce_time: ent.fly_sound_debounce_time,
     last_move_time: ent.last_move_time,
+    plat2flags: ent.plat2flags,
     health: ent.health,
     max_health: ent.max_health,
     gib_health: ent.gib_health,
@@ -893,6 +1000,7 @@ export function deserializeEdict(ent: EdictT, json: EdictJSON): void {
   ent.damage_debounce_time = json.damage_debounce_time;
   ent.fly_sound_debounce_time = json.fly_sound_debounce_time;
   ent.last_move_time = json.last_move_time;
+  ent.plat2flags = json.plat2flags;
   ent.health = json.health;
   ent.max_health = json.max_health;
   ent.gib_health = json.gib_health;
@@ -959,6 +1067,16 @@ export interface ClientPersistantJSON {
   max_grenades: number;
   max_cells: number;
   max_slugs: number;
+  // RERELEASE CONTENT PORT -- the mission-pack ammo caps. Part of
+  // client_persistant_t, so like the vanilla six they have to survive a
+  // save/load and a level change.
+  max_tesla: number;
+  max_prox: number;
+  max_mines: number;
+  max_flechettes: number;
+  max_magslug: number;
+  max_trap: number;
+  max_rounds: number;
   weapon: string | null;
   lastweapon: string | null;
   power_cubes: number;
@@ -985,6 +1103,13 @@ export function serializeClientPersistant(pers: ClientPersistantT): ClientPersis
     max_grenades: pers.max_grenades,
     max_cells: pers.max_cells,
     max_slugs: pers.max_slugs,
+    max_tesla: pers.max_tesla,
+    max_prox: pers.max_prox,
+    max_mines: pers.max_mines,
+    max_flechettes: pers.max_flechettes,
+    max_magslug: pers.max_magslug,
+    max_trap: pers.max_trap,
+    max_rounds: pers.max_rounds,
     weapon: itemClassname(pers.weapon),
     lastweapon: itemClassname(pers.lastweapon),
     power_cubes: pers.power_cubes,
@@ -1012,6 +1137,13 @@ export function deserializeClientPersistant(json: ClientPersistantJSON): ClientP
   pers.max_grenades = json.max_grenades;
   pers.max_cells = json.max_cells;
   pers.max_slugs = json.max_slugs;
+  pers.max_tesla = json.max_tesla;
+  pers.max_prox = json.max_prox;
+  pers.max_mines = json.max_mines;
+  pers.max_flechettes = json.max_flechettes;
+  pers.max_magslug = json.max_magslug;
+  pers.max_trap = json.max_trap;
+  pers.max_rounds = json.max_rounds;
   pers.weapon = itemFromClassname(json.weapon);
   pers.lastweapon = itemFromClassname(json.lastweapon);
   pers.power_cubes = json.power_cubes;
@@ -1245,6 +1377,13 @@ export function InitGame(): void {
 
   // dm map list
   gameCvars.sv_maplist = gi.cvar("sv_maplist", "", 0);
+
+  // RERELEASE CONTENT PORT -- the two rogue cvars the ported mission-pack
+  // pickups read, registered with rogue/g_save.c's own names, defaults and
+  // flags. `huntercam` defaults to 1 (the hunter sphere's chase camera is on
+  // in rogue); `strong_mines` defaults to 0.
+  gameCvars.huntercam = gi.cvar("huntercam", "1", CVAR_SERVERINFO | CVAR_LATCH);
+  gameCvars.strong_mines = gi.cvar("strong_mines", "0", 0);
 
   // items
   InitItems();

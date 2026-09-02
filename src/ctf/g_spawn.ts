@@ -64,6 +64,7 @@ import {
   SP_func_door_secret,
   SP_func_killbox,
   SP_func_plat,
+  SP_func_plat2,
   SP_func_rotating,
   SP_func_timer,
   SP_func_train,
@@ -78,6 +79,7 @@ import {
   SP_func_wall,
   SP_info_notnull,
   SP_info_null,
+  SP_info_position,
   SP_light,
   SP_light_mine1,
   SP_light_mine2,
@@ -393,6 +395,9 @@ const spawns: SpawnT[] = [
   { name: "info_player_team2", spawn: SP_info_player_team2 },
 
   { name: "func_plat", spawn: SP_func_plat },
+  // ROGUE -- q2kctf2.bsp and ndctf0.bsp place func_plat2; ported into
+  // g_func.ts from src/rogue/g_func.ts.
+  { name: "func_plat2", spawn: SP_func_plat2 },
   { name: "func_button", spawn: SP_func_button },
   { name: "func_door", spawn: SP_func_door },
   { name: "func_door_secret", spawn: SP_func_door_secret },
@@ -448,6 +453,9 @@ const spawns: SpawnT[] = [
   { name: "info_null", spawn: SP_info_null },
   { name: "func_group", spawn: SP_info_null },
   { name: "info_notnull", spawn: SP_info_notnull },
+  // LM_JORM -- lmctf14.bsp and lmctf22.bsp place info_position; ported into
+  // g_misc.ts from src/lmctf/g_misc.ts.
+  { name: "info_position", spawn: SP_info_position },
   { name: "path_corner", spawn: SP_path_corner },
   { name: "point_combat", spawn: SP_point_combat },
 
@@ -473,6 +481,35 @@ const spawns: SpawnT[] = [
   { name: "misc_easterchick", spawn: SP_misc_easterchick },
   { name: "misc_easterchick2", spawn: SP_misc_easterchick2 },
 ];
+
+/*
+===============
+G_SpawnableClassnames
+
+RERELEASE CONTENT PORT -- not a C function. Returns every classname
+ED_CallSpawn can resolve in THIS module: the itemlist classnames it scans
+first, plus the spawns[] table it falls through to, in that same order.
+
+Mirrors src/game/g_spawn.ts's function of the same name so the shipped-map
+coverage gate (test/g_spawn_module_coverage.test.ts) can assert "this
+module resolves every classname its own shipped maps place" without
+booting a server or reaching into module-private state. It reads the same
+two sources ED_CallSpawn does, so it cannot drift from actual spawn
+behavior.
+
+Note this reads itemlist() unguarded by game.num_items, unlike ED_CallSpawn:
+the item table is a static array literal, so its classnames are knowable
+before InitItems has run.
+===============
+*/
+export function G_SpawnableClassnames(): string[] {
+  const out: string[] = [];
+  for (const item of itemlist()) {
+    if (item.classname !== null) out.push(item.classname);
+  }
+  for (const s of spawns) out.push(s.name);
+  return out;
+}
 
 /*
 ===============
@@ -929,6 +966,20 @@ export function SP_worldspawn(ent: EdictT): void {
   gi.modelindex("#w_railgun.md2");
   gi.modelindex("#w_bfg.md2");
   gi.modelindex("#w_grapple.md2");
+  // RERELEASE CONTENT PORT -- the seven mission-pack weapons' vwep models,
+  // in WEAP_PHALANX(13) .. WEAP_CHAINFIST(19) order (see g_local.ts's
+  // re-release constants block: this module keeps ctf's WEAP_GRAPPLE at 12,
+  // so the incoming weapons take 13..19 rather than src/game's 12..19).
+  // THIS ORDER MUST MATCH THOSE DEFINES: the client turns s.skinnum >> 8
+  // into an index over exactly the "#"-prefixed models registered here, and
+  // its cap is MAX_CLIENTWEAPONMODELS = 20, so 19 is the last usable slot.
+  gi.modelindex("#w_phalanx.md2");
+  gi.modelindex("#w_ripper.md2");
+  gi.modelindex("#w_disrupt.md2");
+  gi.modelindex("#w_etfrifle.md2");
+  gi.modelindex("#w_plasma.md2");
+  gi.modelindex("#w_plauncher.md2");
+  gi.modelindex("#w_chainfist.md2");
 
   //-------------------
 

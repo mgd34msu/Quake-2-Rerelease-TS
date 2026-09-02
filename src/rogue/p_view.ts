@@ -65,6 +65,7 @@ import {
   RF_SHELL_BLUE,
   RF_SHELL_GREEN,
   RF_SHELL_RED,
+  RF_TRANSLUCENT,
   RF_USE_DISGUISE,
   ROLL,
   STAT_FLASHES,
@@ -803,6 +804,22 @@ export function G_SetClientEffects(ent: EdictT): void {
     if (client.invincible_framenum > level.framenum) {
       const remaining = client.invincible_framenum - level.framenum;
       if (remaining > 30 || (remaining & 4) !== 0) ent.s.effects |= EF_PENT;
+    }
+
+    // RE-RELEASE CONTENT PORT -- item_invisibility (the cloak), placed by
+    // rdm14. See g_items.ts's Use_Invisibility.
+    //
+    // The re-release draws this with a dedicated fade shader driven by
+    // `invisibility_fade_time`, which protocol 34 has no representation for.
+    // RF_TRANSLUCENT is the closest thing this module's renderer and its
+    // protocol both already understand, so the cloak reads as translucency
+    // rather than the re-release's ramped fade -- the player is visibly
+    // cloaked, just not with the re-release's exact look. The same
+    // >30-or-blink tail every other powerup here uses gives the
+    // about-to-expire warning flicker.
+    if (client.invisible_framenum > level.framenum) {
+      const remaining = client.invisible_framenum - level.framenum;
+      if (remaining > 30 || (remaining & 4) !== 0) ent.s.renderfx |= RF_TRANSLUCENT;
     }
   }
 

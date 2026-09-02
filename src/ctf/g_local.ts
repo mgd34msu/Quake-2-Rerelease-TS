@@ -105,6 +105,30 @@ export enum AmmoT {
   AMMO_GRENADES,
   AMMO_CELLS,
   AMMO_SLUGS,
+  // =====================================================================
+  // RERELEASE CONTENT PORT -- the six mission-pack ammo types the
+  // re-release CTF maps (q2kctf1/q2kctf2) hand the player. Appended after
+  // vanilla's six so every vanilla ammo type keeps its numeric value
+  // (gitem_t.tag and Add_Ammo's cap lookup both dispatch on exactly this
+  // value).
+  //
+  // A REAL NUMERIC COLLISION IS RESOLVED HERE, the same way src/game's
+  // merged module resolved it. rogue/g_local.h appends AMMO_FLECHETTES/
+  // AMMO_TESLA/AMMO_PROX as 6/7/8 and xatrix/g_local.h INDEPENDENTLY
+  // appends AMMO_MAGSLUG/AMMO_TRAP as 6/7 -- each pack numbered from the
+  // end of vanilla's list without knowing about the other. Merged naively,
+  // a Mag Slug pickup would dispatch into the flechette cap and a Trap
+  // into the tesla cap. rogue keeps 6/7/8 (matching the re-release's own
+  // ammo_t ordering) and xatrix's two move above them; AMMO_DISRUPTOR,
+  // which rogue's shipped build does not have at all (it uses a separate
+  // max_rounds field), follows.
+  // =====================================================================
+  AMMO_FLECHETTES, // 6  (rogue)
+  AMMO_TESLA, // 7  (rogue)
+  AMMO_PROX, // 8  (rogue)
+  AMMO_MAGSLUG, // 9  (xatrix, renumbered from 6)
+  AMMO_TRAP, // 10 (xatrix, renumbered from 7)
+  AMMO_DISRUPTOR, // 11
 }
 
 // deadflag
@@ -192,6 +216,14 @@ export enum MovetypeT {
   MOVETYPE_TOSS, // gravity
   MOVETYPE_FLYMISSILE, // extra size to monsters
   MOVETYPE_BOUNCE,
+  // RERELEASE CONTENT PORT (xatrix/g_local.h's `// RAFAEL -- move type for
+  // rippergun projectile`): the ion ripper's projectile bounces off walls
+  // with a stronger backoff than MOVETYPE_BOUNCE, re-orients its model to
+  // the new travel direction on each hit, ignores gravity, and never
+  // settles on the ground. Appended last so every existing movetype keeps
+  // its vanilla numeric value (savegames and g_phys dispatch both key off
+  // these).
+  MOVETYPE_WALLBOUNCE,
 }
 
 export class GitemArmorT {
@@ -226,7 +258,13 @@ export const WEAP_BFG = 11;
 export const WEAP_GRAPPLE = 12;
 
 // ctf/g_local.h: `#define IT_TECH 64` (gitem_t->flags)
-export const IT_TECH = 64;
+// RENUMBERED 0x40 -> 0x100 by the re-release content port at the bottom of
+// this file: rogue's IT_MELEE already claims 0x40 (and IT_NOT_GIVEABLE
+// 0x80) in the same gitem_t->flags word, and this module now hosts rogue's
+// weapon_chainfist, which is the one IT_MELEE row. gitem_t.flags is a
+// compile-time property of the static itemlist[] -- not parsed from map
+// files, not sent over the wire -- so the bit choice is free.
+export const IT_TECH = 0x00000100;
 
 export class GItemT {
   classname: string | null = null; // spawning name
@@ -526,8 +564,18 @@ export const MOD_TARGET_LASER = 30;
 export const MOD_TRIGGER_HURT = 31;
 export const MOD_HIT = 32;
 export const MOD_TARGET_BLASTER = 33;
-// ctf/g_local.h: `#define MOD_GRAPPLE 34`
-export const MOD_GRAPPLE = 34;
+// ctf/g_local.h: `#define MOD_GRAPPLE 34`.
+// RENUMBERED 34 -> 56 by the re-release content port at the bottom of this
+// file: xatrix's MOD_RIPPER is also 34 (each mission pack numbered its own
+// means-of-death additions from the end of vanilla's list, 33, without
+// knowing about the others), and this module now hosts xatrix's ion ripper.
+// xatrix took 34-39 and rogue took 40-55 without overlapping, so grapple
+// moves to the first free slot after both. MOD_* values are internal to the
+// game module -- they pick an obituary string in ClientObituary and gate a
+// few damage special-cases; never written to the wire, never stored in a
+// .bsp, and savegames are written and read by the same build -- so the
+// renumber is invisible to content and to clients.
+export const MOD_GRAPPLE = 56;
 export const MOD_FRIENDLY_FIRE = 0x8000000;
 
 // `extern int meansOfDeath;` -- a reassigned scalar global, not an object
@@ -621,6 +669,22 @@ export class ClientPersistantT {
   max_grenades = 0;
   max_cells = 0;
   max_slugs = 0;
+  // RERELEASE CONTENT PORT -- per-client ammo caps for the mission-pack
+  // ammo types the re-release CTF maps place. From src/rogue/g_local.ts
+  // (tesla/prox/mines/flechettes) and src/xatrix/g_local.ts (magslug/trap).
+  // Vanilla's own six caps are above; these extend them for the ported
+  // ammo_* items. `max_rounds` is what rogue's Add_Ammo caps
+  // AMMO_DISRUPTOR against -- rogue's shipped build has no AMMO_DISRUPTOR
+  // ammo_t member at all and uses this field instead, and the re-release
+  // seeds it to 12 in InitClientPersistant (see p_client.ts), so like every
+  // other cap it can be raised by a Bandolier or Ammo Pack.
+  max_tesla = 0;
+  max_prox = 0;
+  max_mines = 0;
+  max_flechettes = 0;
+  max_magslug = 0;
+  max_trap = 0;
+  max_rounds = 0;
 
   weapon: GItemT | null = null;
   lastweapon: GItemT | null = null;
@@ -782,6 +846,26 @@ export class GClientT {
   ctf_regentime = 0; // regen tech
   ctf_techsndtime = 0;
   ctf_lasttechmsg = 0;
+
+  // ===================================================================
+  // RERELEASE CONTENT PORT -- client fields the mission-pack pickups the
+  // re-release CTF maps place need. Ported verbatim from
+  // src/rogue/g_local.ts and src/xatrix/g_local.ts. These back the Double
+  // Damage timer, the A-M Bomb countdown, the disruptor's lingering pain
+  // effect, the owned sphere, and the trap's held-too-long bookkeeping.
+  //
+  // DELIBERATELY NOT PORTED: rogue's ir_framenum and xatrix's
+  // quadfire_framenum. No entity class in this module's target list
+  // spawns item_ir_goggles or item_quadfire, and an unread timer would
+  // just be dead state.
+  // ===================================================================
+  double_framenum = 0;
+  nuke_framenum = 0;
+  tracker_pain_framenum = 0;
+  owned_sphere: EdictT | null = null; // this points to the player's sphere
+  trap_blew_up = false;
+  trap_time = 0;
+
   chase_target: EdictT | null = null; // player we are chasing
   update_chase = false; // need to update chase info?
   menutime = 0; // time to update menu
@@ -955,6 +1039,11 @@ export class EdictT implements Edict {
   moveinfo: MoveinfoT = new MoveinfoT();
   monsterinfo: MonsterInfoT = new MonsterInfoT();
 
+  // ROGUE -- func_plat2's PLAT2_CALLED/PLAT2_MOVING/PLAT2_WAITING state
+  // word (rogue/g_local.h's `int plat2flags`), needed by the func_plat2
+  // port in g_func.ts. Nothing else in this module touches it.
+  plat2flags = 0;
+
   clear(): void {
     Object.assign(this, new EdictT());
   }
@@ -1062,6 +1151,13 @@ export const gameCvars: {
   // module-local `let`s since g_local.h never externs them.
   capturelimit: CvarT | null;
   instantweap: CvarT | null;
+  // RERELEASE CONTENT PORT: the rogue cvars the ported pickups read --
+  // `huntercam` (the hunter sphere's chase camera, rogue/g_local.h) and
+  // `strong_mines` (prox/tesla mine tuning). Both default to
+  // vanilla-equivalent behavior when unset; registered in g_main.ts's
+  // InitGame alongside the rest.
+  huntercam: CvarT | null;
+  strong_mines: CvarT | null;
 } = {
   maxentities: null,
   deathmatch: null,
@@ -1096,5 +1192,104 @@ export const gameCvars: {
   sv_maplist: null,
   capturelimit: null,
   instantweap: null,
+  huntercam: null,
+  strong_mines: null,
 };
 
+
+// =========================================================================
+// RERELEASE CONTENT PORT -- constants the mission-pack pickups need.
+//
+// The two re-release CTF maps shipped in baseq2/pak0.pak (q2kctf1.bsp and
+// q2kctf2.bsp) place seventeen Ground Zero / Reckoning pickups: seven
+// ammo_* rows, item_double / item_doppleganger / item_sphere_hunter, and
+// seven weapons. Hosting them in this module means carrying the union of
+// those packs' constants, so the blocks below are lifted from this repo's
+// own src/rogue/g_local.ts and src/xatrix/g_local.ts -- each of which is
+// already a faithful port of the matching mission-pack g_local.h.
+//
+// FOUR SETS OF VALUES ARE RENUMBERED, and only four. Each mission pack was
+// built as a standalone game DLL and numbered its additions from the end of
+// vanilla's list without knowing about the others, so some of those choices
+// collide once the packs share one module (the same collisions src/game's
+// merged module documents, resolved the same way except where noted):
+//
+//   IT_TECH       0x40 -> 0x100  (collided with rogue's IT_MELEE)
+//   MOD_GRAPPLE   34   -> 56     (collided with xatrix's MOD_RIPPER)
+//   AMMO_MAGSLUG/AMMO_TRAP 6/7 -> 9/10 (collided with rogue's 6/7)
+//   WEAP_PHALANX/BOOMER 12/13 -> 13/14 and
+//   WEAP_DISRUPTOR/ETFRIFLE/PLASMA/PROXLAUNCH/CHAINFIST 12..16 -> 15..19
+//
+// The first three are edited in place above, at their original
+// declarations. The WEAP_* renumber DIFFERS FROM src/game's on purpose:
+// src/game moved ctf's WEAP_GRAPPLE from 12 to 14 because its worldspawn
+// vwep list has no "#w_grapple.md2". This module's SP_worldspawn DOES
+// register the grapple's vwep model at slot 12, and the grapple is a
+// first-class CTF weapon here, so WEAP_GRAPPLE STAYS AT 12 and the seven
+// incoming weapons take 13..19 instead. WEAP_* is the "vwep" weapon-model
+// slot a player entity encodes into s.skinnum so other clients draw the
+// right weapon in that player's hands -- so it has to agree with the order
+// of the "#..." models SP_worldspawn registers, and g_spawn.ts's list is
+// extended to match, in exactly this order. The client's cap is
+// MAX_CLIENTWEAPONMODELS (src/client/client.ts), which is 20, so 19 fits.
+//
+// Everything else -- the FL_*, DAMAGE_*, SPHERE_* and MOD_* additions --
+// has no collision: each pack extended above vanilla's last bit/value, and
+// xatrix (MOD 34-39) and rogue (MOD 40-55) happen not to overlap.
+// =========================================================================
+
+// ------------------- from src/rogue/g_local.ts -------------------
+// ROGUE
+export const FL_MECHANICAL = 0x00002000; // entity is mechanical, use sparks not blood
+export const FL_SAM_RAIMI = 0x00004000; // entity is in sam raimi cam mode
+export const FL_NOGIB = 0x00010000; // player has been vaporized by a nuke, drop no gibs
+// ROGUE
+export const DAMAGE_DESTROY_ARMOR = 0x00000040; // damage is done to armor and health.
+export const DAMAGE_NO_REG_ARMOR = 0x00000080; // damage skips regular armor
+export const DAMAGE_NO_POWER_ARMOR = 0x00000100; // damage skips power armor
+// ROGUE
+export const IT_MELEE = 0x00000040;
+export const IT_NOT_GIVEABLE = 0x00000080; // item can not be given
+// ROGUE
+export const MOD_CHAINFIST = 40;
+export const MOD_DISINTEGRATOR = 41;
+export const MOD_ETF_RIFLE = 42;
+export const MOD_BLASTER2 = 43;
+export const MOD_HEATBEAM = 44;
+export const MOD_TESLA = 45;
+export const MOD_PROX = 46;
+export const MOD_NUKE = 47;
+export const MOD_VENGEANCE_SPHERE = 48;
+export const MOD_HUNTER_SPHERE = 49;
+export const MOD_DEFENDER_SPHERE = 50;
+export const MOD_TRACKER = 51;
+export const MOD_DBALL_CRUSH = 52;
+export const MOD_DOPPLE_EXPLODE = 53;
+export const MOD_DOPPLE_VENGEANCE = 54;
+export const MOD_DOPPLE_HUNTER = 55;
+// ROGUE -- sphere_t bits (rogue/g_local.h). The low byte is the sphere
+// type, the high byte its flags; SPHERE_DOPPLEGANGER marks a sphere spawned
+// by the doppleganger rather than carried by a player.
+export const SPHERE_DEFENDER = 0x0001;
+export const SPHERE_HUNTER = 0x0002;
+export const SPHERE_VENGEANCE = 0x0004;
+export const SPHERE_DOPPLEGANGER = 0x0100;
+export const SPHERE_TYPE = 0x00ff;
+export const SPHERE_FLAGS = 0xff00;
+// ROGUE -- vwep slots, renumbered 12..16 -> 15..19 (see the block comment
+// above; ctf's WEAP_GRAPPLE keeps 12 and xatrix's two take 13/14).
+export const WEAP_DISRUPTOR = 15;
+export const WEAP_ETFRIFLE = 16;
+export const WEAP_PLASMA = 17;
+export const WEAP_PROXLAUNCH = 18;
+export const WEAP_CHAINFIST = 19;
+
+// ------------------- from src/xatrix/g_local.ts -------------------
+// xatrix/g_local.h: `// RAFAEL 14-APR-98` block
+export const MOD_RIPPER = 34;
+export const MOD_PHALANX = 35;
+export const MOD_TRAP = 39;
+// xatrix/g_local.h: `#define WEAP_PHALANX 12` / `#define WEAP_BOOMER 13`,
+// renumbered 12/13 -> 13/14 (see the block comment above).
+export const WEAP_PHALANX = 13;
+export const WEAP_BOOMER = 14;

@@ -175,14 +175,28 @@ describe("rogue InitGame", () => {
 // ---------------------------------------------------------------------------
 
 describe("itemlist[] (g_items.c)", () => {
-  test("has 63 entries (index-0 placeholder + real items + end-of-list marker; item_torch is dead code, commented out in the C source)", () => {
-    expect(itemlist().length).toBe(63);
+  test("has 64 entries: rogue/g_items.c's 63, plus item_invisibility for re-release content", () => {
+    // 63 = index-0 placeholder + rogue/g_items.c's real items +
+    // end-of-list marker (item_torch is dead code, commented out in the C
+    // source). The 64th is item_invisibility, which is NOT in the C
+    // itemlist: it is the re-release cloak, placed by the re-release build
+    // of rdm14, added so Ground Zero satisfies the "any content plays
+    // under any ruleset" rule the way src/game did in commit 288484f.
+    // See test/g_spawn_module_coverage.test.ts for the shipped-map gate
+    // that requires it.
+    expect(itemlist().length).toBe(64);
   });
 });
 
 describe("spawns[] registry (g_spawn.c)", () => {
-  test("has 143 entries, matching rogue/g_spawn.c's spawn_t spawns[] table", () => {
-    expect(spawnRegistry().length).toBe(143);
+  test("has 149 entries: rogue/g_spawn.c's 143, plus 6 re-release classnames", () => {
+    // 143 real `{"name", SP_fn}` entries in rogue/g_spawn.c, not counting
+    // the `{NULL, NULL}` terminator. The extra 6 are the re-release-era
+    // classnames the re-release build of the Ground Zero campaign maps
+    // places and the classic table never knew: dynamic_light,
+    // info_landmark, func_animation, target_poi, info_nav_lock and
+    // trigger_fog. Before they were added, rmine1 dropped 14 entities.
+    expect(spawnRegistry().length).toBe(149);
   });
 
   test("includes entries for both sibling units' spawn functions (RG-monsters, RG-systems)", () => {

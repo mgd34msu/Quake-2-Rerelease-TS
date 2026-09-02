@@ -187,6 +187,11 @@ import {
   SP_target_temp_entity,
 } from "./g_target";
 import { SP_turret_base, SP_turret_breach, SP_turret_driver, SP_turret_invisible_brain } from "./g_turret";
+// RE-RELEASE CONTENT PORT -- the six 2023-era classnames Ground Zero's own
+// shipped maps place. See the block at the tail of spawns[] below.
+import { SP_dynamic_light, SP_func_animation, SP_info_landmark } from "./g_kexmisc";
+import { SP_target_poi } from "./g_kextarg";
+import { SP_info_nav_lock, SP_trigger_fog } from "./g_kextrig";
 import { SP_misc_actor, SP_target_actor } from "./m_actor";
 import { SP_misc_insane } from "./m_insane";
 import { SP_monster_berserk } from "./m_berserk";
@@ -350,6 +355,13 @@ export function ED_ParseField(key: string, value: string, ent: EdictT): void {
   for (const f of FIELDS) {
     if (Q_stricmp(f.key, key) !== 0) continue;
 
+    // RE-RELEASE CONTENT PORT: this switch used to assume every non-"edict"
+    // target was "spawntemp", because the C fields[] only ever had those two
+    // (plus "edict_s" for origin/angles). The re-release keys Ground Zero's
+    // own shipped maps carry also write onto the fog / heightfog /
+    // bmodel_anim sub-structs g_local.ts now declares, so each type case
+    // dispatches on the target explicitly. Every 1998-era row takes exactly
+    // the path it always did.
     switch (f.type) {
       case "F_LSTRING": {
         const s = ED_NewString(value);
@@ -360,18 +372,52 @@ export function ED_ParseField(key: string, value: string, ent: EdictT): void {
       case "F_INT": {
         const n = C_atoi(value);
         if (f.target === "edict") ent[f.prop] = n;
-        else st[f.prop] = n;
+        else if (f.target === "spawntemp") st[f.prop] = n;
+        else {
+          // kexgame/g_spawn.ts:860-872 -- parsing bmodel_anim_start or
+          // bmodel_anim_end is what MARKS an entity as animated
+          // (`e.bmodel_anim.enabled = true`), and SP_func_animation frees
+          // any func_animation that reaches it without the flag set. The
+          // style/speed/nowrap keys do NOT set it.
+          //
+          // DEVIATION FROM OUR SIBLING src/game/g_spawn.ts, deliberate:
+          // that module's ED_ParseField never sets `enabled`, so every
+          // func_animation it spawns takes SP_func_animation's
+          // "has no animation data" early free. This module follows the
+          // re-release source instead, so rware1/rhangar2/rsewer2's
+          // func_animation brushes actually animate. Reported to the
+          // coordinator as a src/game bug rather than fixed there (that
+          // file is not this port's to edit).
+          if (f.prop === "start" || f.prop === "end") ent.bmodel_anim.enabled = true;
+          ent.bmodel_anim[f.prop] = n;
+        }
         break;
       }
       case "F_FLOAT": {
         const n = C_atof(value);
         if (f.target === "edict") ent[f.prop] = n;
-        else st[f.prop] = n;
+        else if (f.target === "spawntemp") st[f.prop] = n;
+        else if (f.target === "fog") ent.fog[f.prop] = n;
+        else ent.heightfog[f.prop] = n;
+        break;
+      }
+      case "F_BOOL": {
+        // kexgame/g_spawn.ts parses these with `C_atoi(v) !== 0`.
+        ent.bmodel_anim[f.prop] = C_atoi(value) !== 0;
         break;
       }
       case "F_VECTOR": {
         const vec = parseVector3(value);
-        const dest = f.target === "edict" ? ent[f.prop] : f.target === "spawntemp" ? st[f.prop] : ent.s[f.prop];
+        const dest =
+          f.target === "edict"
+            ? ent[f.prop]
+            : f.target === "spawntemp"
+              ? st[f.prop]
+              : f.target === "edict_s"
+                ? ent.s[f.prop]
+                : f.target === "fog"
+                  ? ent.fog[f.prop]
+                  : ent.heightfog[f.prop];
         VectorCopy(vec, dest);
         break;
       }
@@ -632,6 +678,31 @@ const spawns: SpawnT[] = [
   { name: "weapon_boomer", spawn: SP_xatrix_item },
   { name: "weapon_phalanx", spawn: SP_xatrix_item },
   // ROGUE
+
+  // ======================================================================
+  // RE-RELEASE CONTENT PORT -- not in rogue/g_spawn.c's spawns[].
+  //
+  // Six 2023-era classnames Ground Zero's OWN shipped maps place, which this
+  // module was dropping with "<classname> doesn't have a spawn function"
+  // (rmine1 alone inhibited 70 entities that way). Implementations in
+  // g_kexmisc.ts / g_kextarg.ts / g_kextrig.ts, ported from our sibling
+  // src/game/ the same way commit 288484f ported Ground Zero's own entities
+  // the other direction.
+  //
+  // The seventh, item_invisibility (rdm14), is deliberately NOT here: it is
+  // an item, and ED_CallSpawn scans the itemlist BEFORE this table, so its
+  // registration is the ITEMLIST row in g_items.ts. Adding it here too would
+  // shadow the item path.
+  //
+  // spawnRegistry()'s count assertion in test/rogue_core.test.ts counts the
+  // C's own 143 entries; these six are additions beyond it.
+  // ======================================================================
+  { name: "dynamic_light", spawn: SP_dynamic_light },
+  { name: "func_animation", spawn: SP_func_animation },
+  { name: "info_landmark", spawn: SP_info_landmark },
+  { name: "target_poi", spawn: SP_target_poi },
+  { name: "trigger_fog", spawn: SP_trigger_fog },
+  { name: "info_nav_lock", spawn: SP_info_nav_lock },
 ];
 
 // Exposed the same way g_items.ts's `itemlist()` exposes its private
@@ -642,6 +713,42 @@ const spawns: SpawnT[] = [
 // `{NULL, NULL}` terminator, verified by hand against the C source).
 export function spawnRegistry(): readonly SpawnT[] {
   return spawns;
+}
+
+/*
+===============
+G_SpawnableClassnames
+
+RERELEASE CONTENT PORT -- not a C function. Returns every classname
+ED_CallSpawn can resolve in THIS module: the itemlist classnames it scans
+first, plus the spawns[] table it falls through to, in that same order.
+
+Mirrors src/game/g_spawn.ts's function of the same name so the shipped-map
+coverage gate (test/g_spawn_module_coverage.test.ts) can assert "this
+module resolves every classname its own shipped maps place" without
+booting a server or reaching into module-private state. It reads the same
+two sources ED_CallSpawn does, so it cannot drift from actual spawn
+behavior.
+
+Note this reads itemlist() unguarded by game.num_items, unlike ED_CallSpawn:
+the item table is a static array literal, so its classnames are knowable
+before InitItems has run.
+===============
+*/
+export function G_SpawnableClassnames(): string[] {
+  const out: string[] = [
+    // The three names ED_CallSpawn's "PMM classnames hack" remaps onto
+    // shipped items before consulting either lookup. They resolve just as
+    // surely as a table row, so the contract of this function includes them.
+    "weapon_nailgun",
+    "ammo_nails",
+    "weapon_heatbeam",
+  ];
+  for (const item of itemlist()) {
+    if (item.classname !== null) out.push(item.classname);
+  }
+  for (const s of spawns) out.push(s.name);
+  return out;
 }
 
 /*

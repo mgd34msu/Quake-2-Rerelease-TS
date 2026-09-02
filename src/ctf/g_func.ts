@@ -4,6 +4,7 @@ import {
   AddPointToBounds,
   AngleVectors,
   DotProduct,
+  VectorAdd,
   type Vec3,
   vec3,
   vec3_origin,
@@ -40,8 +41,10 @@ import {
   type EdictT,
   FL_TEAMSLAVE,
   FRAMETIME,
+  g_edicts,
   gameCvars,
   gi,
+  globals,
   level,
   MOD_CRUSH,
   type MoveinfoT,
@@ -49,9 +52,23 @@ import {
   st,
 } from "./g_local";
 import { BecomeExplosion1 } from "./g_misc";
-import { G_Find, G_PickTarget, G_SetMovedir, G_Spawn, G_UseTargets, KillBox, vtos } from "./g_utils";
+import { G_Find, G_FreeEdict, G_PickTarget, G_SetMovedir, G_Spawn, G_UseTargets, KillBox, vtos } from "./g_utils";
 
 const PLAT_LOW_TRIGGER = 1;
+
+// ROGUE -- func_plat2's spawnflags, ported from src/rogue/g_func.ts (whose
+// own source is rogue/g_func.c's "PLAT 2 -- ROGUE" section).
+const PLAT2_TOGGLE = 2;
+const PLAT2_TOP = 4;
+const PLAT2_TRIGGER_TOP = 8;
+const PLAT2_TRIGGER_BOTTOM = 16;
+const PLAT2_BOX_LIFT = 32;
+// PLAT2_TRIGGER_TOP/PLAT2_TRIGGER_BOTTOM are declared in rogue/g_func.c and
+// documented on func_plat2's QUAKED line but never actually tested anywhere
+// in the shipped .c file (plat2_hit_top/plat2_hit_bottom always call
+// G_UseTargets unconditionally) -- dead editor flags, preserved exactly as
+// vanilla has them, so the two constants above are declared and never read.
+// ROGUE
 
 const STATE_TOP = 0;
 const STATE_BOTTOM = 1;
@@ -367,7 +384,11 @@ function Touch_Plat_Center(ent: EdictT, other: EdictT, _plane: CplaneT | null, _
   else if (plat.moveinfo.state === STATE_TOP) plat.nextthink = level.time + 1; // the player is still on the plat, so delay going down
 }
 
-function plat_spawn_inside_trigger(ent: EdictT): void {
+// PGM - func_plat2 (below) needs to adjust the trigger this spawns after the
+// fact, so rogue/g_func.c changed this shared helper's return type from void
+// to edict_t *. Ported the same way here; vanilla func_plat's own call site
+// simply ignores the returned edict.
+function plat_spawn_inside_trigger(ent: EdictT): EdictT {
   //
   // middle trigger
   //
@@ -405,6 +426,8 @@ function plat_spawn_inside_trigger(ent: EdictT): void {
   VectorCopy(tmax, trigger.maxs);
 
   gi.linkentity(trigger);
+
+  return trigger;
 }
 
 /*QUAKED func_plat (0 .5 .8) ? PLAT_LOW_TRIGGER
@@ -1665,4 +1688,384 @@ export function SP_func_killbox(ent: EdictT): void {
   gi.setmodel(ent, ent.model ?? "");
   ent.use = use_killbox;
   ent.svflags = SVF_NOCLIENT;
+}
+
+// ==========================================
+// PLAT 2 -- ROGUE
+//
+// Ported from src/rogue/g_func.ts's section of the same name (rogue's own
+// g_func.c). Two shipped CTF maps place func_plat2 -- q2kctf2.bsp and
+// ndctf0.bsp -- and without a spawn function ED_CallSpawn drops them, which
+// on ndctf0 removes lifts the level needs to be traversable.
+//
+// It shares plumbing with vanilla func_plat: Move_Calc, the STATE_*
+// enumerants, and plat_spawn_inside_trigger (whose return type this file
+// widened above, exactly as rogue's own g_func.c does). Everything else is
+// plat2's own, copied line for line.
+//
+// The one dependency rogue's version has outside g_func.c is SpawnBadArea,
+// declared in rogue/g_newai.c. This module has no g_newai.ts (CTF ships no
+// monster AI), so the helper is ported alongside plat2 below rather than
+// invented as a no-op: dropping it would change which edicts exist and how
+// many edict slots a moving plat consumes, and the entities are cheap.
+// ==========================================
+const PLAT2_CALLED = 1;
+const PLAT2_MOVING = 2;
+const PLAT2_WAITING = 4;
+
+//
+// Monster "Bad" Areas -- rogue/g_newai.c, ported here (see the note above).
+//
+// In rogue these trigger volumes steer monster navigation away from a
+// rising plat; nothing in this module reads them (CTF has no monsters), so
+// they are inert markers that plat2_kill_danger_area removes again on the
+// way down. Kept anyway so plat2's edict bookkeeping matches rogue's.
+//
+function badarea_touch(_ent: EdictT, _other: EdictT, _plane: CplaneT | null, _surf: CsurfaceT | null): void {
+  // drawbbox(ent);
+}
+
+function SpawnBadArea(minsIn: Vec3, maxsIn: Vec3, lifespan: number, owner: EdictT | null): EdictT {
+  const mins = vec3();
+  VectorCopy(minsIn, mins);
+  const maxs = vec3();
+  VectorCopy(maxsIn, maxs);
+
+  const origin = vec3();
+  VectorAdd(mins, maxs, origin);
+  VectorScale(origin, 0.5, origin);
+
+  VectorSubtract(maxs, origin, maxs);
+  VectorSubtract(mins, origin, mins);
+
+  const badarea = G_Spawn();
+  VectorCopy(origin, badarea.s.origin);
+  VectorCopy(maxs, badarea.maxs);
+  VectorCopy(mins, badarea.mins);
+  badarea.touch = badarea_touch;
+  badarea.movetype = MovetypeT.MOVETYPE_NONE;
+  badarea.solid = SolidT.SOLID_TRIGGER;
+  badarea.classname = "bad_area";
+  gi.linkentity(badarea);
+
+  if (lifespan) {
+    badarea.think = G_FreeEdict;
+    badarea.nextthink = level.time + lifespan;
+  }
+  if (owner !== null) {
+    badarea.owner = owner;
+  }
+
+  return badarea;
+}
+
+function plat2_spawn_danger_area(ent: EdictT): void {
+  const mins = vec3(ent.mins[0], ent.mins[1], ent.mins[2]);
+  const maxs = vec3(ent.maxs[0], ent.maxs[1], ent.maxs[2]);
+  maxs[2] = ent.mins[2] + 64;
+
+  SpawnBadArea(mins, maxs, 0, ent);
+}
+
+function plat2_kill_danger_area(ent: EdictT): void {
+  let t: EdictT | null = null;
+  while ((t = G_Find(t, "classname", "bad_area")) !== null) {
+    if (t.owner === ent) G_FreeEdict(t);
+  }
+}
+
+function plat2_hit_top(ent: EdictT): void {
+  if ((ent.flags & FL_TEAMSLAVE) === 0) {
+    if (ent.moveinfo.sound_end) {
+      gi.sound(ent, CHAN_NO_PHS_ADD + CHAN_VOICE, ent.moveinfo.sound_end, 1, ATTN_STATIC, 0);
+    }
+    ent.s.sound = 0;
+  }
+  ent.moveinfo.state = STATE_TOP;
+
+  if ((ent.plat2flags & PLAT2_CALLED) !== 0) {
+    ent.plat2flags = PLAT2_WAITING;
+    if ((ent.spawnflags & PLAT2_TOGGLE) === 0) {
+      ent.think = plat2_go_down;
+      ent.nextthink = level.time + 5.0;
+    }
+    if (cvarNum(gameCvars.deathmatch) !== 0) ent.last_move_time = level.time - 1.0;
+    else ent.last_move_time = level.time - 2.0;
+  } else if ((ent.spawnflags & PLAT2_TOP) === 0 && (ent.spawnflags & PLAT2_TOGGLE) === 0) {
+    ent.plat2flags = 0;
+    ent.think = plat2_go_down;
+    ent.nextthink = level.time + 2.0;
+    ent.last_move_time = level.time;
+  } else {
+    ent.plat2flags = 0;
+    ent.last_move_time = level.time;
+  }
+
+  G_UseTargets(ent, ent);
+}
+
+function plat2_hit_bottom(ent: EdictT): void {
+  if ((ent.flags & FL_TEAMSLAVE) === 0) {
+    if (ent.moveinfo.sound_end) {
+      gi.sound(ent, CHAN_NO_PHS_ADD + CHAN_VOICE, ent.moveinfo.sound_end, 1, ATTN_STATIC, 0);
+    }
+    ent.s.sound = 0;
+  }
+  ent.moveinfo.state = STATE_BOTTOM;
+
+  if ((ent.plat2flags & PLAT2_CALLED) !== 0) {
+    ent.plat2flags = PLAT2_WAITING;
+    if ((ent.spawnflags & PLAT2_TOGGLE) === 0) {
+      ent.think = plat2_go_up;
+      ent.nextthink = level.time + 5.0;
+    }
+    if (cvarNum(gameCvars.deathmatch) !== 0) ent.last_move_time = level.time - 1.0;
+    else ent.last_move_time = level.time - 2.0;
+  } else if ((ent.spawnflags & PLAT2_TOP) !== 0 && (ent.spawnflags & PLAT2_TOGGLE) === 0) {
+    ent.plat2flags = 0;
+    ent.think = plat2_go_up;
+    ent.nextthink = level.time + 2.0;
+    ent.last_move_time = level.time;
+  } else {
+    ent.plat2flags = 0;
+    ent.last_move_time = level.time;
+  }
+
+  plat2_kill_danger_area(ent);
+  G_UseTargets(ent, ent);
+}
+
+function plat2_go_down(ent: EdictT): void {
+  if ((ent.flags & FL_TEAMSLAVE) === 0) {
+    if (ent.moveinfo.sound_start) {
+      gi.sound(ent, CHAN_NO_PHS_ADD + CHAN_VOICE, ent.moveinfo.sound_start, 1, ATTN_STATIC, 0);
+    }
+    ent.s.sound = ent.moveinfo.sound_middle;
+  }
+  ent.moveinfo.state = STATE_DOWN;
+  ent.plat2flags |= PLAT2_MOVING;
+
+  Move_Calc(ent, ent.moveinfo.end_origin, plat2_hit_bottom);
+}
+
+function plat2_go_up(ent: EdictT): void {
+  if ((ent.flags & FL_TEAMSLAVE) === 0) {
+    if (ent.moveinfo.sound_start) {
+      gi.sound(ent, CHAN_NO_PHS_ADD + CHAN_VOICE, ent.moveinfo.sound_start, 1, ATTN_STATIC, 0);
+    }
+    ent.s.sound = ent.moveinfo.sound_middle;
+  }
+  ent.moveinfo.state = STATE_UP;
+  ent.plat2flags |= PLAT2_MOVING;
+
+  plat2_spawn_danger_area(ent);
+
+  Move_Calc(ent, ent.moveinfo.start_origin, plat2_hit_top);
+}
+
+function plat2_operate(triggerEnt: EdictT, other: EdictT): void {
+  const trigger = triggerEnt;
+  const plat = triggerEnt.enemy; // now point at the plat, not the trigger
+  if (plat === null) return; // guards TS null-safety; always set when trigger.touch === Touch_Plat_Center2
+
+  if ((plat.plat2flags & PLAT2_MOVING) !== 0) return;
+
+  if (plat.last_move_time + 2 > level.time) return;
+
+  const platCenter = (trigger.absmin[2] + trigger.absmax[2]) / 2;
+
+  let otherState: number;
+  if (plat.moveinfo.state === STATE_TOP) {
+    otherState = STATE_TOP;
+    if ((plat.spawnflags & PLAT2_BOX_LIFT) !== 0) {
+      if (platCenter > other.s.origin[2]) otherState = STATE_BOTTOM;
+    } else {
+      if (trigger.absmax[2] > other.s.origin[2]) otherState = STATE_BOTTOM;
+    }
+  } else {
+    otherState = STATE_BOTTOM;
+    if (other.s.origin[2] > platCenter) otherState = STATE_TOP;
+  }
+
+  plat.plat2flags = PLAT2_MOVING;
+
+  let pauseTime: number;
+  if (cvarNum(gameCvars.deathmatch) !== 0) pauseTime = 0.3;
+  else pauseTime = 0.5;
+
+  if (plat.moveinfo.state !== otherState) {
+    plat.plat2flags |= PLAT2_CALLED;
+    pauseTime = 0.1;
+  }
+
+  plat.last_move_time = level.time;
+
+  if (plat.moveinfo.state === STATE_BOTTOM) {
+    plat.think = plat2_go_up;
+    plat.nextthink = level.time + pauseTime;
+  } else {
+    plat.think = plat2_go_down;
+    plat.nextthink = level.time + pauseTime;
+  }
+}
+
+function Touch_Plat_Center2(ent: EdictT, other: EdictT, _plane: CplaneT | null, _surf: CsurfaceT | null): void {
+  // this requires monsters to actively trigger plats, not just step on them.
+  if (other.health <= 0) return;
+
+  // PMM - don't let non-monsters activate plat2s
+  if ((other.svflags & SVF_MONSTER) === 0 && other.client === null) return;
+
+  plat2_operate(ent, other);
+}
+
+function plat2_blocked(self: EdictT, other: EdictT): void {
+  if ((other.svflags & SVF_MONSTER) === 0 && other.client === null) {
+    // give it a chance to go away on it's own terms (like gibs)
+    T_Damage(other, self, self, vec3_origin, other.s.origin, vec3_origin, 100000, 1, 0, MOD_CRUSH);
+    // if it's still there, nuke it
+    if (other.inuse) BecomeExplosion1(other);
+    return;
+  }
+
+  // gib dead things
+  if (other.health < 1) {
+    T_Damage(other, self, self, vec3_origin, other.s.origin, vec3_origin, 100, 1, 0, MOD_CRUSH);
+  }
+
+  T_Damage(other, self, self, vec3_origin, other.s.origin, vec3_origin, self.dmg, 1, 0, MOD_CRUSH);
+
+  if (self.moveinfo.state === STATE_UP) plat2_go_down(self);
+  else if (self.moveinfo.state === STATE_DOWN) plat2_go_up(self);
+}
+
+function Use_Plat2(ent: EdictT, _other: EdictT | null, activator: EdictT | null): void {
+  if (ent.moveinfo.state > STATE_BOTTOM) return;
+  if (ent.last_move_time + 2 > level.time) return;
+  // plat2_operate unconditionally dereferences its `other` param (C would
+  // crash on a NULL activator here too); guarded for TS's nullable `use`
+  // signature rather than left as an unchecked dereference.
+  if (activator === null) return;
+
+  for (let i = 1; i < globals.num_edicts; i++) {
+    const trigger = g_edicts[i];
+    if (trigger === undefined) continue;
+    if (!trigger.inuse) continue;
+    if (trigger.touch === Touch_Plat_Center2 && trigger.enemy === ent) {
+      plat2_operate(trigger, activator);
+      return;
+    }
+  }
+}
+
+function plat2_activate(ent: EdictT, _other: EdictT | null, _activator: EdictT | null): void {
+  ent.use = Use_Plat2;
+
+  const trigger = plat_spawn_inside_trigger(ent); // the "start moving" trigger
+
+  trigger.maxs[0] += 10;
+  trigger.maxs[1] += 10;
+  trigger.mins[0] -= 10;
+  trigger.mins[1] -= 10;
+
+  gi.linkentity(trigger);
+
+  trigger.touch = Touch_Plat_Center2; // Override trigger touch function
+
+  plat2_go_down(ent);
+}
+
+/*QUAKED func_plat2 (0 .5 .8) ? PLAT_LOW_TRIGGER PLAT2_TOGGLE PLAT2_TOP PLAT2_TRIGGER_TOP PLAT2_TRIGGER_BOTTOM BOX_LIFT
+speed	default 150
+
+PLAT_LOW_TRIGGER - creates a short trigger field at the bottom
+PLAT2_TOGGLE - plat will not return to default position.
+PLAT2_TOP - plat's default position will the the top.
+PLAT2_TRIGGER_TOP - plat will trigger it's targets each time it hits top
+PLAT2_TRIGGER_BOTTOM - plat will trigger it's targets each time it hits bottom
+BOX_LIFT - this indicates that the lift is a box, rather than just a platform
+
+Plats are always drawn in the extended position, so they will light correctly.
+
+If the plat is the target of another trigger or button, it will start out disabled in the extended position until it is trigger, when it will lower and become a normal plat.
+
+"speed"	overrides default 200.
+"accel" overrides default 500
+"lip"	no default
+
+If the "height" key is set, that will determine the amount the plat moves, instead of being implicitly determoveinfoned by the model's height.
+*/
+export function SP_func_plat2(ent: EdictT): void {
+  VectorClear(ent.s.angles);
+  ent.solid = SolidT.SOLID_BSP;
+  ent.movetype = MovetypeT.MOVETYPE_PUSH;
+
+  gi.setmodel(ent, ent.model ?? "");
+
+  ent.blocked = plat2_blocked;
+
+  if (!ent.speed) ent.speed = 20;
+  else ent.speed *= 0.1;
+
+  if (!ent.accel) ent.accel = 5;
+  else ent.accel *= 0.1;
+
+  if (!ent.decel) ent.decel = 5;
+  else ent.decel *= 0.1;
+
+  if (cvarNum(gameCvars.deathmatch) !== 0) {
+    ent.speed *= 2;
+    ent.accel *= 2;
+    ent.decel *= 2;
+  }
+
+  // PMM Added to kill things it's being blocked by
+  if (!ent.dmg) ent.dmg = 2;
+
+  // pos1 is the top position, pos2 is the bottom
+  VectorCopy(ent.s.origin, ent.pos1);
+  VectorCopy(ent.s.origin, ent.pos2);
+
+  if (st.height) ent.pos2[2] -= st.height - st.lip;
+  else ent.pos2[2] -= ent.maxs[2] - ent.mins[2] - st.lip;
+
+  ent.moveinfo.state = STATE_TOP;
+
+  if (ent.targetname !== null) {
+    ent.use = plat2_activate;
+  } else {
+    ent.use = Use_Plat2;
+
+    const trigger = plat_spawn_inside_trigger(ent); // the "start moving" trigger
+
+    // PGM - debugging??
+    trigger.maxs[0] += 10;
+    trigger.maxs[1] += 10;
+    trigger.mins[0] -= 10;
+    trigger.mins[1] -= 10;
+
+    gi.linkentity(trigger);
+
+    trigger.touch = Touch_Plat_Center2; // Override trigger touch function
+
+    if ((ent.spawnflags & PLAT2_TOP) === 0) {
+      VectorCopy(ent.pos2, ent.s.origin);
+      ent.moveinfo.state = STATE_BOTTOM;
+    }
+  }
+
+  gi.linkentity(ent);
+
+  ent.moveinfo.speed = ent.speed;
+  ent.moveinfo.accel = ent.accel;
+  ent.moveinfo.decel = ent.decel;
+  ent.moveinfo.wait = ent.wait;
+  VectorCopy(ent.pos1, ent.moveinfo.start_origin);
+  VectorCopy(ent.s.angles, ent.moveinfo.start_angles);
+  VectorCopy(ent.pos2, ent.moveinfo.end_origin);
+  VectorCopy(ent.s.angles, ent.moveinfo.end_angles);
+
+  ent.moveinfo.sound_start = gi.soundindex("plats/pt1_strt.wav");
+  ent.moveinfo.sound_middle = gi.soundindex("plats/pt1_mid.wav");
+  ent.moveinfo.sound_end = gi.soundindex("plats/pt1_end.wav");
 }

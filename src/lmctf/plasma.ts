@@ -75,7 +75,9 @@ import {
 } from "./g_local";
 import { FindItem, ITEM_INDEX } from "./g_items";
 import { G_FreeEdict, G_Spawn, vectoangles } from "./g_utils";
-import { T_Damage } from "./g_combat";
+import { T_Damage, T_RadiusDamage } from "./g_combat";
+// Value cycle with p_weapon.ts -- see the "Cross-dependencies" note below.
+import { ChangeWeapon, NoAmmoWeaponChange, PlayerNoise } from "./p_weapon";
 
 //==============================================================================
 // Plasma Rifle Configuration File
@@ -181,38 +183,20 @@ const FRAME_crpain1 = 169; // lmctf60/m_player.h:174
 const FRAME_crpain4 = 172; // lmctf60/m_player.h:177
 
 // ---------------------------------------------------------------------
-// Cross-dependencies into files this unit does not own. Unit A owns
-// g_combat.ts (T_RadiusDamage addition) and p_weapon.ts's foundation-
-// partial completion (PlayerNoise/ChangeWeapon/NoAmmoWeaponChange -- the
-// current p_weapon.ts partial's own header already flags
-// ChangeWeapon/NoAmmoWeaponChange as missing dependencies it needs too).
-// Each stub throws if actually invoked and cites its C source plus the
-// ctf-ancestor TS file with the real implementation's signature.
-// ---------------------------------------------------------------------
-
-function T_RadiusDamage(
-  _inflictor: EdictT,
-  _attacker: EdictT,
-  _damage: number,
-  _ignore: EdictT | null,
-  _radius: number,
-  _mod: number,
-): void {
-  throw new Error("T_RadiusDamage not yet ported (lmctf60/g_combat.c; owned by unit A's g_combat.ts completion)");
-}
-
-function PlayerNoise(_who: EdictT, _where: Vec3, _type: number): void {
-  throw new Error("PlayerNoise not yet ported (lmctf60/p_weapon.c:51; owned by unit A's p_weapon.ts completion)");
-}
-
-function ChangeWeapon(_ent: EdictT): void {
-  throw new Error("ChangeWeapon not yet ported (lmctf60/p_weapon.c; owned by unit A's p_weapon.ts completion)");
-}
-
-function NoAmmoWeaponChange(_ent: EdictT): void {
-  throw new Error("NoAmmoWeaponChange not yet ported (lmctf60/p_weapon.c; owned by unit A's p_weapon.ts completion)");
-}
-
+// Cross-dependencies into files this unit does not own. These were four
+// throwing stubs while g_combat.ts and p_weapon.ts were still partial
+// ports; all four now exist for real, so the stubs are replaced with
+// static imports (see the import block at the top of this file):
+//   T_RadiusDamage      -> ./g_combat  (lmctf60/g_combat.c)
+//   PlayerNoise         -> ./p_weapon  (lmctf60/p_weapon.c:51)
+//   ChangeWeapon        -> ./p_weapon  (lmctf60/p_weapon.c:171)
+//   NoAmmoWeaponChange  -> ./p_weapon  (lmctf60/p_weapon.c:239)
+// p_weapon.ts imports fire_plasma/Weapon_PLASMA_Generic/the PLASMA_SOUND_*
+// names back out of this file, so the two modules form a value cycle. Both
+// sides are hoisted `function` declarations invoked only from inside other
+// functions (never during top-level evaluation), which ES modules resolve
+// safely -- the same arrangement src/ctf/p_weapon.ts <-> g_ctf.ts already
+// relies on and documents.
 // ---------------------------------------------------------------------
 
 // plasma.c:26: `int quadmeister = 0;` -- file-scope global, read by

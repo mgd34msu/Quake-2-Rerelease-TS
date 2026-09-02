@@ -80,11 +80,17 @@
 // writes to a client field that was already correctly decided not to
 // exist -- a clear "add a row to make the count fit" violation of this
 // project's landmine list. This file therefore ports the real,
-// C-compiled 63-entry array (`fixedLength("ITEMLIST", 63, [...])`,
-// `InitItems` sets `game.num_items = 62`) and reports the discrepancy
-// here rather than silently matching the test. If the coordinator
-// confirms this analysis, test/rogue_core.test.ts line ~172 should read
-// `.toBe(63)`.
+// C-compiled 63-entry array and reports the discrepancy here rather than
+// silently matching the test.
+//
+// SEPARATE, LATER CHANGE (re-release content port): one row is appended
+// beyond that C array -- item_invisibility, which the shipped rogue map
+// rdm14 places and this module was dropping with "doesn't have a spawn
+// function". So the table is now `fixedLength("ITEMLIST", 64, [...])` and
+// `InitItems` sets `game.num_items = 63`. The 63-vs-64 analysis above is
+// unchanged; this is 63 real C entries plus 1 deliberate addition, not the
+// phantom item_torch. test/rogue_core.test.ts's assertion should read
+// `.toBe(64)` (coordinator owns that file).
 
 import {
   AngleVectors,
@@ -821,6 +827,37 @@ export function Use_Invulnerability(ent: EdictT, item: GItemT): void {
 
 //======================================================================
 
+// RE-RELEASE CONTENT PORT -- item_invisibility, the re-release cloak, placed
+// by rdm14. Ported from our sibling src/game/g_items.ts, which translated
+// src/kexgame/g_items.ts's Use_Invisibility
+// (`client.invisible_time = max(level.time, invisible_time) + 30s`).
+//
+// This module counts powerups in server frames rather than the re-release's
+// gtime_t, so 30 seconds is 300 frames -- the same idiom every other powerup
+// in this file already uses (quad, invulnerability, double, IR).
+//
+// DOCUMENTED DEGRADATION: the SERVER-SIDE timer runs and is readable by
+// anything that cares, and p_view.ts applies the translucency this module's
+// renderer already understands. What is NOT reproduced is the re-release's
+// own cloak SHADER (its fade-in/fade-out ramp, driven by
+// `invisibility_fade_time`), which has no protocol-34 representation. The
+// player does become visibly translucent; it just is not the re-release's
+// exact presentation.
+export function Use_Invisibility(ent: EdictT, item: GItemT): void {
+  const client = ent.client;
+  if (client === null) return;
+
+  client.pers.inventory[ITEM_INDEX(item)]--;
+  ValidateSelectedItem(ent);
+
+  if (client.invisible_framenum > level.framenum) client.invisible_framenum += 300;
+  else client.invisible_framenum = level.framenum + 300;
+
+  gi.sound(ent, CHAN_ITEM, gi.soundindex("items/protect.wav"), 1, ATTN_NORM, 0);
+}
+
+//======================================================================
+
 export function Use_Silencer(ent: EdictT, item: GItemT): void {
   const client = ent.client;
   if (client === null) return;
@@ -1518,11 +1555,18 @@ function mkItem(fields: Partial<GItemT>): GItemT {
 
 // `gitem_t itemlist[]` -- transcribed in the exact order of the C array,
 // including index 0 ("leave index 0 alone") and the trailing `{NULL}`
-// end-of-list marker. 63 entries total (see this file's header comment for
-// the itemlist-length deviation from test/rogue_core.test.ts's hardcoded
-// 64); `InitItems` sets `game.num_items` to `ITEMLIST.length - 1` exactly
-// as the C `sizeof(itemlist)/sizeof(...)-1` does.
-const ITEMLIST: GItemT[] = fixedLength("ITEMLIST", 63, [
+// end-of-list marker. 63 entries from the C array (see this file's header
+// comment for the 63-vs-64 provenance note), plus ONE re-release addition at
+// the tail -- item_invisibility, which rdm14 places -- for 64 total.
+// `InitItems` sets `game.num_items` to `ITEMLIST.length - 1` exactly as the C
+// `sizeof(itemlist)/sizeof(...)-1` does.
+//
+// This guard is a RUNTIME invariant, not a type: bumping the count is part of
+// adding a row, and tsc --noEmit will not catch a stale number. MAX_ITEMS is
+// 256 (shared/q_shared.ts), so the inventory array and the CS_ITEMS
+// configstring block have ample room; nothing else in this module keys off
+// the item count.
+const ITEMLIST: GItemT[] = fixedLength("ITEMLIST", 64, [
   mkItem({}), // leave index 0 alone
 
   //
@@ -2728,6 +2772,49 @@ const ITEMLIST: GItemT[] = fixedLength("ITEMLIST", 63, [
     count_width: 3,
     // PMM - health sound fix
     precaches: "items/s_health.wav items/n_health.wav items/l_health.wav items/m_health.wav",
+  }),
+
+  // ======================================
+  // RE-RELEASE CONTENT PORT -- not in rogue/g_items.c's itemlist[].
+  //
+  // rdm14 (a shipped Ground Zero deathmatch map) places item_invisibility,
+  // and this module was dropping it with "item_invisibility doesn't have a
+  // spawn function". ED_CallSpawn scans the itemlist BEFORE the spawns[]
+  // table, so an ITEMLIST row -- not a spawns[] entry -- is the correct
+  // registration for an item, exactly as in the C.
+  //
+  // Appended at the tail rather than woven into the C's ordering so the row
+  // is obviously an addition; nothing indexes this table positionally
+  // (FindItem/FindItemByClassname search by name, SetItemNames walks it in
+  // order), and InitItems still derives game.num_items from the length minus
+  // the end marker below.
+  //
+  // *** ITEM COUNT CHANGE -- FLAGGED FOR THE COORDINATOR ***
+  // test/rogue_core.test.ts asserts `itemlist().length === 63`; with this row
+  // it is 64. See this file's header for the separate 63-vs-64 provenance
+  // note on the C array itself -- that count is unchanged, this is one
+  // deliberate re-release addition on top of it.
+  // ======================================
+
+  /*QUAKED item_invisibility (.3 .3 1) (-16 -16 -16) (16 16 16)
+   */
+  // See Use_Invisibility above: the 30-second cloak timer runs on
+  // GClientT.invisible_framenum and p_view.ts's G_SetClientEffects draws it
+  // as RF_TRANSLUCENT.
+  mkItem({
+    classname: "item_invisibility",
+    pickup: Pickup_Powerup,
+    use: Use_Invisibility,
+    drop: Drop_General,
+    pickup_sound: "items/pkup.wav",
+    world_model: "models/items/cloaker/tris.md2",
+    world_model_flags: EF_ROTATE,
+    icon: "p_cloaker",
+    pickup_name: "Invisibility",
+    count_width: 2,
+    quantity: 300,
+    flags: IT_POWERUP,
+    precaches: "items/protect.wav items/protect2.wav items/protect4.wav",
   }),
 
   // end of list marker

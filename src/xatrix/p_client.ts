@@ -817,6 +817,10 @@ export function player_die(self: EdictT, inflictor: EdictT, attacker: EdictT, da
 
     // RAFAEL
     self.client.quadfire_framenum = 0;
+
+    // RERELEASE CONTENT PORT -- the cloak (item_invisibility) expires on
+    // death like every other powerup above.
+    self.client.invisible_framenum = 0;
   }
   self.flags &= ~FL_POWER_ARMOR;
 

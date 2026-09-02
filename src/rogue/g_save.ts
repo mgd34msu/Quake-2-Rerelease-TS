@@ -55,9 +55,12 @@ import { FS_ReadRawFile, FS_WriteFile } from "../qcommon/files";
 import { type EdictStringKey } from "./g_utils";
 import { type GTraceT } from "./game";
 import {
+  type BmodelAnimT,
   ClientPersistantT,
   EdictT,
+  type FogT,
   GAMEVERSION,
+  type HeightFogT,
   GClientT,
   gameCvars,
   g_edicts,
@@ -102,6 +105,16 @@ type SpawnTempStringKey = {
 type SpawnTempNumberKey = { [K in keyof SpawnTempT]: SpawnTempT[K] extends number ? K : never }[keyof SpawnTempT];
 type SpawnTempVectorKey = { [K in keyof SpawnTempT]: SpawnTempT[K] extends Vec3 ? K : never }[keyof SpawnTempT];
 
+// RE-RELEASE CONTENT PORT -- key types for the three sub-structs g_local.ts
+// now hangs off an edict (FogT / HeightFogT / BmodelAnimT). Same shape as the
+// EdictT/SpawnTempT helpers above.
+type FogVectorKey = { [K in keyof FogT]: FogT[K] extends Vec3 ? K : never }[keyof FogT];
+type FogNumberKey = { [K in keyof FogT]: FogT[K] extends number ? K : never }[keyof FogT];
+type HeightFogVectorKey = { [K in keyof HeightFogT]: HeightFogT[K] extends Vec3 ? K : never }[keyof HeightFogT];
+type HeightFogNumberKey = { [K in keyof HeightFogT]: HeightFogT[K] extends number ? K : never }[keyof HeightFogT];
+type BmodelAnimNumberKey = { [K in keyof BmodelAnimT]: BmodelAnimT[K] extends number ? K : never }[keyof BmodelAnimT];
+type BmodelAnimBoolKey = { [K in keyof BmodelAnimT]: BmodelAnimT[K] extends boolean ? K : never }[keyof BmodelAnimT];
+
 export type FieldSpawn =
   | { key: string; type: "F_LSTRING"; target: "edict"; prop: EdictStringKey }
   | { key: string; type: "F_LSTRING"; target: "spawntemp"; prop: SpawnTempStringKey }
@@ -112,6 +125,18 @@ export type FieldSpawn =
   | { key: string; type: "F_VECTOR"; target: "edict"; prop: EdictVectorKey }
   | { key: string; type: "F_VECTOR"; target: "spawntemp"; prop: SpawnTempVectorKey }
   | { key: string; type: "F_VECTOR"; target: "edict_s"; prop: EntityStateVectorKey }
+  // RE-RELEASE CONTENT PORT: the C fields[] table this port redesigns only
+  // ever had "edict" and "spawntemp" targets (plus "edict_s" for
+  // origin/angles). The re-release key set Ground Zero's own maps carry also
+  // writes onto the fog / heightfog / bmodel_anim sub-structs, so those three
+  // targets are new here. Every 1998-era row takes exactly the path it always
+  // did.
+  | { key: string; type: "F_VECTOR"; target: "fog"; prop: FogVectorKey }
+  | { key: string; type: "F_FLOAT"; target: "fog"; prop: FogNumberKey }
+  | { key: string; type: "F_VECTOR"; target: "heightfog"; prop: HeightFogVectorKey }
+  | { key: string; type: "F_FLOAT"; target: "heightfog"; prop: HeightFogNumberKey }
+  | { key: string; type: "F_INT"; target: "bmodel_anim"; prop: BmodelAnimNumberKey }
+  | { key: string; type: "F_BOOL"; target: "bmodel_anim"; prop: BmodelAnimBoolKey }
   | { key: string; type: "F_ANGLEHACK"; target: "edict"; prop: EdictVectorKey }
   | { key: string; type: "F_ANGLEHACK"; target: "spawntemp"; prop: SpawnTempVectorKey }
   | { key: string; type: "F_ANGLEHACK"; target: "edict_s"; prop: EntityStateVectorKey }
@@ -168,6 +193,68 @@ export const FIELDS: FieldSpawn[] = [
   { key: "minpitch", type: "F_FLOAT", target: "spawntemp", prop: "minpitch" },
   { key: "maxpitch", type: "F_FLOAT", target: "spawntemp", prop: "maxpitch" },
   { key: "nextmap", type: "F_LSTRING", target: "spawntemp", prop: "nextmap" },
+
+  // =======================================================================
+  // RE-RELEASE CONTENT PORT -- the entity keys the six re-release-era
+  // classnames Ground Zero's own shipped maps place actually read.
+  //
+  // Every row below was chosen from a scan of the entity lump of every
+  // shipped rogue .bsp (both the 1998 discs and the re-release versions
+  // inside the shipped pak), not from the re-release's full key list: these
+  // are exactly the keys a rogue map writes onto dynamic_light,
+  // func_animation, info_landmark, info_nav_lock, target_poi, trigger_fog
+  // and worldspawn. Without them the entity spawns but silently loses its
+  // parameters, and every key logs "<key> is not a field".
+  // =======================================================================
+
+  // --- dynamic_light (g_kexmisc.ts). rmine1/rware1/rware2 write all eight.
+  { key: "image", type: "F_LSTRING", target: "spawntemp", prop: "image" },
+  { key: "shadowlightradius", type: "F_FLOAT", target: "spawntemp", prop: "shadowlightradius" },
+  { key: "shadowlightresolution", type: "F_INT", target: "spawntemp", prop: "shadowlightresolution" },
+  { key: "shadowlightintensity", type: "F_FLOAT", target: "spawntemp", prop: "shadowlightintensity" },
+  { key: "shadowlightstartfadedistance", type: "F_FLOAT", target: "spawntemp", prop: "shadowlightstartfadedistance" },
+  { key: "shadowlightendfadedistance", type: "F_FLOAT", target: "spawntemp", prop: "shadowlightendfadedistance" },
+  { key: "shadowlightstyle", type: "F_INT", target: "spawntemp", prop: "shadowlightstyle" },
+  { key: "shadowlightconeangle", type: "F_FLOAT", target: "spawntemp", prop: "shadowlightconeangle" },
+  { key: "shadowlightstyletarget", type: "F_LSTRING", target: "spawntemp", prop: "shadowlightstyletarget" },
+  { key: "itemtarget", type: "F_LSTRING", target: "edict", prop: "itemtarget" },
+
+  // --- fog / heightfog (see the FogT note in g_local.ts: parsed and held
+  // server-side, never transmitted under protocol 34). rmine1/rlava1/rlava2/
+  // rware1/rware2/rbase1/rhangar1/rhangar2/rboss worldspawns carry the fog_*
+  // block; rmine2's trigger_fog and rlava2's `fog_values` info_notnull carry
+  // the heightfog_* block including the _off half.
+  { key: "fog_color", type: "F_VECTOR", target: "fog", prop: "color" },
+  { key: "fog_color_off", type: "F_VECTOR", target: "fog", prop: "color_off" },
+  { key: "fog_density", type: "F_FLOAT", target: "fog", prop: "density" },
+  { key: "fog_density_off", type: "F_FLOAT", target: "fog", prop: "density_off" },
+  { key: "fog_sky_factor", type: "F_FLOAT", target: "fog", prop: "sky_factor" },
+  { key: "fog_sky_factor_off", type: "F_FLOAT", target: "fog", prop: "sky_factor_off" },
+  { key: "heightfog_falloff", type: "F_FLOAT", target: "heightfog", prop: "falloff" },
+  { key: "heightfog_density", type: "F_FLOAT", target: "heightfog", prop: "density" },
+  { key: "heightfog_start_color", type: "F_VECTOR", target: "heightfog", prop: "start_color" },
+  { key: "heightfog_start_dist", type: "F_FLOAT", target: "heightfog", prop: "start_dist" },
+  { key: "heightfog_end_color", type: "F_VECTOR", target: "heightfog", prop: "end_color" },
+  { key: "heightfog_end_dist", type: "F_FLOAT", target: "heightfog", prop: "end_dist" },
+  { key: "heightfog_falloff_off", type: "F_FLOAT", target: "heightfog", prop: "falloff_off" },
+  { key: "heightfog_density_off", type: "F_FLOAT", target: "heightfog", prop: "density_off" },
+  { key: "heightfog_start_color_off", type: "F_VECTOR", target: "heightfog", prop: "start_color_off" },
+  { key: "heightfog_start_dist_off", type: "F_FLOAT", target: "heightfog", prop: "start_dist_off" },
+  { key: "heightfog_end_color_off", type: "F_VECTOR", target: "heightfog", prop: "end_color_off" },
+  { key: "heightfog_end_dist_off", type: "F_FLOAT", target: "heightfog", prop: "end_dist_off" },
+
+  // --- func_animation (g_kexmisc.ts). rware1/rhangar2/rsewer2 write the
+  // start/end/speed/nowrap pair plus its alt_* half.
+  { key: "bmodel_anim_start", type: "F_INT", target: "bmodel_anim", prop: "start" },
+  { key: "bmodel_anim_end", type: "F_INT", target: "bmodel_anim", prop: "end" },
+  { key: "bmodel_anim_style", type: "F_INT", target: "bmodel_anim", prop: "style" },
+  { key: "bmodel_anim_speed", type: "F_INT", target: "bmodel_anim", prop: "speed" },
+  { key: "bmodel_anim_nowrap", type: "F_BOOL", target: "bmodel_anim", prop: "nowrap" },
+  { key: "bmodel_anim_alt_start", type: "F_INT", target: "bmodel_anim", prop: "alt_start" },
+  { key: "bmodel_anim_alt_end", type: "F_INT", target: "bmodel_anim", prop: "alt_end" },
+  { key: "bmodel_anim_alt_style", type: "F_INT", target: "bmodel_anim", prop: "alt_style" },
+  { key: "bmodel_anim_alt_speed", type: "F_INT", target: "bmodel_anim", prop: "alt_speed" },
+  { key: "bmodel_anim_alt_nowrap", type: "F_BOOL", target: "bmodel_anim", prop: "alt_nowrap" },
 ];
 
 // -------------------------------------------------------------------------
