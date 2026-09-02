@@ -426,9 +426,63 @@ export function SV_SendClientMessages(): void {
   // of 0x8000 (inc/common/protocol.h:25) -- our MAX_FRAGMENT_MSGLEN.
   const msgbuf = new Uint8Array(MAX_FRAGMENT_MSGLEN);
 
+  // "don't write any frame data until all fragments are sent" -- the SAME
+  // rule the cs_spawned branch below already applies (q2pro/q2repro
+  // src/server/send.c, SV_SendClientMessages), hoisted here because the
+  // ss_demo/ss_cinematic/ss_pic branch bypasses that branch entirely and so
+  // never got it.
+  //
+  // Netchan_Transmit's first statement (net_chan.ts, mirroring chan.c:456-458)
+  // is: if this channel still has fragments in flight, send the next fragment
+  // and DROP the payload this call was handed. Vanilla's demo server
+  // (sv_send.c:501-527) reads one .dm2 block per server frame and hands it
+  // straight to Netchan_Transmit, which is correct only because vanilla's
+  // netchan never fragments -- every classic demo block fits one datagram.
+  //
+  // A re-release (kex, protocol 2022) demo does not: measured on the retail
+  // attract-loop demo, baseq2/pak0.pak "demos/demo1.dm2", block 0 (the
+  // svc_serverdata + configstrings + baselines preamble) is 19104 bytes
+  // against a loopback kex channel's maxpacketlen of 4086, i.e. 5 fragments,
+  // while the remaining 1610 blocks have a median of 217 bytes. Instrumented
+  // run before this fix: block 0 fragmented, then blocks 1 (944 B), 2 (148 B),
+  // 3 (95 B) and 4 (139 B) were each read off disk on the next four server
+  // frames and destroyed by Netchan_Transmit's fragment_pending short-circuit.
+  // The client received block 0, then block 5 -- so the first four svc_frames
+  // of the demo simply never existed, producing exactly the reported
+  // "Delta from invalid frame (not supposed to happen!)" / "Delta frame too
+  // old" / "U_REMOVE: oldnum != newnum" cascade and finally
+  // "CL_ParseServerMessage: Illegible server message".
+  //
+  // A demo block is not a droppable unreliable frame the way a live server's
+  // datagram is -- it is one irreplaceable element of a recorded stream, and
+  // the file cursor has already moved past it. So the file must not be read at
+  // all while a fragmented block is still draining: the demo clock stalls for
+  // as many server frames as the fragmented block needs, and resumes intact.
+  //
+  // (Design note on the alternative: q2repro does not fix this path, it
+  // deletes it -- src/server/commands.c:267-271 intercepts a `demomap` whose
+  // target is a .dm2 before SV_SpawnServer runs and rewrites it as
+  // `demo "<name>" compat`, playing the file CLIENT-side through
+  // src/client/demo.c with no fake server at all; src/server/init.c:286
+  // comments "demos are handled specially, because they are played locally on
+  // the client". That redesign is not adopted here: this port's demo server is
+  // vanilla's and already carries every protocol this engine records
+  // (34/36/1038/4038) plus the classic 1997 demo1.dm2, and cl_demo.ts's
+  // client-side reader is a non-paced loader, not an interactive player. The
+  // defect was never the streaming architecture -- it was one missing
+  // application of the reference's own fragment-drain rule.)
+  let fragmentsDraining = false;
+  for (const c of svs.clients) {
+    if (!c.state || c.isLocalSeat) continue;
+    if (c.netchan.type === NETCHAN_NEW && c.netchan.fragment_pending) {
+      fragmentsDraining = true;
+      break;
+    }
+  }
+
   // read the next demo message if needed
   if (sv.state === ServerStateT.ss_demo && sv.demofile !== null) {
-    if (sv_paused && sv_paused.value) {
+    if ((sv_paused && sv_paused.value) || fragmentsDraining) {
       msglen = 0;
     } else {
       const demofile = sv.demofile;
@@ -477,6 +531,16 @@ export function SV_SendClientMessages(): void {
     }
 
     if (sv.state === ServerStateT.ss_cinematic || sv.state === ServerStateT.ss_demo || sv.state === ServerStateT.ss_pic) {
+      // Drain an in-flight fragmented block one datagram per frame. msglen is
+      // 0 here by construction (the read above was gated on exactly this
+      // condition), so calling Netchan_Transmit would take the same
+      // short-circuit anyway; going through Netchan_TransmitNextFragment
+      // directly matches the cs_spawned branch below and keeps the
+      // "no new demo data was consumed this frame" invariant readable.
+      if (c.netchan.type === NETCHAN_NEW && c.netchan.fragment_pending) {
+        Netchan_TransmitNextFragment(c.netchan);
+        continue;
+      }
       Netchan_Transmit(c.netchan, msglen, msgbuf);
     } else if (c.state === ClientStateT.cs_spawned) {
       // don't overrun bandwidth
