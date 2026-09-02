@@ -81,6 +81,38 @@ const PLAT2_TRIGGER_TOP = 8;
 const PLAT2_TRIGGER_BOTTOM = 16;
 void PLAT2_TRIGGER_TOP;
 void PLAT2_TRIGGER_BOTTOM;
+
+/*
+RERELEASE CONTENT PORT -- bit 8 is START_ACTIVE on re-release content.
+
+rogue/g_rogue_func.cpp:10 renames the bit this file calls PLAT2_TRIGGER_TOP:
+    constexpr spawnflags_t SPAWNFLAGS_PLAT2_START_ACTIVE = 8_spawnflag;
+and reads it in SP_func_plat2 (rogue/g_rogue_func.cpp:391), where rogue's
+own g_func.c:54 had a bare targetname test:
+
+    vanilla     if (ent->targetname)
+    re-release  if (ent->targetname && !(ent->spawnflags & SPAWNFLAGS_PLAT2_START_ACTIVE))
+
+A plat2 that has BOTH a targetname and this bit therefore takes the ELSE
+branch in the re-release: it gets its "start moving" inside trigger, and
+(without PLAT2_TOP) starts down at STATE_BOTTOM instead of parked at
+STATE_TOP waiting to be activated by name.
+
+Safe to read here, by the same argument 7c68b1a used for
+SPAWNFLAG_COOP_ONLY (0x4000): the bit is DEAD in 3.21. This file's note
+directly above says so -- shipped rogue g_func.c declares
+PLAT2_TRIGGER_TOP and never reads it -- so nothing in vanilla can observe
+the bit, and honouring it cannot change any 1997 behaviour.
+
+Confirmed against both content trees rather than argued: of 130 func_plat2
+entities across the 1997 tree's id paks (baseq2 pak0/pak1, xatrix, rogue,
+ctf), ZERO carry a targetname together with bit 8. Of 143 in the re-release
+pak, exactly THREE do -- hangar1 "hg_plat1", jail1 "trust_fall" and
+xcompnd2 "return_plat", all spawnflags 9 -- and those are precisely the
+three maps the cross-module sweep flagged (classic parked the plat at
+STATE_TOP, the re-release module started it at STATE_BOTTOM).
+*/
+const PLAT2_START_ACTIVE = 8;
 const PLAT2_BOX_LIFT = 32;
 
 // plat2flags bits (distinct from the spawnflags above).
@@ -406,7 +438,8 @@ export function SP_func_plat2(ent: EdictT): void {
 
   ent.moveinfo.state = STATE_TOP;
 
-  if (ent.targetname !== null) {
+  // rogue/g_rogue_func.cpp:391 -- see PLAT2_START_ACTIVE's note above.
+  if (ent.targetname !== null && (ent.spawnflags & PLAT2_START_ACTIVE) === 0) {
     ent.use = plat2_activate;
   } else {
     ent.use = Use_Plat2;

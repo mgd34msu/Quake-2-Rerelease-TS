@@ -484,6 +484,19 @@ function charAt(s: string, idx: number): number {
   return idx < s.length ? s.charCodeAt(idx) : 0;
 }
 
+/**
+ * q_shared.h:70 `#define MAX_TOKEN_CHARS 128 // max length of an individual
+ * token`. This is vanilla 3.21's value and stays the default here, so every
+ * existing caller keeps vanilla's truncation exactly.
+ *
+ * The re-release raised it: game.h:122 `constexpr size_t MAX_TOKEN_CHARS =
+ * 512;`, and its q_std.cpp COM_ParseEx falls back to a
+ * `static char com_token[MAX_TOKEN_CHARS]` of that size whenever the caller
+ * passes no buffer -- which is every call in the re-release game code,
+ * ED_ParseEdict's key/value parse included. src/kexgame/ passes that 512
+ * through the `maxTokenChars` parameter below (see src/kexgame/q_std.ts);
+ * src/game/ does not, because 128 is the number vanilla actually used.
+ */
 const MAX_TOKEN_CHARS = 128;
 
 export interface ComParseState {
@@ -498,7 +511,7 @@ COM_Parse
 Parse a token out of a string
 ==============
 */
-export function COM_Parse(state: ComParseState): string {
+export function COM_Parse(state: ComParseState, maxTokenChars: number = MAX_TOKEN_CHARS): string {
   const s = state.data;
   let idx = state.index;
   let len = 0;
@@ -536,7 +549,7 @@ export function COM_Parse(state: ComParseState): string {
         state.index = idx;
         return token;
       }
-      if (len < MAX_TOKEN_CHARS) {
+      if (len < maxTokenChars) {
         token += String.fromCharCode(c);
         len++;
       }
@@ -545,7 +558,7 @@ export function COM_Parse(state: ComParseState): string {
 
   // parse a regular word
   do {
-    if (len < MAX_TOKEN_CHARS) {
+    if (len < maxTokenChars) {
       token += String.fromCharCode(c);
       len++;
     }
@@ -553,7 +566,7 @@ export function COM_Parse(state: ComParseState): string {
     c = charAt(s, idx);
   } while (c > 32);
 
-  if (len === MAX_TOKEN_CHARS) {
+  if (len === maxTokenChars) {
     token = "";
   }
 

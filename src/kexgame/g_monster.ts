@@ -197,13 +197,14 @@
 // unit has landed; see g_ai.ts's own "STUB SWAP" header section). No local
 // stub remains for either name in this file.
 //
-// `stationarymonster_start` is a SPECIAL case, not the usual "future file"
-// stub: it is declared in g_local.h:2240 and called from m_insane.cpp:686,
-// but grepping every single *.cpp in the shipped rerelease source tree for
-// its definition (not just callers) finds NOTHING -- it does not exist
-// anywhere in this codebase. This is a genuine hole in the upstream C++
-// source, not a porting gap on this side; ported as a throwing stub that
-// says exactly that, rather than guessing at a body that was never shipped.
+// `stationarymonster_start` used to stand here as a throwing stub, on the
+// claim that no definition existed anywhere in the shipped rerelease
+// source. That claim was wrong -- it is defined at
+// rerelease/rogue/g_rogue_monster.cpp:88-96 (the whole stationarymonster_*
+// family lives in that rogue file, which the original grep missed), and
+// this port already carried a faithful transcription of it in
+// src/kexgame/rogue/g_rogue_monster.ts. The stub is gone; m_insane.ts and
+// m_rogue_turret.ts import the real function from ./rogue/g_rogue_monster.
 //
 // ============================================================================
 // OTHER NOTED DEVIATIONS / QUIRKS (bug-for-bug, not "fixed")
@@ -2073,11 +2074,11 @@ export function SP_trigger_health_relay(self: EdictT): void {
 // stationarymonster_start -- see file header's special-case note
 // ---------------------------------------------------------------------------
 
-export function stationarymonster_start(self: EdictT): void {
-  throw new Error(
-    `stationarymonster_start: declared in g_local.h:2240 and called from m_insane.cpp:686, but has no definition anywhere in the shipped rerelease source tree (verified by grepping every *.cpp for its body, not just callers) -- a genuine hole in the upstream C++ source, not a porting gap here -- called against ${self.classname ?? "?"}`,
-  );
-}
+// `stationarymonster_start` is NOT defined here. It lives in
+// rerelease/rogue/g_rogue_monster.cpp:88-96, transcribed into
+// src/kexgame/rogue/g_rogue_monster.ts; its two callers (m_insane.ts,
+// m_rogue_turret.ts) import it from there directly. See m_insane.ts's own
+// header section for why a throwing stub stood here before.
 
 // ---------------------------------------------------------------------------
 // CROSS-DEPENDENCIES STILL NOT YET PORTED -- see file header ("STUB SWAP")

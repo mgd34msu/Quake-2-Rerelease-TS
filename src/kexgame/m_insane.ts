@@ -19,19 +19,29 @@
 // below -- instead of `flymonster_start`).
 //
 // ============================================================================
-// stationarymonster_start -- DOCUMENTED UPSTREAM HOLE, not a porting gap
+// stationarymonster_start -- WHERE THE DEFINITION ACTUALLY LIVES
 // ============================================================================
 // SP_misc_insane's CRUCIFIED branch (m_insane.cpp:683-687) sets
 // `self->flags |= FL_NO_KNOCKBACK | FL_STATIONARY;` then calls
-// `stationarymonster_start(self)`. `stationarymonster_start` is declared in
-// g_local.h:2240 but, per g_monster.ts's own header note and its throwing
-// stub at the bottom of that file, has NO definition anywhere in the shipped
-// rerelease source tree (verified there by grepping every *.cpp for the
-// body, not just callers) -- a genuine hole in the upstream C++ source. This
-// file calls `stationarymonster_start` exactly as the C++ does (imported
-// from g_monster.ts, not reimplemented or worked around here); calling
-// `SP_misc_insane` with the CRUCIFIED spawnflag set will throw that stub's
-// error, exactly mirroring the C++ side's own dead end.
+// `stationarymonster_start(self)`, which is declared in g_local.h:2240.
+//
+// This file (and g_monster.ts) previously recorded that the function had NO
+// definition anywhere in the shipped rerelease source and imported a
+// throwing stub for it. That was wrong: it is defined in
+// rerelease/rogue/g_rogue_monster.cpp:88-96, alongside the rest of the
+// stationarymonster_* family, and this port has carried a faithful
+// transcription of it in src/kexgame/rogue/g_rogue_monster.ts all along --
+// only the import here pointed at the stub instead. The C++ needs no
+// #include to reach it because g_local.h declares it for every translation
+// unit; TypeScript needs the real module path, so this file imports it from
+// ./rogue/g_rogue_monster (no new module cycle: that file already imports
+// ../g_monster, which this file already imports too).
+//
+// FOUND BY: the cross-module map sweep (test/parity_map_sweep.test.ts).
+// SP_misc_insane threw on every shipped map carrying a crucified insane --
+// jail2, jail4, mgu5m3, q64/lab and the ten rogue r* maps -- so the
+// re-release module could not reach ss_game on ANY of them, while the
+// classic module booted all fourteen.
 //
 // ============================================================================
 // PLACEMENT-MISMATCH FUNCTIONS PORTED LOCALLY -- see m_gladiator.ts header
@@ -104,7 +114,8 @@ import { type SpawnFlags, SpawnFlags_from, SpawnFlags_has, SpawnFlags_has_all, S
 import { frandom, brandom, irandom, random_element } from "./q_std";
 import { st } from "./g_spawn";
 import { G_FreeEdict } from "./g_utils";
-import { M_SetAnimation, M_AllowSpawn, walkmonster_start, stationarymonster_start, monster_dead } from "./g_monster";
+import { M_SetAnimation, M_AllowSpawn, walkmonster_start, monster_dead } from "./g_monster";
+import { stationarymonster_start } from "./rogue/g_rogue_monster";
 import { ThrowGibs, type GibDefT } from "./g_misc";
 import {
   RegisterDie,

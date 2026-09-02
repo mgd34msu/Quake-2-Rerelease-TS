@@ -37,10 +37,15 @@ Scope (18 cases, each citing the exact C++ line(s) it exercises):
       insane_move_cross and sets AI_STAND_GROUND (m_insane.cpp:550-556).
     - spawnflag variant: insane_stand w/ CRAWL|STAND_GROUND (4|16) picks
       insane_move_down deterministically, no RNG (m_insane.cpp:557-562).
-    - distinctive: SP_misc_insane w/ CRUCIFIED calls stationarymonster_start,
-      a documented upstream hole with NO C++ definition anywhere in the
-      shipped rerelease source tree (m_insane.cpp:683-687; g_monster.ts's own
-      throwing stub, declared g_local.h:2240).
+    - distinctive: SP_misc_insane w/ CRUCIFIED calls stationarymonster_start
+      (m_insane.cpp:683-687), which is defined at
+      rerelease/rogue/g_rogue_monster.cpp:88-96 and lives here in
+      src/kexgame/rogue/g_rogue_monster.ts. It used to be a throwing stub in
+      g_monster.ts on the mistaken claim that no definition existed; the
+      cross-module map sweep (test/parity_map_sweep.test.ts) found that this
+      killed fourteen shipped maps under the re-release module, so this test
+      now pins the real behaviour: FL_STATIONARY set, viewheight zeroed,
+      think armed on stationarymonster_start_go, and no throw.
 
   ACTOR (m_actor.cpp):
     - mmove sanity: actor_move_attack's frame array satisfies
@@ -92,7 +97,7 @@ import { vec3, type Vec3 } from "../src/shared/math";
 import { CplaneT, CvarT } from "../src/shared/q_shared";
 import type { KexEdictT, KexGameExports, KexGameImports, KexTraceT } from "../src/kexapi/game";
 import { GAME_API_VERSION, SvflagsT, SolidT } from "../src/kexapi/game";
-import { type EdictT, MonsterAiFlagsT, MovetypeT } from "../src/kexgame/g_local";
+import { type EdictT, EntFlagsT, MonsterAiFlagsT, MovetypeT } from "../src/kexgame/g_local";
 import { defaultEdict, gi, game, level, g_edicts, SetGameImports, SetGameExports, SetGEdicts } from "../src/kexgame/g_main_globals";
 import { Gtime_from_sec, GTIME_ZERO } from "../src/kexgame/gtime";
 import { M_SetAnimation, M_MoveFrame } from "../src/kexgame/g_monster";
@@ -110,6 +115,7 @@ import {
 // "successful import IS an assertion" idiom kexgame_monsters1.test.ts uses
 // for infantry's un-exported tables).
 import { SP_misc_insane } from "../src/kexgame/m_insane";
+import { stationarymonster_start_go } from "../src/kexgame/rogue/g_rogue_monster";
 import "../src/kexgame/m_actor";
 import "../src/kexgame/m_shambler";
 import "../src/kexgame/m_guardian";
@@ -501,12 +507,21 @@ describe("insane", () => {
     expect(pendingOrActiveMove(self)).toBe(requireMmove("insane_move_down"));
   });
 
-  test("distinctive: SP_misc_insane w/ CRUCIFIED calls stationarymonster_start, a documented upstream hole with no C++ definition anywhere in the shipped rerelease source (m_insane.cpp:683-687)", () => {
+  test("distinctive: SP_misc_insane w/ CRUCIFIED runs the real stationarymonster_start (rogue/g_rogue_monster.cpp:88-96), no throw", () => {
     setupWorld(4);
     const self = makeMonster(1);
     self.spawnflags = SpawnFlags_from(8); // SPAWNFLAG_INSANE_CRUCIFIED
 
-    expect(() => SP_misc_insane(self)).toThrow(/stationarymonster_start/);
+    expect(() => SP_misc_insane(self)).not.toThrow();
+
+    // rogue/g_rogue_monster.cpp:88-96:
+    //   self->flags |= FL_STATIONARY;
+    //   self->think = stationarymonster_start_go;
+    //   monster_start(self);
+    //   self->viewheight = 0;   // "fix viewheight"
+    expect(self.flags & EntFlagsT.FL_STATIONARY).not.toBe(0n);
+    expect(self.viewheight).toBe(0);
+    expect(self.think).toBe(stationarymonster_start_go);
   });
 });
 

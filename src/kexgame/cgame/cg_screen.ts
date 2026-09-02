@@ -154,7 +154,9 @@ import {
 } from "../../kexapi/game";
 import { PlayerStatT } from "../p_hud";
 import type { CvarT } from "../../shared/q_shared";
-import { type ComParseState, COM_Parse } from "../../shared/math";
+// COM_Parse comes from ../q_std, which caps tokens at the re-release's 512
+// (game.h:122) rather than vanilla's 128 -- see that file's own note.
+import { type ComParseState, COM_Parse } from "../q_std";
 import { fixedLength } from "../../shared/fixed";
 import { CGI, cgame_init_time } from "./cg_local";
 

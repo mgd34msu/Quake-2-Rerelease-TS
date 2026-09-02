@@ -57,6 +57,8 @@
 export type { Byte } from "../shared/q_shared";
 export { PITCH, YAW, ROLL } from "../shared/q_shared";
 import type { Vec4 } from "../kexapi/game";
+import { COM_Parse as COM_Parse_shared, type ComParseState } from "../shared/math";
+export type { ComParseState };
 
 // ---------------------------------------------------------------------------
 // MATHLIB constants (q_std.h ~136-147)
@@ -293,4 +295,43 @@ export function random_element<T>(container: readonly T[]): T {
  */
 export function brandom(): boolean {
   return irandom(2) === 0;
+}
+
+// ---------------------------------------------------------------------------
+// COM_Parse -- the re-release's token size, not vanilla's
+// ---------------------------------------------------------------------------
+
+/**
+ * game.h:122 `constexpr size_t MAX_TOKEN_CHARS = 512; // max length of an
+ * individual token`. Vanilla's q_shared.h:70 says 128, and
+ * src/shared/math.ts's COM_Parse keeps 128 as its default because that is
+ * what src/game/ (the vanilla module) must use.
+ *
+ * q_std.cpp's COM_ParseEx falls back to `static char
+ * com_token[MAX_TOKEN_CHARS]` whenever the caller passes no buffer, and no
+ * call in the re-release game code passes one -- ED_ParseEdict's key and
+ * value parses included (g_spawn.cpp:908-950, `com_token = COM_Parse(&data)`
+ * with `char keyname[256]` only for the key COPY). So every token the
+ * re-release module parses out of a map's entity lump is capped at 512, not
+ * 128.
+ *
+ * FOUND BY: the cross-module map sweep (test/parity_map_sweep.test.ts).
+ * mgu1m5's worldspawn carries
+ *   "start_items" "weapon_shotgun;weapon_railgun;weapon_machinegun;
+ *    weapon_chaingun;weapon_rocketlauncher;weapon_hyperblaster;
+ *    weapon_supershotgun;weapon_phalanx;weapon_bfg"
+ * -- 151 characters. Parsed at vanilla's 128 it came back cut mid-word at
+ * "...weapon_supershotgun;we", and Player_GiveStartItems then dropped the
+ * server with `Invalid g_start_item entry: we` before any player could
+ * spawn. The map is unplayable under the re-release module without this.
+ */
+export const MAX_TOKEN_CHARS = 512;
+
+/**
+ * The re-release's COM_Parse: src/shared/math.ts's parser with the
+ * re-release's 512-character token cap instead of vanilla's 128. Every
+ * COM_Parse call in src/kexgame/ goes through this.
+ */
+export function COM_Parse(state: ComParseState): string {
+  return COM_Parse_shared(state, MAX_TOKEN_CHARS);
 }

@@ -196,6 +196,7 @@ import { GTIME_ZERO, Gtime_add, Gtime_from_ms, Gtime_from_sec, Gtime_nonzero, Gt
 import { SpawnFlags_has } from "./spawnflags";
 import { AngleVectors, vec3_equals, vec3_length, vec3_origin } from "./q_vec3";
 import { irandom } from "./q_std";
+import { PARITY_TRACE_ENABLED, ParityTrace_UseTargets } from "../shared/parity_trace";
 
 // ---------------------------------------------------------------------------
 // EXTERNAL DEPENDENCIES NOT YET PORTED (see file header)
@@ -382,6 +383,9 @@ export function G_PrintActivationMessage(ent: EdictT, activator: EdictT | null, 
  * the vanilla/legacy port's two -- ported faithfully with all four.
  */
 export function G_UseTargets(ent: EdictT, activator: EdictT | null): void {
+  // Off-by-default parity observation hook; see src/shared/parity_trace.ts.
+  if (PARITY_TRACE_ENABLED) ParityTrace_UseTargets(ent, activator);
+
   // check for a delay
   if (ent.delay !== 0) {
     const t = G_Spawn();

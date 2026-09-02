@@ -301,7 +301,10 @@
 // fully initialized regardless of which side of the cycle happened to
 // evaluate first. No `require()` needed.
 
-import { vec3, type Vec3, type ComParseState, COM_Parse } from "../shared/math";
+import { vec3, type Vec3 } from "../shared/math";
+// COM_Parse comes from ./q_std, which caps tokens at the re-release's 512
+// (game.h:122) rather than vanilla's 128 -- see that file's own note.
+import { type ComParseState, COM_Parse } from "./q_std";
 import { YAW } from "../shared/q_shared";
 import {
   MAX_CLIENTS,

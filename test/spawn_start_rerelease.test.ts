@@ -197,7 +197,12 @@ function classicSelection(mapname: string, entities: string, spawnpoint: string,
   try {
     SelectSpawnPoint(player, origin, angles);
   } catch {
-    return null; // gi.error("Couldn't find spawn point ...")
+    // Kept so a REGRESSION back to vanilla's gi.error is reported as
+    // "<no spawn point>" rather than blowing the whole file up. Nothing
+    // reaches it any more: p_client.ts now ends the chain the way the
+    // re-release does (print, then the world origin) instead of calling
+    // gi.error. See the "no spawn point at all" test below.
+    return null;
   }
   return { origin, angles };
 }
@@ -365,7 +370,16 @@ function describeSelection(sel: { origin: Vec3; angles: Vec3 } | null): string {
 }
 
 function describeReference(spot: RawEntity | null): string {
-  if (spot === null) return "<no spawn point>";
+  // p_client.cpp's SelectSpawnPoint, single-player branch:
+  //     spot = SelectSingleSpawnPoint(ent);
+  //     // in SP, just put us at the origin if spawn fails
+  //     if (!spot) { gi.Com_PrintFmt(...); origin = {0,0,0}; angles = {0,0,0}; return true; }
+  // so "nothing selected" is a real, successful spawn at the world origin
+  // in the re-release, not a failure -- and src/game/p_client.ts now does
+  // the same instead of vanilla's gi.error. The classic module's own +9 z
+  // nudge (p_client.c:911) applies to a CHOSEN spot's origin, not to this
+  // constant, so the fallback compares as a plain 0 0 0.
+  if (spot === null) return "0 0 0 @ 0 0 0";
   // vanilla's SelectSpawnPoint adds 9 to z after copying the spot origin;
   // the rerelease's single-player arm does not, so the reference is lifted
   // here to keep the comparison about WHICH ENTITY was chosen rather than
@@ -447,14 +461,12 @@ describe("classic module: the rerelease keys, and only those, change the selecti
 
   test("a lone COOP_ONLY start leaves single player with no start at all -- same entity set as the rerelease", () => {
     // The inhibition is at load time, so the entity is gone before
-    // selection runs. The rerelease reaches the same place (its
-    // SelectSingleSpawnPoint returns null); the two modules then differ
-    // only in the recovery -- it prints and drops the player at the world
-    // origin, this one keeps vanilla's gi.error. No shipped map has this
-    // shape, so nothing observable rides on it.
+    // selection runs, and the rerelease's SelectSingleSpawnPoint returns
+    // null. Both modules now recover the same way: print, and put the
+    // player at the world origin.
     const map = WORLD + ent("info_player_start", { origin: "9 9 9", spawnflags: String(SPAWNFLAG_COOP_ONLY) });
-    expect(classicSelection("r_only", map, "", SINGLE_PLAYER)).toBeNull();
     expect(kexSelection(parseEntities(map), "", SINGLE_PLAYER)).toBeNull();
+    expect(describeSelection(classicSelection("r_only", map, "", SINGLE_PLAYER))).toBe("0 0 0 @ 0 0 0");
   });
 
   test("rule 2: an unmatched non-empty spawnpoint falls back instead of reaching gi.error", () => {
@@ -469,8 +481,18 @@ describe("classic module: the rerelease keys, and only those, change the selecti
     expect(describeSelection(classicSelection("r_any", map, "missing"))).toBe("6 6 15 @ 0 0 0");
   });
 
-  test("a map with no info_player_start at all still reaches gi.error, as vanilla did", () => {
-    expect(classicSelection("r_none", WORLD, "")).toBeNull();
+  test("a map with no info_player_start at all spawns at the world origin, as the rerelease does, instead of vanilla's gi.error", () => {
+    // Vanilla p_client.c:906 ends the chain with
+    //     gi.error ("Couldn't find spawn point %s\n", game.spawnpoint);
+    // which drops the server. The rerelease prints and returns the world
+    // origin (p_client.cpp, SelectSpawnPoint's single-player branch).
+    //
+    // This is not hypothetical: the cross-module map sweep
+    // (test/parity_map_sweep.test.ts) found THREE shipped maps with no
+    // spawn point of any kind -- test/mals_box, test/mals_ladder_test and
+    // test/mals_barrier_test -- which the classic module could not host at
+    // all until it adopted this branch.
+    expect(describeSelection(classicSelection("r_none", WORLD, ""))).toBe("0 0 0 @ 0 0 0");
   });
 });
 

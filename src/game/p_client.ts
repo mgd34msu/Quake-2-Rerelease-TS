@@ -1477,7 +1477,42 @@ export function SelectSpawnPoint(ent: EdictT, origin: Vec3, angles: Vec3, landma
   if (spot === null) spot = SelectSingleSpawnPoint();
 
   if (spot === null) {
-    gi.error(`Couldn't find spawn point ${game.spawnpoint}\n`);
+    /*
+    RERELEASE CONTENT PORT -- a map with no usable spawn point at all is
+    content, not a fatal error.
+
+    Vanilla p_client.c:906 ends the chain with
+        gi.error ("Couldn't find spawn point %s\n", game.spawnpoint);
+    which drops the server. The re-release replaced that with a print and a
+    spawn at the world origin, p_client.cpp (SelectSpawnPoint, the
+    single-player branch):
+        spot = SelectSingleSpawnPoint(ent);
+        // in SP, just put us at the origin if spawn fails
+        if (!spot)
+        {
+            gi.Com_PrintFmt("Couldn't find spawn point {}\n", game.spawnpoint);
+            origin = { 0, 0, 0 };
+            angles = { 0, 0, 0 };
+            return true;
+        }
+
+    FOUND BY: the cross-module map sweep (test/parity_map_sweep.test.ts).
+    Three shipped maps carry no info_player_start, info_player_coop or
+    info_player_deathmatch at all -- test/mals_box, test/mals_ladder_test
+    and test/mals_barrier_test -- so the classic module dropped the server
+    the moment a player tried to spawn, while the re-release module put the
+    player at (0,0,0) and played. 7c68b1a already ported
+    SelectSingleSpawnPoint's fallback CHAIN; this is the last rung of it,
+    for the case where the chain itself comes up empty.
+
+    Additive with respect to 1997 content: this branch is only reached where
+    vanilla would have called gi.error and killed the session, so no map
+    that used to play behaves differently. No 1997-tree map reaches it.
+    */
+    gi.dprintf(`Couldn't find spawn point ${game.spawnpoint}\n`);
+    VectorClear(origin);
+    VectorClear(angles);
+    return;
   }
 
   VectorCopy(spot.s.origin, origin);

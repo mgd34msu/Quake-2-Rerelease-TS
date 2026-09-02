@@ -25,6 +25,7 @@ import {
   YAW,
 } from "../shared/q_shared";
 import { fixedLength } from "../shared/fixed";
+import { PARITY_TRACE_ENABLED, ParityTrace_UseTargets } from "../shared/parity_trace";
 import { T_Damage } from "./g_combat";
 import { type Edict, type GTraceT, SolidT, SVF_MONSTER } from "./game";
 import {
@@ -184,6 +185,8 @@ match (string)self.target and call their .use function
 ==============================
 */
 export function G_UseTargets(ent: EdictT, activator: EdictT | null): void {
+  // Off-by-default parity observation hook; see src/shared/parity_trace.ts.
+  if (PARITY_TRACE_ENABLED) ParityTrace_UseTargets(ent, activator);
 
   //
   // check for a delay

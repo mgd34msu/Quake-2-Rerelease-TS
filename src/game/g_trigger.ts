@@ -40,12 +40,40 @@ function requireEdict(e: EdictT | null, what: string): EdictT {
   return e;
 }
 
+/*
+RERELEASE CONTENT PORT -- a trigger may be authored with no brush model.
+
+g_trigger.c's InitTrigger (and SP_trigger_multiple, which inlines the same
+body rather than calling it) does `gi.setmodel (self, self->model);`
+unconditionally. sv_game.c's PF_setmodel opens with
+`if (!name) gi.error ("PF_setmodel: NULL");`, so a trigger entity with no
+"model" key drops the server before the map finishes spawning.
+
+The re-release added a guard, g_trigger.cpp:21-24:
+    // [Paril-KEX] adjusted to allow mins/maxs to be defined
+    // by hand instead
+    if (self->model)
+        gi.setmodel(self, self->model);
+so a point-entity trigger positioned by hand (origin + mins/maxs, or used
+purely as a target relay) is legal content. Five shipped maps author one:
+badlands (trigger_once "t255"), city2 ("t180"), outbase ("t238"),
+rhangar2 ("t1") and q64/orbit (a trigger_coop_relay, "wait_players_relay",
+which reaches this through g_kextrig.ts's SP_trigger_coop_relay). Without
+the guard the classic module cannot reach ss_game on any of them, while the
+re-release module boots all five.
+
+Purely additive with respect to 1997 content: the guard only skips a call
+that would have been a fatal error, so any map that used to spawn still
+spawns identically. No map in the 1997 tree authors a model-less trigger --
+if one did, vanilla 3.21 itself would have dropped on it.
+*/
 export function InitTrigger(self: EdictT): void {
   if (VectorCompare(self.s.angles, vec3_origin) === 0) G_SetMovedir(self.s.angles, self.movedir);
 
   self.solid = SolidT.SOLID_TRIGGER;
   self.movetype = MovetypeT.MOVETYPE_NONE;
-  gi.setmodel(self, self.model ?? "");
+  // g_trigger.cpp:21-24 -- see the note above this function.
+  if (self.model !== null && self.model !== "") gi.setmodel(self, self.model);
   self.svflags = SVF_NOCLIENT;
 }
 
@@ -135,7 +163,11 @@ export function SP_trigger_multiple(ent: EdictT): void {
 
   if (VectorCompare(ent.s.angles, vec3_origin) === 0) G_SetMovedir(ent.s.angles, ent.movedir);
 
-  gi.setmodel(ent, ent.model ?? "");
+  // Same guard as InitTrigger above (g_trigger.cpp:21-24). Vanilla's
+  // SP_trigger_multiple inlines InitTrigger's body instead of calling it,
+  // so the guard has to be repeated here; the re-release's own
+  // SP_trigger_multiple calls InitTrigger and picks it up for free.
+  if (ent.model !== null && ent.model !== "") gi.setmodel(ent, ent.model);
   gi.linkentity(ent);
 }
 
