@@ -63,6 +63,7 @@ import { decodePNG } from "../qcommon/png";
 import { decodeJPG } from "../qcommon/jpg";
 import { decodeBMP } from "../qcommon/bmp";
 import { decodeGIF } from "../qcommon/gif";
+import { decodeTGA } from "../qcommon/tga";
 import { imageExtCandidates, type ImgExtT } from "../qcommon/img_resolve";
 
 // r_image.c owns this counter; r_model.c's copy of the same name cannot be
@@ -329,6 +330,47 @@ export function LoadGIFQuantized(name: string): { pic: Uint8Array | null; width:
   return result;
 }
 
+// TARGA LOADING (truecolor -> palette quantization).
+//
+// Vanilla ref_soft had no .tga path at all: id shipped every sky twice,
+// env/*.pcx for this renderer and env/*.tga for ref_gl, so "pcx only" cost
+// the software renderer nothing. The 2023 rerelease ships env/ skies as
+// .tga ONLY -- baseq2/pak0.pak carries 154 env/ entries and not one of them
+// is a .pcx -- so on rerelease content R_SetSky's six R_FindImage calls all
+// missed, r_skytexinfo[i].image stayed null, and D_SkySurf's `if
+// (!texinfo.image) return` (r_edge.ts, vanilla's own guard) silently drew
+// nothing. On an outdoor rerelease map that is ~92% of the screen left
+// holding whatever the previous frame put there, with no error printed
+// anywhere -- measured on maps/mgu4m1.bsp: 442924 of 480000 pixels at
+// 800x600 belonged to SURF_DRAWSKYBOX spans that painted zero pixels.
+//
+// Decoding lives in qcommon/tga.ts (see that file's header) so this is the
+// same truecolor-in/palette-out shape as LoadPNG/JPG/BMP/GIFQuantized
+// above, sharing the identical QuantizeRGBAToPalette pipeline.
+// ref_gl/gl_image.ts's own LoadTGA is deliberately untouched.
+export function LoadTGAQuantized(name: string): { pic: Uint8Array | null; width: number; height: number } {
+  const result: { pic: Uint8Array | null; width: number; height: number } = { pic: null, width: 0, height: 0 };
+
+  const { data: buffer } = ri.FS_LoadFile(name);
+  if (!buffer) {
+    ri.Con_Printf(PRINT_DEVELOPER, `Bad tga file ${name}\n`);
+    return result;
+  }
+
+  const decoded = decodeTGA(buffer);
+  ri.FS_FreeFile(buffer);
+
+  if (!decoded.ok) {
+    ri.Con_Printf(PRINT_ALL, `Bad tga file ${name}: ${decoded.reason}\n`);
+    return result;
+  }
+
+  result.pic = QuantizeRGBAToPalette(decoded.image.pixels, decoded.image.width, decoded.image.height);
+  result.width = decoded.image.width;
+  result.height = decoded.image.height;
+  return result;
+}
+
 //=======================================================
 
 function R_FindFreeImage(): ImageT {
@@ -429,7 +471,19 @@ function R_LoadWal(name: string): ImageT | null {
 // IM_MAX "unrecognized extension" path (images.c:1824-1830) -- still gets
 // the full substitution search run against it (e.g. a wall texture named
 // "x.tga" with a "x.png" sibling on disk still resolves).
-const SOFT_SUPPORTED_EXTS: readonly ImgExtT[] = ["pcx", "wal", "png", "jpg", "jpeg", "bmp", "gif"];
+// "tga" joins this list as of the sky fix above (see LoadTGAQuantized):
+// the rerelease ships env/ skies as .tga only, and the software renderer
+// can now quantize them like every other truecolor source. This is the
+// same membership ref_gl's GL_SUPPORTED_EXTS has always had, so both
+// renderers now resolve an image name through an identical candidate list
+// (imageExtCandidates, qcommon/img_resolve.ts).
+//
+// Ordering note: imageExtCandidates always tries the caller's OWN
+// extension first, so adding "tga" can only change the outcome for a name
+// whose natively-requested file is missing -- a classic tree, where every
+// requested .pcx/.wal is present, resolves exactly as it did before
+// (verified: byte-identical base1 frame).
+const SOFT_SUPPORTED_EXTS: readonly ImgExtT[] = ["pcx", "wal", "tga", "png", "jpg", "jpeg", "bmp", "gif"];
 
 // Extension string (no leading dot, e.g. "jpeg" not ".jpeg") -> ImgExtT --
 // a plain lookup rather than a fixed-length suffix slice, since ".jpeg" is
@@ -439,6 +493,8 @@ function softExtOf(ext: string): ImgExtT | null {
   switch (ext) {
     case "pcx":
       return "pcx";
+    case "tga":
+      return "tga";
     case "wal":
       return "wal";
     case "png":
@@ -492,12 +548,11 @@ function R_LoadByExt(name: string, ext: ImgExtT, type: ImagetypeT): ImageT | nul
       if (!pic) return null;
       return GL_LoadPic(name, pic, width, height, type);
     }
-    case "tga":
-      // Never actually reached: "tga" is absent from SOFT_SUPPORTED_EXTS,
-      // so imageExtCandidates never produces it as a candidate for this
-      // renderer (see that constant's own comment above). Only present so
-      // this switch stays exhaustive over the full ImgExtT union.
-      return null;
+    case "tga": {
+      const { pic, width, height } = LoadTGAQuantized(name);
+      if (!pic) return null;
+      return GL_LoadPic(name, pic, width, height, type);
+    }
   }
 }
 

@@ -18,6 +18,7 @@ it from this module.
 
 import { type Vec3, vec3, DotProduct, VectorLength } from "../shared/math";
 import { CplaneT, CONTENTS_SOLID, SURF_SKY, SURF_WARP, SURF_FLOWING, ERR_DROP, PRINT_ALL, PRINT_DEVELOPER, Com_sprintf } from "../shared/q_shared";
+import { MAX_MODELS_WIDE } from "../shared/cs_remap";
 import {
   type LumpT,
   type DmodelT,
@@ -474,7 +475,25 @@ export function SetRegistrationSequence(v: number): void {
 // (an imported `let` binding is read-only to the importer -- the same
 // situation as g_local.ts's SetGEdicts, see PORTING.md's globals section).
 
-const MAX_MOD_KNOWN = 256;
+// vanilla ref_soft/r_model.c's own #define is 256 (gl_model.c's is 512 --
+// see gl_model.ts). Both were sized for the classic wire format, where
+// CS_MODELS held at most MAX_MODELS(256) names. A widened session
+// (shared/cs_remap.ts, protocol 4038) negotiates the rerelease layout
+// instead: MAX_MODELS_WIDE is 8192, of which "half is reserved for inline
+// BSP models" -- so up to 4096 non-inline models can be registered, and a
+// map may carry up to that many *N submodels. At 256 the software
+// renderer hard-errored ("mod_numknown == MAX_MOD_KNOWN") on the first,
+// and the submodel setup loop in Mod_LoadBrushModel indexed mod_inline
+// past its end on the second (an undefined slot, so `starmod.clear()`
+// threw rather than reporting anything useful).
+//
+// Raised to the wide layout's real ceiling. The backing arrays still start
+// at the vanilla count and grow on demand (ensureModSlot below), so
+// classic content allocates exactly what it always did -- a ModelT is a
+// large object and preallocating 4096 of them twice over would cost far
+// more than any map actually uses.
+const MAX_MOD_KNOWN = MAX_MODELS_WIDE / 2;
+const MOD_PREALLOC = 256; // vanilla's own MAX_MOD_KNOWN; the growth floor
 // Exported beyond r_model.h's surface purely for test introspection: several
 // call sites below (R_InitSkyBox, D_FlushCaches, R_NewMap, R_FindImage) are
 // pending stubs in sibling ref_soft units at the time, so a full Mod_ForName/
@@ -482,10 +501,20 @@ const MAX_MOD_KNOWN = 256;
 // mutated the model object in place. Exposing the backing array lets tests
 // inspect that mutated state the same way cmodel.ts exposes
 // CM_MarkMapLoadedForTesting for an analogous reason.
-export const mod_known: ModelT[] = Array.from({ length: MAX_MOD_KNOWN }, () => new ModelT());
+export const mod_known: ModelT[] = Array.from({ length: MOD_PREALLOC }, () => new ModelT());
 let mod_numknown = 0;
 // the inline * models from the current map are kept seperate
-export const mod_inline: ModelT[] = Array.from({ length: MAX_MOD_KNOWN }, () => new ModelT());
+export const mod_inline: ModelT[] = Array.from({ length: MOD_PREALLOC }, () => new ModelT());
+
+// Grows `arr` in place until index `i` exists, then returns that slot.
+// Grown IN PLACE (push, never reassignment) on purpose: mod_known and
+// mod_inline are exported bindings that r_main.ts and this port's tests
+// hold direct references to, so replacing the array object would strand
+// every one of them on the old copy.
+function ensureModSlot(arr: ModelT[], i: number): ModelT {
+  while (arr.length <= i) arr.push(new ModelT());
+  return arr[i];
+}
 
 let modfilelen = 0;
 
@@ -583,7 +612,7 @@ export function Mod_ForName(name: string, crash: boolean): ModelT | null {
     if (i < 1 || !r_worldmodel || i >= r_worldmodel.numsubmodels) {
       ri.Sys_Error(ERR_DROP, "bad inline model number");
     }
-    return mod_inline[i];
+    return ensureModSlot(mod_inline, i);
   }
 
   //
@@ -606,7 +635,7 @@ export function Mod_ForName(name: string, crash: boolean): ModelT | null {
     }
     mod_numknown++;
   }
-  const mod = mod_known[i];
+  const mod = ensureModSlot(mod_known, i);
   mod.name = name;
 
   //
@@ -1879,7 +1908,7 @@ function Mod_LoadBrushModel(mod: ModelT, buffer: Uint8Array): void {
   //
   for (let i = 0; i < mod.numsubmodels; i++) {
     const bm = mod.submodels[i];
-    const starmod = mod_inline[i];
+    const starmod = ensureModSlot(mod_inline, i);
 
     starmod.clear();
     Object.assign(starmod, loadmodel); // *starmod = *loadmodel; (shallow struct copy)

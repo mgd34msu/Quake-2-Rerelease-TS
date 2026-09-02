@@ -115,6 +115,10 @@ import {
   r_visframecount,
   surf_max,
   surfaces,
+  r_outofsurfaces,
+  r_outofedges,
+  SetOutOfSurfaces,
+  SetOutOfEdges,
   SetAliasUvScale,
   SetAuxEdges,
   SetClipflags,
@@ -162,7 +166,7 @@ import { r_worldmodel, R_DrawSolidClippedSubmodelPolygons, R_DrawSubmodelPolygon
 import { Draw_Char, Draw_ColorPic, Draw_FadeScreen, Draw_Fill, Draw_FindPic, Draw_GetPicSize, Draw_InitLocal, Draw_Pic, Draw_StretchPic, Draw_StretchPicRegion, Draw_StretchRaw, Draw_TileClear } from "./r_draw";
 import { LoadPCX, R_FindImage, R_ImageList_f, R_InitImages, R_RegisterSkin, R_RegisterRawPic, R_ShutdownImages } from "./r_image";
 import { R_BeginEdgeFrame, R_ScanEdges, R_SurfacePatch } from "./r_edge";
-import { r_skytexinfo } from "./r_rast";
+import { r_skytexinfo, R_SetSkyTextureSize } from "./r_rast";
 import { D_FlushCaches, R_InitCaches } from "./r_surf";
 import { D_SetZBuffer, D_WarpScreen } from "./r_scan";
 import { R_LightPoint, R_PushDlights } from "./r_light";
@@ -184,6 +188,53 @@ const MINSURFACES = 1000; // NUMSTACKSURFACES (r_local.ts)
 const MINEDGES = 2000; // NUMSTACKEDGES (r_local.ts)
 const NUMSTACKSURFACES = 1000;
 const NUMSTACKEDGES = 2000;
+
+// Per-frame surface/edge pool ceilings for rerelease-family content.
+//
+// R_NewMap below sized both pools to the vanilla MINSURFACES/MINEDGES
+// constants (1000/2000) no matter how big the map was, and
+// R_RenderFace/R_RenderBmodelFace (r_rast.ts) drop every face past those
+// bounds SILENTLY -- they only bump r_outofsurfaces/r_outofedges, which
+// until now nothing ever read (see R_RenderFrame's report block). Vanilla
+// got away with it because a 1997 map never put 1000 faces in one view.
+// A rerelease map does: measured on maps/mgu4m1.bsp ("Uplink Tower",
+// 55990 faces) a single 800x600 view queues 4421 surfaces / 6455 edges,
+// so with the old sizing ~3600 faces PER FRAME were thrown away and the
+// software renderer simply left those pixels holding the previous frame.
+//
+// The pools are now sized from the loaded world model, which is a true
+// upper bound on the world faces one frame can queue, then clamped into
+// [MIN*, MAX_POOL_*]. The ceilings keep a huge map from allocating one
+// SurfT/EdgeT per face when only a few thousand are ever live at once
+// (mgu4m1 would otherwise want 55990 surfaces for a measured peak of
+// 4421); they sit ~7x above the worst per-frame demand measured across
+// the rerelease "Call of the Machine" map set. Classic maps land far
+// below both ceilings and, never having overflowed in the first place,
+// render byte-identically either way (verified on base1).
+const MAX_POOL_SURFACES = 32768;
+const MAX_POOL_EDGES = 98304;
+
+// Faces contribute (numedges + 4) edges each; the measured surface:edge
+// ratio on rerelease content is ~1.5:1, so 3x the surface budget leaves
+// generous headroom while staying proportional (vanilla's own fixed pair
+// is 2:1).
+const EDGES_PER_SURFACE = 3;
+
+/*
+Auto-sizing for sw_maxsurfs/sw_maxedges (both default to "0" = auto).
+
+Reads the world model that R_BeginRegistration has already loaded --
+R_NewMap is called immediately after SetWorldModel(R_RegisterModel(...))
+in r_model.ts, so r_worldmodel is always current here. Falls back to the
+vanilla minimum when there is no world model yet (a null-worldmodel
+R_NewMap can happen before the first map is loaded).
+*/
+function autoSurfaceBudget(): number {
+  const world = r_worldmodel;
+  if (!world || world.numsurfaces <= 0) return MINSURFACES;
+  const wanted = world.numsurfaces + NUMSTACKSURFACES;
+  return wanted > MAX_POOL_SURFACES ? MAX_POOL_SURFACES : wanted;
+}
 
 // r_main.c's own file-scope cvars that rCvars (r_local.ts) has no field
 // for -- see this file's header comment.
@@ -234,9 +285,31 @@ R_InitTurb
 */
 export function R_InitTurb(): void {
   // C hardcodes 1280 here; the tables now scale with MAXWIDTH (mode 10)
+  //
+  // Math.trunc, because r_local.h declares all three of these as `int
+  // sintable[]/intsintable[]/blanktable[]` -- the C assignment truncates
+  // the double toward zero, and this port was storing the raw fraction.
+  //
+  // intsintable is the load-bearing one: D_WarpScreen (r_scan.ts) uses it
+  // as an ARRAY SUBSCRIPT (`rowptr[v + turb(u)]`, `column[turb(v) + u]`).
+  // With a fractional value those became fractional keys, which in JS are
+  // simply absent properties -- `rowptr[302.85]` is undefined, the row +
+  // column sum is NaN, `r_warpbuffer[NaN]` is undefined, and assigning
+  // undefined into a Uint8Array stores 0. So EVERY pixel of the warped
+  // view came out palette index 0: the whole underwater view rendered
+  // black, with only the full-screen blend tinting it (measured on
+  // maps/mgu5m2.bsp and maps/mguhub.bsp, both of which put the player in
+  // water at spawn -- RDF_UNDERWATER, sw_waterwarp on by default; the
+  // warp buffer itself was fully populated the whole time, 76800/76800
+  // non-zero bytes).
+  //
+  // sintable is truncated for the same declared-as-int reason. It cannot
+  // change any rendered pixel: its only consumers add it to an integer
+  // fixed-point accumulator and immediately `>> 16`, and adding a
+  // fraction < 1 to an integer never moves that shift's result.
   for (let i = 0; i < SIN_BUFFER_SIZE; i++) {
-    sintable[i] = AMP + Math.sin(((i * 3.14159 * 2) / CYCLE)) * AMP;
-    intsintable[i] = AMP2 + Math.sin(((i * 3.14159 * 2) / CYCLE)) * AMP2; // AMP2, not 20
+    sintable[i] = Math.trunc(AMP + Math.sin(((i * 3.14159 * 2) / CYCLE)) * AMP);
+    intsintable[i] = Math.trunc(AMP2 + Math.sin(((i * 3.14159 * 2) / CYCLE)) * AMP2); // AMP2, not 20
     blanktable[i] = 0; //PGM
   }
 }
@@ -247,7 +320,11 @@ export function R_Register(): void {
   rCvars.sw_clearcolor = ri.Cvar_Get("sw_clearcolor", "2", 0);
   rCvars.sw_drawflat = ri.Cvar_Get("sw_drawflat", "0", 0);
   rCvars.sw_draworder = ri.Cvar_Get("sw_draworder", "0", 0);
-  rCvars.sw_maxedges = ri.Cvar_Get("sw_maxedges", String(NUMSTACKSURFACES), 0);
+  // Both pool cvars now default to "0" = auto-size from the world model
+  // (R_NewMap). Vanilla registered sw_maxedges at NUMSTACKSURFACES (1000),
+  // which R_NewMap then floored to MINEDGES (2000) anyway -- so the only
+  // behavior this default changes is the one that had to change.
+  rCvars.sw_maxedges = ri.Cvar_Get("sw_maxedges", "0", 0);
   rCvars.sw_maxsurfs = ri.Cvar_Get("sw_maxsurfs", "0", 0);
   rCvars.sw_mipcap = ri.Cvar_Get("sw_mipcap", "0", 0);
   rCvars.sw_mipscale = ri.Cvar_Get("sw_mipscale", "1", 0);
@@ -369,8 +446,12 @@ R_NewMap
 export function R_NewMap(): void {
   SetViewCluster(-1);
 
+  // sw_maxsurfs <= 0 means "auto" (its own default): size from the world
+  // model rather than vanilla's fixed 1000. An explicit non-zero value
+  // still wins outright, exactly as before.
   let cnumsurfs = rCvars.sw_maxsurfs ? rCvars.sw_maxsurfs.value | 0 : 0;
 
+  if (cnumsurfs <= 0) cnumsurfs = autoSurfaceBudget();
   if (cnumsurfs <= MINSURFACES) cnumsurfs = MINSURFACES;
   SetCnumSurfs(cnumsurfs);
 
@@ -391,8 +472,15 @@ export function R_NewMap(): void {
   SetMaxEdgesSeen(0);
   SetMaxSurfsSeen(0);
 
+  // sw_maxedges <= 0 means "auto", derived from the surface budget just
+  // computed (see EDGES_PER_SURFACE). An explicit non-zero value still
+  // wins outright and is still floored at MINEDGES, as before.
   let numallocatededges = rCvars.sw_maxedges ? rCvars.sw_maxedges.value | 0 : 0;
 
+  if (numallocatededges <= 0) {
+    numallocatededges = cnumsurfs * EDGES_PER_SURFACE;
+    if (numallocatededges > MAX_POOL_EDGES) numallocatededges = MAX_POOL_EDGES;
+  }
   if (numallocatededges < MINEDGES) numallocatededges = MINEDGES;
   SetNumAllocatedEdges(numallocatededges);
 
@@ -883,6 +971,22 @@ export function R_RenderFrame(fd: RefdefT): void {
   if (rCvars.r_speeds && rCvars.r_speeds.value) R_PrintTimes();
 
   if (rCvars.r_dspeeds && rCvars.r_dspeeds.value) R_PrintDSpeeds();
+
+  // Vanilla r_main.c's own surface/edge starvation report. Both cvars were
+  // already registered by R_Register (and are still default-off, so this
+  // prints nothing unless asked), but nothing in this port ever READ them
+  // -- which is exactly why a map that lost ~3600 faces every frame did so
+  // with no diagnostic of any kind. Counters are reset per frame here so
+  // the number reported is this frame's shortfall rather than a
+  // session-long running total (nothing else resets them).
+  if (rCvars.sw_reportsurfout && rCvars.sw_reportsurfout.value && r_outofsurfaces) {
+    ri.Con_Printf(PRINT_ALL, `Short ${r_outofsurfaces} surfaces\n`);
+  }
+  if (rCvars.sw_reportedgeout && rCvars.sw_reportedgeout.value && r_outofedges) {
+    ri.Con_Printf(PRINT_ALL, `Short roughly ${Math.trunc((r_outofedges * 2) / 3)} edges\n`);
+  }
+  SetOutOfSurfaces(0);
+  SetOutOfEdges(0);
 }
 
 /*
@@ -1074,8 +1178,17 @@ export function R_SetSky(name: string, rotate: number, axis: Vec3): void {
   VectorCopy(axis, skyaxis);
 
   for (let i = 0; i < 6; i++) {
+    // Still spelled ".pcx" exactly as vanilla did -- R_FindImage resolves
+    // through the shared extension-candidate chain (qcommon/img_resolve.ts)
+    // and now reaches the rerelease's .tga-only env/ skies too (see
+    // r_image.ts's SOFT_SUPPORTED_EXTS / LoadTGAQuantized).
     const pathname = Com_sprintf("env/%s%s.pcx", skyname, suf[r_skysideimage[i]]);
-    r_skytexinfo[i].image = R_FindImage(pathname, ImagetypeT.it_sky);
+    const image = R_FindImage(pathname, ImagetypeT.it_sky);
+    r_skytexinfo[i].image = image;
+    // Re-window this sky side for the image actually loaded; falls back to
+    // vanilla's 256x256 assumption when the side is missing entirely (in
+    // which case D_SkySurf draws nothing for it, exactly as before).
+    R_SetSkyTextureSize(i, image ? image.width : 256, image ? image.height : 256);
   }
 }
 

@@ -887,7 +887,11 @@ function D_SkySurf(s: SurfT): void {
   miplevel = 0;
   const texinfo = msurf.texinfo;
   if (texinfo === null || texinfo.image === null) return;
-  D_SetCacheSource(texinfo.image.pixels[0], 256);
+  // cachewidth is the sky image's own row stride, not vanilla's hardcoded
+  // 256: the rerelease ships 512x512 skies too, and r_rast.ts's
+  // R_SetSkyTextureSize has already widened this face's texture window to
+  // match, so the two have to agree or every span samples the wrong row.
+  D_SetCacheSource(texinfo.image.pixels[0], texinfo.image.width);
 
   D_SetZGradients(s.d_zistepu, s.d_zistepv, s.d_ziorigin);
 

@@ -189,6 +189,53 @@ let r_skyedges: MedgeT[] = [];
 R_InitSkyBox
 ================
 */
+// The sky-box side length vanilla assumed, in texels. Vanilla ref_soft only
+// ever saw 256x256 env/*.pcx skies, so R_InitSkyBox hardcoded a 256-texel
+// face (texturemins -128, extents 256) and D_SkySurf (r_edge.ts) hardcoded
+// cachewidth 256 to match. The rerelease ships 512x512 skies as well
+// (env/strogg_moon_*, env/hub_*, env/u6_*, env/the_moon_*,
+// env/ruined_earth_city_* are 512; env/moon*, env/space* are 256), and at
+// the fixed 256 those sampled one corner of the image smeared across the
+// whole sky -- a flat wash of colour, not a skybox.
+const SKY_BASE_SIZE = 256;
+
+/*
+Rebinds sky side `i` to a texture of `width` x `height` texels.
+
+The sky box's six faces are a fixed 256-unit cube around the viewpoint
+(box_verts * 128), so mapping an NxN texture onto one face means scaling
+that face's texture axes by N/256 and widening its texture-space window to
+match: D_CalcGradients (r_edge.ts) derives every gradient from exactly
+these three -- texinfo.vecs, texturemins and extents -- and bbextents
+clamps sampling to `extents`, so all three have to move together or the
+sky samples off the end of its own image. vecs[*][3] is NOT set here:
+R_EmitSkyBox recomputes it from r_origin every frame, and it stays correct
+because it is derived from these same (now scaled) axes.
+
+Kept vanilla-exact for a 256x256 sky: scale 1, texturemins -128, extents
+256 -- byte-identical to the constants this replaced.
+*/
+export function R_SetSkyTextureSize(i: number, width: number, height: number): void {
+  const sx = width / SKY_BASE_SIZE;
+  const sy = height / SKY_BASE_SIZE;
+
+  for (let j = 0; j < 3; j++) {
+    r_skytexinfo[i].vecs[0][j] = box_vecs[i][0][j] * sx;
+    r_skytexinfo[i].vecs[1][j] = box_vecs[i][1][j] * sy;
+  }
+
+  // R_SetSky can be called before R_InitSkyBox has built the faces (a
+  // sky configstring with no world model yet); the texinfo scaling above
+  // is still worth keeping, the face window simply lands next map.
+  const face = r_skyfaces[i];
+  if (face === undefined) return;
+
+  face.texturemins[0] = -(width >> 1);
+  face.texturemins[1] = -(height >> 1);
+  face.extents[0] = width;
+  face.extents[1] = height;
+}
+
 export function R_InitSkyBox(): void {
   const loadmodel = modelMod().loadmodel;
 
@@ -248,18 +295,18 @@ export function R_InitSkyBox(): void {
     plane.normal[skybox_planes[i * 2]] = 1;
     plane.dist = skybox_planes[i * 2 + 1];
 
-    VectorCopy(box_vecs[i][0], r_skytexinfo[i].vecs[0]);
-    VectorCopy(box_vecs[i][1], r_skytexinfo[i].vecs[1]);
-
     face.plane = plane;
     face.numedges = 4;
     face.flags = box_faces[i] | SURF_DRAWSKYBOX;
     face.firstedge = loadmodel.numsurfedges - 24 + i * 4;
     face.texinfo = r_skytexinfo[i];
-    face.texturemins[0] = -128;
-    face.texturemins[1] = -128;
-    face.extents[0] = 256;
-    face.extents[1] = 256;
+
+    // Default to vanilla's 256x256 sky. R_SetSky (r_main.ts) re-applies
+    // this per side with the real image size once the sky images are
+    // loaded -- which happens after this function, since R_InitSkyBox runs
+    // during Mod_LoadBrushModel and the client only calls SetSky at the
+    // end of registration.
+    R_SetSkyTextureSize(i, SKY_BASE_SIZE, SKY_BASE_SIZE);
   }
 
   for (let i = 0; i < 24; i++) {
