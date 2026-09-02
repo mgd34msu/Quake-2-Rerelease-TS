@@ -109,21 +109,39 @@
 // succeeding with both files importing each other.
 //
 // ============================================================================
-// `st` (spawn_temp_t) -- a real-shaped, permanently-default placeholder
+// `st` (spawn_temp_t) -- the ONE shared global, imported from g_spawn.ts
 // ============================================================================
-// Same precedent g_misc.ts's own header already established for itself: no
-// src/kexgame/g_spawn.ts exists yet, so there is no shared global `st` to
-// import. This file reads `st.lip`/`st.height`/`st.distance`/`st.noise`/
-// `st.noise_start`/`st.noise_middle`/`st.noise_end`/`st.pausetime`/
-// `st.keys_specified` (`st.was_key_specified(key)` inlined as
-// `st.keys_specified.has(key)`, the real method body -- see
-// g_local_types.ts's own SpawnTempT comment), so a full, real `SpawnTempT`
-// object is built here too, all-zero/all-null, identical in shape to
-// g_misc.ts's own placeholder. CONSEQUENCE, stated plainly: every "lip
-// defaults to 8/4" etc. fallback below always takes the "unset" branch until
-// a future g_spawn.ts lands and wires a real per-entity `st` through
-// SpawnEntities. A future unit should delete this placeholder and import
-// the real one.
+// This file used to declare its own module-private, permanently-default
+// `SpawnTempT` placeholder, because it was written before
+// src/kexgame/g_spawn.ts existed and there was no shared `st` to import. The
+// header text that stood here said so, and ended "A future unit should delete
+// this placeholder and import the real one." g_spawn.ts has since landed --
+// it owns `export const st` (g_spawn.ts:719), mutated in place by
+// `ClearSpawnTemp()` and `ED_ParseField` exactly the way the classic module's
+// src/game/g_local.ts `st` is -- but this file was never migrated off the
+// stand-in, so every `st.*` read below silently saw a zeroed object.
+//
+// CONSEQUENCE while that stood, stated plainly: every map-authored spawn-temp
+// key this file reads was ignored and the "unset" fallback always won.
+// Measured on mgu2m3's `{"classname":"func_door","angle":"-1","speed":"200",
+// "lip":"16","model":"*90"}`: the real parser put `st.lip = 16` in g_spawn.ts's
+// `st`, but SP_func_door read its own local `st.lip == 0`, took the
+// `if (!st.lip) st.lip = 8;` fallback, and computed
+// `moveinfo.distance = 130 - 8 = 122` instead of the correct `130 - 16 = 114`
+// the classic module produces from the same entity -- an 8-unit-too-far travel
+// on that door, and the same shape of error on every other key below. The
+// affected keys are `lip`, `distance`, `height`, `noise`, `noise_start`,
+// `noise_middle`, `noise_end`, `pausetime`, `radius` and `keys_specified`,
+// read by SP_func_door, SP_func_door_rotating, SP_func_plat, SP_func_rotating,
+// SP_func_train, SP_func_water, SP_func_timer and SP_func_eye.
+//
+// The import below closes a two-way module cycle with g_spawn.ts (which
+// imports this file's SP_func_* spawn functions). That is the same safe cycle
+// this header already documents for rogue/g_rogue_func.ts, and safe for the
+// same reason: `st` is only ever dereferenced inside function bodies, never at
+// module-evaluation time. rogue/g_rogue_func.ts:108 already does exactly this
+// (`import { st } from "../g_spawn";`), citing this file's own stale
+// placeholder as the reason it does not use it. Verified by `bunx tsc --noEmit`.
 //
 // ============================================================================
 // FRAME_TIME_S / cvarOrDefault / edictFmt / anglemod / active_players --
@@ -245,14 +263,12 @@ import { vec3, type Vec3, VectorCopy } from "../shared/math";
 import type { CvarT } from "../shared/q_shared";
 import {
   type KexTraceT,
-  type ShadowLightDataT,
   ContentsT,
   SvflagsT,
   SolidT,
   SoundchanT,
   EffectsT,
   KexEntityEventT,
-  ShadowLightTypeT,
   MASK_WATER,
   ATTN_STATIC,
   ATTN_NONE,
@@ -264,7 +280,6 @@ import {
 import {
   type EdictT,
   type ModT,
-  type SpawnTempT,
   MovetypeT,
   EntFlagsT,
   MoveStateT,
@@ -295,6 +310,8 @@ import {
   vectoangles,
 } from "./q_vec3";
 import { G_Spawn, G_FreeEdict, G_PickTarget, G_UseTargets, G_SetMovedir, G_FindByString, KillBox } from "./g_utils";
+// The ONE shared spawn_temp_t -- see this file's header, "`st` (spawn_temp_t)".
+import { st } from "./g_spawn";
 import { T_Damage } from "./g_combat";
 import { BecomeExplosion1 } from "./g_misc";
 import {
@@ -354,59 +371,6 @@ function mod(id: ModIdT): ModT {
   return { id, friendly_fire: false, no_point_loss: false };
 }
 
-/** g_misc.ts's own `defaultShadowLightData()`, copied verbatim -- part of
- *  this file's own local `st` placeholder (see file header). */
-function defaultShadowLightData(): ShadowLightDataT {
-  return {
-    lighttype: ShadowLightTypeT.point,
-    radius: 0,
-    resolution: 0,
-    intensity: 0,
-    fade_start: 0,
-    fade_end: 0,
-    lightstyle: -1,
-    coneangle: 45,
-    conedirection: vec3(0, 0, 0),
-  };
-}
-
-const st: SpawnTempT = {
-  sky: null,
-  skyrotate: 0,
-  skyaxis: vec3(0, 0, 0),
-  skyautorotate: 0,
-  nextmap: null,
-  lip: 0,
-  distance: 0,
-  height: 0,
-  noise: null,
-  pausetime: 0,
-  item: null,
-  gravity: null,
-  minyaw: 0,
-  maxyaw: 0,
-  minpitch: 0,
-  maxpitch: 0,
-  sl: { data: defaultShadowLightData(), lightstyletarget: null },
-  music: null,
-  instantitems: 0,
-  radius: 0,
-  hub_map: false,
-  achievement: null,
-  goals: null,
-  image: null,
-  fade_start_dist: 0,
-  fade_end_dist: 0,
-  start_items: null,
-  no_grapple: 0,
-  health_multiplier: 1.0,
-  reinforcements: null,
-  noise_start: null,
-  noise_middle: null,
-  noise_end: null,
-  loop_count: 0,
-  keys_specified: new Set<string>(),
-};
 
 // ---------------------------------------------------------------------------
 // support routines for movement (changes in origin using velocity)

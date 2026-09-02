@@ -690,6 +690,29 @@ function syncEdictKexToEngine(kexEnt: KexEdictT, eng: Edict): void {
 // entirely this port's own architecture, and copying every engine-computed
 // field back is exactly what this function already exists to do.
 function syncLinkResultsToKex(eng: Edict, kexEnt: KexEdictT): void {
+  // SECOND INSTANCE OF THE SAME BUG AS `s.modelindex` ABOVE, one field over.
+  // PF_setmodel's inline-model branch (sv_game.ts) is the engine's only
+  // writer of `mins`/`maxs`: it reads CM_InlineModel("*N")'s bounds into
+  // `eng.mins`/`eng.maxs` and relinks. With no copy-back, `kexEnt.mins`/
+  // `kexEnt.maxs` stayed (0,0,0) on every kex brush entity -- and because
+  // `syncEdictKexToEngine` copies kex -> engine on the NEXT link, that zero
+  // box was then written back over the engine's own correct bounds, so the
+  // damage was not confined to the game module's view: SV_LinkEdict
+  // recomputed `size` as (0,0,0) and `absmin`/`absmax` as origin +/- 1 for
+  // every func_door/func_plat/func_train/func_button/func_wall and every
+  // brush trigger_* on the map. Observable result: those entities collapsed
+  // to a degenerate box at the world origin, so they left the player's PVS
+  // (invisible on screen), their auto-spawned door/plat trigger fields
+  // became ~122x122x2 boxes at the origin, and brush triggers could never be
+  // touched. Reproduced on mgu2m3, where the func_door "*90" in front of the
+  // start point vanished entirely and its trigger box came out as
+  // (-61,-61,-1)..(61,61,1) instead of (-1934,866,-1282)..(-1778,1118,-1150).
+  // Same rationale as the modelindex fix: the real engine has one edict_t,
+  // so copying every engine-computed field back is exactly this function's
+  // job. Idempotent on the linkentity path, where eng.mins/maxs were just
+  // synced from these same kex values a line earlier.
+  VectorCopy(eng.mins, kexEnt.mins);
+  VectorCopy(eng.maxs, kexEnt.maxs);
   VectorCopy(eng.absmin, kexEnt.absmin);
   VectorCopy(eng.absmax, kexEnt.absmax);
   VectorCopy(eng.size, kexEnt.size);

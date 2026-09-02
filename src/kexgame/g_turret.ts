@@ -68,7 +68,6 @@ import {
   type UseFn,
   type DieFn,
   type MoveinfoBlockedFn,
-  type SpawnTempT,
   type ModT,
   EntFlagsT,
   ModIdT,
@@ -76,10 +75,11 @@ import {
   MovetypeT,
   DamageflagsT,
 } from "./g_local";
-import { ShadowLightTypeT, SolidT, SoundchanT, SvflagsT, ATTN_NORM, MASK_MONSTERSOLID, MASK_SHOT, type CvarFlagsT } from "../kexapi/game";
+import { SolidT, SoundchanT, SvflagsT, ATTN_NORM, MASK_MONSTERSOLID, MASK_SHOT, type CvarFlagsT } from "../kexapi/game";
 import { RegisterThink, RegisterUse, RegisterDie, RegisterMoveinfoBlocked } from "./g_save_registry";
 import { gi, level } from "./g_main_globals";
 import { G_PickTarget, G_FreeEdict } from "./g_utils";
+import { st } from "./g_spawn";
 import { T_Damage } from "./g_combat";
 import { fire_rocket } from "./g_weapon";
 import { FindTarget, visible } from "./g_ai";
@@ -108,47 +108,13 @@ function edictFmt(ent: EdictT): string {
   return `${ent.classname} @ (${p[0]} ${p[1]} ${p[2]})`;
 }
 
-/** `st` (spawn_temp_t) -- see file header. */
-const st: SpawnTempT = {
-  sky: null,
-  skyrotate: 0,
-  skyaxis: vec3(0, 0, 0),
-  skyautorotate: 1,
-  nextmap: null,
-  lip: 0,
-  distance: 0,
-  height: 0,
-  noise: null,
-  pausetime: 0,
-  item: null,
-  gravity: null,
-  minyaw: 0,
-  maxyaw: 0,
-  minpitch: 0,
-  maxpitch: 0,
-  sl: {
-    data: { lighttype: ShadowLightTypeT.point, radius: 0, resolution: 0, intensity: 1, fade_start: 0, fade_end: 0, lightstyle: -1, coneangle: 45, conedirection: vec3(0, 0, 0) },
-    lightstyletarget: null,
-  },
-  music: null,
-  instantitems: 0,
-  radius: 0,
-  hub_map: false,
-  achievement: null,
-  goals: null,
-  image: null,
-  fade_start_dist: 96,
-  fade_end_dist: 384,
-  start_items: null,
-  no_grapple: 0,
-  health_multiplier: 1.0,
-  reinforcements: null,
-  noise_start: null,
-  noise_middle: null,
-  noise_end: null,
-  loop_count: 0,
-  keys_specified: new Set<string>(),
-};
+// The ONE shared spawn_temp_t. This file used to declare its own
+// permanently-default placeholder here (the same stale stand-in
+// src/kexgame/g_func.ts carried, for the same "g_spawn.ts did not exist yet"
+// reason), so SP_turret_breach/SP_turret_base/SP_turret_driver silently
+// ignored every map-authored `item`/`minyaw`/`maxyaw`/`minpitch`/`maxpitch`/
+// `noise` key and always took their hardcoded defaults. See g_func.ts's
+// header for the full derivation and the cycle-safety argument.
 
 // ---------------------------------------------------------------------------
 // unported cross-deps (throwing stubs) -- see file header
