@@ -66,6 +66,178 @@ const LCOLUMN_OFFSET = -16;
 const VID_WIDTH = () => viddef.width;
 const VID_HEIGHT = () => viddef.height;
 
+// Viewport-scrolling addition (Mike, 2026-09-02): qmenu has no notion of a
+// menu taller than the screen -- Menu_Draw just drew every item, so rows
+// past the bottom edge (or, in principle, above the top) were invisible and
+// unreachable at small video modes (menu_controllers at 320x240/400x300 is
+// the concrete case this fixes; menu.ts's Keys screen had the same class of
+// bug). Menu_ComputeWindow below decides, from viddef.height and the menu's
+// own y, which item indices fit; Menu_Draw shifts drawing by the result
+// (see there) and draws small indicator glyphs when rows are hidden above
+// or below.
+//
+// Indicator glyphs are plain ASCII '^'/'v' via the same DrawChar path as
+// everything else in this file, not a dedicated glyph-atlas index: this
+// mirrors console_impl.ts's own back-scroll indicator (a row of '^' chars
+// drawn with re.DrawChar when the console is scrolled back), and sidesteps
+// the exact problem Slider_Draw's DEVIATION comment above already hit --
+// the rerelease conchars atlas ships several of the "special" glyph cells
+// (128-130) completely empty, so an obscure index picked without checking
+// the actual asset can render as nothing. Plain ASCII glyphs are guaranteed
+// present (every menu label already renders through them).
+const ARROW_UP_CHAR = "^".charCodeAt(0);
+const ARROW_DOWN_CHAR = "v".charCodeAt(0);
+
+export interface MenuWindowT {
+  /** false when every item already fits between menu.y and the statusbar --
+   *  Menu_Draw then draws exactly as it did before this feature existed. */
+  scrollActive: boolean;
+  /** first visible item index (inclusive). */
+  firstIndex: number;
+  /** last visible item index (exclusive). */
+  lastIndex: number;
+  /** more items exist above firstIndex. */
+  showUp: boolean;
+  /** more items exist at/after lastIndex. */
+  showDown: boolean;
+  /** the menu's own per-item row stride, in pixels (derived from the items). */
+  rowHeight: number;
+  /** pixels to add to `menu.y` while drawing rows [firstIndex, lastIndex). */
+  yOffset: number;
+}
+
+/*
+Decides which of a menu's items currently fit on screen.
+
+The available vertical space runs from `menu.y` (unchanged -- this is where
+each screen's own title/banner placement already put it, Menu_Center or a
+manual assignment) down to 8px above the bottom of the screen (the statusbar
+strip Menu_DrawStatusBar always paints there). If every item's row already
+lies inside that span, no scrolling happens at all: firstIndex/lastIndex
+cover the whole menu and yOffset is 0, so a menu that already fit renders
+pixel-identical to the pre-scrolling code.
+
+When the content is taller than the available space, one row at the top and
+one at the bottom of the window are reserved for the scroll indicators
+(regardless of whether either indicator actually has anything to show, so
+the window size doesn't change as the player reaches either end of the
+list), and `menu.scrollTop` is nudged just far enough to keep the cursor
+item inside the remaining rows -- the same "scroll only when the cursor
+would go off the visible edge" behavior every scrollable listbox has.
+*/
+export function Menu_ComputeWindow(menu: MenuframeworkS): MenuWindowT {
+  const n = menu.nitems;
+  const DEFAULT_EMPTY: MenuWindowT = { scrollActive: false, firstIndex: 0, lastIndex: n, showUp: false, showDown: false, rowHeight: 10, yOffset: 0 };
+  if (n === 0) return DEFAULT_EMPTY;
+
+  // viddef starts at 0x0 before Vid_Init runs (and several qmenu unit tests
+  // fabricate a menu without ever touching viddef, same as they did before
+  // this feature existed). Height 0 means "no real screen to overflow yet",
+  // not "a screen 8 pixels shorter than the statusbar" -- treat it as an
+  // unconstrained viewport rather than let a negative `available` force
+  // every menu into scroll mode.
+  if (VID_HEIGHT() <= 0) return DEFAULT_EMPTY;
+
+  // Row stride: every screen in this codebase lays its items out in
+  // increasing-y order with one constant step per row (9 or 10 units
+  // depending on the screen -- see menu.ts's Controllers/Keys build code),
+  // so the smallest positive gap between consecutive items IS that step.
+  let rowHeight = 10;
+  let minGap = Infinity;
+  for (let i = 1; i < n; i++) {
+    const a = menu.items[i - 1];
+    const b = menu.items[i];
+    if (!a || !b) continue;
+    const gap = b.generic.y - a.generic.y;
+    if (gap > 0 && gap < minGap) minGap = gap;
+  }
+  if (minGap !== Infinity) rowHeight = minGap;
+
+  const firstItem = menu.items[0];
+  const lastItem = menu.items[n - 1];
+  const topY = firstItem ? firstItem.generic.y : 0;
+  const bottomY = (lastItem ? lastItem.generic.y : 0) + rowHeight;
+
+  const statusbarTop = VID_HEIGHT() - 8;
+  const available = statusbarTop - menu.y;
+  const contentHeight = bottomY - topY;
+
+  if (contentHeight <= available) {
+    return { scrollActive: false, firstIndex: 0, lastIndex: n, showUp: false, showDown: false, rowHeight, yOffset: 0 };
+  }
+
+  // Pixel budget for content rows, after reserving one rowHeight-tall slot
+  // at each end for the indicator glyphs (see the top-of-file comment).
+  // Deliberately NOT "how many rows of a constant height fit": real menus
+  // are not evenly spaced -- Controllers_MenuBuild (menu.ts) inserts a
+  // half-row gap between each player's block, so a row-COUNT budget can
+  // compute a window whose last item's real y falls past the screen edge.
+  // Everything below sizes the window by actual pixel span instead.
+  const budget = Math.max(rowHeight, available - 2 * rowHeight);
+
+  // Grows forward from `start`, including as many items as fit in `budget`
+  // pixels measured from item[start]'s own y (so item[start] always shows).
+  const forwardEnd = (start: number): number => {
+    const item0 = menu.items[start];
+    const startY = item0 ? item0.generic.y : 0;
+    let end = start;
+    while (end < n) {
+      const item = menu.items[end];
+      const span = (item ? item.generic.y : 0) - startY + rowHeight;
+      if (span > budget) break;
+      end++;
+    }
+    return Math.max(end, start + 1);
+  };
+
+  // Grows backward from `endExclusive - 1`, the mirror of forwardEnd: as
+  // many items as fit in `budget` pixels ending at that last item.
+  const backwardStart = (endExclusive: number): number => {
+    const lastItemAt = menu.items[endExclusive - 1];
+    const lastY = lastItemAt ? lastItemAt.generic.y : 0;
+    let start = endExclusive - 1;
+    while (start > 0) {
+      const candidate = menu.items[start - 1];
+      const span = lastY - (candidate ? candidate.generic.y : 0) + rowHeight;
+      if (span > budget) break;
+      start--;
+    }
+    return start;
+  };
+
+  let top = Math.max(0, Math.min(menu.scrollTop, n - 1));
+  let lastIndex = forwardEnd(top);
+
+  if (menu.cursor >= 0 && menu.cursor < n) {
+    if (menu.cursor < top) {
+      // cursor moved above the window: scroll up just enough to lead with it
+      top = menu.cursor;
+      lastIndex = forwardEnd(top);
+    } else if (menu.cursor >= lastIndex) {
+      // cursor moved below the window: scroll down just enough to trail it
+      lastIndex = menu.cursor + 1;
+      top = backwardStart(lastIndex);
+    }
+  }
+
+  top = Math.max(0, Math.min(top, n - 1));
+  lastIndex = Math.max(top + 1, Math.min(lastIndex, n));
+  menu.scrollTop = top;
+
+  const firstVisible = menu.items[top];
+  const yOffset = rowHeight - (firstVisible ? firstVisible.generic.y : topY);
+
+  return {
+    scrollActive: true,
+    firstIndex: top,
+    lastIndex,
+    showUp: top > 0,
+    showDown: lastIndex < n,
+    rowHeight,
+    yOffset,
+  };
+}
+
 function DrawChar(x: number, y: number, c: number): void {
   if (re) re.DrawChar(x, y, c);
 }
@@ -267,7 +439,13 @@ export function Field_Key(field: MenufieldS, key: number): boolean {
 }
 
 export function Menu_AddItem(menu: MenuframeworkS, item: MenuItemU): void {
-  if (menu.nitems === 0) menu.nslots = 0;
+  if (menu.nitems === 0) {
+    menu.nslots = 0;
+    // Viewport-scrolling addition: a screen rebuild (nitems reset to 0, then
+    // re-populated) starts back at the top of the list, same lifecycle as
+    // nslots above -- see MenuframeworkS.scrollTop in qmenu.ts.
+    menu.scrollTop = 0;
+  }
 
   if (menu.nitems < MAXMENUITEMS) {
     menu.items[menu.nitems] = item;
@@ -322,8 +500,21 @@ export function Menu_Center(menu: MenuframeworkS): void {
 }
 
 export function Menu_Draw(menu: MenuframeworkS): void {
-  // draw contents
-  for (let i = 0; i < menu.nitems; i++) {
+  const win = Menu_ComputeWindow(menu);
+  const originalY = menu.y;
+
+  // Shift the whole coordinate system the item-draw functions read (they
+  // all compute their y as `item.generic.y + parentOf(item.generic).y`, and
+  // the fallback cursor arrow and any per-menu `cursordraw` callback below
+  // read `menu.y` the same way -- e.g. menu.ts's Keys screen cursordraw)
+  // by mutating `menu.y` for the duration of this draw and restoring it
+  // before returning. When the menu fits (win.scrollActive is false),
+  // win.yOffset is 0 and this is a no-op: byte-identical to the
+  // pre-scrolling behavior.
+  menu.y = originalY + win.yOffset;
+
+  // draw contents -- only the rows the window currently shows
+  for (let i = win.firstIndex; i < win.lastIndex; i++) {
     const item = menu.items[i];
     if (!item) continue;
 
@@ -349,6 +540,21 @@ export function Menu_Draw(menu: MenuframeworkS): void {
       DrawChar(menu.x + item.generic.cursor_offset, menu.y + item.generic.y, frame);
     }
   }
+
+  if (win.scrollActive) {
+    // Fixed slots relative to the screen, not the item list: the up
+    // indicator sits at the menu's own (unshifted) top, the down indicator
+    // one rowHeight above the statusbar strip. Both stay put regardless of
+    // scroll position -- the window itself never resizes as the player
+    // reaches either end of the list. (Not derived from how many items are
+    // currently visible: Controllers_MenuBuild's irregular row spacing --
+    // a half-row gap between each player's block -- means item count and
+    // pixel span don't correspond 1:1; see Menu_ComputeWindow above.)
+    if (win.showUp) DrawChar(menu.x - 4, originalY, ARROW_UP_CHAR);
+    if (win.showDown) DrawChar(menu.x - 4, VID_HEIGHT() - 8 - win.rowHeight, ARROW_DOWN_CHAR);
+  }
+
+  menu.y = originalY;
 
   if (item) {
     if (item.generic.statusbarfunc) item.generic.statusbarfunc(item);

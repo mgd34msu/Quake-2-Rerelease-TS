@@ -44,6 +44,14 @@ export class MenuframeworkS {
   statusbar: string | null = null;
 
   cursordraw: ((m: MenuframeworkS) => void) | null = null;
+
+  // Viewport-scrolling addition (Mike, 2026-09-02): index of the first item
+  // Menu_Draw is currently showing, persisted across frames so a menu taller
+  // than the screen scrolls smoothly with the cursor instead of re-centering
+  // every draw. Reset to 0 by Menu_AddItem whenever a screen rebuilds from
+  // nitems=0 (qmenu_impl.ts), same lifecycle as `nslots` above. Untouched
+  // (stays 0) for any menu that fits the screen -- see Menu_ComputeWindow.
+  scrollTop = 0;
 }
 
 export class MenuCommonS {
