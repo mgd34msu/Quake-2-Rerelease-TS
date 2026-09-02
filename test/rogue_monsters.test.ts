@@ -145,6 +145,9 @@ function setupWorld(): void {
 function freshEdict(index: number): EdictT {
   const e = new EdictT();
   e.s.number = index;
+  // G_Spawn marks a live edict inuse; SP_* functions assume it. Without this
+  // the gib-death test's inuse assertions were meaningless.
+  e.inuse = true;
   g_edicts[index] = e;
   return e;
 }
@@ -283,7 +286,7 @@ for (const c of CASES) {
     test("deathmatch guard frees the edict instead of spawning", () => {
       setupWorld();
       gameCvars.deathmatch = fakeCvar(1);
-      const ent = freshEdict(2);
+      const ent = freshEdict(16) /* past the protected player/body-queue slots, so G_FreeEdict can act */;
 
       c.spawn(ent);
 
@@ -320,7 +323,11 @@ for (const c of CASES) {
 
     test("die with gib-level damage sets deadflag to DEAD_DEAD", () => {
       setupWorld();
-      const ent = freshEdict(2);
+      // Slot 16, not 2: G_FreeEdict refuses slots <= maxclients + BODY_QUEUE_SIZE
+      // (vanilla's `ed <= g_edicts + maxclients + BODY_QUEUE_SIZE` guard), so a
+      // monster parked in slot 2 could never be freed and turret_die's own
+      // G_FreeEdict was silently rejected.
+      const ent = freshEdict(16);
       c.spawn(ent);
       const inflictor = freshEdict(1);
       const attacker = freshEdict(1);
@@ -330,9 +337,17 @@ for (const c of CASES) {
       expect(() =>
         ent.die?.(ent, inflictor, attacker, 9999, vec3(ent.s.origin[0], ent.s.origin[1], ent.s.origin[2])),
       ).not.toThrow();
-      // C's turret_die never sets deadflag: it explodes, throws debris, and
-      // G_FreeEdicts itself -- death is ceasing to exist
-      expect(ent.inuse).toBe(false);
+      if (c.name === "monster_turret") {
+        // C's turret_die never sets deadflag: it explodes, throws debris, and
+        // G_FreeEdicts itself -- death is ceasing to exist
+        expect(ent.inuse).toBe(false);
+      } else {
+        // m_stalker.c / m_widow2.c gib branches: ThrowGibs + ThrowHead, then
+        // deadflag = DEAD_DEAD. ThrowHead keeps the edict alive as the head
+        // gib (think = G_FreeEdict, nextthink 10-20s out), so inuse stays true.
+        expect(ent.deadflag).toBe(DEAD_DEAD);
+        expect(ent.inuse).toBe(true);
+      }
     });
   });
 }
