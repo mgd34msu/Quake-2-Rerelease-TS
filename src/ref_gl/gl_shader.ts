@@ -76,7 +76,18 @@ import { ri, glCvars } from "./gl_local";
 import { type Vec3, vec3 } from "../shared/math";
 import { PRINT_ALL } from "../shared/q_shared";
 import { type DlightT } from "../client/ref";
-import { type ShadowMapBindingT, GL_ShadowMapBindings, GL_ShadowMapsReady, GL_ShadowMapTexture, GL_EyeToWorldMatrix, SHADOW_ATLAS_SIZE } from "./gl_shadowmap";
+import {
+  type ShadowMapBindingT,
+  GL_ShadowMapBindings,
+  GL_ShadowMapsReady,
+  GL_ShadowMapTexture,
+  GL_EyeToWorldMatrix,
+  SHADOW_ATLAS_SIZE,
+  SHADOW_NEAR,
+  SHADOW_CUBE_COLS,
+  SHADOW_CUBE_ROWS,
+  SHADOW_KIND_NONE,
+} from "./gl_shadowmap";
 
 const GL_TEXTURE0 = 0x84c0;
 const GL_TEXTURE1 = 0x84c1;
@@ -108,7 +119,9 @@ export const MAX_SHADER_LIGHTS = 8;
 // exactly the two combinations layers 1-2 actually use.
 export const GLS_LIGHTMAP = 1 << 0;
 export const GLS_DYNAMIC_LIGHTS = 1 << 1;
-// v1.1.0: sample gl_shadowmap.ts's depth atlas to occlude each cone light.
+// v1.1.0: sample gl_shadowmap.ts's depth atlas to occlude each shadow light --
+// a cone light through its own light matrix, a point light through the six
+// cube faces packed into its atlas rectangle.
 // A separate bit rather than a change to GLS_DYNAMIC_LIGHTS so the
 // unshadowed permutation stays compiled and available as the fallback when
 // the shadow permutation won't build on a given context.
@@ -126,6 +139,20 @@ export const GLS_ENTITY_MESH: GlShaderBits = GLS_DYNAMIC_LIGHTS;
 // bias here is what produces peter-panning (shadows detaching from their
 // caster's base).
 export const SHADOW_DEPTH_BIAS = 0.0005;
+
+// A point light's bias, in WORLD units rather than window depth. The cube
+// path inverts the stored depth back to a distance along the face axis (see
+// gl_shadowmap.ts's shadowCubeDepthCoefficients), which is exactly what makes
+// this possible -- a constant window-depth bias like the cone path's would be
+// worth 0.1 units next to the light and 30 units at the far plane, because
+// perspective depth is distributed as 1/distance.
+//
+// The constant term covers texel quantization; the texel term covers slope,
+// and is expressed in FACE TEXELS so that halving a light's face resolution
+// (which fitCandidatesToAtlas does under atlas pressure) widens the bias to
+// match instead of breaking out in acne.
+export const SHADOW_CUBE_BIAS = 1.0;
+export const SHADOW_CUBE_BIAS_TEXELS = 2.0;
 
 // --- uniform-binding table (pure data) ---------------------------------
 //
@@ -232,11 +259,18 @@ export function buildFragmentShaderSource(bits: GlShaderBits): string {
       // xy = this light's atlas rectangle origin, zw = its size, both already
       // normalized to [0,1] atlas UV by the caller
       `uniform vec4 u_light_atlas[${MAX_SHADER_LIGHTS}];`,
-      // 1.0 when this light owns an atlas rectangle, 0.0 when it does not
-      // (point lights, and cone lights the atlas had no room for) -- those
-      // keep the unoccluded contribution rather than being wrongly shadowed
+      // The light's KIND: 0 for a light with no atlas rectangle (one the
+      // atlas had no room for -- it keeps the unoccluded contribution rather
+      // than being wrongly shadowed), 1 for a cone light, 2 for a point
+      // light. A code rather than a second uniform array: the two kinds
+      // share every other uniform they need.
       `uniform float u_light_shadow[${MAX_SHADER_LIGHTS}];`,
       `#define SHADOW_DEPTH_BIAS ${SHADOW_DEPTH_BIAS}`,
+      `#define SHADOW_NEAR ${SHADOW_NEAR.toFixed(1)}`,
+      `#define SHADOW_CUBE_BIAS ${SHADOW_CUBE_BIAS.toFixed(1)}`,
+      `#define SHADOW_CUBE_BIAS_TEXELS ${SHADOW_CUBE_BIAS_TEXELS.toFixed(1)}`,
+      `#define SHADOW_CUBE_COLS ${SHADOW_CUBE_COLS.toFixed(1)}`,
+      `#define SHADOW_CUBE_ROWS ${SHADOW_CUBE_ROWS.toFixed(1)}`,
     );
   }
 
@@ -279,27 +313,92 @@ export function buildFragmentShaderSource(bits: GlShaderBits): string {
       // above already rely on.
       lines.push(
         `    if (u_light_shadow[i] != 0.0) {`,
-        `      vec4 lpos = u_light_matrix[i] * vec4(v_world_pos, 1.0);`,
-        `      if (lpos.w > 0.0) {`,
-        `        vec3 lproj = lpos.xyz / lpos.w;`,
-        // outside the light's own frustum there is no depth data to consult;
-        // leave the fragment lit rather than guessing (a wrong guess here is
-        // what paints hard black rectangles at shadow-map edges)
-        `        if (lproj.x >= 0.0 && lproj.x <= 1.0 && lproj.y >= 0.0 && lproj.y <= 1.0 && lproj.z <= 1.0) {`,
-        `          vec2 base = lproj.xy * u_light_atlas[i].zw + u_light_atlas[i].xy;`,
-        `          float lit = 0.0;`,
-        // 2x2 percentage-closer filter. Cheap, and enough to break up the
-        // stair-stepped edge a single tap gives at these map sizes.
+        // 1.0 == unoccluded. Every path below either leaves it there (the
+        // fragment is outside this light's depth data, where a guess is what
+        // paints hard black rectangles at map edges) or replaces it with the
+        // 2x2 percentage-closer average.
+        `      float lit = 1.0;`,
+        `      vec2 rect_lo = u_light_atlas[i].xy;`,
+        `      vec2 rect_size = u_light_atlas[i].zw;`,
+        `      if (u_light_shadow[i] < 1.5) {`,
+        // ---- cone light: one perspective depth map, one matrix ----
+        `        vec4 lpos = u_light_matrix[i] * vec4(v_world_pos, 1.0);`,
+        `        if (lpos.w > 0.0) {`,
+        `          vec3 lproj = lpos.xyz / lpos.w;`,
+        `          if (lproj.x >= 0.0 && lproj.x <= 1.0 && lproj.y >= 0.0 && lproj.y <= 1.0 && lproj.z <= 1.0) {`,
+        `            vec2 base = lproj.xy * rect_size + rect_lo;`,
+        // Clamp each filter tap inside this light's own rectangle. Without
+        // it a tap half a texel past the edge reads the NEIGHBOURING light's
+        // depth map, which is how a shadow from one light appears as a
+        // one-texel fringe along another's.
+        `            vec2 tap_lo = rect_lo + u_shadow_texel;`,
+        `            vec2 tap_hi = rect_lo + rect_size - u_shadow_texel;`,
+        `            lit = 0.0;`,
+        `            for (int sy = 0; sy < 2; sy++) {`,
+        `              for (int sx = 0; sx < 2; sx++) {`,
+        `                vec2 off = (vec2(float(sx), float(sy)) - 0.5) * u_shadow_texel;`,
+        `                float d = texture2D(u_shadow_map, clamp(base + off, tap_lo, tap_hi)).r;`,
+        `                lit += (lproj.z - SHADOW_DEPTH_BIAS) > d ? 0.0 : 1.0;`,
+        `              }`,
+        `            }`,
+        `            lit *= 0.25;`,
+        `          }`,
+        `        }`,
+        `      } else {`,
+        // ---- point light: six 90-degree faces, 3x2 inside one rectangle ----
+        // The face basis table below is gl_shadowmap.ts's CUBE_FACE_BASIS,
+        // and the major-axis tie rules are cubeFaceForDirection's, both
+        // written out because a fragment that picked a different face than
+        // the depth pass rasterized would read a neighbouring face's texels.
+        `        vec3 lvec = v_world_pos - u_light_pos[i];`,
+        `        vec3 lmag = abs(lvec);`,
+        `        vec3 face_f;`,
+        `        vec3 face_r;`,
+        `        vec3 face_u;`,
+        `        float face;`,
+        `        if (lmag.x >= lmag.y && lmag.x >= lmag.z) {`,
+        `          if (lvec.x >= 0.0) { face_f = vec3(1.0, 0.0, 0.0); face_r = vec3(0.0, -1.0, 0.0); face_u = vec3(0.0, 0.0, 1.0); face = 0.0; }`,
+        `          else { face_f = vec3(-1.0, 0.0, 0.0); face_r = vec3(0.0, 1.0, 0.0); face_u = vec3(0.0, 0.0, 1.0); face = 1.0; }`,
+        `        } else if (lmag.y >= lmag.z) {`,
+        `          if (lvec.y >= 0.0) { face_f = vec3(0.0, 1.0, 0.0); face_r = vec3(1.0, 0.0, 0.0); face_u = vec3(0.0, 0.0, 1.0); face = 2.0; }`,
+        `          else { face_f = vec3(0.0, -1.0, 0.0); face_r = vec3(-1.0, 0.0, 0.0); face_u = vec3(0.0, 0.0, 1.0); face = 3.0; }`,
+        `        } else {`,
+        `          if (lvec.z >= 0.0) { face_f = vec3(0.0, 0.0, 1.0); face_r = vec3(0.0, 1.0, 0.0); face_u = vec3(1.0, 0.0, 0.0); face = 4.0; }`,
+        `          else { face_f = vec3(0.0, 0.0, -1.0); face_r = vec3(0.0, -1.0, 0.0); face_u = vec3(1.0, 0.0, 0.0); face = 5.0; }`,
+        `        }`,
+        `        float axial = dot(lvec, face_f);`,
+        `        if (axial > SHADOW_NEAR) {`,
+        // matrixPerspective's third row, with w divided out: the depth pass
+        // stored 0.5 * (-pa + pb / axial) + 0.5, so the stored value inverts
+        // back to a distance and the comparison happens in world units.
+        `          float zfar = max(u_light_radius[i], SHADOW_NEAR * 2.0);`,
+        `          float pa = (zfar + SHADOW_NEAR) / (SHADOW_NEAR - zfar);`,
+        `          float pb = (2.0 * zfar * SHADOW_NEAR) / (SHADOW_NEAR - zfar);`,
+        `          vec2 cell_size = rect_size / vec2(SHADOW_CUBE_COLS, SHADOW_CUBE_ROWS);`,
+        `          vec2 cell_lo = rect_lo + vec2(mod(face, SHADOW_CUBE_COLS), floor(face / SHADOW_CUBE_COLS)) * cell_size;`,
+        // tan(45) == 1 for a square 90-degree frustum, so the face UV is just
+        // the two off-axis components over the axial one
+        `          vec2 face_uv = vec2(dot(lvec, face_r), dot(lvec, face_u)) / axial * 0.5 + 0.5;`,
+        `          vec2 base = cell_lo + face_uv * cell_size;`,
+        // taps clamp inside this FACE's cell, not just the light's rectangle:
+        // the five neighbouring faces are the nearest wrong answers there
+        `          vec2 tap_lo = cell_lo + u_shadow_texel;`,
+        `          vec2 tap_hi = cell_lo + cell_size - u_shadow_texel;`,
+        `          float face_texels = cell_size.x / u_shadow_texel;`,
+        `          float bias = SHADOW_CUBE_BIAS + axial * (2.0 / face_texels) * SHADOW_CUBE_BIAS_TEXELS;`,
+        `          lit = 0.0;`,
         `          for (int sy = 0; sy < 2; sy++) {`,
         `            for (int sx = 0; sx < 2; sx++) {`,
         `              vec2 off = (vec2(float(sx), float(sy)) - 0.5) * u_shadow_texel;`,
-        `              float d = texture2D(u_shadow_map, base + off).r;`,
-        `              lit += (lproj.z - SHADOW_DEPTH_BIAS) > d ? 0.0 : 1.0;`,
+        `              float d = texture2D(u_shadow_map, clamp(base + off, tap_lo, tap_hi)).r;`,
+        `              float stored = pb / ((2.0 * d - 1.0) + pa);`,
+        `              lit += (axial - bias) > stored ? 0.0 : 1.0;`,
         `            }`,
         `          }`,
-        `          result *= lit * 0.25;`,
+        `          lit *= 0.25;`,
         `        }`,
         `      }`,
+        `      result *= lit;`,
         `    }`,
       );
     }
@@ -634,8 +733,8 @@ uploadShadowUniforms
 
 Binds the depth atlas to TMU 1 and fills the per-light shadow arrays. Every
 slot is written every frame, including the zeroed `u_light_shadow` entries
-for lights with no map -- leaving a stale 1.0 behind from a previous frame
-would shadow a light against another light's depth rectangle.
+for lights with no map -- leaving a stale kind code behind from a previous
+frame would shadow a light against another light's depth rectangle.
 
 TMU 1 via qglActiveTexture rather than gl_image.ts's GL_SelectTexture: that
 helper drives qglSelectTextureSGIS, and GL_SGIS_multitexture is absent from
@@ -662,15 +761,22 @@ function uploadShadowUniforms(prog: CompiledProgram, bindings: readonly ShadowMa
 
   for (let i = 0; i < MAX_SHADER_LIGHTS; i++) {
     const binding = shadowed.get(i);
-    const flagLoc = prog.uniforms.get(`u_light_shadow[${i}]`);
-    if (flagLoc !== undefined && qgl.qglUniform1f) qgl.qglUniform1f(flagLoc, binding ? 1 : 0);
+    const kindLoc = prog.uniforms.get(`u_light_shadow[${i}]`);
+    if (kindLoc !== undefined && qgl.qglUniform1f) qgl.qglUniform1f(kindLoc, binding ? binding.kind : SHADOW_KIND_NONE);
     if (!binding) continue;
     const matrixLoc = prog.uniforms.get(`u_light_matrix[${i}]`);
     const atlasLoc = prog.uniforms.get(`u_light_atlas[${i}]`);
     if (matrixLoc !== undefined && qgl.qglUniformMatrix4fv) qgl.qglUniformMatrix4fv(matrixLoc, 1, false, binding.matrix);
     if (atlasLoc !== undefined && qgl.qglUniform4f) {
-      const scale = binding.slot.size / SHADOW_ATLAS_SIZE;
-      qgl.qglUniform4f(atlasLoc, binding.slot.x / SHADOW_ATLAS_SIZE, binding.slot.y / SHADOW_ATLAS_SIZE, scale, scale);
+      // zw is the rectangle's size, no longer necessarily square: a point
+      // light's rectangle is three faces wide by two tall.
+      qgl.qglUniform4f(
+        atlasLoc,
+        binding.slot.x / SHADOW_ATLAS_SIZE,
+        binding.slot.y / SHADOW_ATLAS_SIZE,
+        binding.slot.width / SHADOW_ATLAS_SIZE,
+        binding.slot.height / SHADOW_ATLAS_SIZE,
+      );
     }
   }
 }

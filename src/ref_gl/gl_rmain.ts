@@ -128,7 +128,7 @@ import {
 } from "./gl_local";
 import { R_BeginRegistration, R_EndRegistration, R_RegisterModel, Mod_PointInLeaf, Mod_Init, Mod_FreeAll, Mod_Modellist_f, ModtypeT, ModelT, ParsedSp2T } from "./gl_model";
 import { GL_InitShaderPath, GL_ShutdownShaderPath, GL_UsingShaderPath } from "./gl_shader";
-import { GL_InitShadowMaps, GL_ShutdownShadowMaps, GL_ShadowMapsNewMap, R_RenderShadowMaps } from "./gl_shadowmap";
+import { GL_InitShadowMaps, GL_ShutdownShadowMaps, GL_ShadowMapsNewMap, GL_ShadowMapStats, R_RenderShadowMaps } from "./gl_shadowmap";
 import {
   R_RegisterSkin,
   GL_InitImages,
@@ -1028,12 +1028,16 @@ export function R_RenderView(fd: RefdefT): void {
 
   R_MarkLeaves(); // done here so we know if we're in water
 
-  // v1.1.0 shadow maps: build/refresh the cone lights' depth atlas. Must sit
+  // v1.1.0 shadow maps: build/refresh the shadow lights' depth atlas. Must sit
   // between R_SetupGL and R_DrawWorld -- it takes over the viewport and both
   // matrices, and nothing between here and the world draw depends on them
   // except R_DrawWorld itself, which is why R_SetupGL is re-run below rather
   // than the pass trying to restore the scene's matrices by hand.
-  R_RenderShadowMaps(r_worldmodel, r_newrefdef.dlights, r_newrefdef.num_dlights);
+  //
+  // The entity list goes in as well: alias models and inline brush models are
+  // casters, so a light with one in range re-renders its depth map here
+  // before R_DrawEntitiesOnList below draws the same entities to the screen.
+  R_RenderShadowMaps(r_worldmodel, r_newrefdef.dlights, r_newrefdef.num_dlights, r_newrefdef.entities, r_newrefdef.num_entities);
   R_SetupGL();
 
   R_DrawWorld();
@@ -1050,6 +1054,16 @@ export function R_RenderView(fd: RefdefT): void {
 
   if (glCvars.r_speeds && glCvars.r_speeds.value) {
     ri.Con_Printf(PRINT_ALL, `${c_brush_polys} wpoly ${c_alias_polys} epoly ${c_visible_textures} tex ${c_visible_lightmaps} lmaps\n`);
+    // v1.1.1: the shadow atlas's own cost, appended rather than folded into
+    // the line above so the original id Software format stays byte-identical
+    // for anyone reading it. A frame with no shadow lights prints nothing.
+    const shadows = GL_ShadowMapStats();
+    if (shadows.lights) {
+      ri.Con_Printf(
+        PRINT_ALL,
+        `${shadows.lights} shadowlights (${shadows.cachedLights} cached, ${shadows.rebuiltLights} rebuilt) ${shadows.facesRendered} depthpass ${shadows.entityCasters} ecasters\n`,
+      );
+    }
   }
 }
 

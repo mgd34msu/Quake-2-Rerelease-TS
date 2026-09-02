@@ -19,14 +19,52 @@
 // mirror here and none is cited: the technique below is ordinary GL2-era
 // shadow mapping, chosen to fit this renderer's existing architecture.
 //
-// ── Staged scope (deliberate, see this unit's report) ──────────────────────
-// SHIPPING: cone/spot shadow lights only, cast by static world (BSP) brush
-// geometry, into one depth-texture atlas. NOT shipping: omni/point shadow
-// lights (they keep task #25's existing unoccluded contribution -- a working
-// spot shadow beats a broken cube map), and alias/brush-model entities as
-// CASTERS (they are still correctly SHADOWED, they just do not block light).
-// In the shipped rerelease content this covers 475 of 925 shadow lights;
-// every one of the other 450 renders exactly as it did before this unit.
+// ── Scope ──────────────────────────────────────────────────────────────────
+// Both shadow-light kinds and both caster kinds:
+//
+//   * CONE/SPOT lights -- a light whose `target` resolves to another entity's
+//     `targetname` (g_misc.ts's setup_shadow_lights) -- get one square
+//     perspective depth map, as they have since v1.1.0.
+//   * POINT/OMNI lights -- every shadow light that resolves no target -- get
+//     six 90-degree faces packed as a 3x2 grid of squares inside ONE atlas
+//     rectangle. See "Why cube FACES in the 2D atlas" below.
+//   * CASTERS are the static world (BSP) brush geometry plus alias-model
+//     entities (players, monsters, gibs, items) and inline brush-model
+//     entities (doors, platforms, every func_* mover). shadowCasterKind below
+//     names what is deliberately excluded and why.
+//
+// ── Why cube FACES in the 2D atlas, not a cube map or a paraboloid ─────────
+// A GL_TEXTURE_CUBE_MAP depth target would need its own samplerCube and its
+// own texture unit, and -- being a separate texture -- could share neither
+// the shelf-packed atlas, the single FBO, nor the depth-map cache the cone
+// path already has. The fragment loop would then have to pick between a
+// sampler2D and a samplerCube per light, which under GLSL 1.10 means indexing
+// a sampler array by a non-constant expression: exactly the restriction that
+// produced the single-atlas design in the first place.
+//
+// Dual-paraboloid and octahedral encodings avoid the second sampler, but both
+// bend straight edges: they are only correct where the geometry is tessellated
+// finely enough for the per-vertex warp to approximate the true mapping. Quake
+// 2 BSP faces are single very large polygons (a room's whole floor is often
+// one quad), so either encoding would need a tessellation stage this renderer
+// does not have, and would curve every shadow edge in the meantime.
+//
+// Six 90-degree perspective faces keep rasterization exactly as linear as the
+// cone path's, reuse every piece of machinery above, and need NO per-face
+// matrix in the shader: a square 90-degree perspective has tan(45) == 1, so
+// the face UV is just (dot(L,right), dot(L,up)) / dot(L,forward) and the
+// stored window depth inverts to a distance in closed form. A point light is
+// therefore read from the SAME uniforms a cone light uses -- u_light_pos,
+// u_light_radius and u_light_atlas -- with u_light_shadow carrying a kind
+// code (0 none / 1 cone / 2 point) where it used to carry a flag.
+//
+// ── Cost, and why the cache survives moving entities ───────────────────────
+// A light's depth map is rebuilt only when its own parameters change OR when
+// the set of entity casters standing inside its radius changes shape (see
+// shadowSignature). A room whose only casters are still -- an idle monster,
+// a closed door -- keeps rendering zero depth passes per frame, exactly as
+// before this unit. A light with a walking monster in range rebuilds every
+// frame it moves, which for a point light is six faces.
 //
 // ── Why a single atlas and not one FBO per light ───────────────────────────
 // GLSL 1.10 only guarantees sampler array indexing by a constant-index-
@@ -37,10 +75,21 @@
 
 import { qgl } from "./gl_image";
 import { ri, glCvars, r_world_matrix } from "./gl_local";
-import { type Vec3 } from "../shared/math";
-import { PRINT_ALL } from "../shared/q_shared";
-import { type DlightT } from "../client/ref";
-import { type ModelT, type MsurfaceT, type GlpolyT, SURF_DRAWSKY, SURF_DRAWTURB } from "./gl_model";
+import { type Vec3, vec3, AngleVectors } from "../shared/math";
+import {
+  PRINT_ALL,
+  RF_BEAM,
+  RF_FLARE,
+  RF_TRANSLUCENT,
+  RF_NOSHADOW,
+  RF_WEAPONMODEL,
+  RF_DEPTHHACK,
+  SURF_TRANS33,
+  SURF_TRANS66,
+} from "../shared/q_shared";
+import { type DlightT, type EntityT } from "../client/ref";
+import { ModelT, ModtypeT, ParsedMd2T, type MsurfaceT, type GlpolyT, SURF_DRAWSKY, SURF_DRAWTURB } from "./gl_model";
+import { type Md5ModelT, calcSkelVert, getSkeletonFrame } from "../qcommon/md5_model";
 
 const GL_DEPTH_COMPONENT24 = 0x81a6;
 const GL_DEPTH_COMPONENT = 0x1902;
@@ -70,6 +119,9 @@ const GL_DEPTH_TEST = 0x0b71;
 const GL_LEQUAL = 0x0203;
 const GL_DEPTH_FUNC = 0x0b74;
 const GL_DEPTH_RANGE = 0x0b70;
+const GL_TRIANGLES = 0x0004;
+const GL_TRIANGLE_FAN = 0x0006;
+const GL_TRIANGLE_STRIP = 0x0005;
 
 // One shadow map per shader light slot (gl_shader.ts's MAX_SHADER_LIGHTS).
 // Kept equal so a light's shadow index is simply its light index -- no
@@ -88,6 +140,20 @@ export const SHADOW_ATLAS_SIZE = 2048;
 export const SHADOW_RES_DEFAULT = 512;
 export const SHADOW_RES_MIN = 128;
 export const SHADOW_RES_MAX = 1024;
+
+// A point light's six faces are laid out inside ONE atlas rectangle as a
+// 3-wide, 2-tall grid: face f occupies cell (f % 3, floor(f / 3)). One
+// rectangle rather than six independent square slots is what keeps the
+// per-light shader state at the single vec4 the cone path already uploads.
+export const SHADOW_CUBE_COLS = 3;
+export const SHADOW_CUBE_ROWS = 2;
+export const SHADOW_CUBE_FACES = SHADOW_CUBE_COLS * SHADOW_CUBE_ROWS;
+
+// The value gl_shader.ts's fragment loop reads out of u_light_shadow[i].
+// It used to be a 0/1 flag; a third state was cheaper than a second array.
+export const SHADOW_KIND_NONE = 0;
+export const SHADOW_KIND_CONE = 1;
+export const SHADOW_KIND_POINT = 2;
 
 /*
 ====================
@@ -118,7 +184,18 @@ export function shadowMapResolution(requested: number, cap: number = SHADOW_RES_
 export interface AtlasSlotT {
   readonly x: number;
   readonly y: number;
-  readonly size: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+// A packing request. A bare number is the square a cone light asks for; the
+// {width, height} form is what a point light's 3x2 face grid needs, and is
+// the only reason the packer handles rectangles at all.
+export type AtlasRequestT = number | { readonly width: number; readonly height: number };
+
+function requestExtent(request: AtlasRequestT): { width: number; height: number } {
+  if (typeof request === "number") return { width: request, height: request };
+  return { width: request.width, height: request.height };
 }
 
 /*
@@ -127,36 +204,37 @@ packShadowAtlas
 
 Shelf packer: requests are placed left-to-right on a shelf whose height is
 the first (largest) request that opened it, and a new shelf starts above when
-the current one runs out of width. Callers pass requests already sorted
-descending, which is what makes a shelf packer tight rather than merely
+the current one runs out of width. Callers pass requests already sorted by
+descending AREA, which is what makes a shelf packer tight rather than merely
 correct. Returns one slot per request, or null for any request that no
 longer fits -- that light simply renders unshadowed, never garbage.
 ====================
 */
-export function packShadowAtlas(sizes: readonly number[], atlasSize: number = SHADOW_ATLAS_SIZE): (AtlasSlotT | null)[] {
+export function packShadowAtlas(requests: readonly AtlasRequestT[], atlasSize: number = SHADOW_ATLAS_SIZE): (AtlasSlotT | null)[] {
   const slots: (AtlasSlotT | null)[] = [];
   let shelfY = 0;
   let shelfHeight = 0;
   let cursorX = 0;
 
-  for (const size of sizes) {
-    if (size <= 0 || size > atlasSize) {
+  for (const request of requests) {
+    const { width, height } = requestExtent(request);
+    if (width <= 0 || height <= 0 || width > atlasSize || height > atlasSize) {
       slots.push(null);
       continue;
     }
-    if (cursorX + size > atlasSize) {
+    if (cursorX + width > atlasSize) {
       // close this shelf, open the next one above it
       shelfY += shelfHeight;
       shelfHeight = 0;
       cursorX = 0;
     }
-    if (shelfY + size > atlasSize) {
+    if (shelfY + height > atlasSize) {
       slots.push(null); // atlas full
       continue;
     }
-    slots.push({ x: cursorX, y: shelfY, size });
-    cursorX += size;
-    if (size > shelfHeight) shelfHeight = size;
+    slots.push({ x: cursorX, y: shelfY, width, height });
+    cursorX += width;
+    if (height > shelfHeight) shelfHeight = height;
   }
   return slots;
 }
@@ -356,10 +434,246 @@ export function shadowLightMatrix(origin: Vec3, coneDirection: Vec3, coneAngleDe
   return matrixMultiply(matrixDepthBias(), matrixMultiply(proj, view));
 }
 
+// --- omnidirectional (cube-face) light math ------------------------------
+
+export interface CubeFaceBasisT {
+  readonly forward: Vec3;
+  readonly right: Vec3;
+  readonly up: Vec3;
+}
+
+/*
+====================
+CUBE_FACE_BASIS
+
+The six face bases, in the atlas's 3x2 cell order: +X, -X, +Y, -Y, +Z, -Z.
+Each one is exactly what matrixLookAt builds for that direction (pinned by a
+test), written out as literals because gl_shader.ts's fragment stage has to
+carry the SAME table in GLSL -- the shader selects the face and derives the
+face UV from these three vectors by hand rather than being handed six
+matrices it has no uniform budget for.
+
+Handedness is deliberately not policed: rendering and lookup use the same
+basis, so they agree either way, and the depth pass draws with GL_CULL_FACE
+off so winding never enters into it.
+====================
+*/
+export const CUBE_FACE_BASIS: readonly CubeFaceBasisT[] = [
+  { forward: vec3(1, 0, 0), right: vec3(0, -1, 0), up: vec3(0, 0, 1) },
+  { forward: vec3(-1, 0, 0), right: vec3(0, 1, 0), up: vec3(0, 0, 1) },
+  { forward: vec3(0, 1, 0), right: vec3(1, 0, 0), up: vec3(0, 0, 1) },
+  { forward: vec3(0, -1, 0), right: vec3(-1, 0, 0), up: vec3(0, 0, 1) },
+  { forward: vec3(0, 0, 1), right: vec3(0, 1, 0), up: vec3(1, 0, 0) },
+  { forward: vec3(0, 0, -1), right: vec3(0, -1, 0), up: vec3(1, 0, 0) },
+];
+
+// Which 3x2 cell a face occupies. Kept as a function so the GLSL's
+// `vec2(mod(face, 3.0), floor(face / 3.0))` has one thing to be tested against.
+export function cubeFaceCell(face: number): { col: number; row: number } {
+  return { col: face % SHADOW_CUBE_COLS, row: Math.floor(face / SHADOW_CUBE_COLS) };
+}
+
+/*
+====================
+cubeFaceForDirection
+
+Major-axis selection: the face whose forward axis dominates `dir`. The tie
+rules (>= rather than >, and the x-then-y-then-z order) are load-bearing --
+gl_shader.ts's fragment stage repeats them exactly, and a fragment that
+picked a different face than the depth pass rasterized would read a
+neighbouring face's texels.
+====================
+*/
+export function cubeFaceForDirection(dir: Vec3): number {
+  const ax = Math.abs(dir[0]);
+  const ay = Math.abs(dir[1]);
+  const az = Math.abs(dir[2]);
+  if (ax >= ay && ax >= az) return dir[0] >= 0 ? 0 : 1;
+  if (ay >= az) return dir[1] >= 0 ? 2 : 3;
+  return dir[2] >= 0 ? 4 : 5;
+}
+
+/*
+====================
+matrixCubeFaceView
+
+World -> face-eye view matrix for one cube face, built straight from
+CUBE_FACE_BASIS so the render side and the shader's hand-rolled lookup can
+never drift apart. Same layout as matrixLookAt (which a test asserts it
+matches for all six directions).
+====================
+*/
+export function matrixCubeFaceView(origin: Vec3, face: number): Float32Array {
+  const basis = CUBE_FACE_BASIS[face] ?? CUBE_FACE_BASIS[0];
+  if (!basis) return matrixIdentity();
+  const f = basis.forward;
+  const r = basis.right;
+  const u = basis.up;
+  const m = new Float32Array(16);
+  m[0] = r[0];
+  m[4] = r[1];
+  m[8] = r[2];
+  m[1] = u[0];
+  m[5] = u[1];
+  m[9] = u[2];
+  m[2] = -f[0];
+  m[6] = -f[1];
+  m[10] = -f[2];
+  m[12] = -(r[0] * origin[0] + r[1] * origin[1] + r[2] * origin[2]);
+  m[13] = -(u[0] * origin[0] + u[1] * origin[1] + u[2] * origin[2]);
+  m[14] = f[0] * origin[0] + f[1] * origin[1] + f[2] * origin[2];
+  m[15] = 1;
+  return m;
+}
+
+// A cube face is always a square 90-degree frustum; only its far plane varies.
+export const SHADOW_CUBE_FOV = 90;
+
+export function shadowCubeFar(radius: number): number {
+  return Math.max(radius, SHADOW_NEAR * 2);
+}
+
+/*
+====================
+shadowCubeDepthCoefficients
+
+The two numbers that turn a distance ALONG THE FACE AXIS into the window
+depth glDrawPixels-equivalent the depth pass stores, and back again:
+
+    z_ndc = -a + b / axialDistance          (what the rasterizer writes)
+    axialDistance = b / (z_ndc + a)         (what the fragment shader inverts)
+
+which is just matrixPerspective's third row rewritten with w divided out.
+The shader does the same two lines with the same a/b, so that a point light's
+depth comparison can be made in WORLD units -- see SHADOW_CUBE_BIAS in
+gl_shader.ts for why that matters for the bias.
+====================
+*/
+export function shadowCubeDepthCoefficients(radius: number): { a: number; b: number } {
+  const far = shadowCubeFar(radius);
+  return {
+    a: (far + SHADOW_NEAR) / (SHADOW_NEAR - far),
+    b: (2 * far * SHADOW_NEAR) / (SHADOW_NEAR - far),
+  };
+}
+
+export function shadowCubeWindowDepth(axialDistance: number, radius: number): number {
+  const { a, b } = shadowCubeDepthCoefficients(radius);
+  return 0.5 * (-a + b / axialDistance) + 0.5;
+}
+
+export function shadowCubeAxialDistance(windowDepth: number, radius: number): number {
+  const { a, b } = shadowCubeDepthCoefficients(radius);
+  return b / (2 * windowDepth - 1 + a);
+}
+
+export interface CubeProjectionT {
+  readonly face: number;
+  readonly u: number; // [0,1] inside the face
+  readonly v: number;
+  readonly axial: number; // distance along the face's forward axis
+  readonly depth: number; // window depth as the depth pass stores it
+}
+
+/*
+====================
+cubeFaceProject
+
+TS mirror of the whole point-light lookup gl_shader.ts's fragment stage does:
+pick the face, project onto it, and say what window depth that point would
+have been rasterized with. Exists so the face math can be tested without a
+GPU -- the GLSL is the same expressions in the same order.
+
+Returns null in front of the near plane, which is the shader's early-out.
+====================
+*/
+export function cubeFaceProject(lightOrigin: Vec3, worldPoint: Vec3, radius: number): CubeProjectionT | null {
+  const l = vec3(worldPoint[0] - lightOrigin[0], worldPoint[1] - lightOrigin[1], worldPoint[2] - lightOrigin[2]);
+  const face = cubeFaceForDirection(l);
+  const basis = CUBE_FACE_BASIS[face];
+  if (!basis) return null;
+  const axial = l[0] * basis.forward[0] + l[1] * basis.forward[1] + l[2] * basis.forward[2];
+  if (axial <= SHADOW_NEAR) return null;
+  const sx = l[0] * basis.right[0] + l[1] * basis.right[1] + l[2] * basis.right[2];
+  const sy = l[0] * basis.up[0] + l[1] * basis.up[1] + l[2] * basis.up[2];
+  return {
+    face,
+    u: (sx / axial) * 0.5 + 0.5,
+    v: (sy / axial) * 0.5 + 0.5,
+    axial,
+    depth: shadowCubeWindowDepth(axial, radius),
+  };
+}
+
+// --- caster classification ----------------------------------------------
+
+export const SHADOW_CASTER_NONE = 0;
+export const SHADOW_CASTER_ALIAS = 1;
+export const SHADOW_CASTER_BRUSH = 2;
+
+/*
+====================
+shadowCasterKind
+
+Which refresh entities block light. Deliberately excluded, and why:
+
+  * RF_BEAM and RF_FLARE carry no model at all -- gl_rmain.ts draws both
+    procedurally, so there is no geometry to rasterize.
+  * RF_TRANSLUCENT: a surface you can see through does not stop light.
+  * RF_NOSHADOW: the rerelease's own opt-out, honoured here for the first
+    time (nothing else in this renderer reads it).
+  * RF_WEAPONMODEL / RF_DEPTHHACK: the view weapon sits a few units from the
+    eye and is not really in the world; in a light's depth map it would black
+    out the entire room.
+  * mod_sprite: a camera-facing billboard has no stable silhouette from a
+    light's point of view -- its shadow would swing as the PLAYER turned.
+
+RF_VIEWERMODEL is deliberately NOT excluded: "don't draw through the owner's
+own eyes" is a statement about the eye pass, and a player who casts no shadow
+of their own is exactly the artifact this unit exists to remove.
+====================
+*/
+export function shadowCasterKind(ent: EntityT | null | undefined): number {
+  if (!ent) return SHADOW_CASTER_NONE;
+  if (ent.flags & (RF_BEAM | RF_FLARE | RF_TRANSLUCENT | RF_NOSHADOW | RF_WEAPONMODEL | RF_DEPTHHACK)) return SHADOW_CASTER_NONE;
+  const model = ent.model;
+  if (!(model instanceof ModelT)) return SHADOW_CASTER_NONE;
+  if (model.type === ModtypeT.mod_alias) return SHADOW_CASTER_ALIAS;
+  // mod_brush in the ENTITY list is always an inline submodel (*1, *2, ...):
+  // a func_door/func_plat/func_rotating and friends. The world model itself
+  // is drawn by R_DrawWorld and never appears here.
+  if (model.type === ModtypeT.mod_brush && model.nummodelsurfaces > 0) return SHADOW_CASTER_BRUSH;
+  return SHADOW_CASTER_NONE;
+}
+
+/*
+====================
+shadowCasterRadius
+
+Radius of a world-axis-aligned sphere centred on the entity's ORIGIN that
+contains the model however it is rotated: the corner of the model's own
+bounding box that is furthest from its origin. Using the origin rather than
+the box centre is what makes it rotation-proof -- R_RotateForEntity spins the
+model about its origin, so a sphere centred there never has to be re-fitted.
+====================
+*/
+export function shadowCasterRadius(model: ModelT): number {
+  const rx = Math.max(Math.abs(model.mins[0]), Math.abs(model.maxs[0]));
+  const ry = Math.max(Math.abs(model.mins[1]), Math.abs(model.maxs[1]));
+  const rz = Math.max(Math.abs(model.mins[2]), Math.abs(model.maxs[2]));
+  const r = Math.hypot(rx, ry, rz);
+  // A model that reported no bounds at all still has to occlude something;
+  // 64 comfortably contains every shipped alias model's ±32 default box.
+  return r > 0 ? r : 64;
+}
+
 // --- live shadow-map state (real GL calls) --------------------------------
 
 export interface ShadowMapBindingT {
   readonly lightIndex: number;
+  // SHADOW_KIND_CONE or SHADOW_KIND_POINT -- gl_shader.ts uploads this
+  // straight into u_light_shadow[i], where the fragment loop switches on it.
+  readonly kind: number;
   readonly matrix: Float32Array;
   readonly slot: AtlasSlotT;
 }
@@ -370,12 +684,44 @@ interface CachedShadowT {
   matrix: Float32Array;
 }
 
+interface ShadowCasterT {
+  readonly ent: EntityT;
+  readonly model: ModelT;
+  readonly kind: number;
+  readonly radius: number;
+}
+
+interface ShadowCandidateT {
+  readonly index: number;
+  readonly dl: DlightT;
+  readonly kind: number;
+  // per-FACE edge for a point light, whole-map edge for a cone light
+  face: number;
+  casters: ShadowCasterT[];
+}
+
+export interface ShadowMapStatsT {
+  // lights that ended up with an atlas rectangle this frame
+  readonly lights: number;
+  // ...of which reused their existing depth texels (zero draw calls)
+  readonly cachedLights: number;
+  // ...and which had to re-render, because the light or one of its casters moved
+  readonly rebuiltLights: number;
+  // total depth passes issued: one per cone light, six per point light
+  readonly facesRendered: number;
+  // entity casters actually emitted into a depth map this frame
+  readonly entityCasters: number;
+}
+
+const NO_STATS: ShadowMapStatsT = { lights: 0, cachedLights: 0, rebuiltLights: 0, facesRendered: 0, entityCasters: 0 };
+
 let shadowFbo = 0;
 let shadowTexture = 0;
 let shadowReady = false;
 let shadowWarned = false;
-const cached: (CachedShadowT | null)[] = [];
+const cached = new Map<number, CachedShadowT>();
 let activeBindings: ShadowMapBindingT[] = [];
+let shadowStats: ShadowMapStatsT = NO_STATS;
 
 export function GL_ShadowMapTexture(): number {
   return shadowTexture;
@@ -387,6 +733,12 @@ export function GL_ShadowMapsReady(): boolean {
 
 export function GL_ShadowMapBindings(): readonly ShadowMapBindingT[] {
   return activeBindings;
+}
+
+// Last frame's depth-pass cost, for r_speeds-style reporting and for tests
+// that need to assert the cache actually cached.
+export function GL_ShadowMapStats(): ShadowMapStatsT {
+  return shadowStats;
 }
 
 /*
@@ -429,7 +781,9 @@ export function GL_InitShadowMaps(): boolean {
   // GL_NEAREST, and GL_TEXTURE_COMPARE_MODE deliberately left at its default
   // GL_NONE: the fragment shader reads the raw depth through texture2D().r
   // and does its own compare, which needs no sampler2DShadow and so keeps
-  // the GLSL at the #version 110 this renderer's shader path targets.
+  // the GLSL at the #version 110 this renderer's shader path targets. For a
+  // point light it also has to INVERT that depth back to a distance, which
+  // a hardware compare could not have done for it either.
   qgl.qglTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
   qgl.qglTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
   qgl.qglTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -456,7 +810,7 @@ export function GL_InitShadowMaps(): boolean {
     return false;
   }
 
-  cached.length = 0;
+  cached.clear();
   shadowReady = true;
   return true;
 }
@@ -467,8 +821,9 @@ export function GL_ShutdownShadowMaps(): void {
   shadowFbo = 0;
   shadowTexture = 0;
   shadowReady = false;
-  cached.length = 0;
+  cached.clear();
   activeBindings = [];
+  shadowStats = NO_STATS;
 }
 
 // Invalidates every cached depth map. Called on map change: the cache is
@@ -476,23 +831,141 @@ export function GL_ShutdownShadowMaps(): void {
 // geometry came from, so two maps whose lights happen to match would
 // otherwise share a stale depth map.
 export function GL_ShadowMapsNewMap(): void {
-  cached.length = 0;
+  cached.clear();
   activeBindings = [];
+  shadowStats = NO_STATS;
 }
 
-// A light's depth map only needs re-rendering when the light itself moves or
-// changes shape. Intensity/colour/lightstyle flicker change none of that, so
-// they are deliberately absent from the signature -- a strobing shadow light
-// re-renders its depth map zero times per second, not sixty.
-function shadowSignature(dl: DlightT, resolution: number): string {
-  const cone = dl.cone;
-  if (!cone) return "";
+/*
+====================
+shadowSignature
+
+What a light's depth map depends on. Intensity/colour/lightstyle flicker
+change none of it, so they are deliberately absent -- a strobing shadow light
+re-renders its depth map zero times per second, not sixty.
+
+The caster digest is the part that makes entity casters affordable. An entity
+contributes its model, its origin, its angles and its current frame; it
+contributes its LERP state (oldframe/backlerp) only when that lerp actually
+moves vertices, i.e. only when the entity is mid-animation or mid-move. That
+distinction is the whole cache: `backlerp` ticks every single client frame
+even for a crate sitting still, so digesting it unconditionally would rebuild
+every depth map in the level, every frame, forever.
+====================
+*/
+function casterDigest(caster: ShadowCasterT): string {
+  const e = caster.ent;
+  const r = (v: number): string => v.toFixed(1);
+  const moving =
+    Math.abs(e.oldorigin[0] - e.origin[0]) > 0.05 || Math.abs(e.oldorigin[1] - e.origin[1]) > 0.05 || Math.abs(e.oldorigin[2] - e.origin[2]) > 0.05;
+  const animating = e.frame !== e.oldframe;
+  const lerp = moving || animating ? `${e.oldframe}:${e.backlerp.toFixed(2)}:${r(e.oldorigin[0])},${r(e.oldorigin[1])},${r(e.oldorigin[2])}` : "";
+  return `${caster.model.name}@${r(e.origin[0])},${r(e.origin[1])},${r(e.origin[2])}/${r(e.angles[0])},${r(e.angles[1])},${r(e.angles[2])}#${e.frame}${lerp}`;
+}
+
+function shadowSignature(cand: ShadowCandidateT): string {
+  const dl = cand.dl;
   const r = (v: number): string => v.toFixed(2);
-  return `${r(dl.origin[0])},${r(dl.origin[1])},${r(dl.origin[2])};${r(cone.direction[0])},${r(cone.direction[1])},${r(cone.direction[2])};${r(cone.cosHalfAngle)};${r(dl.intensity)};${resolution}`;
+  const cone = dl.cone;
+  const shape = cone ? `${r(cone.direction[0])},${r(cone.direction[1])},${r(cone.direction[2])};${r(cone.cosHalfAngle)}` : "omni";
+  const casters = cand.casters.map(casterDigest).join("|");
+  return `${cand.kind};${r(dl.origin[0])},${r(dl.origin[1])},${r(dl.origin[2])};${shape};${r(dl.intensity)};${cand.face};${casters}`;
 }
 
 function coneAngleDegrees(cosHalfAngle: number): number {
   return (Math.acos(Math.min(Math.max(cosHalfAngle, -1), 1)) * 180) / Math.PI;
+}
+
+// The atlas rectangle a candidate wants: one square for a cone light, a 3x2
+// grid of face-sized squares for a point light.
+function candidateRequest(cand: ShadowCandidateT): AtlasRequestT {
+  if (cand.kind !== SHADOW_KIND_POINT) return cand.face;
+  return { width: cand.face * SHADOW_CUBE_COLS, height: cand.face * SHADOW_CUBE_ROWS };
+}
+
+function candidateArea(cand: ShadowCandidateT): number {
+  const request = candidateRequest(cand);
+  const extent = typeof request === "number" ? { width: request, height: request } : request;
+  return extent.width * extent.height;
+}
+
+/*
+====================
+fitCandidatesToAtlas
+
+Packs the frame's lights, and -- when they do not all fit -- halves every
+point light's FACE edge and tries again rather than dropping whole lights.
+A point light asks for six faces' worth of atlas, so at the video menu's
+"high" setting two of them alone fill a 2048 atlas; softening those to a
+smaller face is a far better answer than the first two lights casting
+shadows and the rest silently not.
+
+Cone lights are never shrunk: their footprint is already a sixth of a point
+light's at the same resolution, and shrinking them would regress shadows
+that shipped working in v1.1.0.
+====================
+*/
+function fitCandidatesToAtlas(candidates: ShadowCandidateT[]): (AtlasSlotT | null)[] {
+  candidates.sort((a, b) => candidateArea(b) - candidateArea(a));
+  let slots = packShadowAtlas(candidates.map(candidateRequest));
+
+  for (let attempt = 0; attempt < 4 && slots.some((slot) => slot === null); attempt++) {
+    let shrank = false;
+    for (const cand of candidates) {
+      if (cand.kind === SHADOW_KIND_POINT && cand.face > SHADOW_RES_MIN) {
+        cand.face /= 2;
+        shrank = true;
+      }
+    }
+    if (!shrank) break;
+    candidates.sort((a, b) => candidateArea(b) - candidateArea(a));
+    slots = packShadowAtlas(candidates.map(candidateRequest));
+  }
+  return slots;
+}
+
+/*
+====================
+gatherCasters
+
+Every entity caster whose bounding sphere reaches into the light. For a cone
+light the sphere is additionally tested against the shadow frustum's DIAGONAL
+half-angle -- the frustum is a square pyramid, so its corners open wider than
+shadowFovForConeAngle's vertical half-angle, and clipping a caster that a
+corner would have caught is the one error that shows (a shadow that pops in
+as the caster walks toward the middle of the cone).
+====================
+*/
+function gatherCasters(cand: ShadowCandidateT, casters: readonly ShadowCasterT[]): ShadowCasterT[] {
+  if (!casters.length) return [];
+  const dl = cand.dl;
+  const lightRadius = dl.intensity;
+
+  let cosLimit = -1;
+  const cone = dl.cone;
+  if (cone) {
+    const halfFov = (shadowFovForConeAngle(coneAngleDegrees(cone.cosHalfAngle)) * 0.5 * Math.PI) / 180;
+    const diagonal = Math.atan(Math.SQRT2 * Math.tan(Math.min(halfFov, (87 * Math.PI) / 180)));
+    cosLimit = Math.cos(Math.min(diagonal, Math.PI));
+  }
+
+  const hits: ShadowCasterT[] = [];
+  for (const caster of casters) {
+    const dx = caster.ent.origin[0] - dl.origin[0];
+    const dy = caster.ent.origin[1] - dl.origin[1];
+    const dz = caster.ent.origin[2] - dl.origin[2];
+    const dist = Math.hypot(dx, dy, dz);
+    if (dist > lightRadius + caster.radius) continue;
+
+    if (cone && dist > caster.radius) {
+      const dot = (dx * cone.direction[0] + dy * cone.direction[1] + dz * cone.direction[2]) / dist;
+      // widen the cone by the caster's own angular radius before rejecting
+      const angular = Math.asin(Math.min(1, caster.radius / dist));
+      if (Math.cos(Math.min(Math.PI, Math.acos(Math.min(1, Math.max(-1, dot))) - angular)) < cosLimit) continue;
+    }
+    hits.push(caster);
+  }
+  return hits;
 }
 
 /*
@@ -504,58 +977,112 @@ framebuffer binding exactly as it found it. Must run BEFORE R_SetupGL: it
 takes over the projection and modelview matrices and the viewport, and
 R_SetupGL is what puts all three back for the scene proper.
 
-Point lights are skipped by design (see the staged-scope note at the top of
-this file), as is every light past MAX_SHADOW_MAPS and every light the atlas
-has no room left for -- each of those simply keeps task #25's unoccluded
-contribution rather than getting a wrong shadow.
+Every light past MAX_SHADOW_MAPS, and every light the atlas has no room left
+for even after fitCandidatesToAtlas has shrunk what it can, keeps task #25's
+unoccluded contribution rather than getting a wrong shadow.
 ====================
 */
-export function R_RenderShadowMaps(worldmodel: ModelT | null, lights: readonly DlightT[], numLights: number): void {
+export function R_RenderShadowMaps(
+  worldmodel: ModelT | null,
+  lights: readonly DlightT[],
+  numLights: number,
+  entities: readonly EntityT[] = [],
+  numEntities = 0,
+): void {
   activeBindings = [];
+  shadowStats = NO_STATS;
   if (!shadowReady || !worldmodel) return;
   if (glCvars.gl_shadowmaps && !glCvars.gl_shadowmaps.value) return;
 
   const bindFramebuffer = qgl.qglBindFramebuffer;
   if (!bindFramebuffer) return;
 
-  // pick the shadow-casting lights, largest map first so the shelf packs tight
   const resolutionCap = glCvars.gl_shadowmap_res ? glCvars.gl_shadowmap_res.value : SHADOW_RES_MAX;
-  const candidates: { index: number; dl: DlightT; resolution: number }[] = [];
+  const candidates: ShadowCandidateT[] = [];
   const count = Math.min(numLights, lights.length, MAX_SHADOW_MAPS);
   for (let i = 0; i < count; i++) {
     const dl = lights[i];
-    if (!dl || !dl.cone || dl.intensity <= 0) continue;
-    candidates.push({ index: i, dl, resolution: shadowMapResolution(dl.resolution, resolutionCap) });
+    if (!dl || dl.intensity <= 0) continue;
+    // Only CS_SHADOWLIGHTS-fed lights get a depth map. A classic transient
+    // dlight (muzzle flash, rocket, blaster glow) is coneless like a point
+    // shadow light is, and would otherwise be handed a six-face cube map it
+    // has never had in any Quake 2 -- see DlightT.isShadowLight.
+    if (!dl.isShadowLight && !dl.cone) continue;
+    candidates.push({
+      index: i,
+      dl,
+      kind: dl.cone ? SHADOW_KIND_CONE : SHADOW_KIND_POINT,
+      // gl_shadowmap_res is the cap for BOTH kinds; for a point light it caps
+      // one FACE, which is what makes it comparable to a cone light's map.
+      face: shadowMapResolution(dl.resolution, resolutionCap),
+      casters: [],
+    });
   }
   if (!candidates.length) return;
-  candidates.sort((a, b) => b.resolution - a.resolution);
 
-  const slots = packShadowAtlas(candidates.map((c) => c.resolution));
+  // Entity casters are hidden exactly when the entities themselves are:
+  // r_drawentities 0 must not leave a level full of shadows cast by nothing.
+  const entitiesVisible =
+    (!glCvars.r_drawentities || glCvars.r_drawentities.value !== 0) && (!glCvars.gl_drawentities || glCvars.gl_drawentities.value !== 0);
+  const allCasters: ShadowCasterT[] = [];
+  if (entitiesVisible) {
+    const entCount = Math.min(numEntities, entities.length);
+    for (let i = 0; i < entCount; i++) {
+      const ent = entities[i];
+      if (!ent) continue;
+      const kind = shadowCasterKind(ent);
+      if (kind === SHADOW_CASTER_NONE) continue;
+      const model = ent.model;
+      if (!(model instanceof ModelT)) continue;
+      allCasters.push({ ent, model, kind, radius: shadowCasterRadius(model) });
+    }
+  }
+  for (const cand of candidates) cand.casters = gatherCasters(cand, allCasters);
 
-  // Reuse a cached depth map whenever the light AND its atlas rectangle are
-  // both unchanged; the rectangle matters because the cached texels live at
-  // fixed atlas coordinates.
-  const pending: { candidateIndex: number; slot: AtlasSlotT; matrix: Float32Array; signature: string }[] = [];
+  const slots = fitCandidatesToAtlas(candidates);
+
+  // Reuse a cached depth map whenever the light, its casters AND its atlas
+  // rectangle are all unchanged; the rectangle matters because the cached
+  // texels live at fixed atlas coordinates.
+  const pending: { cand: ShadowCandidateT; slot: AtlasSlotT }[] = [];
   const bindings: ShadowMapBindingT[] = [];
+  let cachedLights = 0;
+  let entityCasters = 0;
 
   for (let c = 0; c < candidates.length; c++) {
     const cand = candidates[c];
     const slot = slots[c];
     if (!cand || !slot) continue;
-    const cone = cand.dl.cone;
-    if (!cone) continue;
 
-    const signature = shadowSignature(cand.dl, cand.resolution);
-    const matrix = shadowLightMatrix(cand.dl.origin, cone.direction, coneAngleDegrees(cone.cosHalfAngle), cand.dl.intensity);
-    const hit = cached[c];
-    if (!hit || hit.signature !== signature || hit.slot.x !== slot.x || hit.slot.y !== slot.y || hit.slot.size !== slot.size) {
-      pending.push({ candidateIndex: c, slot, matrix, signature });
+    const signature = shadowSignature(cand);
+    const matrix =
+      cand.kind === SHADOW_KIND_CONE && cand.dl.cone
+        ? shadowLightMatrix(cand.dl.origin, cand.dl.cone.direction, coneAngleDegrees(cand.dl.cone.cosHalfAngle), cand.dl.intensity)
+        : // a point light needs no matrix at all -- the shader derives the
+          // face and its UV from u_light_pos/u_light_radius. Identity keeps
+          // ShadowMapBindingT one shape and the uniform upload branch-free.
+          matrixIdentity();
+    const hit = cached.get(cand.index);
+    if (!hit || hit.signature !== signature || hit.slot.x !== slot.x || hit.slot.y !== slot.y || hit.slot.width !== slot.width || hit.slot.height !== slot.height) {
+      pending.push({ cand, slot });
+      entityCasters += cand.casters.length;
+    } else {
+      cachedLights++;
     }
-    cached[c] = { signature, slot, matrix };
-    bindings.push({ lightIndex: cand.index, matrix, slot });
+    cached.set(cand.index, { signature, slot, matrix });
+    bindings.push({ lightIndex: cand.index, kind: cand.kind, matrix, slot });
   }
 
   activeBindings = bindings;
+  let facesRendered = 0;
+  for (const job of pending) facesRendered += job.cand.kind === SHADOW_KIND_POINT ? SHADOW_CUBE_FACES : 1;
+  shadowStats = {
+    lights: bindings.length,
+    cachedLights,
+    rebuiltLights: pending.length,
+    facesRendered,
+    entityCasters,
+  };
   if (!pending.length) return;
 
   // This pass runs before R_SetupGL, so the GL state it inherits is whatever
@@ -583,26 +1110,48 @@ export function R_RenderShadowMaps(worldmodel: ModelT | null, lights: readonly D
   qgl.qglDisable(GL_CULL_FACE); // closed brush geometry: take whichever face is nearest the light
   qgl.qglEnable(GL_SCISSOR_TEST); // so the per-slot clear cannot wipe a neighbour's map
   qgl.qglEnable(GL_POLYGON_OFFSET_FILL);
-  qgl.qglPolygonOffset(2, 4); // depth bias in the map itself; the shader adds a small constant one too
   qgl.qglDepthMask(true);
 
   for (const job of pending) {
-    const cand = candidates[job.candidateIndex];
-    if (!cand) continue;
+    const cand = job.cand;
+    const far = shadowCubeFar(cand.dl.intensity);
     const cone = cand.dl.cone;
-    if (!cone) continue;
 
-    qgl.qglViewport(job.slot.x, job.slot.y, job.slot.size, job.slot.size);
-    qgl.qglScissor(job.slot.x, job.slot.y, job.slot.size, job.slot.size);
-    qgl.qglClear(GL_DEPTH_BUFFER_BIT);
+    if (cand.kind === SHADOW_KIND_CONE && cone) {
+      renderShadowFace(
+        job.slot.x,
+        job.slot.y,
+        job.slot.width,
+        job.slot.height,
+        matrixPerspective(shadowFovForConeAngle(coneAngleDegrees(cone.cosHalfAngle)), SHADOW_NEAR, far),
+        matrixLookAt(cand.dl.origin, cone.direction),
+        worldmodel,
+        cand,
+        far,
+        null,
+      );
+      continue;
+    }
 
-    const far = Math.max(cand.dl.intensity, SHADOW_NEAR * 2);
-    qgl.qglMatrixMode(GL_PROJECTION);
-    qgl.qglLoadMatrixf(matrixPerspective(shadowFovForConeAngle(coneAngleDegrees(cone.cosHalfAngle)), SHADOW_NEAR, far));
-    qgl.qglMatrixMode(GL_MODELVIEW);
-    qgl.qglLoadMatrixf(matrixLookAt(cand.dl.origin, cone.direction));
-
-    drawWorldDepth(worldmodel, cand.dl.origin, far);
+    const faceSize = job.slot.width / SHADOW_CUBE_COLS;
+    const projection = matrixPerspective(SHADOW_CUBE_FOV, SHADOW_NEAR, far);
+    for (let f = 0; f < SHADOW_CUBE_FACES; f++) {
+      const basis = CUBE_FACE_BASIS[f];
+      if (!basis) continue;
+      const { col, row } = cubeFaceCell(f);
+      renderShadowFace(
+        job.slot.x + col * faceSize,
+        job.slot.y + row * faceSize,
+        faceSize,
+        faceSize,
+        projection,
+        matrixCubeFaceView(cand.dl.origin, f),
+        worldmodel,
+        cand,
+        far,
+        basis.forward,
+      );
+    }
   }
 
   qgl.qglDisable(GL_POLYGON_OFFSET_FILL);
@@ -611,6 +1160,57 @@ export function R_RenderShadowMaps(worldmodel: ModelT | null, lights: readonly D
   qgl.qglDepthFunc(savedDepthFunc[0] ?? GL_LEQUAL);
   qgl.qglDepthRange(savedDepthRange[0] ?? 0, savedDepthRange[1] ?? 1);
   bindFramebuffer(GL_FRAMEBUFFER, previous[0] ?? 0);
+}
+
+// Polygon offset for the STATIC world. Slope-scaled, because a big BSP floor
+// seen edge-on from a light is where depth-map acne comes from.
+const SHADOW_OFFSET_WORLD_FACTOR = 2;
+const SHADOW_OFFSET_WORLD_UNITS = 4;
+// ...and a gentler one for entity casters. An alias model is a thin, curved
+// shell rather than a slab, so the world's offset would lift its shadow clean
+// off the floor it is standing on (peter-panning) to buy acne protection it
+// does not need -- its own surfaces are not receiving these shadows.
+const SHADOW_OFFSET_ENTITY_FACTOR = 1;
+const SHADOW_OFFSET_ENTITY_UNITS = 2;
+
+/*
+====================
+renderShadowFace
+
+One viewport's worth of depth: the shared clear/viewport/matrix preamble and
+then the world and entity geometry. `faceForward`, when given, is the cube
+face's forward axis, used to reject geometry that is entirely behind this
+face -- a pure CPU saving (GL would clip it correctly anyway), but with six
+faces per light the world walk is the part worth not doing six times.
+====================
+*/
+function renderShadowFace(
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  projection: Float32Array,
+  view: Float32Array,
+  worldmodel: ModelT,
+  cand: ShadowCandidateT,
+  far: number,
+  faceForward: Vec3 | null,
+): void {
+  qgl.qglViewport(x, y, width, height);
+  qgl.qglScissor(x, y, width, height);
+  qgl.qglClear(GL_DEPTH_BUFFER_BIT);
+
+  qgl.qglMatrixMode(GL_PROJECTION);
+  qgl.qglLoadMatrixf(projection);
+  qgl.qglMatrixMode(GL_MODELVIEW);
+  qgl.qglLoadMatrixf(view);
+
+  qgl.qglPolygonOffset(SHADOW_OFFSET_WORLD_FACTOR, SHADOW_OFFSET_WORLD_UNITS);
+  drawWorldDepth(worldmodel, cand.dl.origin, far, faceForward);
+
+  if (!cand.casters.length) return;
+  qgl.qglPolygonOffset(SHADOW_OFFSET_ENTITY_FACTOR, SHADOW_OFFSET_ENTITY_UNITS);
+  for (const caster of cand.casters) drawCasterDepth(caster, cand.dl.origin, faceForward);
 }
 
 /*
@@ -623,13 +1223,13 @@ level and would clamp every shadow to the skybox, and liquid surfaces are
 vertex-animated at draw time so their static positions here would not match
 what the eye pass shows anyway.
 
-Culling is a plain per-vertex radius test rather than a light-frustum test:
-this runs only when a light's depth map is actually (re)built -- effectively
-once per light per level, since shipped shadow lights never move -- so the
+Culling is a plain per-vertex radius test (plus, for a cube face, a per-vertex
+half-space test against that face's forward axis) rather than a full frustum
+test: this runs only when a light's depth map is actually (re)built, so the
 cheaper, looser test costs nothing worth reclaiming.
 ====================
 */
-function drawWorldDepth(worldmodel: ModelT, origin: Vec3, radius: number): void {
+function drawWorldDepth(worldmodel: ModelT, origin: Vec3, radius: number, faceForward: Vec3 | null): void {
   const radiusSquared = radius * radius;
 
   for (let i = 0; i < worldmodel.numsurfaces; i++) {
@@ -638,16 +1238,23 @@ function drawWorldDepth(worldmodel: ModelT, origin: Vec3, radius: number): void 
     if (surf.flags & (SURF_DRAWSKY | SURF_DRAWTURB)) continue;
 
     for (let poly: GlpolyT | null = surf.polys; poly; poly = poly.next) {
-      let anyInside = false;
-      for (let v = 0; v < poly.numverts && !anyInside; v++) {
+      // The two tests are accumulated INDEPENDENTLY on purpose. Requiring one
+      // single vertex to pass both would drop a polygon that reaches into the
+      // light with one corner and in front of the face with another -- which
+      // is most of a big floor quad seen from a cube face's edge, and would
+      // show up as a wedge of missing shadow.
+      let anyInRadius = false;
+      let anyInFront = faceForward === null;
+      for (let v = 0; v < poly.numverts && !(anyInRadius && anyInFront); v++) {
         const vert = poly.verts[v];
         if (!vert) continue;
         const dx = (vert[0] ?? 0) - origin[0];
         const dy = (vert[1] ?? 0) - origin[1];
         const dz = (vert[2] ?? 0) - origin[2];
-        if (dx * dx + dy * dy + dz * dz <= radiusSquared) anyInside = true;
+        if (dx * dx + dy * dy + dz * dz <= radiusSquared) anyInRadius = true;
+        if (faceForward && dx * faceForward[0] + dy * faceForward[1] + dz * faceForward[2] > 0) anyInFront = true;
       }
-      if (!anyInside) continue;
+      if (!anyInRadius || !anyInFront) continue;
 
       qgl.qglBegin(GL_POLYGON);
       for (let v = 0; v < poly.numverts; v++) {
@@ -656,6 +1263,201 @@ function drawWorldDepth(worldmodel: ModelT, origin: Vec3, radius: number): void 
       }
       qgl.qglEnd();
     }
+  }
+}
+
+/*
+====================
+rotateForCasterDepth
+
+R_RotateForEntity's transform, re-stated here rather than imported: gl_rmain
+imports this file, so importing gl_rmain back would close a module cycle for
+three glRotatef calls. The two sign flips its callers apply before calling it
+are folded in -- R_DrawAliasModel negates PITCH around the call
+(gl_mesh.ts:824-826) and R_DrawBrushModel negates PITCH and ROLL
+(gl_rsurf.ts:872-876) -- because a shadow whose transform differs from the
+drawn model's is worse than no shadow.
+====================
+*/
+function rotateForCasterDepth(ent: EntityT, kind: number): void {
+  qgl.qglTranslatef(ent.origin[0], ent.origin[1], ent.origin[2]);
+  qgl.qglRotatef(ent.angles[1], 0, 0, 1);
+  qgl.qglRotatef(ent.angles[0], 0, 1, 0); // == -(-pitch), for both entity kinds
+  qgl.qglRotatef(kind === SHADOW_CASTER_ALIAS ? -ent.angles[2] : ent.angles[2], 1, 0, 0);
+}
+
+function drawCasterDepth(caster: ShadowCasterT, lightOrigin: Vec3, faceForward: Vec3 | null): void {
+  if (faceForward) {
+    const dx = caster.ent.origin[0] - lightOrigin[0];
+    const dy = caster.ent.origin[1] - lightOrigin[1];
+    const dz = caster.ent.origin[2] - lightOrigin[2];
+    // entirely behind this cube face: another face already has it
+    if (dx * faceForward[0] + dy * faceForward[1] + dz * faceForward[2] + caster.radius <= 0) return;
+  }
+
+  qgl.qglPushMatrix();
+  rotateForCasterDepth(caster.ent, caster.kind);
+  if (caster.kind === SHADOW_CASTER_BRUSH) drawBrushEntityDepth(caster.model);
+  else drawAliasEntityDepth(caster.model, caster.ent);
+  qgl.qglPopMatrix();
+}
+
+/*
+====================
+drawBrushEntityDepth
+
+The inline submodel's own surfaces, in model space (the caller has already
+pushed the entity transform). No backface test, unlike R_DrawInlineBModel:
+the depth pass draws with GL_CULL_FACE off and wants whichever face is
+nearest the light, which for a door seen edge-on is the back one.
+
+SURF_TRANS33/SURF_TRANS66 surfaces are skipped for the same reason
+RF_TRANSLUCENT entities are not casters at all -- you can see through them.
+====================
+*/
+function drawBrushEntityDepth(model: ModelT): void {
+  for (let i = 0; i < model.nummodelsurfaces; i++) {
+    const surf: MsurfaceT | undefined = model.surfaces[model.firstmodelsurface + i];
+    if (!surf || !surf.polys) continue;
+    if (surf.flags & (SURF_DRAWSKY | SURF_DRAWTURB)) continue;
+    if (surf.texinfo && surf.texinfo.flags & (SURF_TRANS33 | SURF_TRANS66)) continue;
+
+    for (let poly: GlpolyT | null = surf.polys; poly; poly = poly.next) {
+      qgl.qglBegin(GL_POLYGON);
+      for (let v = 0; v < poly.numverts; v++) {
+        const vert = poly.verts[v];
+        if (vert) qgl.qglVertex3fv(vert);
+      }
+      qgl.qglEnd();
+    }
+  }
+}
+
+interface AliasDepthVertexT {
+  readonly v: readonly [number, number, number];
+}
+interface AliasDepthFrameT {
+  readonly scale: readonly [number, number, number];
+  readonly translate: readonly [number, number, number];
+  readonly verts: readonly AliasDepthVertexT[];
+}
+
+/*
+====================
+drawAliasEntityDepth
+
+Position-only alias emission. The frame lerp is GL_DrawAliasFrameLerp's
+(gl_mesh.ts:284-330) with everything that is not a vertex position removed --
+restated here rather than called because gl_mesh imports gl_rmain, which
+imports this file, and because that function's real work is the colours and
+texcoords a depth pass has no use for.
+
+The RF_SHELL_* powersuit expansion GL_LerpVerts applies is deliberately NOT
+reproduced: it inflates the mesh along its normals to draw a glowing shell
+around the model, and a shadow cast by the shell rather than the body would
+be visibly too fat.
+====================
+*/
+function drawAliasEntityDepth(model: ModelT, ent: EntityT): void {
+  const skeleton = model.skeleton;
+  if (skeleton && (!glCvars.gl_md5_use || glCvars.gl_md5_use.value)) {
+    drawAliasSkeletonDepth(skeleton, ent);
+    return;
+  }
+
+  const hdr = model.extradata;
+  if (!(hdr instanceof ParsedMd2T)) return;
+  if (!hdr.num_frames || !hdr.glcmds.length) return;
+
+  const frameIndex = ent.frame >= 0 && ent.frame < hdr.num_frames ? ent.frame : 0;
+  const oldIndex = ent.oldframe >= 0 && ent.oldframe < hdr.num_frames ? ent.oldframe : 0;
+  const frame = hdr.frames[frameIndex] as AliasDepthFrameT | undefined;
+  const oldframe = hdr.frames[oldIndex] as AliasDepthFrameT | undefined;
+  if (!frame || !oldframe) return;
+
+  const backlerp = Math.min(Math.max(ent.backlerp, 0), 1);
+  const frontlerp = 1 - backlerp;
+
+  const delta = vec3(ent.oldorigin[0] - ent.origin[0], ent.oldorigin[1] - ent.origin[1], ent.oldorigin[2] - ent.origin[2]);
+  const forward = vec3();
+  const right = vec3();
+  const up = vec3();
+  AngleVectors(ent.angles, forward, right, up);
+
+  const move = vec3(
+    delta[0] * forward[0] + delta[1] * forward[1] + delta[2] * forward[2],
+    -(delta[0] * right[0] + delta[1] * right[1] + delta[2] * right[2]),
+    delta[0] * up[0] + delta[1] * up[1] + delta[2] * up[2],
+  );
+  for (let i = 0; i < 3; i++) move[i] = backlerp * (move[i] + (oldframe.translate[i] ?? 0)) + frontlerp * (frame.translate[i] ?? 0);
+
+  const frontv = vec3(frontlerp * frame.scale[0], frontlerp * frame.scale[1], frontlerp * frame.scale[2]);
+  const backv = vec3(backlerp * oldframe.scale[0], backlerp * oldframe.scale[1], backlerp * oldframe.scale[2]);
+
+  const lerped: Float32Array = new Float32Array(hdr.num_xyz * 3);
+  for (let i = 0; i < hdr.num_xyz; i++) {
+    const nv = frame.verts[i];
+    const ov = oldframe.verts[i];
+    if (!nv || !ov) continue;
+    lerped[i * 3 + 0] = move[0] + ov.v[0] * backv[0] + nv.v[0] * frontv[0];
+    lerped[i * 3 + 1] = move[1] + ov.v[1] * backv[1] + nv.v[1] * frontv[1];
+    lerped[i * 3 + 2] = move[2] + ov.v[2] * backv[2] + nv.v[2] * frontv[2];
+  }
+
+  const order = hdr.glcmds;
+  const point = vec3();
+  let idx = 0;
+  for (;;) {
+    let count = order[idx++] ?? 0;
+    if (!count) break;
+    if (count < 0) {
+      count = -count;
+      qgl.qglBegin(GL_TRIANGLE_FAN);
+    } else {
+      qgl.qglBegin(GL_TRIANGLE_STRIP);
+    }
+    do {
+      const index_xyz = order[idx + 2] ?? 0;
+      idx += 3;
+      point[0] = lerped[index_xyz * 3 + 0] ?? 0;
+      point[1] = lerped[index_xyz * 3 + 1] ?? 0;
+      point[2] = lerped[index_xyz * 3 + 2] ?? 0;
+      qgl.qglVertex3fv(point);
+      count--;
+    } while (count);
+    qgl.qglEnd();
+  }
+}
+
+/*
+====================
+drawAliasSkeletonDepth
+
+The MD5 path's silhouette, when a model has one. R_DrawAliasModel also gates
+this on gl_md5_distance (an LOD switch measured from the EYE); the shadow
+pass has no eye, and at the distance where that switch fires the two meshes'
+silhouettes differ by less than one shadow texel, so the gate is not
+reproduced -- the model's higher-fidelity mesh is simply always used.
+====================
+*/
+function drawAliasSkeletonDepth(model: Md5ModelT, ent: EntityT): void {
+  const backlerp = Math.min(Math.max(ent.backlerp, 0), 1);
+  const skeleton = getSkeletonFrame(model, ent.oldframe, ent.frame, backlerp, 1 - backlerp);
+  const position = vec3();
+  const normal = vec3();
+
+  for (const mesh of model.meshes) {
+    const positions: Vec3[] = new Array(mesh.numVerts);
+    for (let i = 0; i < mesh.numVerts; i++) {
+      calcSkelVert(mesh.vertices[i], mesh, skeleton, position, normal);
+      positions[i] = vec3(position[0], position[1], position[2]);
+    }
+    qgl.qglBegin(GL_TRIANGLES);
+    for (let i = 0; i < mesh.numIndices; i++) {
+      const vert = positions[mesh.indices[i]];
+      if (vert) qgl.qglVertex3fv(vert);
+    }
+    qgl.qglEnd();
   }
 }
 

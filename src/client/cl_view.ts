@@ -234,6 +234,9 @@ export function V_AddLightEx(light: ShadowLightT): void {
   const styleScale = light.lightstyle === -1 ? 1 : r_lightstyles[light.lightstyle].rgb[0];
   dl.lightScale = light.intensity * styleScale * fade;
   dl.resolution = light.resolution;
+  // marks this as a CS_SHADOWLIGHTS-fed light, which is what makes it
+  // eligible for a shadow map at all (see DlightT.isShadowLight)
+  dl.isShadowLight = true;
 
   if (light.coneangle) {
     const rad = (light.coneangle * Math.PI) / 180;

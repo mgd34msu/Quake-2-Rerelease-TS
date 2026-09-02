@@ -120,6 +120,24 @@ export class DlightT {
   // handoff. 0 means the map's entity omitted the key -- gl_shadowmap.ts's
   // shadowMapResolution reads that as "use the default", not "no shadow".
   resolution = 0;
+
+  // v1.1.1: true only for a CS_SHADOWLIGHTS-fed light (V_AddLightEx). Every
+  // classic V_AddLight caller -- muzzle flashes, rockets, the blaster glow,
+  // CL_RunDLights' whole transient pool -- leaves it false.
+  //
+  // Before omni shadow maps existed, `cone !== null` was an adequate stand-in
+  // for "this is a shadow light": only V_AddLightEx ever set a cone. It stops
+  // being adequate the moment CONELESS lights can be shadowed too, because a
+  // muzzle flash is also a coneless light. Without this flag every rocket in
+  // flight would allocate a six-face cube map and re-render it every frame,
+  // and vanilla's unshadowed transient dlights would start casting shadows
+  // they have never cast in any Quake 2.
+  //
+  // Declared OPTIONAL rather than initialized to false so that the several
+  // DlightT-shaped object literals already in the tree stay assignable
+  // without being rewritten; `undefined` and `false` mean the same thing to
+  // every reader of this field, all of which test it for truthiness.
+  isShadowLight?: boolean;
 }
 
 export class ParticleT {
