@@ -1670,9 +1670,40 @@ the only implementation there is. r_glowmaps alone gates it here.
 // -- multi-frame registration, see GL_LoadByExt), and for a plain miss.
 function GL_LoadGlowRgba(name: string, ext: ImgExtT): { pic: Uint8Array; width: number; height: number } | null {
   switch (ext) {
-    case "wal":
     case "gif":
       return null;
+    case "wal": {
+      // Every retail wall texture is a .wal, so this is the diffuse the wall
+      // glow bake (GL_CheckForGlowMap) actually reads. Returning null here
+      // made the bake fall back to white for every wall, and lava veins,
+      // lamps and panels on the re-release maps glowed pure white instead
+      // of their own colour. Expanded through d_8to24table exactly as
+      // GL_Upload8 draws the texture.
+      const { data: mt } = ri.FS_LoadFile(name);
+      if (!mt) return null;
+      if (mt.byteLength < WAL_OFFSET0_OFFSET + 4) {
+        ri.FS_FreeFile(mt);
+        return null;
+      }
+      const view = new DataView(mt.buffer, mt.byteOffset, mt.byteLength);
+      const width = LittleLong(view.getUint32(WAL_WIDTH_OFFSET, true));
+      const height = LittleLong(view.getUint32(WAL_HEIGHT_OFFSET, true));
+      const ofs = LittleLong(view.getUint32(WAL_OFFSET0_OFFSET, true));
+      if (width <= 0 || height <= 0 || ofs + width * height > mt.byteLength) {
+        ri.FS_FreeFile(mt);
+        return null;
+      }
+      const out = new Uint8Array(width * height * 4);
+      for (let i = 0; i < width * height; i++) {
+        const v = d_8to24table[mt[ofs + i]];
+        out[i * 4 + 0] = v & 0xff;
+        out[i * 4 + 1] = (v >>> 8) & 0xff;
+        out[i * 4 + 2] = (v >>> 16) & 0xff;
+        out[i * 4 + 3] = (v >>> 24) & 0xff;
+      }
+      ri.FS_FreeFile(mt);
+      return { pic: out, width, height };
+    }
     case "pcx": {
       // No retail glow map is a .pcx (the census above is png/tga only), but
       // the reference's own final fallback is IM_PCX, so the path exists.

@@ -28,7 +28,7 @@ un-initialised (all-zero) table would make every assertion pass vacuously.
 import { describe, test, expect, beforeEach } from "bun:test";
 import { deflateSync } from "node:zlib";
 
-import { glCvars, SetRefImports, gltextures, ImageT, ImagetypeT, SetNumGltextures, gl_state } from "../src/ref_gl/gl_local";
+import { glCvars, SetRefImports, gltextures, ImageT, ImagetypeT, SetNumGltextures, gl_state, d_8to24table } from "../src/ref_gl/gl_local";
 import type { RefImports } from "../src/client/ref";
 import { CvarT } from "../src/shared/q_shared";
 import { QGLRecording } from "../src/ref_gl/qgl";
@@ -342,6 +342,29 @@ describe("GL_CheckForGlowMap -- post-processing", () => {
     expect(emissive).toEqual([80, 160, 240]); // the wall's colour, not white
     expect(masked).toEqual([0, 0, 0]);
     expect(half).toEqual([40, 80, 120]);
+  });
+
+  test("a .wal wall bakes its palette colour, not white (every retail wall is a .wal)", () => {
+    // Regression: GL_LoadGlowRgba returned null for .wal, so the bake fell
+    // back to white and lava veins / lamps on the re-release maps glowed
+    // pure white (rmine1 look-up, 4.6% of the frame).
+    const idx = 7;
+    d_8to24table[idx] = (255 << 24) | (30 << 16) | (60 << 8) | 200; // r=200 g=60 b=30
+    const w = 2;
+    const h = 2;
+    const wal = new Uint8Array(100 + w * h);
+    const view = new DataView(wal.buffer);
+    view.setUint32(32, w, true);
+    view.setUint32(36, h, true);
+    view.setUint32(40, 100, true);
+    wal.fill(idx, 100);
+    files.set("textures/w4.wal", wal);
+    files.set("textures/w4_glow.png", buildPngRgba(w, h, () => [255, 255, 255, 255]));
+    qgl.clear();
+    const image = GL_FindImage("textures/w4.wal", ImagetypeT.it_wall);
+    expect(image?.glow).not.toBeNull();
+    // upload 0 is the diffuse, upload 1 is the glow
+    expect(uploadTexels(1)[0].slice(0, 3)).toEqual([200, 60, 30]);
   });
 
   test("calling GL_CheckForGlowMap twice does not re-upload or relink", () => {
