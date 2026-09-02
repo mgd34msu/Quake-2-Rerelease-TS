@@ -21,7 +21,7 @@
 // 13, self-sufficient test files), following test/protocol_negotiation_e2e.
 // test.ts's own harness shape for the loopback connect drive.
 
-import { describe, test, expect, beforeEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterAll } from "bun:test";
 import { sv, svs, ServerStateT, ClientStateT, ClientT, maxclients } from "../src/server/server";
 import { SV_Init, SV_ConnectionlessPacket } from "../src/server/sv_main";
 import { SV_ModelIndex, SV_WidenConfigstringSpace } from "../src/server/sv_init";
@@ -32,7 +32,7 @@ import { NetadrT, NetadrtypeT, NetsrcT, PROTOCOL_VERSION, PROTOCOL_VERSION_REREL
 import { net_from, net_message } from "../src/qcommon/net_chan";
 import { NET_ClearLoopback, NET_SendPacket, NET_GetPacket } from "../src/platform/net_udp";
 import { MSG_BeginReading, MSG_ReadLong } from "../src/qcommon/sizebuf";
-import { Cvar_FullSet } from "../src/qcommon/cvar";
+import { Cvar_FullSet, Cvar_VariableString } from "../src/qcommon/cvar";
 import { CVAR_LATCH, CVAR_SERVERINFO, EntityStateT, CS_NAME, CS_MODELS, CS_ITEMS, MAX_MODELS } from "../src/shared/q_shared";
 import { vec3 } from "../src/shared/math";
 import { LinkT, SolidT, MAX_ENT_CLUSTERS, type Edict, type GameExports } from "../src/game/game";
@@ -95,6 +95,25 @@ function makeFakeGameExports(): GameExports {
     max_edicts: 2,
   };
 }
+
+// Rule 13 teardown: every piece of process-global server/session state this
+// suite drives (sv/svs, the game-exports holder, the latched maxclients cvar,
+// the loopback rings, the session layout/protocol) is restored, so the
+// engine-boot suites that run after this file in a clean checkout's order
+// (boot, protocol_q2repro_boot, cl_main, cvar_parity, savegame_kex_e2e) see
+// the same pristine process they would have seen running alone.
+const preTestMaxclients = Cvar_VariableString("maxclients") || "8";
+afterAll(() => {
+  geHolder.ge = null;
+  sv.clear();
+  svs.clear();
+  svs.csr = CS_REMAP_OLD;
+  svs.sessionProtocol = 0;
+  sv.state = ServerStateT.ss_dead;
+  svs.initialized = false;
+  NET_ClearLoopback();
+  Cvar_FullSet("maxclients", preTestMaxclients, CVAR_SERVERINFO | CVAR_LATCH);
+});
 
 // A freshly-spawned CLASSIC-module session, mid-map-load: the exact state
 // SV_ModelIndex is called from while the game module spawns entities.
