@@ -34,6 +34,8 @@ import {
   net_from,
   net_message,
   qport,
+  MAX_PACKETLEN,
+  MAX_PACKETLEN_WRITABLE,
 } from "../src/qcommon/net_chan";
 
 function loopbackAdr(): NetadrT {
@@ -314,6 +316,129 @@ describe("NETCHAN_NEW fragmentation: split on send, reassemble on receive", () =
 
     expect(Netchan_Process(server, net_message)).toBe(true);
     expect(server.fragment_in.cursize).toBe(0); // no reassembly buffer in use
+  });
+
+  // Boundary pins for NetchanNew_Transmit's own split predicate (chan.c:475):
+  //     if (length > chan->maxpacketlen || (send_reliable &&
+  //         (chan->reliable_length + length > chan->maxpacketlen)))
+  // It is a strict `>`, so a payload of EXACTLY maxpacketlen is the largest
+  // unfragmented write there is, and maxpacketlen + 1 is the smallest
+  // fragmented one. Off-by-one here would either fragment writes that never
+  // needed it (an extra round trip per frame) or hand SZ_Write a payload one
+  // byte past the datagram budget.
+  test("exactly maxpacketlen is the largest UNfragmented write; one more byte fragments", () => {
+    const maxpacketlen = 512;
+
+    {
+      const { client, server } = pair(NETCHAN_NEW, PROTOCOL_VERSION_RERELEASE, maxpacketlen);
+      const body = bigPayload(maxpacketlen);
+      Netchan_Transmit(client, body.length, body);
+      expect(client.fragment_pending).toBe(false);
+      const raw = peekDatagram();
+      expect((le32(raw, 0) & 0x40000000) >>> 0).toBe(0); // no FRG_BIT
+      expect(Netchan_Process(server, net_message)).toBe(true);
+      expect(Array.from(net_message.data.subarray(net_message.readcount, net_message.cursize))).toEqual(Array.from(body));
+    }
+
+    {
+      const { client, server } = pair(NETCHAN_NEW, PROTOCOL_VERSION_RERELEASE, maxpacketlen);
+      const body = bigPayload(maxpacketlen + 1);
+      Netchan_Transmit(client, body.length, body);
+      expect(client.fragment_pending).toBe(true); // one byte over => fragmented
+
+      // fragment 1 carries exactly maxpacketlen bytes
+      expect(NET_GetPacket(NetsrcT.NS_SERVER, net_from, net_message)).toBe(true);
+      expect(Netchan_Process(server, net_message)).toBe(false);
+      expect(server.fragment_in.cursize).toBe(maxpacketlen);
+
+      // fragment 2 carries the single remaining byte and completes the message
+      Netchan_Transmit(client, 0, EMPTY);
+      expect(client.fragment_pending).toBe(false);
+      expect(NET_GetPacket(NetsrcT.NS_SERVER, net_from, net_message)).toBe(true);
+      expect(Netchan_Process(server, net_message)).toBe(true);
+      expect(net_message.cursize).toBe(maxpacketlen + 1);
+      expect(Array.from(net_message.data.subarray(0, net_message.cursize))).toEqual(Array.from(body));
+    }
+  });
+
+  // The exact-multiple boundary, where Netchan_TransmitNextFragment's
+  // more_fragments test earns its keep (chan.c:417-418):
+  //     if (chan->fragment_out.readcount + fragment_length ==
+  //         chan->fragment_out.cursize) more_fragments = false;
+  // A 2*maxpacketlen message must go out as exactly TWO fragments with the
+  // second one clearing the more_fragments bit -- not three, with a trailing
+  // zero-length fragment. A receiver handed that empty third packet would see
+  // its offset as already-consumed and drop the whole message.
+  test("a message that is an exact multiple of maxpacketlen sends exactly that many fragments, with no trailing empty one", () => {
+    const maxpacketlen = 512;
+    const { client, server } = pair(NETCHAN_NEW, PROTOCOL_VERSION_RERELEASE, maxpacketlen);
+    const body = bigPayload(maxpacketlen * 2);
+    Netchan_Transmit(client, body.length, body);
+    const qpBytes = (qportValue() & 0xff) !== 0 ? 1 : 0;
+
+    // fragment 1 of 2: more_fragments set
+    expect(client.fragment_pending).toBe(true);
+    let raw = peekDatagram();
+    expect((le16(raw, 8 + qpBytes) & 0x8000) !== 0).toBe(true);
+    expect(Netchan_Process(server, net_message)).toBe(false);
+
+    // fragment 2 of 2: more_fragments CLEAR, and the send side is done
+    Netchan_Transmit(client, 0, EMPTY);
+    expect(client.fragment_pending).toBe(false);
+    raw = peekDatagram();
+    expect((le16(raw, 8 + qpBytes) & 0x8000) !== 0).toBe(false);
+    expect(le16(raw, 8 + qpBytes) & 0x7fff).toBe(maxpacketlen); // offset of the 2nd chunk
+    expect(Netchan_Process(server, net_message)).toBe(true);
+    expect(net_message.cursize).toBe(maxpacketlen * 2);
+    expect(Array.from(net_message.data.subarray(0, net_message.cursize))).toEqual(Array.from(body));
+
+    // and there is no third datagram waiting on the ring
+    expect(NET_GetPacket(NetsrcT.NS_SERVER, net_from, net_message)).toBe(false);
+  });
+
+  // The case this whole unit exists for, at the REAL negotiated numbers
+  // rather than a scaled-down 512: a server pushing a single message larger
+  // than MAX_PACKETLEN (4096, the hard per-packet ceiling) to a loopback
+  // client that negotiated MAX_PACKETLEN_WRITABLE (4086), and the client
+  // reading it back whole. That is the shape of a Call of the Machine
+  // per-frame server datagram on mgu5m2, which before this unit overflowed
+  // SV_SendClientDatagram's message buffer and was thrown away entirely (the
+  // black screen). Also pins net_message_buffer's capacity: a reassembled
+  // message is handed back in it (chan.c:643-645), so it has to hold more
+  // than one datagram.
+  test("a >4096-byte server message round-trips whole over the loopback at the real negotiated 4086 budget", () => {
+    const { client, server } = pair(NETCHAN_NEW, PROTOCOL_VERSION_RERELEASE, MAX_PACKETLEN_WRITABLE);
+    expect(MAX_PACKETLEN_WRITABLE).toBe(4086);
+
+    const payload = bigPayload(6000); // > MAX_PACKETLEN: impossible in one datagram
+    expect(payload.length).toBeGreaterThan(MAX_PACKETLEN);
+
+    // server -> client. NET_SendLoopPacket pushes onto the OTHER socket's
+    // ring, so these come back out of NET_GetPacket(NS_CLIENT).
+    Netchan_Transmit(server, payload.length, payload);
+    expect(server.fragment_pending).toBe(true);
+
+    expect(NET_GetPacket(NetsrcT.NS_CLIENT, net_from, net_message)).toBe(true);
+    // a full-size fragment is exactly MAX_PACKETLEN on the wire: the 8-byte
+    // sequence pair + the 2-byte fragment offset word (a server writes no
+    // qport) + maxpacketlen of payload == 10 + 4086 == 4096, which is what
+    // makes PACKET_HEADER 10 ("two ints and a short (worst case)", net.h:30).
+    expect(net_message.cursize).toBe(MAX_PACKETLEN);
+    expect(Netchan_Process(client, net_message)).toBe(false); // more_fragments
+    expect(client.fragment_in.cursize).toBe(MAX_PACKETLEN_WRITABLE);
+
+    Netchan_Transmit(server, 0, EMPTY);
+    expect(server.fragment_pending).toBe(false);
+    expect(NET_GetPacket(NetsrcT.NS_CLIENT, net_from, net_message)).toBe(true);
+    expect(Netchan_Process(client, net_message)).toBe(true);
+
+    expect(net_message.cursize).toBe(6000);
+    expect(net_message.readcount).toBe(0);
+    expect(Array.from(net_message.data.subarray(0, 6000))).toEqual(Array.from(payload));
+
+    // one sequence for the whole message, both sides agreeing
+    expect(server.outgoing_sequence).toBe(2);
+    expect(client.incoming_sequence).toBe(1);
   });
 
   // A NETCHAN_NEW write that still fits stays a single unfragmented packet.

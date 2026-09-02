@@ -69,25 +69,41 @@ import { NET_SendPacket, NET_AdrToString } from "../platform/net_udp";
 // q2repro's packet-size ladder stays together further down this file.
 export const MAX_PACKETLEN = 4096; // max length of a single packet
 
+// q2repro's MAX_MSGLEN (inc/common/protocol.h:25, 0x8000) -- the capacity its
+// Netchan_Setup gives fragment_in/fragment_out, and the size of the
+// msg_read_buffer a reassembled message is handed back in. This port's own
+// MAX_MSGLEN is vanilla's 1400, which is the SINGLE-DATAGRAM limit and
+// deliberately not changed here; a reassembled NETCHAN_NEW message is by
+// definition larger than one datagram, so it needs the C's real number.
+// Hoisted above net_message_buffer, which is sized off it (below); the rest
+// of q2repro's packet-size ladder stays together further down this file.
+export const MAX_FRAGMENT_MSGLEN = 0x8000;
+
 export const net_from: NetadrT = new NetadrT();
-// Sized to MAX_PACKETLEN (4096, declared below), not MAX_MSGLEN (1400) -- the
-// receive-side counterpart of Netchan_Transmit's own `send_buf` sizing and
-// its comment further down this file. This is the buffer every INBOUND
-// datagram is copied into, and a connection that negotiated a packet_length
-// above 1400 (any loopback client asks for MAX_PACKETLEN_WRITABLE = 4086,
-// per cl_main.ts's CL_SendConnectPacket, mirroring client/main.c:461) can
-// legitimately be sent one that large. At 1400 the send side would happily
-// emit a 4086-byte datagram that the receive side could not hold, and
-// net_udp.ts's NET_GetLoopPacket died on `message.data.set(packet, 0)` with
-// "Range consisting of offset and length are out of bounds". Found live: a
-// classic-ruleset session on maps/mgu4trial that had widened its
-// configstring space (sv_init.ts's SV_WidenConfigstringSpace) and therefore
-// sent a large enough signon burst to cross 1400 in one packet. Latent on
-// the kex family for the same reason -- nothing about it is specific to the
-// widening, that map just happened to be the first content big enough to
-// reach it. q2repro has no such mismatch: its own MAX_MSGLEN is 0x8000,
-// comfortably above every packet length it will negotiate.
-export const net_message_buffer: Uint8Array = new Uint8Array(MAX_PACKETLEN);
+// This is the buffer every INBOUND datagram is copied into, AND -- exactly as
+// in the C -- the buffer a reassembled NETCHAN_NEW message is handed back in.
+// q2repro's own `msg_read_buffer` is `byte msg_read_buffer[MAX_MSGLEN]` with
+// its MAX_MSGLEN = 0x8000 (inc/common/protocol.h:25, src/common/msg.c's
+// msg_read_buffer), and src/common/net/chan.c:643-645's completed-reassembly
+// arm re-inits msg_read over THAT SAME buffer:
+//     SZ_InitRead(&msg_read, msg_read_buffer, sizeof(msg_read_buffer));
+//     SZ_Write(&msg_read, chan->fragment_in.data, chan->fragment_in.cursize);
+// so one buffer serves both roles there and now here too. It was previously
+// MAX_PACKETLEN (4096) with a second, separate 32 KiB buffer bolted on beside
+// it for reassembly, which left the exported `net_message` singleton pointing
+// at a DIFFERENT array than `net_message_buffer` for the rest of the process
+// after the first fragmented message arrived (every later NET_GetPacket then
+// filled the reassembly buffer instead). Sizing this one buffer the way the C
+// sizes its one buffer removes that split entirely.
+//
+// The 4096 floor this replaces was itself a fix, and the reason still holds:
+// a connection that negotiated a packet_length above 1400 (any loopback
+// client asks for MAX_PACKETLEN_WRITABLE = 4086, per cl_main.ts's
+// CL_SendConnectPacket, mirroring client/main.c:461) can legitimately be sent
+// a datagram that large, and at 1400 net_udp.ts's NET_GetLoopPacket died on
+// `message.data.set(packet, 0)` with "Range consisting of offset and length
+// are out of bounds".
+export const net_message_buffer: Uint8Array = new Uint8Array(MAX_FRAGMENT_MSGLEN);
 export const net_message: SizeBuf = new SizeBuf();
 SZ_Init(net_message, net_message_buffer, net_message_buffer.length);
 
@@ -113,20 +129,8 @@ export const MAX_PACKETLEN_WRITABLE_DEFAULT = MAX_PACKETLEN_DEFAULT - PACKET_HEA
 export const MAX_PACKETLEN_WRITABLE = MAX_PACKETLEN - PACKET_HEADER;
 export const MIN_PACKETLEN = 512; // don't allow smaller packets (net.h:29)
 
-// q2repro's MAX_MSGLEN (inc/common/protocol.h:25, 0x8000) -- the capacity its
-// Netchan_Setup gives fragment_in/fragment_out, and the size of the
-// msg_read_buffer a reassembled message is handed back in. This port's own
-// MAX_MSGLEN is vanilla's 1400, which is the SINGLE-DATAGRAM limit and
-// deliberately not changed here; a reassembled NETCHAN_NEW message is by
-// definition larger than one datagram, so it needs the C's real number.
-export const MAX_FRAGMENT_MSGLEN = 0x8000;
-
-// q2repro's msg_read_buffer equivalent for reassembled NETCHAN_NEW messages:
-// a message that arrived as fragments is by definition larger than one
-// datagram, so it cannot be handed back in net_message_buffer. Netchan_Process
-// re-inits the caller's SizeBuf over this buffer once a fragmented message is
-// complete, exactly as chan.c:643-645's SZ_InitRead does.
-const net_message_assembled_buffer: Uint8Array = new Uint8Array(MAX_FRAGMENT_MSGLEN);
+// MAX_FRAGMENT_MSGLEN is declared at the top of this file (net_message_buffer
+// is sized off it).
 
 // RULE-17 FINDING (phase-8 q2repro interop, matrix cell a): a real q2repro
 // client negotiating protocol 1038 (or 36/Q2PRO) never uses the classic
@@ -389,9 +393,14 @@ function writeQport(send: SizeBuf, chan: NetchanT): void {
 /*
 ===============
 Netchan_TransmitNextFragment
+
+Returns the size of the datagram just sent, exactly as chan.c:441's
+`return send.cursize;` does -- sv_send.ts's SV_SendClientMessages feeds it
+straight into this client's rate-estimation window the way the reference
+feeds it to SV_CalcSendTime (src/server/send.c:883).
 ================
 */
-export function Netchan_TransmitNextFragment(chan: NetchanT): void {
+export function Netchan_TransmitNextFragment(chan: NetchanT): number {
   const send_reliable = chan.reliable_length !== 0;
 
   // write the packet header
@@ -449,6 +458,8 @@ export function Netchan_TransmitNextFragment(chan: NetchanT): void {
 
   // send the datagram
   NET_SendPacket(chan.sock, send.cursize, send.data, chan.remote_address);
+
+  return send.cursize;
 }
 
 // Returns true if the last reliable message has acked
@@ -713,15 +724,29 @@ export function Netchan_Process(chan: NetchanT, msg: SizeBuf): boolean {
     SZ_Write(chan.fragment_in, msg.data.subarray(msg.readcount, msg.readcount + length), length);
     if (more_fragments) return false;
 
-    // message has been successfully assembled. The C re-inits msg_read over
-    // its own msg_read_buffer (chan.c:643-645); this port's net_message is
-    // only MAX_MSGLEN (1400) wide, so the assembled message is handed back in
-    // a dedicated buffer of q2repro's real MAX_MSGLEN instead -- see
-    // MAX_FRAGMENT_MSGLEN's doc comment.
-    const assembled = chan.fragment_in.cursize;
-    net_message_assembled_buffer.set(chan.fragment_in.data.subarray(0, assembled), 0);
-    SZ_Init(msg, net_message_assembled_buffer, net_message_assembled_buffer.length);
-    msg.cursize = assembled;
+    // message has been successfully assembled (chan.c:658-661):
+    //     memcpy(msg_read_buffer, chan->fragment_in.data, chan->fragment_in.cursize);
+    //     SZ_InitRead(&msg_read, msg_read_buffer, chan->fragment_in.cursize);
+    //     SZ_Clear(&chan->fragment_in);
+    // net_message_buffer IS this port's msg_read_buffer, and is now sized the
+    // way the C sizes its own (MAX_FRAGMENT_MSGLEN), so the assembled message
+    // goes straight back into it -- see net_message_buffer's doc comment.
+    // fragment_in is a distinct array, so this copy never aliases.
+    //
+    // ONE DELIBERATE DIFFERENCE: the C passes the ASSEMBLED LENGTH as
+    // SZ_InitRead's size, so msg_read.maxsize ends up equal to cursize. That
+    // is safe there only because q2repro's NET_GetPacket re-inits msg_read
+    // over the full buffer for every single datagram it receives
+    // (src/common/net/net.c). This port's NET_GetPacket does not -- it writes
+    // into `message.data` and sets `message.cursize` in place (platform/
+    // net_udp.ts, both the loopback and UDP arms) -- so a shrunk maxsize would
+    // persist for the rest of the process and start rejecting later packets in
+    // NET_GetPacket's own `packet.data.length >= message.maxsize` oversize
+    // check. maxsize therefore stays the buffer's real length, which is what
+    // that check needs to mean. cursize/readcount, the two fields every reader
+    // downstream of here actually consumes, are identical to the C's.
+    SZ_Init(msg, net_message_buffer, net_message_buffer.length);
+    SZ_Write(msg, chan.fragment_in.data.subarray(0, chan.fragment_in.cursize), chan.fragment_in.cursize);
     msg.readcount = 0;
     SZ_Clear(chan.fragment_in);
   }

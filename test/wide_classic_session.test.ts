@@ -24,11 +24,19 @@
 import { describe, test, expect, beforeEach, afterAll } from "bun:test";
 import { sv, svs, ServerStateT, ClientStateT, ClientT, maxclients } from "../src/server/server";
 import { SV_Init, SV_ConnectionlessPacket } from "../src/server/sv_main";
-import { SV_ModelIndex, SV_WidenConfigstringSpace } from "../src/server/sv_init";
+import { SV_ModelIndex, SV_WidenConfigstringSpace, SV_LocalConnectProtocol, SV_ContentNeedsWideLayout } from "../src/server/sv_init";
 import { geHolder } from "../src/server/sv_game";
 import { BuildLegacyImports } from "../src/server/bindings/legacy";
 import { selectServerCodec } from "../src/client/cl_parse";
-import { NetadrT, NetadrtypeT, NetsrcT, PROTOCOL_VERSION, PROTOCOL_VERSION_RERELEASE, PROTOCOL_VERSION_RERELEASE_CLASSIC } from "../src/qcommon/qcommon";
+import {
+  NetadrT,
+  NetadrtypeT,
+  NetsrcT,
+  PROTOCOL_VERSION,
+  PROTOCOL_VERSION_Q2PRO,
+  PROTOCOL_VERSION_RERELEASE,
+  PROTOCOL_VERSION_RERELEASE_CLASSIC,
+} from "../src/qcommon/qcommon";
 import { net_from, net_message } from "../src/qcommon/net_chan";
 import { NET_ClearLoopback, NET_SendPacket, NET_GetPacket } from "../src/platform/net_udp";
 import { MSG_BeginReading, MSG_ReadLong } from "../src/qcommon/sizebuf";
@@ -322,6 +330,52 @@ describe("classic-module session: protocol negotiation", () => {
     expect(client).not.toBeNull();
     expect(client?.codec.name).toBe("q2repro-classic");
   });
+
+  // The localhost half of the same question. There is no challenge exchange
+  // on an in-process connect, so the client cannot negotiate off the
+  // `p=34,35,36` list the tests above check -- it is told one number through
+  // the Com_SetServerConnectProtocol bridge (sv_init.ts's SV_SpawnServer),
+  // and q2repro's own client overrides cl_protocol with the local server's
+  // protocol for exactly this reason (src/client/main.c:414-419).
+  //
+  // The value for a NEGOTIATING session used to be 0, which cl_main.ts read
+  // as "no answer" and fell back to cl_protocol's vanilla default (34). That
+  // pinned every classic-module single-player session to vanilla's 1390-byte
+  // datagram budget with no fragmentation available, so Call of the Machine
+  // maps whose per-frame datagram exceeds it (mgu5m1) had every frame dropped
+  // and rendered black. It now answers with the best protocol the session
+  // actually accepts.
+  test("the in-process client is told the best protocol the session accepts, never the vanilla default", () => {
+    // negotiating (unwidened classic) session: the top of its own p= list
+    expect(svs.sessionProtocol).toBe(0);
+    expect(SV_LocalConnectProtocol()).toBe(PROTOCOL_VERSION_Q2PRO);
+    expect(SV_LocalConnectProtocol()).not.toBe(PROTOCOL_VERSION);
+
+    // a session that demands one protocol is still answered with exactly it
+    SV_WidenConfigstringSpace();
+    expect(svs.sessionProtocol).toBe(PROTOCOL_VERSION_RERELEASE_CLASSIC);
+    expect(SV_LocalConnectProtocol()).toBe(PROTOCOL_VERSION_RERELEASE_CLASSIC);
+
+    svs.sessionProtocol = PROTOCOL_VERSION_RERELEASE; // the kex family
+    expect(SV_LocalConnectProtocol()).toBe(PROTOCOL_VERSION_RERELEASE);
+  });
+
+  // FIDELITY guard for the change above: it moves what the LOOPBACK client is
+  // told, and nothing else. A remote vanilla client must still be offered and
+  // accepted exactly as before -- the same thing the first test in this block
+  // pins, restated here so a future edit that "simplifies" the bridge by
+  // narrowing the advertised list fails loudly.
+  test("changing the in-process client's protocol does not change what remote clients are offered or accepted", () => {
+    sv.state = ServerStateT.ss_game;
+
+    const { text } = getChallenge();
+    expect(text).toContain("p=34,35,36");
+
+    const { client } = driveConnect(PROTOCOL_VERSION, "");
+    expect(client).not.toBeNull();
+    expect(client?.codec.name).toBe("vanilla");
+    expect(client?.netchan.maxpacketlen).toBe(1390); // vanilla has no packet_length field to negotiate
+  });
 });
 
 describe("client: reading the session's protocol back", () => {
@@ -358,5 +412,211 @@ describe("client: reading the session's protocol back", () => {
     expect(sel.codec.name).toBe("vanilla");
     expect(sel.csr).toBe(CS_REMAP_OLD);
     expect(sel.gameFamily).toBe("classic");
+  });
+});
+
+/*
+=============================================================================
+THE CONTENT TRIGGER (SV_ContentNeedsWideLayout)
+
+Widening used to happen only when a model/sound/image block actually filled,
+which on the shipped re-release content is 3 maps out of 28. Every other
+re-release map under the classic ruleset stayed narrow, and narrow is exactly
+what clears cls.csr.extended on the client -- so its flares, shadow lights
+and per-entity alpha/scale were dropped on the wire even though src/game had
+spawned every one of those entities.
+
+The session now asks the map's own entity lump, before ge.SpawnEntities runs.
+Both outcomes are pinned here, on real entity-lump text, plus the fidelity
+half: a 1997 entity lump must produce the narrow layout and the 34/35/36
+advertisement, and the value position of a key must never be mistaken for a
+key (`"team" "alpha"` is a real team name in baseq2/maps/dlite.bsp).
+=============================================================================
+*/
+describe("classic-module session: deciding the layout from the map's content", () => {
+  // A vanilla 1997 entity lump: worldspawn, a light with a `_color`, a
+  // deathmatch spawn, a monster_tank (the 1997 classname -- NOT
+  // monster_tank_stand), and the dlite.bsp team-name trap.
+  const CLASSIC_ENTS = `
+{
+"classname" "worldspawn"
+"message" "Outer Base"
+"sky" "unit1_"
+}
+{
+"classname" "light"
+"origin" "16 32 64"
+"_color" "1 1 0.5"
+"light" "300"
+}
+{
+"classname" "monster_tank"
+"origin" "128 128 24"
+}
+{
+"origin" "64 448 -368"
+"team" "alpha"
+"classname" "weapon_bfg"
+}
+{
+"origin" "64 448 -376"
+"team" "alpha"
+"classname" "weapon_chaingun"
+}
+`;
+
+  test("FIDELITY: a 1997 entity lump needs nothing the classic wire cannot carry", () => {
+    const verdict = SV_ContentNeedsWideLayout(CLASSIC_ENTS);
+    expect(verdict.needed).toBe(false);
+  });
+
+  test("a value that happens to spell a trigger key is not a key", () => {
+    // `"team" "alpha"` above. A substring search for "alpha" matches it; the
+    // pair-wise read this uses must not. Same for a classname in value
+    // position of some other key.
+    expect(SV_ContentNeedsWideLayout(`{ "team" "alpha" "classname" "weapon_bfg" }`).needed).toBe(false);
+    expect(SV_ContentNeedsWideLayout(`{ "target" "misc_flare" "classname" "func_door" }`).needed).toBe(false);
+    expect(SV_ContentNeedsWideLayout(`{ "message" "scale" "classname" "worldspawn" }`).needed).toBe(false);
+  });
+
+  test("a shadow-light entity widens the session -- this is base1's whole case", () => {
+    // Verbatim shape of one of retail base1's 37 dynamic_lights.
+    const verdict = SV_ContentNeedsWideLayout(`
+{
+"classname" "dynamic_light"
+"origin" "-1920 1228 184"
+"_color" "1 1 0.501961"
+"shadowlightradius" "1000"
+"shadowlightintensity" "1"
+"shadowlightstyle" "0"
+}
+`);
+    expect(verdict.needed).toBe(true);
+    expect(verdict.reason).toContain("dynamic_light");
+  });
+
+  test("every classname in the table widens, and each names why in the reason", () => {
+    for (const cn of [
+      "misc_flare",
+      "target_light",
+      "dynamic_light",
+      "misc_hologram",
+      "misc_player_mannequin",
+      "monster_tank_stand",
+      "monster_guncmdr",
+      "target_camera",
+    ]) {
+      const verdict = SV_ContentNeedsWideLayout(`{ "classname" "${cn}" "origin" "0 0 0" }`);
+      expect(verdict.needed).toBe(true);
+      expect(verdict.reason).toContain(cn);
+    }
+  });
+
+  test("the three generic spawn keys widen on any entity at all", () => {
+    for (const key of ["alpha", "scale", "shadowlightradius"]) {
+      const verdict = SV_ContentNeedsWideLayout(`{ "classname" "func_door" "${key}" "0.5" }`);
+      expect(verdict.needed).toBe(true);
+      expect(verdict.reason).toContain(key);
+    }
+  });
+
+  test("classname matching is case-insensitive, the way the spawn table's own lookup is", () => {
+    expect(SV_ContentNeedsWideLayout(`{ "CLASSNAME" "MISC_FLARE" }`).needed).toBe(true);
+  });
+
+  test("an empty or truncated lump is never a reason to widen", () => {
+    expect(SV_ContentNeedsWideLayout("").needed).toBe(false);
+    expect(SV_ContentNeedsWideLayout(`{ "classname" "misc_fl`).needed).toBe(false);
+  });
+});
+
+/*
+=============================================================================
+INTEROP: what each kind of classic session advertises
+
+The rule the vanilla-family clients depend on: a classic session widens only
+for content the classic wire cannot carry, so a 1997-data session is still a
+34/35/36 session and a vanilla client still connects to it. A re-release-data
+session (base1 with its shadow lights, mgu2m3 with its 53 flares) advertises
+4038 alone, and says why when it turns a protocol-34 client away.
+=============================================================================
+*/
+describe("classic-module session: what each kind of content advertises", () => {
+  beforeEach(() => {
+    setupClassicLoadingServer();
+  });
+
+  test("1997-data classic session advertises 34,35,36 and takes a vanilla client", () => {
+    // Nothing widened it, because nothing in a 1997 map asks it to.
+    expect(SV_ContentNeedsWideLayout(`{ "classname" "monster_tank" "origin" "0 0 0" }`).needed).toBe(false);
+    sv.state = ServerStateT.ss_game;
+
+    const { text } = getChallenge();
+    expect(text).toContain("p=34,35,36");
+
+    const { client } = driveConnect(PROTOCOL_VERSION, "");
+    expect(client).not.toBeNull();
+    expect(client?.codec.name).toBe("vanilla");
+  });
+
+  test("re-release-data classic session advertises 4038 alone", () => {
+    // The engine's own sequence: ask the lump, then widen if it says so.
+    const verdict = SV_ContentNeedsWideLayout(`{ "classname" "dynamic_light" "shadowlightradius" "1000" }`);
+    expect(verdict.needed).toBe(true);
+    expect(SV_WidenConfigstringSpace(verdict.reason)).toBe(true);
+    sv.state = ServerStateT.ss_game;
+
+    expect(svs.csr.extended).toBe(true);
+    const { text } = getChallenge();
+    expect(text).toContain(`p=${PROTOCOL_VERSION_RERELEASE_CLASSIC}`);
+    expect(text).not.toContain("p=34");
+  });
+});
+
+/*
+=============================================================================
+THE TWO ADDITIONS TO THE FROZEN v3 IMPORT SET
+
+game.ts declares extended_layout()/shadowlight() optional so the other frozen
+legacy trees need no edit; bindings/legacy.ts supplies both. src/game reads
+them to decide whether dynamic_light's shadow data can reach a client at all.
+=============================================================================
+*/
+describe("classic-module session: the engine's layout query and shadow-light publisher", () => {
+  beforeEach(() => {
+    setupClassicLoadingServer();
+  });
+
+  test("extended_layout() tracks the live session layout", () => {
+    const gi = BuildLegacyImports();
+    expect(gi.extended_layout?.()).toBe(false);
+    SV_WidenConfigstringSpace();
+    expect(gi.extended_layout?.()).toBe(true);
+  });
+
+  test("shadowlight() is a no-op on the narrow layout, which has no such block", () => {
+    const gi = BuildLegacyImports();
+    const before = sv.configstrings.slice();
+    gi.shadowlight?.(0, "1;0;1000;512;1;0;0;0;45;0;0;0");
+    expect(sv.configstrings).toEqual(before);
+  });
+
+  test("shadowlight() writes into the wide layout's CS_SHADOWLIGHTS block, slot-addressed", () => {
+    SV_WidenConfigstringSpace();
+    const gi = BuildLegacyImports();
+    gi.shadowlight?.(0, "1;0;1000;512;1;0;0;0;45;0;0;0");
+    gi.shadowlight?.(36, "37;1;386;512;1;0;0;0;45;1;0;0");
+
+    expect(sv.configstrings[CS_REMAP_RERELEASE.shadowlights]).toBe("1;0;1000;512;1;0;0;0;45;0;0;0");
+    expect(sv.configstrings[CS_REMAP_RERELEASE.shadowlights + 36]).toBe("37;1;386;512;1;0;0;0;45;1;0;0");
+  });
+
+  test("shadowlight() refuses a slot outside the block rather than writing over a neighbour", () => {
+    SV_WidenConfigstringSpace();
+    const gi = BuildLegacyImports();
+    const before = sv.configstrings.slice();
+    gi.shadowlight?.(-1, "x");
+    gi.shadowlight?.(CS_REMAP_RERELEASE.max_shadowlights, "x");
+    expect(sv.configstrings).toEqual(before);
   });
 });

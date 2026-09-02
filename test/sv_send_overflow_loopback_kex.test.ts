@@ -43,9 +43,21 @@ import { sv, svs, ServerStateT, ClientStateT, ClientT, maxclients } from "../src
 import { SV_Init, SVC_GetChallenge, SVC_DirectConnect } from "../src/server/sv_main";
 import { SV_SendClientDatagram, SV_Multicast } from "../src/server/sv_send";
 import { geHolder } from "../src/server/sv_game";
-import { NetadrT, NetadrtypeT, PROTOCOL_VERSION_RERELEASE } from "../src/qcommon/qcommon";
-import { net_from, MAX_PACKETLEN_WRITABLE, MAX_PACKETLEN_WRITABLE_DEFAULT } from "../src/qcommon/net_chan";
-import { NET_CompareBaseAdr } from "../src/platform/net_udp";
+import { NetadrT, NetadrtypeT, NetsrcT, PROTOCOL_VERSION_RERELEASE } from "../src/qcommon/qcommon";
+import {
+  net_from,
+  net_message,
+  MAX_PACKETLEN,
+  MAX_PACKETLEN_WRITABLE,
+  MAX_PACKETLEN_WRITABLE_DEFAULT,
+  MAX_FRAGMENT_MSGLEN,
+  NetchanT,
+  Netchan_Setup,
+  Netchan_Process,
+  Netchan_TransmitNextFragment,
+  NETCHAN_NEW,
+} from "../src/qcommon/net_chan";
+import { NET_CompareBaseAdr, NET_ClearLoopback, NET_GetPacket } from "../src/platform/net_udp";
 import { Cmd_TokenizeString } from "../src/qcommon/cmd";
 import { SZ_Init, MSG_WriteByte } from "../src/qcommon/sizebuf";
 import { SetConPrintHandler } from "../src/qcommon/common";
@@ -256,9 +268,21 @@ describe("SV_SendClientDatagram: a loopback kex channel with the negotiated 4086
     expect(client.netchan.maxpacketlen).toBe(MAX_PACKETLEN_WRITABLE);
     expect(client.netchan.maxpacketlen).toBe(4086);
     expect(client.netchan.maxpacketlen).not.toBe(MAX_PACKETLEN_WRITABLE_DEFAULT);
-    // datagram_buf must be able to hold at least maxpacketlen + the packet
-    // header (sv_main.ts's `requiredDatagramCapacity`), not just MAX_MSGLEN.
+    // UPDATED (fragmentation unit): a NETCHAN_NEW channel's accumulated
+    // unreliable payload is no longer capped at one datagram. q2repro's
+    // write_datagram_new bounds it by `msg_write.maxsize` -- msg_write is
+    // SZ_Init'd over `msg_write_buffer[MAX_MSGLEN]` with the C's MAX_MSGLEN
+    // of 0x8000 (inc/common/protocol.h:25, src/common/msg.c:39,59), NOT by
+    // netchan.maxpacketlen, because Netchan_Transmit fragments anything
+    // larger (chan.c:475-487). Only write_datagram_OLD uses maxpacketlen as
+    // the cap (src/server/send.c:677,702), which is why that arm of
+    // sv_main.ts's `requiredDatagramCapacity` is unchanged and
+    // test/sv_send_overflow.test.ts's network-default expectations still
+    // hold. The old floor is asserted too -- the new capacity has to be a
+    // superset of what this test previously demanded, not a replacement.
     expect(client.datagram_buf.length).toBeGreaterThanOrEqual(MAX_PACKETLEN_WRITABLE + 10);
+    expect(client.datagram_buf.length).toBe(MAX_FRAGMENT_MSGLEN);
+    expect(client.netchan.type).toBe(NETCHAN_NEW);
   });
 
   test("a burst too big for a network-default channel (proven by sv_send_overflow.test.ts) causes NO overflow warning over 20 frames on this negotiated 4086-budget loopback channel", () => {
@@ -306,5 +330,107 @@ describe("SV_SendClientDatagram: a loopback kex channel with the negotiated 4086
     // the whole point: this negotiated-4086 channel never overflows on a
     // burst that DOES overflow a network-default (1390/1400) one.
     expect(overflowFrames).toEqual([]);
+  });
+
+  // The Call of the Machine regression itself, end to end through the real
+  // server frame writer: a per-frame payload larger than MAX_PACKETLEN (4096)
+  // -- more than the negotiated 4086 budget can carry in ONE datagram, which
+  // is what mgu5m2 produces every tick under both game modules.
+  //
+  // Before the fragmentation unit this printed "WARNING: msg overflowed for
+  // %s" (plus SZ_GetSpace's own line) and SZ_Clear threw the entire frame
+  // away, so the client never received a complete frame and the map rendered
+  // black for the whole session. The reference does not drop it: q2repro's
+  // write_datagram_new writes the frame into a MAX_MSGLEN (0x8000) buffer and
+  // hands the whole thing to Netchan_Transmit, whose NETCHAN_NEW arm splits
+  // any write larger than maxpacketlen into FRG_BIT fragments the receiver
+  // reassembles (src/common/net/chan.c:475-487 and 545-660).
+  test("a per-frame payload larger than MAX_PACKETLEN goes out as fragments and reassembles whole, instead of overflowing and being dropped", () => {
+    const gclient = { ps: new PlayerStateT(), ping: 0 };
+    setupServer(gclient);
+    NET_ClearLoopback();
+
+    const client = driveKexLoopbackConnect(MAX_PACKETLEN_WRITABLE);
+    expect(client.netchan.maxpacketlen).toBe(MAX_PACKETLEN_WRITABLE);
+
+    // The receiving half of the same connection, set up the way cl_main.ts's
+    // "client_connect" handler does for a kex loopback session. Netchan_Setup
+    // on a NS_CLIENT socket means Netchan_Process skips the qport field, and
+    // NET_SendLoopPacket puts a server-sent datagram on the client's ring.
+    const clientChan = new NetchanT();
+    Netchan_Setup(
+      NetsrcT.NS_CLIENT,
+      clientChan,
+      client.netchan.remote_address,
+      client.netchan.qport,
+      NETCHAN_NEW,
+      PROTOCOL_VERSION_RERELEASE,
+      MAX_PACKETLEN_WRITABLE,
+    );
+
+    // SV_Multicast only fans an UNRELIABLE payload out to clients that are
+    // already cs_spawned (`if (client->state != cs_spawned && !reliable)
+    // continue;`, server/sv_send.c) -- SVC_DirectConnect leaves this one on
+    // cs_connected, which is the state a real client is in only until its
+    // "begin" arrives. Promote it, or every injectMulticastBurst below is
+    // silently dropped and this test would pass without ever putting a byte
+    // in client.datagram. (Worth knowing when reading the sibling test above,
+    // whose own no-overflow assertion runs against a cs_connected client.)
+    client.state = ClientStateT.cs_spawned;
+
+    SZ_Init(sv.multicast, sv.multicast_buf, sv.multicast_buf.length);
+    sv.multicast.allowoverflow = true;
+    sv.framenum = 1;
+
+    const printed: string[] = [];
+    SetConPrintHandler((msg) => printed.push(msg));
+
+    // 4 x 1300 = 5200 bytes of unreliable payload in one tick. Each burst is
+    // written through sv.multicast, which is still vanilla's MAX_MSGLEN
+    // (1400) and deliberately unchanged -- the accumulation happens in
+    // client.datagram, which is what this unit resized.
+    for (let i = 0; i < 4; i++) injectMulticastBurst(1300);
+    expect(client.datagram.cursize).toBeGreaterThan(MAX_PACKETLEN);
+    expect(client.datagram.overflowed).toBe(false);
+    const sentBytes = client.datagram.cursize;
+
+    SV_SendClientDatagram(client);
+
+    // no overflow of any kind, where before there were two lines per frame
+    expect(printed.filter((m) => m.includes("overflow"))).toEqual([]);
+    expect(client.datagram.cursize).toBe(0);
+    expect(client.datagram.overflowed).toBe(false);
+
+    // the frame went out fragmented rather than being dropped
+    expect(client.netchan.fragment_pending).toBe(true);
+
+    // drain the rest exactly as sv_send.ts's SV_SendClientMessages does on
+    // the following server frames ("don't write any frame data until all
+    // fragments are sent", src/server/send.c's SV_SendClientMessages), and
+    // reassemble on the receiving side.
+    let assembled: Uint8Array | null = null;
+    for (let guard = 0; guard < 32 && assembled === null; guard++) {
+      while (NET_GetPacket(NetsrcT.NS_CLIENT, net_from, net_message)) {
+        if (Netchan_Process(clientChan, net_message)) {
+          assembled = net_message.data.slice(0, net_message.cursize);
+          break;
+        }
+      }
+      if (assembled === null && client.netchan.fragment_pending) {
+        Netchan_TransmitNextFragment(client.netchan);
+      } else if (assembled === null) {
+        break;
+      }
+    }
+
+    expect(client.netchan.fragment_pending).toBe(false);
+    expect(assembled).not.toBeNull();
+    const whole = assembled as Uint8Array;
+
+    // the reassembled message is bigger than any single datagram could be,
+    // and it still ends with the 5200 burst bytes the frame writer appended
+    // after the svc_frame envelope.
+    expect(whole.length).toBeGreaterThan(MAX_PACKETLEN);
+    expect(Array.from(whole.subarray(whole.length - sentBytes))).toEqual(Array(sentBytes).fill(0x42));
   });
 });

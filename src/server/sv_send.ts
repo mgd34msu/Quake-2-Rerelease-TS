@@ -1,7 +1,7 @@
 // sv_send.c -- server message sending
 
 import { NetsrcT, NetadrtypeT, SysError, SvcOpsT, MAX_MSGLEN } from "../qcommon/qcommon";
-import { Netchan_OutOfBandPrint, Netchan_Transmit, net_from, PACKET_HEADER } from "../qcommon/net_chan";
+import { Netchan_OutOfBandPrint, Netchan_Transmit, Netchan_TransmitNextFragment, net_from, PACKET_HEADER, NETCHAN_NEW, MAX_FRAGMENT_MSGLEN } from "../qcommon/net_chan";
 import { SizeBuf, SZ_Init, SZ_Clear, SZ_Write, MSG_WriteByte, MSG_WriteShort, MSG_WriteString, MSG_WritePos } from "../qcommon/sizebuf";
 import { Com_Printf, Com_Error, dedicated } from "../qcommon/common";
 import { FS_ReadRaw, FS_FCloseFile, FS_Read } from "../qcommon/files";
@@ -315,16 +315,40 @@ FRAME UPDATES
 */
 
 export function SV_SendClientDatagram(client: ClientT): boolean {
-  // Sized to this CLIENT's own negotiated per-packet budget
-  // (client.netchan.maxpacketlen, set by sv_main.ts's SVC_DirectConnect from
-  // the connect string's packet_length field), not a flat MAX_MSGLEN --
-  // otherwise a connection that negotiated a larger budget (e.g. a loopback
-  // kex client's MAX_PACKETLEN_WRITABLE, 4086) would still have its frame
-  // truncated here before Netchan_Transmit ever got a chance to send it. For
-  // every connection that did NOT negotiate a larger budget (maxpacketlen
-  // stays MAX_PACKETLEN_WRITABLE_DEFAULT, 1390), this is exactly MAX_MSGLEN
-  // (1390 + PACKET_HEADER's 10 = 1400) -- unchanged from before this unit.
-  const msg_buf = new Uint8Array(Math.max(MAX_MSGLEN, client.netchan.maxpacketlen + PACKET_HEADER));
+  // The per-frame write budget, which is NOT the same number as the
+  // per-datagram budget on a fragmenting channel. q2pro/q2repro's
+  // src/server/send.c has one frame writer per netchan type and they use two
+  // different limits for exactly this reason:
+  //
+  //   - write_datagram_old (NETCHAN_OLD): the accumulated unreliable payload
+  //     is dumped when `msg_write.cursize + client->msg_unreliable_bytes >
+  //     client->netchan.maxpacketlen`, because NetchanOld_Transmit has no way
+  //     to split a write and would only print "dumped unreliable" and lose
+  //     it. So the whole frame has to fit one datagram.
+  //   - write_datagram_new (NETCHAN_NEW): the same check is against
+  //     `msg_write.maxsize` instead -- msg_write is SZ_Init'd over
+  //     `msg_write_buffer[MAX_MSGLEN]` with the C's MAX_MSGLEN of 0x8000
+  //     (inc/common/protocol.h:25, src/common/msg.c), NOT maxpacketlen --
+  //     because NetchanNew_Transmit splits anything larger than maxpacketlen
+  //     into fragments (chan.c:475-487) and the receiver reassembles it.
+  //
+  // This port had only the OLD limit, applied to both types: the buffer was
+  // `max(MAX_MSGLEN, maxpacketlen + PACKET_HEADER)`, i.e. 4096 for a loopback
+  // kex/1038 channel. Call of the Machine's mgu5m2 builds per-frame datagrams
+  // larger than that under BOTH game modules (measured: 668 overflowing frames
+  // in one 4-minute kex run, 167 under the widened classic session), so this
+  // SizeBuf overflowed ("WARNING: msg overflowed for %s" plus SZ_GetSpace's
+  // own print), the SZ_Clear below threw the whole frame away, and the client
+  // never received a complete frame at all -- a black screen for the entire
+  // run. The fragmentation path in net_chan.ts already existed but could never
+  // be reached, because the frame was destroyed one layer above it.
+  //
+  // NETCHAN_OLD keeps its previous sizing verbatim (vanilla/34 and R1Q2/35
+  // are unchanged, including their overflow-and-drop behavior, which is the
+  // reference's behavior for a non-fragmenting channel).
+  const msg_buf = new Uint8Array(
+    client.netchan.type === NETCHAN_NEW ? MAX_FRAGMENT_MSGLEN : Math.max(MAX_MSGLEN, client.netchan.maxpacketlen + PACKET_HEADER),
+  );
   const msg = new SizeBuf();
 
   SV_BuildClientFrame(client);
@@ -453,6 +477,41 @@ export function SV_SendClientMessages(): void {
     } else if (c.state === ClientStateT.cs_spawned) {
       // don't overrun bandwidth
       if (SV_RateDrop(c)) continue;
+
+      // "don't write any frame data until all fragments are sent"
+      // (q2pro/q2repro src/server/send.c, SV_SendClientMessages -- the check
+      // sits between SV_RateDrop and SV_BuildClientFrame and does
+      // `client->frameflags |= FF_SUPPRESSED; cursize =
+      // client->netchan.TransmitNextFragment(&client->netchan); goto
+      // advance;`). Placing it HERE rather than relying on
+      // Netchan_Transmit's own fragment_pending short-circuit is the
+      // load-bearing part: SV_SendClientDatagram would otherwise run
+      // SV_BuildClientFrame (advancing the delta-compression frame ring for a
+      // frame that is never going to be transmitted) and then
+      // unconditionally SZ_Clear(client.datagram), silently discarding every
+      // temp entity, sound and print accumulated while the previous message
+      // was still draining. Skipping the whole frame instead keeps that
+      // payload queued for the next non-suppressed frame, exactly as the
+      // reference does. frameflags/FF_SUPPRESSED itself is q2pro's own
+      // client-visible frame-flag bookkeeping and has no counterpart in this
+      // port's vanilla-shaped frame writer, so there is nothing to set.
+      // (The `type === NETCHAN_NEW` half of this condition is belt-and-braces
+      // and cannot change behavior: fragment_pending is only ever set by the
+      // NETCHAN_NEW send path. The reference tests fragment_pending alone,
+      // because there TransmitNextFragment is a per-type function pointer
+      // that a NETCHAN_OLD channel simply does not carry; this port's is a
+      // plain function, so the type is checked explicitly instead.)
+      if (c.netchan.type === NETCHAN_NEW && c.netchan.fragment_pending) {
+        const cursize = Netchan_TransmitNextFragment(c.netchan);
+        // src/server/send.c:883's SV_CalcSendTime(client, cursize) -- a
+        // suppressed frame still consumed bandwidth, so it has to land in the
+        // rate-estimation window SV_RateDrop reads. Leaving the slot holding
+        // the PREVIOUS frame's size would let a fragmenting client
+        // systematically under-report what it is actually sending.
+        c.message_size[sv.framenum % RATE_MESSAGES] = cursize;
+        continue;
+      }
+
       SV_SendClientDatagram(c);
     } else {
       // just update reliable if needed

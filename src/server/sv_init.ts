@@ -1,6 +1,6 @@
 // sv_init.c
 
-import { SysError, SvcOpsT, PORT_MASTER, UPDATE_BACKUP, PROTOCOL_VERSION_RERELEASE_CLASSIC } from "../qcommon/qcommon";
+import { SysError, SvcOpsT, PORT_MASTER, UPDATE_BACKUP, PROTOCOL_VERSION_RERELEASE_CLASSIC, PROTOCOL_VERSION_Q2PRO } from "../qcommon/qcommon";
 import { CS_REMAP_OLD, CS_REMAP_RERELEASE, remapLegacyConfigstringIndex } from "../shared/cs_remap";
 import { Q2REPRO_CLASSIC_CODEC } from "../qcommon/protocol/q2repro";
 import { CM_LoadMap, CM_InlineModel, CM_NumInlineModels, CM_EntityString } from "../qcommon/cmodel";
@@ -130,9 +130,17 @@ WHEN IT REFUSES. Only during map load (ss_loading/ss_dead), and only from the
 classic layout. Once clients are connected they have been told the classic
 layout, so a late overflow must stay the hard error it always was rather than
 silently relocating the space out from under them.
+
+TWO CALLERS NOW. The original one is SV_FindIndexWidening's overflow
+escalation below (the "*Index: overflow" rescue). The second, added later, is
+SV_SpawnServer's up-front content check -- SV_ContentNeedsWideLayout, whose
+own header explains the signal -- which runs BEFORE ge.SpawnEntities so a map
+whose presentation the classic wire cannot carry spends its whole load on one
+layout instead of relocating halfway through. `reason` only picks the console
+wording; everything else about the two paths is identical.
 ================
 */
-export function SV_WidenConfigstringSpace(): boolean {
+export function SV_WidenConfigstringSpace(reason = "Map exceeds the classic configstring limits"): boolean {
   if (svs.csr !== CS_REMAP_OLD) return false; // already wide (kex family, or a previous escalation this level)
   if (sv.state !== ServerStateT.ss_loading && sv.state !== ServerStateT.ss_dead) return false;
 
@@ -164,8 +172,147 @@ export function SV_WidenConfigstringSpace(): boolean {
   for (let i = sv.baselines.length; i < SV_MaxEdicts(); i++) sv.baselines[i] = new EntityStateT();
   for (let i = sv.entities.length; i < SV_MaxEdicts(); i++) sv.entities[i] = new ServerEntityT();
 
-  Com_Printf("Map exceeds the classic configstring limits; widening this session (protocol %i).\n", PROTOCOL_VERSION_RERELEASE_CLASSIC);
+  Com_Printf("%s; widening this session (protocol %i).\n", reason, PROTOCOL_VERSION_RERELEASE_CLASSIC);
   return true;
+}
+
+/*
+================
+SV_ContentNeedsWideLayout
+
+Does the map about to be spawned carry presentation that the CLASSIC wire
+cannot deliver? Answered from the BSP's own entity lump, before a single
+spawn function runs.
+
+WHY THE SESSION HAS TO DECIDE THIS UP FRONT. The overflow escalation below
+only fires when a model/sound/image block actually fills, which on the
+shipped re-release content is 3 maps out of 28 (mgu4m1, mgu4trial, mgu5m2).
+Every other re-release map played under the classic ruleset stayed on the
+narrow layout, and the narrow layout is exactly what turns cls.csr.extended
+off on the client: no flares, no shadow lights, per-entity alpha and scale
+dropped from the delta. The content was spawning server-side the whole time
+(src/game's g_kexmisc/g_kextarg) and being thrown away on the wire. Deciding
+at session start means the map's own presentation, not its precache count,
+picks the layout.
+
+WHY THIS SIGNAL AND NOT THE OTHER TWO CANDIDATES.
+
+  * "The mounted data tree is the re-release tree" (files.ts's
+    FS_RootIsRerelease / menu_content.ts's DataMountPlanFor) is one line, but
+    it is a statement about the INSTALL, not about the map. It widens a
+    re-release-tree session whose map needs nothing -- costing that session
+    protocol 34 and every vanilla-family client that could have connected to
+    it -- and it misses the reverse case, a re-release map reached through a
+    lower-priority content_root while basedir points at a 1997 install.
+
+  * "The BSP has re-release lumps" does not exist as a distinction: both
+    trees' maps are plain IBSP/38 here (verified against this machine's two
+    installs -- rerelease base1 and mgu2m3 are IBSP v38, same as 1997 base1).
+
+The entity lump is the thing that is actually different, it is per-map, and
+it is available at exactly the right moment.
+
+WHAT COUNTS. Two closed sets, both derived from src/game itself -- this is a
+statement about which ENTITY-STATE FIELDS the classic delta has no room for
+(s.alpha, s.scale) and which renderfx bits the client only honors behind
+cls.csr.extended (RF_FLARE, RF_CUSTOM_LIGHT, RF_CASTSHADOW plus its
+CS_SHADOWLIGHTS block), mapped back to the map syntax that reaches them:
+
+  * classnames whose spawn function in src/game writes one of those fields --
+    enumerated in WIDE_LAYOUT_CLASSNAMES below, each with the site that
+    proves it;
+  * the generic spawn keys that write them on ANY entity -- "alpha" and
+    "scale" (g_save.ts's fields[] routes both to target "edict_s"), and
+    "shadowlightradius", the key setup_dynamic_light gates its whole
+    shadow-light path on.
+
+WHY IT NEVER WIDENS A 1997-DATA SESSION. None of these classnames exists in
+the 1997 entity set, and no 1997 map carries the three keys. Checked, not
+assumed: all 686 maps in this machine's classic tree (baseq2/ctf/rogue/
+xatrix/lmctf paks plus loose maps) were scanned with this predicate's exact
+key/value pairing and produced zero matches. The pairing matters -- a naive
+substring search hits `"team" "alpha"` in baseq2's dlite.bsp, where "alpha"
+is a team NAME in value position, which is why this parses key/value pairs
+rather than grepping.
+================
+*/
+
+// Classname -> the src/game site that writes a field the classic wire drops.
+// Kept as a table with its evidence attached so it can be re-audited against
+// the module rather than trusted.
+const WIDE_LAYOUT_CLASSNAMES: ReadonlyMap<string, string> = new Map([
+  // g_kexmisc.ts SP_misc_flare: `ent.s.renderfx = RF_FLARE` + `ent.s.scale`.
+  ["misc_flare", "RF_FLARE + s.scale"],
+  // g_kextarg.ts SP_target_light: `self.s.renderfx = RF_CUSTOM_LIGHT`.
+  ["target_light", "RF_CUSTOM_LIGHT"],
+  // g_kexmisc.ts SP_dynamic_light/setup_dynamic_light: RF_CASTSHADOW plus one
+  // CS_SHADOWLIGHTS configstring per light -- a block the classic layout does
+  // not have at all (cs_remap.ts: shadowlights -1, max_shadowlights 0).
+  ["dynamic_light", "RF_CASTSHADOW + CS_SHADOWLIGHTS"],
+  // g_kexmisc.ts SP_misc_hologram / misc_hologram_think: s.alpha + s.scale.
+  ["misc_hologram", "s.alpha + s.scale"],
+  // g_kexmisc.ts SP_misc_player_mannequin: s.scale (ai_model_scale/radius).
+  ["misc_player_mannequin", "s.scale"],
+  // m_tank.ts SP_monster_tank_stand: `if (!self.s.scale) self.s.scale = 1.5`.
+  // NOTE the classname: plain monster_tank (a 1997 classname) sets nothing.
+  ["monster_tank_stand", "s.scale"],
+  // m_guncmdr.ts SP_monster_guncmdr: `self.s.scale = 1.25`.
+  ["monster_guncmdr", "s.scale"],
+  // g_kextarg.ts target_camera_dummy_think / update_target_camera: the
+  // HACKFLAG_TELEPORT_OUT fade writes s.alpha on the cutscene dummy.
+  ["target_camera", "s.alpha"],
+]);
+
+// Spawn keys that reach the same fields on any entity at all.
+// g_save.ts fields[]: "alpha"/"scale" -> target "edict_s"; "shadowlightradius"
+// -> spawntemp, and setup_dynamic_light keys its whole path on it being > 0.
+const WIDE_LAYOUT_KEYS: ReadonlySet<string> = new Set(["alpha", "scale", "shadowlightradius"]);
+
+export function SV_ContentNeedsWideLayout(entityString: string): { needed: boolean; reason: string } {
+  // Entity-lump grammar: `{ "key" "value" "key" "value" ... }` repeated.
+  // Tokens are read in pairs and the pairing is re-synchronized at every
+  // brace, so a value can never be mistaken for a key (see the dlite.bsp
+  // case in the header).
+  let i = 0;
+  let expectKey = true;
+  let pendingKey = "";
+  const n = entityString.length;
+
+  while (i < n) {
+    const c = entityString[i];
+    if (c === "{" || c === "}") {
+      expectKey = true;
+      i++;
+      continue;
+    }
+    if (c !== '"') {
+      i++;
+      continue;
+    }
+    const end = entityString.indexOf('"', i + 1);
+    if (end < 0) break; // unterminated token; nothing more is parseable
+    const token = entityString.slice(i + 1, end);
+    i = end + 1;
+
+    if (expectKey) {
+      pendingKey = token.toLowerCase();
+      expectKey = false;
+      if (WIDE_LAYOUT_KEYS.has(pendingKey)) {
+        return { needed: true, reason: `Map carries the "${pendingKey}" key, which the classic protocol cannot deliver` };
+      }
+      continue;
+    }
+
+    expectKey = true;
+    if (pendingKey === "classname") {
+      const why = WIDE_LAYOUT_CLASSNAMES.get(token.toLowerCase());
+      if (why !== undefined) {
+        return { needed: true, reason: `Map carries ${token} (${why}), which the classic protocol cannot deliver` };
+      }
+    }
+  }
+
+  return { needed: false, reason: "" };
 }
 
 // Shared body of SV_ModelIndex/SV_SoundIndex/SV_ImageIndex: look the name up
@@ -403,6 +550,25 @@ export function SV_SpawnServer(server: string, spawnpoint: string, serverstate: 
     if (currentGameFamily() === "kex" || Nav_LegacyLoadEnabled()) {
       Nav_Load(server);
     }
+
+    // CONTENT-DRIVEN LAYOUT CHOICE. The classic module can host any content,
+    // but only the wide layout can DELIVER re-release presentation (it is
+    // what sets cls.csr.extended on the client, and so what turns on flares,
+    // shadow lights and per-entity alpha/scale). Ask the map's own entity
+    // lump whether it has any of that, before ge.SpawnEntities runs, so the
+    // whole spawn happens on one layout and the game module can see the
+    // answer through gi.extended_layout() while it spawns (src/game's
+    // setup_dynamic_light needs exactly that).
+    //
+    // No-op for a kex-family session (already CS_REMAP_RERELEASE, so
+    // SV_WidenConfigstringSpace returns false) and for a classic session on
+    // 1997 data (no map in the classic tree matches the predicate).
+    // Only the three configstrings written so far (CS_NAME, airaccel,
+    // models+1) exist at this point, and the relocation pass moves them.
+    if (svs.csr === CS_REMAP_OLD) {
+      const verdict = SV_ContentNeedsWideLayout(CM_EntityString());
+      if (verdict.needed) SV_WidenConfigstringSpace(verdict.reason);
+    }
   }
   sv.configstrings[svs.csr.mapchecksum] = `${checksum}`;
 
@@ -455,7 +621,9 @@ export function SV_SpawnServer(server: string, spawnpoint: string, serverstate: 
   // Read AFTER SpawnEntities and the two settle frames above, which is what
   // makes the escalation visible here: SV_WidenConfigstringSpace can only
   // fire while those are running, so svs.sessionProtocol is final by now.
-  Com_SetServerConnectProtocol(svs.sessionProtocol);
+  // Which protocol the in-process client is told to use -- see
+  // SV_LocalConnectProtocol's own doc comment.
+  Com_SetServerConnectProtocol(SV_LocalConnectProtocol());
 
   // create a baseline for more efficient communications
   SV_CreateBaseline();
@@ -472,6 +640,63 @@ export function SV_SpawnServer(server: string, spawnpoint: string, serverstate: 
   Cvar_FullSet("mapname", sv.name, CVAR_SERVERINFO | CVAR_NOSET);
 
   Com_Printf("-------------------------------------\n");
+}
+
+/*
+==============
+SV_LocalConnectProtocol
+
+Which protocol the IN-PROCESS (localhost) client is told to connect with.
+Published through the Com_SetServerConnectProtocol bridge at the end of
+SV_SpawnServer and read by cl_main.ts's CL_SendConnectPacket.
+==============
+*/
+export function SV_LocalConnectProtocol(): number {
+  // A session that demands one specific protocol (the kex family's 1038, or
+  // PROTOCOL_VERSION_RERELEASE_CLASSIC for a classic session that had to
+  // widen its configstring space) is answered with exactly that -- unchanged.
+  if (svs.sessionProtocol !== 0) return svs.sessionProtocol;
+
+  // A session that demands nothing (the classic module on the classic
+  // configstring layout) still has to name ONE protocol here, because the
+  // localhost connect path has no challenge exchange to negotiate over.
+  // q2repro's own client does exactly this, and overrides the user's cvar to
+  // do it (src/client/main.c:414-419, CL_CheckForResend):
+  //
+  //     if (cls.state < ca_connecting && sv_running->integer > ss_loading) {
+  //         strcpy(cls.servername, "localhost");
+  //         cls.serverAddress.type = NA_LOOPBACK;
+  //         cls.serverProtocol = cl_protocol->integer;
+  //         if (cls.serverProtocol != PROTOCOL_VERSION_RERELEASE)
+  //             cls.serverProtocol = PROTOCOL_VERSION_RERELEASE;
+  //         // we don't need a challenge on the localhost
+  //
+  // -- an in-process connect speaks whatever the local server speaks, never
+  // what cl_protocol asked for. q2repro can hardcode 1038 there because its
+  // server accepts nothing else; this server really does accept 34, 35 and 36
+  // for a classic session, so "whatever the local server speaks" is the BEST
+  // entry of the very list SVC_GetChallenge already advertises to remote
+  // clients (`p=34,35,36`, sv_main.ts) -- Q2PRO/36. That is also the selection
+  // rule cl_main.ts's CL_SendConnectPacket already applies to that list on the
+  // challenge-driven path (`Math.max(...usable)`); returning it here is what
+  // finally applies it to the ONE client that bypasses the challenge.
+  //
+  // Load-bearing, not tidiness. Protocol 34 has no packet_length field at all
+  // (q2proto_server.c:159 gates the token on `protocol >= Q2P_PROTOCOL_R1Q2`),
+  // so a 34 session is pinned to MAX_PACKETLEN_WRITABLE_DEFAULT (1390)
+  // forever AND runs NETCHAN_OLD, which has no fragmentation to fall back on
+  // (src/common/net/chan.c gives Netchan_TransmitNextFragment to NETCHAN_NEW
+  // only). Call of the Machine's mgu5m1 builds per-frame datagrams well past
+  // 1390 under the CLASSIC ruleset, so on 34 its frames were dropped every
+  // tick and the map rendered black; on 36 the same session negotiates the
+  // loopback budget (MAX_PACKETLEN_WRITABLE, 4086) and fragments anything
+  // above it.
+  //
+  // Remote clients are untouched: SVC_GetChallenge still advertises
+  // `p=34,35,36` and SVC_DirectConnect still accepts all three, so a genuine
+  // vanilla client still gets vanilla's wire -- and, on content this size,
+  // vanilla's own inability to carry it.
+  return PROTOCOL_VERSION_Q2PRO;
 }
 
 /*

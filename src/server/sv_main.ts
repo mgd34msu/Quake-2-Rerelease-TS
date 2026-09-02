@@ -34,6 +34,7 @@ import {
   MAX_PACKETLEN_WRITABLE_DEFAULT,
   MIN_PACKETLEN,
   PACKET_HEADER,
+  MAX_FRAGMENT_MSGLEN,
 } from "../qcommon/net_chan";
 import { NET_CompareBaseAdr, NET_AdrToString, NET_IsLocalAddress, NET_GetPacket } from "../platform/net_udp";
 import { MSG_BeginReading, MSG_ReadLong, MSG_ReadStringLine, MSG_WriteByte, MSG_WriteString, SZ_Init, SZ_Clear } from "../qcommon/sizebuf";
@@ -693,21 +694,31 @@ export function SVC_DirectConnect(): void {
 
   newcl.state = ClientStateT.cs_connected;
 
-  // client.datagram's capacity must be able to hold up to one full
-  // negotiated-size datagram (+ the packet header) -- otherwise a client
-  // that negotiated a larger-than-default packet_length (e.g. a loopback
-  // kex connection's MAX_PACKETLEN_WRITABLE, 4086) would still have its
-  // per-frame payload truncated by this port's own fixed MAX_MSGLEN (1400)
-  // scratch buffer before Netchan_Transmit ever saw the bigger budget. This
-  // port has no reference client_t.datagram field to cite a size formula
-  // from directly (q2repro's own server.h dropped the per-client datagram
-  // buffer entirely in favor of a linked message-list architecture --
-  // sv_send.ts's own doc comments already track that divergence), so this
-  // sizes it the same way sv_send.ts's SV_SendClientDatagram sizes its own
-  // per-call `msg` scratch buffer: MAX_MSGLEN by default (unchanged
-  // behavior for every family before this unit), growing only when the
-  // negotiated packet_length actually calls for more room.
-  const requiredDatagramCapacity = negotiatedPacketLength + PACKET_HEADER;
+  // client.datagram is this port's stand-in for q2pro's per-client
+  // msg_unreliable_list (q2repro's server.h dropped the flat per-client
+  // datagram buffer in favor of a linked message list -- sv_send.ts's own
+  // doc comments already track that divergence), so it has no reference
+  // field to copy a size formula from directly. It is sized the same way
+  // sv_send.ts's SV_SendClientDatagram sizes its per-call `msg` scratch
+  // buffer, and for the same reason, so the two limits agree:
+  //
+  //   - NETCHAN_OLD (vanilla/34, R1Q2/35): one datagram is all this channel
+  //     can ever send, so the accumulated unreliable payload is capped at
+  //     the negotiated packet length + the packet header. Unchanged.
+  //   - NETCHAN_NEW (Q2PRO/36, kex/1038, engine-local 4038): the frame is
+  //     allowed to grow past one datagram because Netchan_Transmit splits it
+  //     into fragments the receiver reassembles (chan.c:475-487), so the cap
+  //     is the fragment-message capacity (q2pro's MAX_MSGLEN, 0x8000 --
+  //     net_chan.ts's MAX_FRAGMENT_MSGLEN) exactly as write_datagram_new
+  //     bounds its own unreliable payload by msg_write.maxsize rather than
+  //     by netchan.maxpacketlen.
+  //
+  // Without the NETCHAN_NEW arm, Call of the Machine's mgu5m1/mgu5m2 filled
+  // this buffer mid-frame ("WARNING: datagram overflowed for %s") or blew
+  // out SV_SendClientDatagram's msg one layer up, and the client never got a
+  // complete frame -- a black screen, with the fragmentation path below
+  // unreachable.
+  const requiredDatagramCapacity = chanType === NETCHAN_NEW ? MAX_FRAGMENT_MSGLEN : negotiatedPacketLength + PACKET_HEADER;
   if (newcl.datagram_buf.length < requiredDatagramCapacity) {
     newcl.datagram_buf = new Uint8Array(requiredDatagramCapacity);
   }
