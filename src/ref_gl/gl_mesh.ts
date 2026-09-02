@@ -106,7 +106,8 @@ import { ParsedMd2T, MAX_VERTS, MAX_MD2SKINS } from "./gl_model";
 import { qgl, GL_Bind, GL_TexEnv, GL_TEXTURE_2D, GL_REPLACE, GL_BLEND } from "./gl_image";
 import { R_RotateForEntity, MYgluPerspective } from "./gl_rmain";
 import { lightspot, R_LightPoint } from "./gl_light";
-import { GL_ShadowMapsActive } from "./gl_shadowmap";
+import { GL_ShadowMapsActive, GL_ShadowMapBindings } from "./gl_shadowmap";
+import { type ModelShadowLightT, GL_UseAliasModelProgram, GL_RestoreFixedFunction } from "./gl_shader";
 import { fixedLength } from "../shared/fixed";
 import { type Md5ModelT, calcSkelVert, getSkeletonFrame } from "../qcommon/md5_model";
 
@@ -239,6 +240,54 @@ let sLerpedState: SLerpedState | null = null;
 // usual per-vertex shadedots term, so the glow reads as emissive -- bright
 // in a dark room, where the lit texel underneath is nearly black.
 let aliasGlowPass = 0;
+
+// --- shade-colour headroom for the shadow-receiving program ---------------
+//
+// glColor4f CLAMPS to [0,1] (GL_CLAMP_VERTEX_COLOR is on by default, shader
+// or no shader), and an alias model's shade colour routinely exceeds 1:
+// R_LightPoint's dynamic-light term alone is (intensity - distance) / 256,
+// which for base1's dyn_target_02 (radius 768) is 2.6 at 100 units, and the
+// per-vertex r_avertexnormal_dots value multiplies that by up to 2 again.
+// A white-ish model near a shadow light therefore submits (1,1,1) on every
+// channel and renders as its bare texel -- the saturation is not incidental,
+// it is the normal case.
+//
+// That matters because the shadow-receiving program removes a light's SHARE
+// of the shade colour, and a share only means anything against the colour it
+// was measured in. Applied to an already-clamped (1,1,1) it removes the
+// share of a number the light never reached: an orange light (blue 0.5)
+// takes a smaller share of blue than of red, so the leftover reads
+// blue-purple instead of the warm lightmap-only colour it should be. The
+// removal has to happen BEFORE the clamp.
+//
+// So while that program is bound, both mesh paths divide the colour they
+// submit by this per-model constant, chosen so nothing clamps on the way in,
+// and gl_shader.ts multiplies it straight back out and clamps at the end
+// itself. With no light occluded that is min(1, l * shadelight) -- the fixed
+// function result exactly. 1 (the value outside that program) leaves every
+// existing draw byte-for-byte unchanged.
+let aliasShadeDivisor = 1;
+
+// The largest per-vertex shade multiplier either mesh path can produce.
+// r_avertexnormal_dots tops out at 1.99 (see the table above), and
+// GL_DrawAliasSkeleton's q2repro shadedot() is `d = dot(normal, shadevector);
+// if (d < 0) d *= 0.3; d += 1` over two unit vectors, so at most 2.0.
+export const ALIAS_SHADEDOT_MAX = 2.0;
+
+/*
+=================
+aliasShadeDivisor / aliasShadeDivisorFor
+
+The smallest divisor that keeps ALIAS_SHADEDOT_MAX * shadelight inside
+[0,1] on every channel, so the colour survives glColor4f unclamped. Never
+below 1: a model already inside the range is passed through untouched
+rather than amplified.
+=================
+*/
+export function aliasShadeDivisorFor(shade: Vec3): number {
+  const peak = Math.max(shade[0], shade[1], shade[2]) * ALIAS_SHADEDOT_MAX;
+  return peak > 1 ? peak : 1;
+}
 
 // CPU-skinning reuse across the base pass and the glow pass.
 //
@@ -409,8 +458,11 @@ export function GL_DrawAliasFrameLerp(paliashdr: ParsedMd2T, backlerp: number): 
       //
       // pre light everything
       //
+      // `shadeScale` is 1 unless gl_shader.ts's shadow-receiving program is
+      // bound, in which case it is 1/aliasShadeDivisor -- see that variable.
+      const shadeScale = 1 / aliasShadeDivisor;
       for (let i = 0; i < paliashdr.num_xyz; i++) {
-        const l = shadedots[verts[i].lightnormalindex];
+        const l = shadedots[verts[i].lightnormalindex] * shadeScale;
 
         colorArray[i * 3 + 0] = l * shadelight[0];
         colorArray[i * 3 + 1] = l * shadelight[1];
@@ -494,7 +546,7 @@ export function GL_DrawAliasFrameLerp(paliashdr: ParsedMd2T, backlerp: number): 
           if (aliasGlowPass > 0) {
             qgl.qglColor4f(aliasGlowPass, aliasGlowPass, aliasGlowPass, alpha);
           } else {
-            const l = shadedots[verts[index_xyz].lightnormalindex];
+            const l = shadedots[verts[index_xyz].lightnormalindex] / aliasShadeDivisor;
             qgl.qglColor4f(l * shadelight[0], l * shadelight[1], l * shadelight[2], alpha);
           }
           qgl.qglVertex3fv(s_lerped[index_xyz]);
@@ -591,6 +643,7 @@ function GL_DrawAliasSkeleton(model: Md5ModelT, oldframe: number, newframe: numb
         let d = DotProduct(normals[vi], shadevector);
         if (d < 0) d *= 0.3;
         d += 1;
+        d /= aliasShadeDivisor;
         qgl.qglTexCoord2f(mesh.tcoords[vi].s, mesh.tcoords[vi].t);
         qgl.qglColor4f(d * shadelight[0], d * shadelight[1], d * shadelight[2], alpha);
       }
@@ -843,6 +896,134 @@ function R_CullAliasModel(bbox: Vec3[], e: EntityT): boolean {
   return aggregatemask !== 0;
 }
 
+/*
+=================
+aliasShadowLightFractions
+
+How much of an alias model's shade colour each shadow-mapped light put
+there, per colour channel, so gl_shader.ts's GLS_MODEL_SHADOW program can
+take exactly that much back out where the model is in shadow.
+
+The model's colour comes from R_LightPoint (gl_light.ts), whose last step is
+gl_mesh.c's own dynamic-light loop: for every dlight, `add = (intensity -
+distance from THE ENTITY ORIGIN) / 256`, and `color += add * dl->color` when
+that is positive. The whole result is then scaled by gl_modulate. So a
+shadow light near a monster is already lighting it -- straight through
+walls, since that loop has never had an occlusion test of any kind. Repeated
+here per light rather than returned from R_LightPoint because the sum is all
+that function's callers have ever needed, and the split only matters here.
+
+Two things make a per-channel FRACTION the right thing to hand the shader
+rather than the contribution itself:
+
+  * the fraction survives everything that happens to shadelight afterwards.
+    RF_MINLIGHT raises a dark model to 0.1, RF_GLOW pulses it, monolightmap
+    flattens it to its own greatest channel: dividing by the FINAL colour
+    measures the light's share of what actually reaches the vertex, whatever
+    those did to it.
+  * the per-vertex r_avertexnormal_dots term the mesh paths multiply in
+    scales the light's share and the rest of the colour equally, so the
+    fraction is the same at every vertex -- which is what lets this be one
+    uniform per light instead of a per-vertex attribute, and is why neither
+    mesh path's vertex submission has to change.
+
+`mono` is gl_monolightmap: R_DrawAliasModel collapses shadelight to its
+greatest channel under it, so the contribution has to be collapsed the same
+way or its share would be measured against a colour it is not in.
+=================
+*/
+export interface AliasShadowLightInputT {
+  readonly lightIndex: number;
+  readonly origin: Vec3;
+  readonly color: Vec3;
+  readonly intensity: number;
+}
+
+function shareOfChannel(contribution: number, shade: number): number {
+  if (!(shade > 0)) return 0;
+  const share = contribution / shade;
+  if (!(share > 0)) return 0;
+  return share > 1 ? 1 : share;
+}
+
+export function aliasShadowLightFractions(
+  entOrigin: Vec3,
+  shade: Vec3,
+  modulate: number,
+  mono: boolean,
+  lights: readonly AliasShadowLightInputT[],
+): ModelShadowLightT[] {
+  const out: ModelShadowLightT[] = [];
+  for (const light of lights) {
+    const dist = Math.hypot(entOrigin[0] - light.origin[0], entOrigin[1] - light.origin[1], entOrigin[2] - light.origin[2]);
+    // R_LightPoint's own `add = dl->intensity - VectorLength(dist); add *= 1/256`
+    let add = (light.intensity - dist) * (1.0 / 256);
+    if (add <= 0) continue;
+    add *= modulate;
+
+    let r = add * light.color[0];
+    let g = add * light.color[1];
+    let b = add * light.color[2];
+    if (mono) {
+      const s = Math.max(r, g, b);
+      r = s;
+      g = s;
+      b = s;
+    }
+
+    const fraction = vec3(shareOfChannel(r, shade[0]), shareOfChannel(g, shade[1]), shareOfChannel(b, shade[2]));
+    if (fraction[0] <= 0 && fraction[1] <= 0 && fraction[2] <= 0) continue;
+    out.push({ lightIndex: light.lightIndex, fraction });
+  }
+  return out;
+}
+
+/*
+=================
+aliasShadowLights
+
+The live half of the above: which of this frame's shadow-mapped lights reach
+the entity being drawn.
+
+Deliberately empty (so R_DrawAliasModel keeps the untouched fixed-function
+draw) for the entities whose shade colour never went through R_LightPoint in
+the first place, since a light can own no share of a colour it did not
+contribute to:
+
+  * shell renders (RF_SHELL_*), whose colour is the shell's own constant and
+    which draw untextured with GL_TEXTURE_2D disabled -- a state a fragment
+    program does not honour at all;
+  * RF_FULLBRIGHT, which is (1,1,1) by definition;
+  * an RF_IR_VISIBLE entity under the IR goggles, forced to flat red.
+
+RF_WEAPONMODEL / RF_DEPTHHACK are excluded for the same reason
+gl_shadowmap.ts's shadowCasterKind excludes them from casting: the view
+weapon sits a few units from the eye on a hacked depth range and is not
+really in the world, so testing it against the world's depth atlas would
+flicker it as the player walked past geometry the gun never touched.
+=================
+*/
+function aliasShadowLights(e: EntityT): ModelShadowLightT[] {
+  if (isShellFlags(e.flags)) return [];
+  if (e.flags & (RF_FULLBRIGHT | RF_WEAPONMODEL | RF_DEPTHHACK)) return [];
+  if (r_newrefdef.rdflags & RDF_IRGOGGLES && e.flags & RF_IR_VISIBLE) return [];
+
+  const bindings = GL_ShadowMapBindings();
+  if (bindings.length === 0) return [];
+
+  const inputs: AliasShadowLightInputT[] = [];
+  for (const binding of bindings) {
+    const dl = r_newrefdef.dlights[binding.lightIndex];
+    if (!dl) continue;
+    inputs.push({ lightIndex: binding.lightIndex, origin: dl.origin, color: dl.color, intensity: dl.intensity });
+  }
+  if (inputs.length === 0) return [];
+
+  const modulate = glCvars.gl_modulate ? glCvars.gl_modulate.value : 1;
+  const mono = !!(glCvars.gl_monolightmap && glCvars.gl_monolightmap.string.length > 0 && glCvars.gl_monolightmap.string[0] !== "0");
+  return aliasShadowLightFractions(e.origin, shadelight, modulate, mono, inputs);
+}
+
 function narrowImage(image: unknown): ImageT | null {
   return image instanceof ImageT ? image : null;
 }
@@ -1089,7 +1270,31 @@ export function R_DrawAliasModel(e: EntityT): void {
       GL_DrawAliasFrameLerp(paliashdr, drawEnt.backlerp);
     }
   };
+
+  // Shadow-map RECEIVING (v1.2.2). Both mesh paths above submit exactly the
+  // vertices, texture coordinates and colours they always have; the only
+  // change is which program (if any) is bound while they run, so a model
+  // that no shadow light reaches -- every model in every 1997 map, and most
+  // models in a kex map -- draws through the identical fixed-function
+  // pipeline it did before. The program is bound around the BASE pass only:
+  // the glow pass below is emissive and adds unshadowed, exactly as the
+  // reference does (glow is added after `diffuse *= color`, never scaled by
+  // any light).
+  const shadowLights = aliasShadowLights(currententity);
+  let modelProgram = false;
+  if (shadowLights.length > 0) {
+    // Headroom first, and only kept if the program actually bound: a
+    // divisor left in place with no program to undo it would submit a
+    // darkened model through the fixed-function path.
+    const divisor = aliasShadeDivisorFor(shadelight);
+    modelProgram = GL_UseAliasModelProgram(r_newrefdef.dlights, shadowLights, divisor);
+    aliasShadeDivisor = modelProgram ? divisor : 1;
+  }
   drawMesh();
+  if (modelProgram) {
+    GL_RestoreFixedFunction();
+    aliasShadeDivisor = 1;
+  }
 
   // Emissive glow pass (mesh.c:697-698/713-714 sets GLS_GLOWMAP_ENABLE and
   // binds skin->texnum2; shader.c:698-704 does the actual add). Skipped for

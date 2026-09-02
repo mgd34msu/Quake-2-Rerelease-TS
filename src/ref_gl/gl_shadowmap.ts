@@ -80,12 +80,50 @@
 //    rerelease's own opt-out), RF_WEAPONMODEL / RF_DEPTHHACK (the view
 //    weapon is not in the world), and sprites (no stable silhouette).
 //
-// 2. WHO RECEIVES. World BSP surfaces only, because the shadow test lives in
-//    gl_shader.ts's world-surface program and alias models are drawn through
-//    the fixed-function path with R_LightPoint colours. A monster standing
-//    inside another caster's shadow is therefore still lit by that light.
-//    Stated as a limit, not a defect to hide: making models receivers needs
-//    a shadow-sampling entity-mesh program, which is a separate change.
+// 2. WHO RECEIVES. World BSP surfaces AND alias models -- players, monsters,
+//    corpses, gibs, items. Casters and receivers are now the same set minus
+//    the two exceptions below, so a monster standing in a pillar's shadow,
+//    or in another monster's, darkens with the floor around it instead of
+//    staying lit through the wall.
+//
+//    The two receivers reach that answer differently, because they are lit
+//    differently. A world surface gets its shadow light as a per-pixel
+//    lambert term added on top of the lightmap (gl_shader.ts's
+//    GLS_WORLD_SURFACE_SHADOWED), so occluding it scales that term. An alias
+//    model is shaded by the 1997 pipeline -- one R_LightPoint colour for the
+//    whole model, times the per-vertex r_avertexnormal_dots value -- and the
+//    shadow lights are already mixed INTO that colour by R_LightPoint's own
+//    dynamic-light loop, unoccluded. So gl_shader.ts's GLS_MODEL_SHADOW
+//    program subtracts each light's measured share of that colour
+//    (gl_mesh.ts's aliasShadowLightFractions) in proportion to how much of
+//    the light the fragment cannot see -- and it subtracts BEFORE the
+//    [0,1] clamp glColor4f would otherwise have already applied, which is
+//    why the mesh paths hand the colour over divided by gl_mesh.ts's
+//    aliasShadeDivisor. A model's shade colour is routinely 3 to 8 per
+//    channel (R_LightPoint's dynamic-light term is (intensity - distance) /
+//    256, and gl_modulate defaults to 2), so a lit model is saturated white
+//    at the vertex stage; taking a share off THAT removes a share of a
+//    value the light never reached, and since the shipped shadow lights are
+//    orange it takes less blue than red and the model turns blue-purple
+//    instead of falling back to its warm lightmap-only colour. A corollary
+//    worth knowing: where a model's lightmap-only colour is itself past 1,
+//    removing the light correctly changes nothing.
+//    Both sample the same atlas through
+//    the same GLSL (gl_shader.ts's shadowFactorLines), so a model's shadow
+//    boundary lands where the floor's does; only the bias differs, because a
+//    model self-shadows and a flat world surface does not.
+//
+//    Excluded from receiving, and why:
+//      * the view weapon (RF_WEAPONMODEL / RF_DEPTHHACK), for the same
+//        reason it is excluded from casting -- it is a few units from the
+//        eye on a hacked depth range, not really in the world.
+//      * shell renders (RF_SHELL_*), RF_FULLBRIGHT, and an RF_IR_VISIBLE
+//        model under the IR goggles: none of their colours came from
+//        R_LightPoint, so no shadow light owns any share of them to remove.
+//    A model with no shadow light reaching it is drawn by the untouched
+//    fixed-function path, not by a program that happens to compute 1.0 --
+//    which is what keeps every 1997 map pixel-identical to the build before
+//    models became receivers, at gl_shadowmaps 1 as much as at 0.
 //
 // 3. WHICH LIGHT. Only CS_SHADOWLIGHTS-fed lights (DlightT.isShadowLight)
 //    and cone lights get a depth map -- see R_RenderShadowMaps. A classic
