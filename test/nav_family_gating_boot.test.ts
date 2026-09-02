@@ -42,6 +42,7 @@ wins" contract).
 */
 
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
+import { cls, ConnstateT } from "../src/client/client";
 import { existsSync } from "node:fs";
 import { CVAR_LATCH, CVAR_SERVERINFO, CVAR_NOARCHIVE } from "../src/shared/q_shared";
 import { Cvar_ForceSet, Cvar_Get, Cvar_VariableString } from "../src/qcommon/cvar";
@@ -151,6 +152,11 @@ describe.skipIf(!havePak)("nav loading is family-aware (sv_nav_legacy) on the re
     Cvar_ForceSet("port", "0");
     Cvar_ForceSet("dedicated", "1");
 
+    // In-process boot: a real process starts with cls.state fresh, and CL_Init
+    // returns before touching it under dedicated=1, so reset what an earlier
+    // suite in this process may have left connected (otherwise init's default
+    // startup command forwards to a netchan that was never set up).
+    cls.state = ConnstateT.ca_disconnected;
     Qcommon_Init(["quake2", "+set", "basedir", RETAIL_BASEDIR, "+set", "game", "", "+set", "dedicated", "1", "+set", "port", "0"]);
 
     // Campaign rules, same reasoning as legacy_base1_rerelease_boot.test.ts:

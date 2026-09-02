@@ -6,6 +6,7 @@ console command, and runs game frames against it.
 */
 
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
+import { cls, ConnstateT } from "../src/client/client";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -57,6 +58,11 @@ describe("src/main.ts -- dedicated server boot", () => {
     Cvar_ForceSet("coop", "1");
     Cvar_ForceSet("deathmatch", "0");
 
+    // In-process boot: a real process starts with cls.state fresh, and CL_Init
+    // returns before touching it under dedicated=1, so reset what an earlier
+    // suite in this process may have left connected (otherwise init's default
+    // startup command forwards to a netchan that was never set up).
+    cls.state = ConnstateT.ca_disconnected;
     Qcommon_Init(["quake2", "+set", "basedir", tmpRoot, "+set", "coop", "1", "+set", "port", "0"]);
 
     // SV_InitOperatorCommands registers `map` as a fire-and-forget wrapper

@@ -454,6 +454,11 @@ function runSelfPlayDemoCase(label: string, gameCvar: string, mapname: string): 
       }
       expect(cls.state).toBe(ConnstateT.ca_connecting);
 
+      // In-process boot: a real process starts with cls.state fresh, and CL_Init
+      // returns before touching it under dedicated=1, so reset what an earlier
+      // suite in this process may have left connected (otherwise init's default
+      // startup command forwards to a netchan that was never set up).
+      cls.state = ConnstateT.ca_disconnected;
       Qcommon_Init([
         "quake2",
         "+set",

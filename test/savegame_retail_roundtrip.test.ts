@@ -39,6 +39,7 @@ against real map data, independent of that separate cross-engine gap.
 */
 
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
+import { cls, ConnstateT } from "../src/client/client";
 import { existsSync } from "node:fs";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -156,6 +157,11 @@ describe.skipIf(!haveRetail)("kex family save/load -- real retail base1 e2e (own
     Cvar_ForceSet("content_root", RETAIL_ROOT);
     Cvar_ForceSet("dedicated", "1");
 
+    // In-process boot: a real process starts with cls.state fresh, and CL_Init
+    // returns before touching it under dedicated=1, so reset what an earlier
+    // suite in this process may have left connected (otherwise init's default
+    // startup command forwards to a netchan that was never set up).
+    cls.state = ConnstateT.ca_disconnected;
     Qcommon_Init([
       "quake2",
       "+set",

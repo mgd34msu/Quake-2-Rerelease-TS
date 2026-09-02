@@ -58,6 +58,7 @@ reasons that file's own comments spell out.
 */
 
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
+import { cls, ConnstateT } from "../src/client/client";
 import { existsSync } from "node:fs";
 import { CVAR_LATCH, CVAR_SERVERINFO, CVAR_NOARCHIVE } from "../src/shared/q_shared";
 import { Cvar_ForceSet, Cvar_Get, Cvar_VariableString } from "../src/qcommon/cvar";
@@ -128,6 +129,11 @@ describe.skipIf(!havePak)("legacy 3.21 game module on the real rerelease base1.b
     Cvar_ForceSet("port", "0");
     Cvar_ForceSet("dedicated", "1");
 
+    // In-process boot: a real process starts with cls.state fresh, and CL_Init
+    // returns before touching it under dedicated=1, so reset what an earlier
+    // suite in this process may have left connected (otherwise init's default
+    // startup command forwards to a netchan that was never set up).
+    cls.state = ConnstateT.ca_disconnected;
     Qcommon_Init(["quake2", "+set", "basedir", RETAIL_BASEDIR, "+set", "game", "", "+set", "dedicated", "1", "+set", "port", "0"]);
 
     // Campaign-equivalent play. `coop 1` is what actually reaches the

@@ -58,6 +58,7 @@ need to re-prove).
 
 import { CVAR_LATCH, CVAR_SERVERINFO, CVAR_NOARCHIVE } from "../src/shared/q_shared";
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
+import { cls, ConnstateT } from "../src/client/client";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -115,6 +116,11 @@ describe("kex family save/load -- end-to-end (boot, save, mutate, load, verify)"
     Cvar_ForceSet("coop", "1");
     Cvar_ForceSet("deathmatch", "0");
 
+    // In-process boot: a real process starts with cls.state fresh, and CL_Init
+    // returns before touching it under dedicated=1, so reset what an earlier
+    // suite in this process may have left connected (otherwise init's default
+    // startup command forwards to a netchan that was never set up).
+    cls.state = ConnstateT.ca_disconnected;
     Qcommon_Init(["quake2", "+set", "basedir", tmpRoot, "+set", "game", "kex", "+set", "dedicated", "1", "+set", "coop", "1", "+set", "port", "0"]);
 
     Cbuf_AddText("map e2eroom\n");

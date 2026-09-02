@@ -50,6 +50,7 @@ no silent no-op).
 
 import { CVAR_LATCH, CVAR_SERVERINFO, CVAR_NOARCHIVE, STAT_PICKUP_STRING, MAX_STATS_STORAGE } from "../src/shared/q_shared";
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
+import { cls, ConnstateT } from "../src/client/client";
 import { existsSync } from "node:fs";
 import { Cvar_ForceSet, Cvar_Get, Cvar_VariableString } from "../src/qcommon/cvar";
 import { Cbuf_AddText } from "../src/qcommon/cmd";
@@ -129,6 +130,11 @@ describe.skipIf(!havePak)("dedicated server boot -- LMCTF under the kex family (
     Cvar_ForceSet("deathmatch", "1");
     Cvar_ForceSet("maxclients", "4");
 
+    // In-process boot: a real process starts with cls.state fresh, and CL_Init
+    // returns before touching it under dedicated=1, so reset what an earlier
+    // suite in this process may have left connected (otherwise init's default
+    // startup command forwards to a netchan that was never set up).
+    cls.state = ConnstateT.ca_disconnected;
     Qcommon_Init(["quake2", "+set", "basedir", RETAIL_BASEDIR, "+set", "game", "lmctf-kex", "+set", "deathmatch", "1", "+set", "maxclients", "4", "+set", "port", "0"]);
 
     await bootMap("q2ctf1");

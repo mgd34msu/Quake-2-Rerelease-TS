@@ -322,6 +322,11 @@ describe("cl_main.ts -- real loopback connect against a booted server", () => {
     // never supply, instead of reaching the ClientBegin/area-portal code
     // this test is actually about. A real dedicated server configured this
     // way (downloads off) is common and legitimate, not a workaround.
+    // In-process boot: a real process starts with cls.state fresh, and CL_Init
+    // returns before touching it under dedicated=1, so reset what an earlier
+    // suite in this process may have left connected (otherwise init's default
+    // startup command forwards to a netchan that was never set up).
+    cls.state = ConnstateT.ca_disconnected;
     Qcommon_Init(["quake2", "+set", "basedir", tmpRoot, "+set", "coop", "1", "+set", "port", "0", "+set", "allow_download", "0"]);
 
     Cbuf_AddText("map clmaintest\n");

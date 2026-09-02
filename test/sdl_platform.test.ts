@@ -265,6 +265,13 @@ describe("src/main.ts -- windowed client boot with dedicated 0", () => {
     // instead of reaching CL_PrepRefresh the way this test expects
     // (`cl.refresh_prepped` below) -- see test/cl_main.test.ts's identical
     // fix for the same reason.
+    // In-process boot: a real process starts with cls.state fresh, and CL_Init
+    // returns before touching it under dedicated=1, so reset what an earlier
+    // suite in this process may have left connected (otherwise init's default
+    // startup command forwards to a netchan that was never set up).
+    // (written through a widened type so TS does not narrow the enum for the
+    // ca_active polling comparison below)
+    (cls as { state: ConnstateT }).state = ConnstateT.ca_disconnected;
     Qcommon_Init(["quake2", "+set", "basedir", tmpRoot, "+set", "dedicated", "0", "+set", "port", "0", "+set", "coop", "1", "+set", "allow_download", "0", "+map", "sdlsmoke"]);
 
     expect(Cvar_VariableValue("dedicated")).toBe(0);

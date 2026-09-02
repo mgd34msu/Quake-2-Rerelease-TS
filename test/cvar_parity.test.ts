@@ -96,7 +96,7 @@ import { Qcommon_Init, Qcommon_Frame } from "../src/main";
 import { sv, ServerStateT } from "../src/server/server";
 import { SV_Shutdown } from "../src/server/sv_main";
 import { NET_ClearLoopback, NET_Shutdown } from "../src/platform/net_udp";
-import { setRe } from "../src/client/client";
+import { setRe, cls, ConnstateT } from "../src/client/client";
 import { SDL_ResetBackendForTests } from "../src/platform/sdl";
 import { PROTOCOL_VERSION, PORT_SERVER, PORT_ANY } from "../src/qcommon/qcommon";
 import { buildBoxRoomBsp, WORLDSPAWN_ONLY_ENTITIES } from "./support/bsp_builder";
@@ -677,6 +677,11 @@ describe("cvar parity audit -- full engine boot", () => {
     // value forced over them for the boot to succeed. basedir must still
     // point at the scratch directory (its own manifest check below is
     // flags-only for exactly this reason).
+    // In-process boot: a real process starts with cls.state fresh, and CL_Init
+    // returns before touching it under dedicated=1, so reset what an earlier
+    // suite in this process may have left connected (otherwise init's default
+    // startup command forwards to a netchan that was never set up).
+    cls.state = ConnstateT.ca_disconnected;
     Qcommon_Init(["quake2", "+set", "basedir", tmpRoot, "+set", "port", "0", "+map", "cvarparity"]);
 
     for (let i = 0; i < 300 && sv.state !== ServerStateT.ss_game; i++) {

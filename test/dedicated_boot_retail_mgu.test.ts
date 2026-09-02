@@ -20,6 +20,7 @@ real play session reads it.
 
 import { CVAR_LATCH, CVAR_SERVERINFO, CVAR_NOARCHIVE } from "../src/shared/q_shared";
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
+import { cls, ConnstateT } from "../src/client/client";
 import { existsSync } from "node:fs";
 import { Cvar_ForceSet, Cvar_Get } from "../src/qcommon/cvar";
 import { Cbuf_AddText } from "../src/qcommon/cmd";
@@ -80,6 +81,11 @@ describe.skipIf(!havePak)("dedicated server boot -- real retail mguhub.bsp (QBSP
     Cvar_ForceSet("coop", "1");
     Cvar_ForceSet("deathmatch", "0");
 
+    // In-process boot: a real process starts with cls.state fresh, and CL_Init
+    // returns before touching it under dedicated=1, so reset what an earlier
+    // suite in this process may have left connected (otherwise init's default
+    // startup command forwards to a netchan that was never set up).
+    cls.state = ConnstateT.ca_disconnected;
     Qcommon_Init(["quake2", "+set", "basedir", RETAIL_BASEDIR, "+set", "game", "kex", "+set", "coop", "1", "+set", "port", "0"]);
 
     await bootMap("mguhub");
