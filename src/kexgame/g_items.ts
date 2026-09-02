@@ -702,7 +702,23 @@ export function Compass_Update(ent: EdictT, first: boolean): void {
 
   gi.WriteByte(ServerCommandT.svc_help_path);
   gi.WriteByte(first ? 1 : 0);
-  gi.WritePosition(current);
+  // POSITION AS THREE FLOATS, not gi.WritePosition. q2repro's server-side
+  // PF_WritePos (server/game.c:429) is
+  // `q2proto_server_write_pos(Q2P_PROTOCOL_MULTICAST_FLOAT, ...)` -- three
+  // IEEE floats -- and the read side this port already ships
+  // (qcommon/protocol/kexdemo.ts's readHelpPathKex, a port of q2proto's
+  // q2proto_q2repro_client_read_help_path) decodes exactly that. This engine's own
+  // PF_WritePos (server/sv_game.ts) writes the classic three-shorts-at-
+  // 1/8-unit form that every protocol-34 message uses, and both game
+  // bindings share it, so calling gi.WritePosition here put 6 bytes where
+  // the client reads 12 and desynced the connection the first time a
+  // svc_help_path was sent. Spelling the three floats out reproduces
+  // q2repro's bytes without changing the position encoding of every other
+  // multicast message. src/server/bindings/legacy.ts's PF_HelpPath does the
+  // same, so the classic module puts identical bytes on the wire.
+  gi.WriteFloat(current[0]);
+  gi.WriteFloat(current[1]);
+  gi.WriteFloat(current[2]);
 
   if (client.help_draw_index === client.help_draw_count - 1) {
     gi.WriteDir(vec3_normalized(vec3_sub(client.help_poi_location, current)));

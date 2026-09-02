@@ -83,6 +83,7 @@ import { PowerArmorType } from "./g_items";
 import { DeathmatchScoreboardMessage, G_CheckChaseStats, G_SetSpectatorStats, G_SetStats } from "./p_hud";
 import { PlayerNoise } from "./p_weapon";
 import { P_ForceFogTransition } from "./g_kextrig";
+import { Compass_Update } from "./g_kextarg";
 
 // a per-file local mirrors other units' own cvarNum (module-local
 // everywhere in this codebase, not a shared export) per the established
@@ -1012,4 +1013,11 @@ export function ClientEndServerFrame(ent: EdictT): void {
     DeathmatchScoreboardMessage(ent, ent.enemy);
     gi.unicast(ent, false);
   }
+
+  // RERELEASE CONTENT: p_view.cpp's ClientEndServerFrame ends with
+  // `Compass_Update(ent, false)` (src/kexgame/p_view.ts:1842) -- one
+  // breadcrumb step per frame while a compass path is running. Same call, in
+  // the same place, from the classic module; see g_kextarg.ts's
+  // Compass_Update for why it is a no-op until the nav mesh is wired.
+  Compass_Update(ent, false);
 }

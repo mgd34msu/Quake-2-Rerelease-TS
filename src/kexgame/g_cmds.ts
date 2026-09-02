@@ -1348,7 +1348,23 @@ export function Cmd_Wave_f(ent: EdictT): void {
         gi.WriteByte(ServerCommandT.svc_poi);
         gi.WriteShort(POI_PING + (ent.s.number - 1));
         gi.WriteShort(5000);
-        gi.WritePosition(tr.endpos);
+        // POSITION AS THREE FLOATS, not gi.WritePosition. q2repro's server-side
+        // PF_WritePos (server/game.c:429) is
+        // `q2proto_server_write_pos(Q2P_PROTOCOL_MULTICAST_FLOAT, ...)` -- three
+        // IEEE floats -- and the read side this port already ships
+        // (qcommon/protocol/kexdemo.ts's readPoiKex, a port of q2proto's
+        // q2proto_q2repro_client_read_poi) decodes exactly that. This engine's own
+        // PF_WritePos (server/sv_game.ts) writes the classic three-shorts-at-
+        // 1/8-unit form that every protocol-34 message uses, and both game
+        // bindings share it, so calling gi.WritePosition here put 6 bytes where
+        // the client reads 12 and desynced the connection the first time a
+        // svc_poi was sent. Spelling the three floats out reproduces
+        // q2repro's bytes without changing the position encoding of every other
+        // multicast message. src/server/bindings/legacy.ts's PF_Poi does the
+        // same, so the classic module puts identical bytes on the wire.
+        gi.WriteFloat(tr.endpos[0]);
+        gi.WriteFloat(tr.endpos[1]);
+        gi.WriteFloat(tr.endpos[2]);
         gi.WriteShort(level.pic_ping);
         gi.WriteByte(208);
         gi.WriteByte(SvcPoiFlagsT.POI_FLAG_NONE);

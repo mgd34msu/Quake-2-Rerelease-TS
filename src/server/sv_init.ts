@@ -279,6 +279,19 @@ const WIDE_LAYOUT_CLASSNAMES: ReadonlyMap<string, string> = new Map([
   // gi.draw_static_world_text, engine hooks that exist only on the wide
   // layout (bindings/legacy.ts gates both on svs.csr.extended).
   ["info_world_text", "world text draw hooks"],
+  // g_kextarg.ts target_poi -> P_SendLevelPOI / Compass_Update -> gi.poi() /
+  // gi.help_path(), i.e. the svc_poi and svc_help_path opcodes. Same class as
+  // trigger_fog above: a MESSAGE the classic wire has no opcode for. Without
+  // the wide layout the whole POI selection algorithm still runs and the
+  // objective marker is simply never drawn.
+  ["target_poi", "svc_poi + svc_help_path"],
+  // g_kextarg.ts target_healthbar -> p_hud.ts G_SetHealthBarStat fills
+  // STAT_HEALTH_BARS (stat 52). Protocol 34's delta walks MAX_STATS=32 slots
+  // behind a 32-bit statbits mask (qcommon/protocol/vanilla.ts), so slot 52
+  // has nowhere to go; the wide session's codec carries all 64 behind a u64
+  // mask. The bar's label also needs CS_GENERAL+266, which only exists as a
+  // free slot in the wide layout's general block.
+  ["target_healthbar", "STAT_HEALTH_BARS (52) + CONFIG_HEALTH_BAR_NAME"],
 ]);
 
 // Spawn keys that reach the same fields on any entity at all.

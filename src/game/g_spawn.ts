@@ -1216,6 +1216,33 @@ const single_statusbar =
   "\tpic\t11 " +
   "endif ";
 
+// RERELEASE CONTENT: target_healthbar's boss bars.
+//
+// src/kexgame/g_spawn.ts:1776 puts `ifstat 52 yt 24 health_bars endifstat`
+// into the SP/coop statusbar; the classic layout program spells the same
+// conditional `if 52 ... endif` (client/cgame/classic_hud.ts's interpreter
+// has `if`/`endif`, not the rerelease's `ifstat`/`endifstat`), and the
+// `health_bars` token itself is implemented there with the same geometry
+// cg_screen.cpp draws.
+//
+// APPENDED ONLY ON A WIDE SESSION. CS_STATUSBAR is compared byte-for-byte by
+// nothing, but it IS a configstring that goes on the wire, so a narrow
+// (protocol 34) session must keep the exact string the classic module has
+// always sent -- that is what keeps a 1997-content session's traffic, and its
+// rendered frame, identical. On a narrow session STAT_HEALTH_BARS cannot
+// travel anyway (p_hud.ts's G_SetHealthBarStat), so the block would only ever
+// evaluate false; leaving it out entirely makes that provable rather than
+// incidental.
+//
+// The suffix opens with a leading space because single_statusbar ends with
+// one already ("...\tpic\t11 endif "), so the concatenation is
+// "endif  if 52 ..." -- two spaces, which COM_Parse treats as one separator.
+// Kept rather than trimmed so single_statusbar itself is untouched.
+function wide_statusbar_suffix(): string {
+  if (gi.extended_layout?.() !== true) return "";
+  return " if 52 " + "\tyt\t24 " + "\thealth_bars " + "endif ";
+}
+
 const dm_statusbar =
   "yb\t-24 " +
   // health
@@ -1330,7 +1357,7 @@ export function SP_worldspawn(ent: EdictT): void {
   if (cvarNum(gameCvars.deathmatch) !== 0) {
     gi.configstring(CS_STATUSBAR, dm_statusbar);
   } else {
-    gi.configstring(CS_STATUSBAR, single_statusbar);
+    gi.configstring(CS_STATUSBAR, single_statusbar + wide_statusbar_suffix());
   }
 
   //---------------

@@ -13,11 +13,13 @@ import {
   VectorNormalize,
   DotProduct,
   AngleVectors,
+  VectorInverse,
 } from "../shared/math";
 import { frand, crand } from "../qcommon/common";
 import { PITCH, YAW, ROLL, VIDREF_GL } from "../shared/q_shared";
 import { cl, PARTICLE_GRAVITY, INSTANT_PARTICLE, type ClSustainT, type CentityT } from "./client";
 import { rand, particleList, MakeNormalVectors, CL_AllocDlight } from "./cl_fx";
+import { NUMVERTEXNORMALS, bytedirs } from "../qcommon/anorms";
 import { fixedLength } from "../shared/fixed";
 
 // `extern int vidref_val` -- see cl_fx.ts's CL_AddDLights banner: no GL
@@ -894,5 +896,59 @@ export function CL_BlasterTrail2(start: Vec3, end: Vec3): void {
     }
 
     VectorAdd(move, vec, move);
+  }
+}
+
+/*
+===============
+CL_HologramParticles
+
+q2repro src/client/newfx.c:974-1007. The N64 hologram effect: one particle
+per vertex normal, thrown 100 units out along that normal after the whole
+normal set has been rotated by a slowly advancing yaw/pitch, all drawn as
+INSTANT_PARTICLE (one frame, then gone) so the shell re-forms every frame in
+a slightly different orientation. Reached from cl_ents.ts's
+CL_AddPacketEntities for any entity carrying EF_HOLOGRAM
+(entities.c:1065-1066), which is misc_hologram under both game modules.
+
+AnglesToAxis / VectorRotate have no counterpart in shared/math.ts, so both
+are spelled out inline here from q2repro's own inc/shared/shared.h:342-346
+(`AngleVectors(angles, axis[0], axis[1], axis[2]); VectorInverse(axis[1]);`)
+and :256-259 (`out[i] = DotProduct(in, axis[i])`). They are two lines each
+and nothing else in this port needs them; adding them to shared/math.ts
+would put two unused exports in a file this unit does not own.
+===============
+*/
+export function CL_HologramParticles(org: Vec3): void {
+  const ltime = cl.time * 0.03;
+
+  // AnglesToAxis(dir, axis) with dir = (ltime, ltime, 0)
+  const angles = vec3(ltime, ltime, 0);
+  const axis0 = vec3();
+  const axis1 = vec3();
+  const axis2 = vec3();
+  AngleVectors(angles, axis0, axis1, axis2);
+  VectorInverse(axis1);
+
+  for (let i = 0; i < NUMVERTEXNORMALS; i++) {
+    if (!particleList.free) return;
+    const p = particleList.free;
+    particleList.free = p.next;
+    p.next = particleList.active;
+    particleList.active = p;
+
+    p.time = cl.time;
+    p.color = 0xd0;
+
+    // VectorRotate(bytedirs[i], axis, dir)
+    const bd = bytedirs[i];
+    const dir = vec3(DotProduct(bd, axis0), DotProduct(bd, axis1), DotProduct(bd, axis2));
+    VectorMA(org, 100.0, dir, p.org);
+
+    VectorClear(p.vel);
+    VectorClear(p.accel);
+
+    p.alpha = 1.0;
+    p.alphavel = INSTANT_PARTICLE;
   }
 }

@@ -274,6 +274,8 @@ export function BuildLegacyImports(): GameImports {
     extended_layout: PF_ExtendedLayout,
     shadowlight: PF_ShadowLight,
     fog: PF_Fog,
+    poi: PF_Poi,
+    help_path: PF_HelpPath,
     draw_oriented_world_text: PF_DrawOrientedWorldText,
     draw_static_world_text: PF_DrawStaticWorldText,
     sound: PF_StartSound,
@@ -576,6 +578,84 @@ export function PF_Fog(ent: Edict, current: FogStateT, wanted: FogStateT, transi
   if (bits & FOG_BIT_HEIGHTFOG_END_DIST) PF_WriteLong(hf_end_dist);
 
   PF_Unicast(ent, true);
+}
+
+/*
+===============
+PF_Poi / PF_HelpPath
+
+The engine half of game.ts's optional `poi()` / `help_path()` imports: the
+svc_poi and svc_help_path writes, so the classic module can put the
+re-release compass marker and its breadcrumb trail on the wire when the
+session widened onto the re-release layout.
+
+Same shape and the same reasons as PF_Fog above -- the opcodes and their
+field layouts are protocol 1038 vocabulary the frozen v3 GameImports cannot
+name, and protocol 34 has neither message, so a narrow session emits nothing
+and the module may call unconditionally.
+
+FIELD ORDER, matching the read side exactly
+(qcommon/protocol/kexdemo.ts's readPoiKex / readHelpPathKex, themselves
+ports of q2proto's q2proto_q2repro_client_read_poi / ..._read_help_path):
+
+  svc_poi:       key(u16) time(u16) x,y,z(f32 each) image(u16)
+                 color(u8) flags(u8)
+  svc_help_path: first(u8) x,y,z(f32 each) dir(dir-byte)
+
+POSITIONS ARE FLOATS, NOT PF_WritePos. q2repro's server/game.c:429 defines
+PF_WritePos as `q2proto_server_write_pos(Q2P_PROTOCOL_MULTICAST_FLOAT, ...)`
+-- three IEEE floats -- while this port's generic PF_WritePos (sv_game.ts)
+writes the classic three-shorts-at-1/8-unit form that every protocol-34
+message uses. Spelling the three floats out here reproduces q2repro's bytes
+for these two messages exactly, without changing the position encoding of
+every other multicast message in the engine. src/kexgame's own three write
+sites (p_client.ts's P_SendLevelPOI, g_items.ts's Compass_Update,
+g_cmds.ts's gesture ping) spell them out the same way and for the same
+reason, so both game modules put identical bytes on the wire.
+===============
+*/
+// ServerCommandT.svc_poi / svc_help_path, protocol 1038's opcode table.
+// Spelled here rather than imported from src/kexapi/game.ts for the same
+// reason SVC_FOG above is: this binding, and the src/game module behind it,
+// take no dependency on the kex API surface. test/wide_classic_poi.test.ts
+// pins both against kexapi's own enum so they cannot drift.
+export const SVC_POI = 30;
+export const SVC_HELP_PATH = 31;
+
+export function PF_Poi(
+  ent: Edict,
+  key: number,
+  timeMs: number,
+  pos: Vec3,
+  image: number,
+  color: number,
+  flags: number,
+): void {
+  if (!svs.csr.extended) return;
+
+  PF_WriteByte(SVC_POI);
+  PF_WriteShort(key);
+  PF_WriteShort(timeMs);
+  PF_WriteFloat(pos[0]);
+  PF_WriteFloat(pos[1]);
+  PF_WriteFloat(pos[2]);
+  PF_WriteShort(image);
+  PF_WriteByte(color);
+  PF_WriteByte(flags);
+  PF_Unicast(ent, true);
+}
+
+export function PF_HelpPath(ent: Edict, first: boolean, pos: Vec3, dir: Vec3): void {
+  if (!svs.csr.extended) return;
+
+  PF_WriteByte(SVC_HELP_PATH);
+  PF_WriteByte(first ? 1 : 0);
+  PF_WriteFloat(pos[0]);
+  PF_WriteFloat(pos[1]);
+  PF_WriteFloat(pos[2]);
+  PF_WriteDir(dir);
+  // g_items.cpp:1531's `gi.unicast(ent, false, 0)` -- unreliable.
+  PF_Unicast(ent, false);
 }
 
 /*

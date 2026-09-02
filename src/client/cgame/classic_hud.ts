@@ -60,6 +60,35 @@ import { viddef } from "../vid";
 import { DrawString, DrawAltString } from "../console_impl";
 import { SCR_AddDirtyPoint, SCR_DirtyScreen } from "../cl_scrn";
 
+// ---------------------------------------------------------------------------
+// RERELEASE CONTENT constants for the "health_bars" token below
+// ---------------------------------------------------------------------------
+
+/** The rerelease player_stat_t slot 52, hardcoded for the same reason
+ *  src/client/cl_wheel.ts and src/game/p_hud.ts hardcode it: the classic
+ *  q_shared.ts stat list stops at STAT_SPECTATOR and 32..63 are the KEX-only
+ *  tail. PlayerStateT.stats is MAX_STATS_STORAGE=64 wide, so the read is in
+ *  range under either layout; the stat is only ever non-zero on a wide one. */
+const STAT_HEALTH_BARS = 52;
+
+/** bg_local.h:56-73's reserved general-configstring range, as an offset from
+ *  the LIVE layout's CS_GENERAL base (cls.csr.general): CTF match(0) +
+ *  teaminfo(1) + player names(2 .. 2+MAX_CLIENTS) + 1 + the 5 coop-respawn
+ *  strings + n64 physics -> 10 + MAX_CLIENTS. Computed rather than written as
+ *  266 so it tracks MAX_CLIENTS, exactly as src/kexgame/p_hud.ts computes it
+ *  and src/game/g_kextarg.ts computes the server-side twin. */
+const CONFIG_HEALTH_BAR_NAME_OFFSET = 10 + MAX_CLIENTS;
+
+/** The conchars cell height. cg_screen.cpp reaches the same number through
+ *  SCR_FontLineHeight(scale) with no kfont loaded; this file has always
+ *  advanced a HUD-string line by a literal 8 (see DrawHUDString below). */
+const CONCHAR_HEIGHT = 8;
+
+/** cg_screen.cpp's rgba_black / rgba_red and its inline {80,80,80,255}. */
+const RGBA_BLACK = { r: 0, g: 0, b: 0, a: 255 };
+const RGBA_RED = { r: 255, g: 0, b: 0, a: 255 };
+const RGBA_GREY = { r: 80, g: 80, b: 80, a: 255 };
+
 function atoi(s: string): number {
   const n = Number.parseInt(s, 10);
   return Number.isNaN(n) ? 0 : n;
@@ -429,6 +458,64 @@ function SCR_ExecuteLayoutString(imports: CgameImports, ps: PlayerStateT, player
 
     if (token === "string2") {
       DrawAltString(x, y, nextLayoutToken(state).token);
+      continue;
+    }
+
+    if (token === "health_bars") {
+      // RERELEASE CONTENT: target_healthbar's boss bars, drawn under the
+      // CLASSIC ruleset. Translated from cg_screen.cpp's own "health_bars"
+      // token (src/kexgame/cgame/cg_screen.ts:1429-1470), which is what the
+      // kex HUD draws for the identical stat. Reached only on a wide
+      // session: src/game/g_spawn.ts appends `if 52 yt 24 health_bars endif`
+      // to the SP/coop statusbar only when gi.extended_layout() is true, and
+      // STAT_HEALTH_BARS cannot travel on protocol 34 at all.
+      //
+      // GEOMETRY, term by term against cg_screen.ts:
+      //   scale                 -> 1. The classic layout program is a fixed
+      //                            320x240 virtual HUD drawn at native atlas
+      //                            size; nothing in this file has a scale
+      //                            term (see the HUD PANE note above).
+      //   hud_vrect             -> `pane`, this seat's rectangle.
+      //   hud_safe.x            -> 0. The classic HUD has no safe-area inset
+      //                            concept; the pane carries the origin and
+      //                            the origin is only ever ADDED (HUD PANE
+      //                            note). So barWidth is half the pane width.
+      //   SCR_FontLineHeight(1) -> 8, the conchars cell height this file's
+      //                            DrawHUDString already advances a line by.
+      // Everything else -- the 0x80 "showing" bit, the /127 percent, the
+      // black outline drawn one pixel larger, the red filled part, the grey
+      // remainder, and the barHeight*3 pitch between the two bars -- is the
+      // C's arithmetic unchanged.
+      const raw = ps.stats[STAT_HEALTH_BARS];
+      const bytes = [raw & 0xff, (raw >> 8) & 0xff];
+
+      const name = imports.Localize(imports.get_configstring(cls.csr.general + CONFIG_HEALTH_BAR_NAME_OFFSET), [], 0);
+      DrawHUDString(imports, name, pane.x + Math.trunc(pane.width / 2) - 160, y, 320, 0);
+
+      const barWidth = pane.width * 0.5;
+      const barHeight = 4;
+
+      y += CONCHAR_HEIGHT;
+      const barX = pane.x + pane.width * 0.5 - barWidth * 0.5;
+      let barY = y;
+
+      // 2 health bars, hardcoded (cg_screen.cpp's own comment)
+      for (let i = 0; i < 2; i++) {
+        const stat = bytes[i];
+        if ((stat & 0b10000000) === 0) continue;
+
+        const percent = (stat & 0b01111111) / 127;
+
+        SCR_AddDirtyPoint(barX, barY);
+        SCR_AddDirtyPoint(barX + barWidth + 1, barY + barHeight + 1);
+
+        imports.SCR_DrawColorPic(barX, barY, barWidth + 1, barHeight + 1, "_white", RGBA_BLACK);
+        if (percent > 0) imports.SCR_DrawColorPic(barX, barY, barWidth * percent, barHeight, "_white", RGBA_RED);
+        if (percent < 1) imports.SCR_DrawColorPic(barX + barWidth * percent, barY, barWidth * (1 - percent), barHeight, "_white", RGBA_GREY);
+
+        barY += barHeight * 3;
+        y = barY;
+      }
       continue;
     }
 

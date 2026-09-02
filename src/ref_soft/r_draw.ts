@@ -12,7 +12,7 @@ here.
 
 import { ERR_FATAL, PRINT_ALL } from "../shared/q_shared";
 import { ri, vid, TRANSPARENT_COLOR, d_8to24table } from "./r_local";
-import { R_FindImage } from "./r_image";
+import { R_FindImage, R_RegisterRawPic } from "./r_image";
 import { ImageT, ImagetypeT } from "./r_model";
 
 let draw_chars: ImageT | null = null; // 8*8 graphic characters
@@ -25,11 +25,39 @@ Draw_FindPic
 ================
 */
 export function Draw_FindPic(name: string): ImageT | null {
+  // q2repro's IF_SPECIAL images (refresh/images.c:1913-1917/2291): a leading
+  // "_" names an image the renderer GENERATES rather than loads. "_white" is
+  // the 1x1 opaque white texel every SCR_DrawColorPic tints; see gl_draw.ts's
+  // Draw_SpecialPic for the same branch on the GL side. Quantized to this
+  // renderer's palette (there is no truecolor path here), which is exactly
+  // what Draw_ColorPic below then remaps against its tint.
+  if (name[0] === "_") return Draw_SpecialPic(name);
+
   if (name[0] !== "/" && name[0] !== "\\") {
     const fullname = `pics/${name}.pcx`;
     return R_FindImage(fullname, ImagetypeT.it_pic);
   }
   return R_FindImage(name.slice(1), ImagetypeT.it_pic);
+}
+
+/*
+================
+Draw_SpecialPic
+
+Only "_white" is defined upstream, so only "_white" is defined here; any
+other leading-"_" name resolves to null and takes the caller's usual
+not-found path. Registered on first use through R_RegisterRawPic, which
+quantizes the RGBA texel to the active palette -- for pure white that is
+whatever palette index is nearest (255,255,255), and Draw_ColorPic's own
+nearest-palette remap then multiplies that by the requested tint, so a
+tinted bar lands on the same index it would have if the source pic really
+were an all-white image on disk.
+================
+*/
+function Draw_SpecialPic(name: string): ImageT | null {
+  if (name !== "_white") return null;
+  // images.c:1914-1916 -- one texel, 0xFF in every channel.
+  return R_RegisterRawPic(name, new Uint8Array([0xff, 0xff, 0xff, 0xff]), 1, 1);
 }
 
 /*

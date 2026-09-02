@@ -62,6 +62,7 @@ import {
 import { ArmorIndex, FindItem, GetItemByIndex, ITEM_INDEX, itemlist, PowerArmorType } from "./g_items";
 import { G_Find } from "./g_utils";
 import { respawn } from "./p_client";
+import { kexLevel, MAX_HEALTH_BARS } from "./g_kexent";
 
 // a per-file local mirrors other units' own cvarNum (module-local
 // everywhere in this codebase, not a shared export) per the established
@@ -523,6 +524,100 @@ export function G_SetStats(ent: EdictT): void {
   }
 
   client.ps.stats[STAT_SPECTATOR] = 0;
+
+  G_SetHealthBarStat(ent);
+}
+
+// ---------------------------------------------------------------------------
+// RERELEASE CONTENT: target_healthbar's boss bars (p_hud.cpp's G_SetStats tail,
+// src/kexgame/p_hud.ts:795-830)
+// ---------------------------------------------------------------------------
+
+/**
+ * STAT_HEALTH_BARS -- the rerelease player_stat_t slot 52. Hardcoded here for
+ * the same reason src/client/cl_wheel.ts hardcodes it: the classic module's
+ * frozen q_shared.ts stat list stops at STAT_SPECTATOR (17), and slots 32..63
+ * are the KEX-only tail. PlayerStateT.stats is already MAX_STATS_STORAGE=64
+ * wide (q_shared.ts), so the slot exists; what decides whether it TRAVELS is
+ * the session's codec -- protocol 34's vanilla codec walks only MAX_STATS=32
+ * slots with a 32-bit statbits mask, while the wide session's
+ * Q2REPRO_CLASSIC_CODEC (protocol 4038) walks all 64 behind a u64 mask. So on
+ * a narrow session this stat cannot reach the wire no matter what is written
+ * into it, and the gate below additionally leaves it at zero there so the
+ * 1997 path is provably untouched.
+ */
+const STAT_HEALTH_BARS = 52;
+
+/** g_target.cpp:1828's `SPAWNFLAG_HEALTHBAR_PVS_ONLY`. */
+const SPAWNFLAG_HEALTHBAR_PVS_ONLY = 1;
+
+/**
+ * p_hud.cpp's `// set & run the health bar stuff` block, translated from
+ * src/kexgame/p_hud.ts:795-830.
+ *
+ * Packs MAX_HEALTH_BARS (2) bytes little-endian into one int16 stat, exactly
+ * as the C++ does through `reinterpret_cast<byte *>(&ps->stats[
+ * STAT_HEALTH_BARS])`: bit 7 is "this bar is showing", bits 0-6 are the
+ * remaining health as a fraction of 127. The bookkeeping side effects (a bar
+ * whose timestamp expired or whose monster is gone clears its slot) are the
+ * C++'s and are reproduced here, so the two modules retire bars identically.
+ *
+ * DEVIATION, forced: the C++'s Makron special case
+ * (`enemy->monsterinfo.aiflags & AI_DOUBLE_TROUBLE` -> keep the bar up at
+ * full while the second Makron spawns) has no counterpart here. AI_DOUBLE_
+ * TROUBLE is a rerelease-only monsterinfo flag introduced with the
+ * rerelease's two-stage Makron (src/kexgame/m_boss32.ts); the classic
+ * module's Makron is the 1997 single-stage fight and declares no such flag.
+ * Its slot therefore falls through to the ordinary "enemy dead" handling,
+ * which is the correct answer for the fight the classic module actually runs.
+ */
+export function G_SetHealthBarStat(ent: EdictT): void {
+  const client = ent.client;
+  if (client === null) return;
+
+  // Narrow session: the stat cannot travel, so leave it untouched (zero).
+  if (gi.extended_layout?.() !== true) return;
+
+  const lvl = kexLevel();
+  let packed = 0;
+
+  for (let i = 0; i < MAX_HEALTH_BARS; i++) {
+    let byteVal = 0;
+    const hbEnt = lvl.health_bar_entities[i] ?? null;
+
+    if (hbEnt === null) {
+      byteVal = 0;
+    } else if (hbEnt.timestamp !== 0) {
+      if (hbEnt.timestamp < level.time) {
+        lvl.health_bar_entities[i] = null;
+        byteVal = 0;
+      } else {
+        byteVal = 0b10000000;
+      }
+    } else {
+      const enemy = hbEnt.enemy;
+      if (enemy === null || !enemy.inuse || enemy.health <= 0) {
+        if (hbEnt.delay) {
+          hbEnt.timestamp = level.time + hbEnt.delay;
+          byteVal = 0b10000000;
+        } else {
+          lvl.health_bar_entities[i] = null;
+          byteVal = 0;
+        }
+      } else if ((hbEnt.spawnflags & SPAWNFLAG_HEALTHBAR_PVS_ONLY) !== 0 && !gi.inPVS(ent.s.origin, enemy.s.origin)) {
+        byteVal = 0;
+      } else {
+        const health_remaining = enemy.max_health !== 0 ? enemy.health / enemy.max_health : 0;
+        byteVal = (Math.trunc(health_remaining * 0b01111111) & 0xff) | 0b10000000;
+      }
+    }
+
+    packed |= (byteVal & 0xff) << (i * 8);
+  }
+
+  // Int16Array truncates to the low 16 bits, which is the same two bytes the
+  // C++'s byte-pointer writes produce on a little-endian target.
+  client.ps.stats[STAT_HEALTH_BARS] = packed;
 }
 
 /*

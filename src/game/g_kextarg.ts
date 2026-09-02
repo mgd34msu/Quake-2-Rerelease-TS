@@ -39,16 +39,21 @@
 //  * target_music / target_gravity / target_soundfx / target_autosave /
 //    target_crossunit_* -- no degradation.
 
-import { VectorCopy, VectorLength, VectorSet, VectorSubtract, vec3, type Vec3 } from "../shared/math";
+import { VectorCopy, VectorLength, VectorNormalize, VectorSet, VectorSubtract, vec3, type Vec3 } from "../shared/math";
 import {
+  ATTN_NORM,
   BUTTON_ANY,
+  CHAN_AUTO,
   CHAN_VOICE,
   CS_CDTRACK,
+  CS_GENERAL,
   CS_SKY,
   CS_SKYAXIS,
   CS_SKYROTATE,
   EntityEventT,
+  MAX_CLIENTS,
   PITCH,
+  PRINT_HIGH,
   RF_CUSTOM_LIGHT,
   RF_MINLIGHT,
   ROLL,
@@ -68,6 +73,7 @@ import {
 } from "./g_local";
 import {
   kexBrandom,
+  kexClient,
   kexDeathmatch,
   kexLevel,
   kexLightStyleString,
@@ -815,6 +821,187 @@ export function SP_target_poi(self: EdictT): void {
 }
 
 // ===========================================================================
+// COMPASS / POI PRESENTATION
+// (p_client.cpp:1771-1782 / g_items.cpp:1499-1624, via
+//  src/kexgame/p_client.ts's P_SendLevelPOI and src/kexgame/g_items.ts's
+//  Compass_Update / Use_Compass)
+// ===========================================================================
+//
+// The rerelease turns the target_poi bookkeeping above into two client
+// messages: svc_poi (the objective marker the client projects onto the world
+// and clamps to the screen edge -- cl_scrn.ts's SCR_AddPOI/SCR_DrawPOIs) and
+// svc_help_path (the breadcrumb trail -- SCR_AddHelpPath). Neither opcode
+// exists in protocol 34, so on a NARROW session these emit nothing at all and
+// the target_poi degradation note on SP_target_poi still describes reality.
+//
+// On a WIDE session (gi.extended_layout(), i.e. this map's entity lump made
+// sv_init.ts's SV_ContentNeedsWideLayout fire, or the kex family) the wire
+// carries both, and the classic module presents the objective marker exactly
+// as the kex module does -- same key, same lifetime, same image, same colour,
+// same flags, same reliable unicast. The write itself goes through the
+// engine (game.ts's optional `poi()` / `help_path()` imports,
+// src/server/bindings/legacy.ts's PF_Poi / PF_HelpPath) for the same reason
+// trigger_fog's does: the opcode numbers and field layouts are re-release
+// wire vocabulary the frozen v3 GameImports cannot name.
+//
+// POI_OBJECTIVE (g_local.h:946's `MAX_EDICTS`) is the WIDE layout's
+// MAX_EDICTS, 8192 -- NOT the classic module's own MAX_EDICTS (1024). The
+// key is a slot number in the client's POI table, and the client that
+// receives it is running the wide layout by construction (this only ever
+// emits on a wide session), so it has to be the number the kex module sends
+// or the two modules would key the same marker differently.
+
+/** g_local.h:946's `POI_OBJECTIVE = MAX_EDICTS`, with MAX_EDICTS being the
+ *  wide layout's 8192 (shared/cs_remap.ts's MAX_EDICTS_WIDE). */
+const POI_OBJECTIVE = 8192;
+
+/** p_client.cpp:1780's colour byte -- a classic 8-bit palette index. */
+const POI_COLOR = 208;
+
+/** SvcPoiFlagsT.POI_FLAG_NONE (kexapi/game.ts:1466). Spelled locally so this
+ *  module takes no dependency on the kex API surface, exactly as
+ *  bindings/legacy.ts spells its own SVC_POI. */
+const POI_FLAG_NONE = 0;
+
+/**
+ * p_client.cpp:1771-1782 -- `void P_SendLevelPOI(edict_t *ent)`.
+ * [Paril-KEX] send player level POI.
+ *
+ * Byte-for-byte the same message src/kexgame/p_client.ts's P_SendLevelPOI
+ * writes: key POI_OBJECTIVE, 10000 ms lifetime, the player's recorded POI
+ * location, its image index, colour 208, no flags, reliable unicast.
+ */
+export function P_SendLevelPOI(ent: EdictT): void {
+  const lvl = kexLevel();
+  if (!lvl.valid_poi) return;
+  if (ent.client === null) return;
+
+  const kc = kexClient(ent);
+  gi.poi?.(ent, POI_OBJECTIVE, 10000, kc.help_poi_location, kc.help_poi_image, POI_COLOR, POI_FLAG_NONE);
+}
+
+/**
+ * g_items.cpp:1499-1541 -- `void Compass_Update(edict_t *ent, bool first)`.
+ * Walks the player one breadcrumb further along the path Use_Compass asked
+ * the nav mesh for, emitting one svc_help_path per step plus a refreshed
+ * objective marker and the marker sound.
+ *
+ * WHY THIS IS INERT TODAY, under BOTH modules: the breadcrumb path only
+ * exists once `poi_points` has been filled, and the only thing that fills it
+ * is a successful nav-mesh query. The classic GameImports has no
+ * GetPathToGoal at all, and the kex binding's is `GetPathToGoal: () => false`
+ * (src/server/bindings/kex.ts, ARCHITECTURE.md phase 7) -- so `poi_points`
+ * is null for every client under either ruleset and this returns at the
+ * "deleted for some reason" guard, exactly as src/kexgame/g_items.ts's own
+ * Compass_Update does. Both modules therefore take the same path and put the
+ * same bytes (none) on the wire; when nav lands, both light up together.
+ */
+export function Compass_Update(ent: EdictT, first: boolean): void {
+  if (ent.client === null) return;
+
+  const kc = kexClient(ent);
+  const points = kc.poi_points;
+
+  // deleted for some reason
+  if (points === null) return;
+
+  if (!kc.help_draw_points) return;
+  if (kc.help_draw_time >= level.time) return;
+
+  const current = points[kc.help_draw_index];
+  if (current === undefined) return;
+
+  // don't draw too many points
+  const delta = vec3();
+  VectorSubtract(current, ent.s.origin, delta);
+  if (VectorLength(delta) > 4096 || !gi.inPHS(ent.s.origin, current)) {
+    kc.help_draw_points = false;
+    return;
+  }
+
+  const dir = vec3();
+  if (kc.help_draw_index === kc.help_draw_count - 1) {
+    VectorSubtract(kc.help_poi_location, current, dir);
+  } else {
+    const next = points[kc.help_draw_index + 1];
+    if (next === undefined) return;
+    VectorSubtract(next, current, dir);
+  }
+  VectorNormalize(dir);
+
+  gi.help_path?.(ent, first, current, dir);
+
+  P_SendLevelPOI(ent);
+
+  // g_items.cpp:1537's `gi.local_sound(...)`. The classic GameImports has no
+  // local_sound (a KEX-only per-client sound with a dedupe key); the nearest
+  // classic equivalent that reaches only this player is a positioned sound at
+  // the marker, which is what the marker sound is for.
+  gi.positioned_sound(current, ent, CHAN_AUTO, gi.soundindex("misc/help_marker.wav"), 1.0, ATTN_NORM, 0.0);
+
+  // done
+  if (kc.help_draw_index === kc.help_draw_count - 1) {
+    kc.help_draw_points = false;
+    return;
+  }
+
+  kc.help_draw_index++;
+  kc.help_draw_time = level.time + 0.2;
+}
+
+/**
+ * g_items.cpp:1546-1624 -- `static void Use_Compass(edict_t *ent, gitem_t *inv)`.
+ *
+ * The rerelease reaches this through the IT_COMPASS inventory item's use
+ * function. The classic module has no compass item and no item slot to add
+ * one to (the classic itemlist is a frozen, index-stable table the save
+ * format depends on), so the same body is reached through a `compass` client
+ * command instead -- see g_cmds.ts's ClientCommand. Same trigger for the
+ * player (a bind), same effect.
+ *
+ * NAMED Cmd_Compass_f, not Use_Compass, on purpose: src/game/g_items.ts
+ * already exports a DIFFERENT `Use_Compass` -- the rogue mission pack's
+ * compass ITEM, which prints the player's origin and facing (rogue/g_items.c).
+ * That one stays exactly as it is; this is the rerelease objective compass
+ * and the two must not be confused for each other.
+ *
+ * DEVIATION, forced: the rerelease asks `gi.GetPathToGoal` for a walked path
+ * and, only when that succeeds, fills poi_points and starts the breadcrumb
+ * trail. The classic GameImports has no nav-mesh import, so this always
+ * takes the C++'s own else-branch (g_items.cpp:1617-1623): send the objective
+ * marker and play the marker sound. That is byte-identical to what the kex
+ * module does today, because its GetPathToGoal always returns false too.
+ */
+export function Cmd_Compass_f(ent: EdictT): void {
+  const lvl = kexLevel();
+
+  if (!lvl.valid_poi) {
+    gi.cprintf(ent, PRINT_HIGH, "No valid POI in this level.\n");
+    return;
+  }
+
+  if (lvl.current_dynamic_poi !== null) {
+    const dynamicPoi = lvl.current_dynamic_poi;
+    if (dynamicPoi.use !== null) dynamicPoi.use(dynamicPoi, ent, ent);
+  }
+
+  if (ent.client === null) return;
+
+  const kc = kexClient(ent);
+  VectorCopy(lvl.current_poi, kc.help_poi_location);
+  kc.help_poi_image = lvl.current_poi_image;
+
+  // g_items.cpp:1617-1623 -- the "no path" branch. It is the only branch
+  // reachable here: the C++'s other branch is gated on gi.GetPathToGoal,
+  // which the classic GameImports does not have at all (and which the kex
+  // binding stubs to false), so the breadcrumb trail is never started and
+  // kexClient(ent).poi_points stays null. See this function's DEVIATION note
+  // and Compass_Update above.
+  P_SendLevelPOI(ent);
+  gi.sound(ent, CHAN_AUTO, gi.soundindex("misc/help_marker.wav"), 1.0, ATTN_NORM, 0.0);
+}
+
+// ===========================================================================
 // target_music  (g_target.cpp:1809-1817 / src/kexgame/g_target.ts:1770-1778)
 // ===========================================================================
 
@@ -841,6 +1028,28 @@ export function SP_target_music(self: EdictT): void {
 // target_healthbar  (g_target.cpp:1826-1896 / src/kexgame/g_target.ts:1782-1849)
 // ===========================================================================
 
+// bg_local.h:56-73's reserved general-configstring range, computed the same
+// way src/kexgame/g_target.ts:262-273 computes it: CTF match + teaminfo +
+// MAX_CLIENTS player names + 1 + the coop-respawn strings + n64 physics.
+// Spelled against the CLASSIC CS_GENERAL; PF_LegacyConfigstring maps it onto
+// the live layout (see use_target_healthbar).
+/** src/kexgame/g_local.ts's CoopRespawnT.COOP_RESPAWN_TOTAL. */
+const KEX_COOP_RESPAWN_TOTAL = 6;
+
+const CONFIG_CTF_MATCH_INDEX = CS_GENERAL;
+const CONFIG_CTF_TEAMINFO_INDEX = CONFIG_CTF_MATCH_INDEX + 1;
+const CONFIG_CTF_PLAYER_NAME_INDEX = CONFIG_CTF_TEAMINFO_INDEX + 1;
+const CONFIG_CTF_PLAYER_NAME_END_INDEX = CONFIG_CTF_PLAYER_NAME_INDEX + MAX_CLIENTS;
+const CONFIG_COOP_RESPAWN_STRING_INDEX = CONFIG_CTF_PLAYER_NAME_END_INDEX + 1;
+// bg_local.h:45's COOP_RESPAWN_TOTAL is 5 (src/kexgame/g_local.ts's
+// CoopRespawnT: NONE, IN_COMBAT, BAD_AREA, BLOCKED, WAITING, NO_LIVES ->
+// TOTAL). The classic module has no coop-respawn enum, so the count is
+// spelled out with its source.
+const CONFIG_COOP_RESPAWN_STRING_END_INDEX = CONFIG_COOP_RESPAWN_STRING_INDEX + (KEX_COOP_RESPAWN_TOTAL - 1);
+const CONFIG_N64_PHYSICS_INDEX = CONFIG_COOP_RESPAWN_STRING_END_INDEX + 1;
+/** bg_local.h:71 -- the boss health bar's label. */
+const CONFIG_HEALTH_BAR_NAME_INDEX = CONFIG_N64_PHYSICS_INDEX + 1;
+
 /**
  * g_target.cpp:1826-1853 -- `USE(use_target_healthbar)`.
  *
@@ -854,14 +1063,19 @@ export function SP_target_music(self: EdictT): void {
  * slot was reused -- because a freed edict loses its targetname and can no
  * longer be found by G_PickTarget.
  *
- * DEGRADATION (protocol 34): the rerelease publishes the bar's label into
- * CONFIG_HEALTH_BAR_NAME_INDEX (its own configstring slot, CS_GENERAL+266 in
- * the extended layout) and its client HUD reads that slot plus the tracked
- * monster's health to draw a boss bar. CS_REMAP_OLD has no such slot and the
- * classic HUD program has no bar element, so THE WRITE IS SKIPPED (writing
- * into raw CS_GENERAL space under the classic layout would collide with the
- * classic module's own general configstrings). The bar's registration,
- * validation, slot allocation and enemy tracking all run server-side.
+ * The rerelease publishes the bar's label into CONFIG_HEALTH_BAR_NAME_INDEX
+ * (CS_GENERAL+266 in the extended layout) and its HUD reads that slot plus
+ * the tracked monster's health to draw a boss bar. Both halves now exist for
+ * the classic module too: p_hud.ts's G_SetHealthBarStat fills STAT_HEALTH_BARS
+ * and the classic HUD layout grows a `health_bars` token (g_spawn.ts's
+ * statusbar suffix, client/cgame/classic_hud.ts's token).
+ *
+ * DEGRADATION (protocol 34): the label write is GATED on the wide layout. On
+ * a narrow session CS_REMAP_OLD's general block is the classic module's own
+ * (CS_GENERAL+266 would collide with a classic general configstring) and
+ * STAT_HEALTH_BARS cannot travel anyway, so the bar's registration,
+ * validation, slot allocation and enemy tracking run server-side and nothing
+ * is shown -- exactly as before.
  */
 function use_target_healthbar(ent: EdictT, _other: EdictT | null, _activator: EdictT | null): void {
   const target = ent.target !== null ? G_PickTarget(ent.target) : null;
@@ -880,8 +1094,16 @@ function use_target_healthbar(ent: EdictT, _other: EdictT | null, _activator: Ed
 
     ent.enemy = target;
     lvl.health_bar_entities[i] = ent;
-    // gi.configstring(CONFIG_HEALTH_BAR_NAME_INDEX, ent.message ?? "") --
-    // no classic configstring slot; see this function's degradation note.
+    // g_target.cpp:1849's `gi.configstring(CONFIG_HEALTH_BAR_NAME_INDEX,
+    // ent->message)`. The index is spelled against the CLASSIC CS_GENERAL
+    // base on purpose: bindings/legacy.ts's PF_LegacyConfigstring translates
+    // every legacy index onto the live layout, so CS_GENERAL+266 here lands
+    // on the wide layout's CS_GENERAL+266 -- the exact slot the kex module's
+    // CONFIG_HEALTH_BAR_NAME_INDEX names (both families share MAX_GENERAL,
+    // shared/cs_remap.ts). Gated because on a narrow session that same
+    // translation is the identity and the write would land in the classic
+    // module's own general space.
+    if (gi.extended_layout?.() === true) gi.configstring(CONFIG_HEALTH_BAR_NAME_INDEX, ent.message ?? "");
     return;
   }
 

@@ -83,7 +83,18 @@ import {
   CL_AddDLights,
   CL_AddLightStyles,
 } from "./cl_fx";
-import { CL_TrackerTrail, CL_Tracker_Shell, CL_TagTrail, CL_BlasterTrail2 } from "./cl_newfx";
+import { CL_TrackerTrail, CL_Tracker_Shell, CL_TagTrail, CL_BlasterTrail2, CL_HologramParticles } from "./cl_newfx";
+
+/**
+ * EF_HOLOGRAM (kexapi/game.ts:634, `bitBig(33)`) expressed in this port's
+ * split effects field: bit 33 of the rerelease uint64 is bit 1 of
+ * EntityStateT.morefx (q_shared.ts's effects/morefx DESIGN DEVIATION).
+ * Spelled here rather than imported from kexapi so the classic client path
+ * takes no dependency on the kex API surface, the same convention
+ * src/server/bindings/legacy.ts uses for SVC_FOG/SVC_POI.
+ * test/hologram_effect.test.ts pins it against kexapi's own constant.
+ */
+const MOREFX_HOLOGRAM = 1 << 1;
 import { CL_AddTEnts, cl_img_flare } from "./cl_tent";
 import { CL_CheckPredictionError } from "./cl_pred";
 import { V_AddEntity, V_AddLight } from "./cl_view";
@@ -952,6 +963,23 @@ function CL_AddPacketEntities(frame: FrameT): void {
       ent.alpha = 0.3;
       V_AddEntity(ent);
     }
+
+    // q2repro entities.c:1065-1066 -- `if (effects & EF_HOLOGRAM)
+    // CL_HologramParticles(ent.origin);`, drawn between the powerscreen
+    // shell and the automatic particle trails, exactly where the C has it.
+    //
+    // EF_HOLOGRAM is BIT_ULL(33) of the rerelease's 64-bit effects_t
+    // (kexapi/game.ts:634). This port splits that field in two -- EntityStateT
+    // keeps the low 32 bits in `effects` and the high 32 in `morefx`
+    // (q_shared.ts's own DESIGN DEVIATION note) -- so bit 33 is bit 1 of
+    // morefx. Nothing else in this file reads morefx; the local `effects`
+    // above is the low half only, hence the separate test.
+    //
+    // Only ever non-zero on a WIDE session: morefx travels in the protocol
+    // 1038/4038 delta (qcommon/protocol/q2repro.ts's U_MOREFX8/HI_MOREFX16)
+    // and has no counterpart in protocol 34's, so a classic-wire entity
+    // always reads morefx === 0 here.
+    if (s1.morefx & MOREFX_HOLOGRAM) CL_HologramParticles(ent.origin);
 
     // add automatic particle trails
     if (effects & ~EF_ROTATE) {

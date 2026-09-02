@@ -184,7 +184,9 @@ function makeFakeGameImports(rec: Recorder, boxes: ReturnType<typeof makeControl
       rec.writes.push({ op: "WriteShort", args: [c] });
     },
     WriteLong() {},
-    WriteFloat() {},
+    WriteFloat(f) {
+      rec.writes.push({ op: "WriteFloat", args: [f] });
+    },
     WriteString() {},
     WritePosition(pos) {
       rec.writes.push({ op: "WritePosition", args: [[...pos]] });
@@ -614,7 +616,15 @@ describe("P_SendLevelPOI", () => {
       { op: "WriteByte", args: [ServerCommandT.svc_poi] },
       { op: "WriteShort", args: [POI_OBJECTIVE] },
       { op: "WriteShort", args: [10000] },
-      { op: "WritePosition", args: [[10, 20, 30]] },
+      // POSITION AS THREE FLOATS, not WritePosition -- see p_client.ts's own
+      // comment at the write site: q2repro's server-side PF_WritePos is
+      // Q2P_PROTOCOL_MULTICAST_FLOAT, and kexdemo.ts's readPoiKex decodes
+      // three MSG_ReadFloat. This engine's shared PF_WritePos writes the
+      // classic three-shorts form, so gi.WritePosition here put 6 bytes
+      // where the client reads 12.
+      { op: "WriteFloat", args: [10] },
+      { op: "WriteFloat", args: [20] },
+      { op: "WriteFloat", args: [30] },
       { op: "WriteShort", args: [7] },
       { op: "WriteByte", args: [208] },
       { op: "WriteByte", args: [SvcPoiFlagsT.POI_FLAG_NONE] },
@@ -779,8 +789,10 @@ describe("Compass_Update", () => {
 
     expect(rec.writes[0]).toEqual({ op: "WriteByte", args: [ServerCommandT.svc_help_path] });
     expect(rec.writes[1]).toEqual({ op: "WriteByte", args: [1] }); // first=true
-    expect(rec.writes[2]).toEqual({ op: "WritePosition", args: [[10, 0, 0]] });
-    expect(rec.writes[3]!.op).toBe("WriteDir"); // toward points[2], normalized
+    expect(rec.writes[2]).toEqual({ op: "WriteFloat", args: [10] });
+    expect(rec.writes[3]).toEqual({ op: "WriteFloat", args: [0] });
+    expect(rec.writes[4]).toEqual({ op: "WriteFloat", args: [0] });
+    expect(rec.writes[5]!.op).toBe("WriteDir"); // toward points[2], normalized
     // two unicasts: the compass path write itself (unreliable), then
     // P_SendLevelPOI's own (reliable) -- g_items.cpp:1516-1524's gi.unicast
     // followed immediately by P_SendLevelPOI(ent) at g_items.cpp:1528.
@@ -806,9 +818,9 @@ describe("Compass_Update", () => {
 
     Compass_Update(ent, false);
 
-    expect(rec.writes[3]!.op).toBe("WriteDir");
+    expect(rec.writes[5]!.op).toBe("WriteDir");
     // direction should be normalize(help_poi_location - points[1]) = normalize((0,5,0)) = (0,1,0)
-    const dirArgs = rec.writes[3]!.args[0] as number[];
+    const dirArgs = rec.writes[5]!.args[0] as number[];
     expect(dirArgs[0]).toBeCloseTo(0);
     expect(dirArgs[1]).toBeCloseTo(1);
     expect(dirArgs[2]).toBeCloseTo(0);

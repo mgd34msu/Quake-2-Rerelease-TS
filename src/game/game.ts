@@ -207,6 +207,27 @@ export interface GameImports {
   // therefore call unconditionally, exactly as with shadowlight() above.
   fog?(ent: Edict, current: FogStateT, wanted: FogStateT, transitionMs: number | null): void;
 
+  // The re-release compass/objective marker (svc_poi) and its breadcrumb
+  // trail (svc_help_path), unicast to one player. Same reason PF_Fog exists:
+  // both opcodes and their field layouts are re-release wire vocabulary that
+  // the frozen v3 GameImports cannot name, and neither exists in protocol 34.
+  //
+  // `key` is the POI slot the client keys the marker on (the re-release
+  // reserves MAX_EDICTS for the level objective and MAX_EDICTS+3+n for player
+  // pings); `timeMs` is how long the client keeps it (0xffff means "delete the
+  // POI with this key"); `image` is a CS_IMAGES index; `color` is a palette
+  // index; `flags` is the svc_poi flag byte (1 = hide when aimed at).
+  //
+  // Silently does nothing on a narrow session, exactly like fog() and
+  // shadowlight(), so callers may call unconditionally.
+  poi?(ent: Edict, key: number, timeMs: number, pos: Vec3, image: number, color: number, flags: number): void;
+
+  // One breadcrumb marker of the compass path. `first` marks the start of a
+  // fresh trail (the client clears the old one); `pos` is the marker's world
+  // position and `dir` the direction to the following marker. Unreliable,
+  // matching the re-release's own `gi.unicast(ent, false, 0)`.
+  help_path?(ent: Edict, first: boolean, pos: Vec3, dir: Vec3): void;
+
   // info_world_text's two draw calls (g_misc.cpp:2276-2325). The re-release
   // routes these straight into the client renderer's debug-primitive list;
   // this engine's server-side equivalent is src/server/sv_debugdraw.ts, the

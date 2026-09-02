@@ -36,7 +36,7 @@ import {
 import type { Edict } from "./game";
 import { ChaseNext, ChasePrev } from "./g_chase";
 import { Add_Ammo, FindItem, ITEM_INDEX, itemlist, SpawnItem, Touch_Item } from "./g_items";
-import { G_FreeEdict, G_Spawn } from "./g_utils";
+import { G_FreeEdict, G_Spawn, G_UseTargets } from "./g_utils";
 import { player_die } from "./p_client";
 
 import { FRAME_flip01, FRAME_flip12, FRAME_salute01, FRAME_salute11, FRAME_taunt01, FRAME_taunt17, FRAME_wave01, FRAME_wave11, FRAME_point01, FRAME_point12 } from "./m_player_frames";
@@ -256,6 +256,35 @@ Sets client to godmode
 argv(0) god
 ==================
 */
+/*
+==================
+Cmd_Target_f
+
+g_cmds.cpp:323-331 -- the rerelease's cheat-gated "fire everything named X"
+developer command (src/kexgame/g_cmds.ts's Cmd_Target_f, wired at its
+ClientCommand:1601). The classic module never had it, which is a real
+asymmetry now that the classic module hosts the rerelease target_* family:
+target_poi, target_healthbar, target_story and the rest are all driven by
+being USED, and under the kex ruleset a developer can fire one by name while
+under the classic ruleset there was no way to.
+
+Same cheat gate as Cmd_God_f above, and the same body as the C++: stamp the
+player's own `target` and run G_UseTargets with the player as both self and
+activator, so every entity with that targetname fires exactly as if a
+trigger had fired it.
+==================
+*/
+export function Cmd_Target_f(ent: EdictT): void {
+  if (cvarNum(gameCvars.deathmatch) && !cvarNum(gameCvars.sv_cheats)) {
+    gi.cprintf(ent, PRINT_HIGH, "You must run the server with '+set cheats 1' to enable this command.\n");
+    return;
+  }
+
+  ent.target = gi.argv(1);
+  G_UseTargets(ent, ent);
+  ent.target = null;
+}
+
 export function Cmd_God_f(ent: EdictT): void {
   if (cvarNum(gameCvars.deathmatch) && !cvarNum(gameCvars.sv_cheats)) {
     gi.cprintf(ent, PRINT_HIGH, "You must run the server with '+set cheats 1' to enable this command.\n");
@@ -736,6 +765,7 @@ export function Cmd_PlayerList_f(ent: EdictT): void {
 }
 
 import { Cmd_Help_f, Cmd_Score_f } from "./p_hud";
+import { Cmd_Compass_f } from "./g_kextarg";
 
 // Recovers the full EdictT for the `Edict` ClientCommand receives across the
 // GameExports boundary, by reference identity rather than the EDICT_NUM
@@ -798,6 +828,7 @@ export function ClientCommand(edict: Edict): void {
   else if (Q_stricmp(cmd, "drop") === 0) Cmd_Drop_f(ent);
   else if (Q_stricmp(cmd, "give") === 0) Cmd_Give_f(ent);
   else if (Q_stricmp(cmd, "god") === 0) Cmd_God_f(ent);
+  else if (Q_stricmp(cmd, "target") === 0) Cmd_Target_f(ent);
   else if (Q_stricmp(cmd, "notarget") === 0) Cmd_Notarget_f(ent);
   else if (Q_stricmp(cmd, "noclip") === 0) Cmd_Noclip_f(ent);
   else if (Q_stricmp(cmd, "inven") === 0) Cmd_Inven_f(ent);
@@ -816,5 +847,13 @@ export function ClientCommand(edict: Edict): void {
   else if (Q_stricmp(cmd, "putaway") === 0) Cmd_PutAway_f(ent);
   else if (Q_stricmp(cmd, "wave") === 0) Cmd_Wave_f(ent);
   else if (Q_stricmp(cmd, "playerlist") === 0) Cmd_PlayerList_f(ent);
+  // RERELEASE CONTENT: the compass/objective marker. The rerelease reaches
+  // Use_Compass through the IT_COMPASS inventory item; the classic itemlist
+  // is a frozen, index-stable table the save format depends on, so it is
+  // reached through this command instead (see g_kextarg.ts's Cmd_Compass_f,
+  // which is deliberately NOT called Use_Compass -- g_items.ts already has
+  // one of those, the rogue compass ITEM).
+  // Emits nothing on a narrow session -- gi.poi() is a no-op there.
+  else if (Q_stricmp(cmd, "compass") === 0) Cmd_Compass_f(ent);
   else Cmd_Say_f(ent, false, true); // anything that doesn't match a command will be a chat
 }

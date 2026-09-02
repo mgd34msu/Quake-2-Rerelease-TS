@@ -211,6 +211,52 @@ class KexLevelStateT {
   sky_autorotate_mirror = 0;
 }
 
+/**
+ * The per-client POI/compass bookkeeping the rerelease keeps in gclient_t
+ * (g_local.h's help_draw_points / help_draw_index / help_draw_count /
+ * help_draw_time / help_poi_image / help_poi_location) and the classic
+ * GClientT does not declare. Same ownership reason as KexLevelStateT above:
+ * this port does not own g_local.ts.
+ *
+ * Indexed by client number (ent.s.number - 1), sized MAX_CLIENTS, and reset
+ * with the level state -- the rerelease clears these in PutClientInServer,
+ * which is once per level for a singleplayer/coop session.
+ */
+export class KexClientStateT {
+  /** gclient_t::help_draw_points */
+  help_draw_points = false;
+  /** gclient_t::help_draw_index */
+  help_draw_index = 0;
+  /** gclient_t::help_draw_count */
+  help_draw_count = 0;
+  /** gclient_t::help_draw_time (seconds on the classic clock) */
+  help_draw_time = 0;
+  /** gclient_t::help_poi_image -- a CS_IMAGES index */
+  help_poi_image = 0;
+  /** gclient_t::help_poi_location */
+  help_poi_location: Vec3 = vec3();
+  /**
+   * level_locals_t::poi_points[client] -- the walked path Use_Compass asks
+   * the nav mesh for. `null` until a path is found, which is what
+   * Compass_Update's own "deleted for some reason" guard tests
+   * (g_items.cpp:1501-1503).
+   */
+  poi_points: Vec3[] | null = null;
+}
+
+const kexClientStates: KexClientStateT[] = Array.from({ length: MAX_CLIENTS }, () => new KexClientStateT());
+
+/**
+ * Per-client kex state for `ent`, auto-reset with the level (see kexLevel()).
+ * Returns the slot for ent.s.number - 1; out-of-range callers get slot 0
+ * rather than a crash, matching this file's other defensive lookups.
+ */
+export function kexClient(ent: EdictT): KexClientStateT {
+  kexLevel(); // shares the level-change reset trigger
+  const i = ent.s.number - 1;
+  return kexClientStates[i >= 0 && i < MAX_CLIENTS ? i : 0];
+}
+
 class KexGameStateT {
   /** game_locals_t::cross_unit_flags -- distinct from the classic
    * game.serverflags, which is game_locals_t::cross_level_flags. */
@@ -227,6 +273,7 @@ export function kexLevel(): KexLevelStateT {
   if (kexLevelStateMapname !== level.mapname) {
     kexLevelStateMapname = level.mapname;
     Object.assign(kexLevelState, new KexLevelStateT());
+    for (const c of kexClientStates) Object.assign(c, new KexClientStateT());
   }
   return kexLevelState;
 }
@@ -238,6 +285,7 @@ export function kexLevel(): KexLevelStateT {
 export function KexResetLevelState(): void {
   kexLevelStateMapname = level.mapname;
   Object.assign(kexLevelState, new KexLevelStateT());
+  for (const c of kexClientStates) Object.assign(c, new KexClientStateT());
 }
 
 // ---------------------------------------------------------------------------

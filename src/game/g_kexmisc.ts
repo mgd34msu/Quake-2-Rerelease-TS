@@ -36,7 +36,8 @@
 //    session on the WIDE layout has both, and setup_dynamic_light now takes
 //    that path when gi.extended_layout() says so. The protocol-34 behavior
 //    below is unchanged for a session that stays narrow.
-//  * misc_hologram must NOT set EF_HOLOGRAM. See SP_misc_hologram.
+//  * misc_hologram sets EF_HOLOGRAM (as morefx bit 1) only on a wide
+//    session. See SP_misc_hologram.
 //  * info_world_text has no draw call. See info_world_text_think.
 
 import { anglemod, crandom, VectorCopy, VectorNormalize, VectorScale, VectorSet, vec3, type Vec3 } from "../shared/math";
@@ -446,6 +447,15 @@ export function SP_misc_flare(ent: EdictT): void {
  * expression with FRAMETIME (0.1) yields 10 degrees per tick -- identical
  * angular velocity, one tenth the sample rate.
  */
+/**
+ * EF_HOLOGRAM (kexapi/game.ts:634, `bitBig(33)`) in this port's split effects
+ * field: bit 33 of the rerelease uint64 is bit 1 of EntityStateT.morefx.
+ * Spelled here rather than imported from kexapi so the classic module takes
+ * no dependency on the kex API surface -- the same convention this file
+ * already uses for its other rerelease-only constants.
+ */
+const MOREFX_HOLOGRAM = 1 << 1;
+
 function misc_hologram_think(ent: EdictT): void {
   ent.s.angles[YAW] = (ent.s.angles[YAW] ?? 0) + 100 * FRAMETIME;
   ent.nextthink = level.time + FRAMETIME;
@@ -460,25 +470,37 @@ function misc_hologram_think(ent: EdictT): void {
  * QUAKED misc_hologram (1.0 1.0 0.0) (-16 -16 0) (16 16 32)
  * Ship hologram seen in the N64 version.
  *
- * DEGRADATION (protocol 34):
- *  * DELIBERATE DEVIATION: `ent->s.effects = EF_HOLOGRAM` (g_misc.cpp:2185) is
- *    NOT set. The rerelease's EF_HOLOGRAM is bit 33 of a 64-bit effects field
- *    (src/kexapi/game.ts:634, `bitBig(33)`). The classic entity_state_t's
- *    `effects` is a 32-bit value and the protocol-34 delta writes it as at
- *    most a Long (src/qcommon/sizebuf.ts:311-315), so bit 33 cannot survive
- *    the wire at all; setting it would only corrupt the field. The hologram
- *    therefore renders as an ordinary opaque strogg1 model.
- *  * s.alpha and s.scale are stored but not transmitted, so the flicker and
- *    the 0.75 downscale do not present.
+ * EF_HOLOGRAM: `ent->s.effects = EF_HOLOGRAM` (g_misc.cpp:2185) IS set, on a
+ * wide session. The rerelease's EF_HOLOGRAM is bit 33 of a 64-bit effects
+ * field (src/kexapi/game.ts:634, `bitBig(33)`); this port splits that field
+ * into EntityStateT's 32-bit `effects` (the legacy contract, untouched) and
+ * `morefx` (the high half, q_shared.ts's own DESIGN DEVIATION note), so bit
+ * 33 is bit 1 of morefx -- a field the classic entity_state_t already
+ * declares. It travels in the protocol 1038/4038 delta
+ * (qcommon/protocol/q2repro.ts's U_MOREFX8/HI_MOREFX16) and the client
+ * consumes it in cl_ents.ts's CL_AddPacketEntities, which calls
+ * cl_newfx.ts's CL_HologramParticles exactly where q2repro's
+ * entities.c:1065 does.
  *
- * The model, the position, and the 100 deg/sec spin all work.
+ * DEGRADATION (protocol 34):
+ *  * The write is GATED on gi.extended_layout(). Protocol 34's delta has no
+ *    morefx field at all (vanilla.ts writes `effects` and nothing else), so
+ *    on a narrow session the bit could not reach a client; leaving it unset
+ *    there keeps the classic wire provably byte-identical.
+ *  * s.alpha and s.scale are likewise only transmitted on a wide session, so
+ *    on protocol 34 the flicker and the 0.75 downscale do not present and the
+ *    hologram renders as an ordinary opaque strogg1 model.
+ *
+ * The model, the position, and the 100 deg/sec spin work under both.
  */
 export function SP_misc_hologram(ent: EdictT): void {
   ent.solid = SolidT.SOLID_NOT;
   ent.s.modelindex = gi.modelindex("models/ships/strogg1/tris.md2");
   VectorSet(ent.mins, -16, -16, 0);
   VectorSet(ent.maxs, 16, 16, 32);
-  // g_misc.cpp:2185 -- `ent->s.effects = EF_HOLOGRAM;` INTENTIONALLY OMITTED.
+  // g_misc.cpp:2185 -- `ent->s.effects = EF_HOLOGRAM;`. See the degradation
+  // note above for why this is the morefx half and why it is gated.
+  if (gi.extended_layout?.() === true) ent.s.morefx |= MOREFX_HOLOGRAM;
   ent.think = misc_hologram_think;
   ent.nextthink = level.time + FRAMETIME;
   ent.s.alpha = kexFrandom(0.2, 0.6);
