@@ -50,6 +50,12 @@ export const SPAWNFLAG_NOT_MEDIUM = 0x00000200;
 export const SPAWNFLAG_NOT_HARD = 0x00000400;
 export const SPAWNFLAG_NOT_DEATHMATCH = 0x00000800;
 export const SPAWNFLAG_NOT_COOP = 0x00001000;
+// RERELEASE CONTENT PORT. g_local.h:262 (src/kexgame/g_local.ts:192,
+// `SPAWNFLAG_COOP_ONLY`). Not a 1997 flag: vanilla's g_local.h stops at
+// SPAWNFLAG_NOT_COOP and nothing in the 3.21 source reads bit 0x4000, so
+// only rerelease-authored entities ever set it. Read in exactly one place,
+// g_spawn.ts's ED_LoadFromFile -- see the long comment there.
+export const SPAWNFLAG_COOP_ONLY = 0x00004000;
 
 // edict->flags
 export const FL_FLY = 0x00000001;

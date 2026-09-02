@@ -28,6 +28,7 @@ import {
   globals,
   level,
   MovetypeT,
+  SPAWNFLAG_COOP_ONLY,
   SPAWNFLAG_NOT_COOP,
   SPAWNFLAG_NOT_DEATHMATCH,
   SPAWNFLAG_NOT_EASY,
@@ -1001,6 +1002,50 @@ export function SpawnEntities(mapname: string, entities: string, spawnpoint: str
           continue;
         }
       } else {
+        // RERELEASE-ONLY ARM. g_spawn.cpp's G_InhibitEntity (ported verbatim
+        // as src/kexgame/g_spawn.ts's own G_InhibitEntity) has a coop pair
+        // vanilla 3.21 does not:
+        //
+        //     if ( coop && spawnflags & SPAWNFLAG_NOT_COOP)  -> inhibit
+        //     if (!coop && spawnflags & SPAWNFLAG_COOP_ONLY) -> inhibit
+        //
+        // Only the second half is reproduced here, and that is a deliberate
+        // split, not an omission:
+        //
+        //   SPAWNFLAG_COOP_ONLY (0x00004000, g_local.h:262 /
+        //   src/kexgame/g_local.ts:192) is a bit vanilla assigns no meaning
+        //   to anywhere -- it is not in vanilla's g_local.h, not read by any
+        //   spawn function, and not in the editor mask cleared below. Every
+        //   entity carrying it was authored by the rerelease, so honoring it
+        //   is gated by the rerelease key itself and cannot move a single
+        //   1997-authored entity. Across the shipped map set it inhibits 239
+        //   entities in 20 maps: coop-extra monsters and ammo on ten Rogue
+        //   maps (rbase1/rbase2/rboss/rhangar1/rhangar2/rlava1/rmine1/
+        //   rmine2/rware1/rware2), two Q64 maps, and eight Call of the
+        //   Machine maps -- and NONE in base1/base2/..., whose inhibit
+        //   counts stay exactly where they were.
+        //
+        //   SPAWNFLAG_NOT_COOP (0x00001000) is the opposite case: it is a
+        //   1997 flag with 1997 semantics, and vanilla's own decision was to
+        //   leave the check commented out (the `/* ((coop->value) && ... */`
+        //   in g_spawn.c's ED_LoadFromFile, preserved below by its absence).
+        //   Turning it on here would change coop on original content, so it
+        //   stays off. Known consequence, measured against the shipped maps:
+        //   in coop, mgu1m1 and mgu6m1 select a player start the rerelease
+        //   would have inhibited. Single player is exact on all 222 maps.
+        //
+        // This is what makes rerelease single player play correctly under
+        // this ruleset. Live case that found it: mgu4m1 places an
+        // info_player_start AND a trigger_always that fires the drop-pod
+        // teleporter, both COOP_ONLY; without this arm the classic ruleset
+        // both started the player at the coop spot and immediately ran the
+        // coop-only landing script.
+        if ((current.spawnflags & SPAWNFLAG_COOP_ONLY) !== 0 && cvarNum(gameCvars.coop) === 0) {
+          G_FreeEdict(current);
+          inhibit++;
+          continue;
+        }
+
         const skill = cvarNum(gameCvars.skill);
         if (
           (skill === 0 && (current.spawnflags & SPAWNFLAG_NOT_EASY) !== 0) ||

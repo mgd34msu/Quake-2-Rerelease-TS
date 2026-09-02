@@ -1261,6 +1261,65 @@ export function SelectCoopSpawnPoint(ent: EdictT): EdictT | null {
 }
 
 /*
+=============================================================================
+RERELEASE START-POINT SELECTION
+
+Two independent things decide which info_player_start a rerelease map
+starts the player on, and this module now reproduces both. Live case that
+found them: a fresh `+map mgu4m1` put the player out on the open red
+terrain by the Uplink Tower under this ruleset, and inside the drop pod
+looking out through its doorway under the rerelease ruleset.
+
+  1. WHICH STARTS EXIST. Rerelease campaign-entry maps place two untargeted
+     info_player_starts, one flagged SPAWNFLAG_COOP_ONLY and one flagged
+     SPAWNFLAG_NOT_COOP, and expect the ruleset to delete the wrong one
+     before selection runs. That is an entity-inhibition rule, not a
+     selection rule, and it lives where the rerelease puts it -- see
+     g_spawn.ts's ED_LoadFromFile, which carries the full derivation and
+     the one known coop-side gap. It is what actually fixes mgu4m1: the map
+     ALSO gates its drop-pod teleport script on the same flag.
+
+  2. WHAT HAPPENS WHEN NOTHING MATCHES -- reproduced here.
+     p_client.cpp:1199-1228's SelectSingleSpawnPoint replaces vanilla's
+     "if nothing matched AND the requested spawnpoint was empty, use any"
+     tail with a two-step fallback that also runs when a NON-EMPTY
+     spawnpoint failed to match: first any untargeted info_player_start,
+     then any info_player_start at all.
+
+     Rule 2 needs no gate of its own and cannot change any behavior vanilla
+     defines. For an empty spawnpoint the two chains select the identical
+     entity; for a non-empty spawnpoint that matches, both take the match;
+     the only inputs they disagree on are the ones where vanilla fell
+     through to `gi.error("Couldn't find spawn point ...")` and killed the
+     server. Across the whole shipped map set that is 4 (map, spawnpoint)
+     pairs -- boss1$bosstart, mgu5m1$from3_1, xship$xhangar2 and
+     test/spbox$map1s -- each of which the rerelease survives and this
+     module now survives the same way.
+=============================================================================
+*/
+
+/** p_client.cpp:1199-1228, `static edict_t *SelectSingleSpawnPoint(edict_t *ent)`. */
+function SelectSingleSpawnPoint(): EdictT | null {
+  let spot: EdictT | null = null;
+
+  // vanilla's own loop, unchanged
+  while ((spot = G_Find(spot, "classname", "info_player_start")) !== null) {
+    if (game.spawnpoint.length === 0 && spot.targetname === null) break;
+    if (game.spawnpoint.length === 0 || spot.targetname === null) continue;
+    if (Q_stricmp(game.spawnpoint, spot.targetname) === 0) break;
+  }
+  if (spot !== null) return spot;
+
+  // there wasn't a matching targeted spawnpoint, use one that has no targetname
+  while ((spot = G_Find(spot, "classname", "info_player_start")) !== null) {
+    if (spot.targetname === null) return spot;
+  }
+
+  // none at all, so just pick any
+  return G_Find(null, "classname", "info_player_start");
+}
+
+/*
 ===========
 SelectSpawnPoint
 
@@ -1277,20 +1336,7 @@ export function SelectSpawnPoint(ent: EdictT, origin: Vec3, angles: Vec3): void 
   }
 
   // find a single player start spot
-  if (spot === null) {
-    while ((spot = G_Find(spot, "classname", "info_player_start")) !== null) {
-      if (game.spawnpoint.length === 0 && spot.targetname === null) break;
-      if (game.spawnpoint.length === 0 || spot.targetname === null) continue;
-      if (Q_stricmp(game.spawnpoint, spot.targetname) === 0) break;
-    }
-
-    if (spot === null) {
-      if (game.spawnpoint.length === 0) {
-        // there wasn't a spawnpoint without a target, so use any
-        spot = G_Find(null, "classname", "info_player_start");
-      }
-    }
-  }
+  if (spot === null) spot = SelectSingleSpawnPoint();
 
   if (spot === null) {
     gi.error(`Couldn't find spawn point ${game.spawnpoint}\n`);
