@@ -598,6 +598,26 @@ export class GlconfigT {
   gets vanilla's POT behavior.
   */
   npot = false;
+  /*
+  Non-power-of-two support for MIPMAPPED textures (skins and world textures)
+  specifically -- the stricter half of `npot` above.
+
+  q2repro grants QGL_CAP_TEXTURE_NON_POWER_OF_TWO only in its GL 3.0 / GLES
+  3.0 tier (src/refresh/qgl.c:287-293) with the comment "NPOT textures are
+  technically GL 2.0, but only enable them on 3.0 to ensure full hardware
+  support, INCLUDING MIPMAPS". `npot` above is deliberately more permissive
+  than that -- it also accepts a pre-3.0 context that advertises
+  GL_ARB_texture_non_power_of_two / GL_OES_texture_npot -- which is safe for
+  the non-mipmapped 2D pics but is exactly the case the reference's comment
+  warns about once a mip chain is involved. This field is the reference's own
+  unrelaxed rule, version tier only, and GL_Upload32 requires it (plus a
+  resolved qglGenerateMipmap) before it will hand a skin or a wall to the
+  driver at a non-power-of-two size.
+
+  Set in R_Init next to `npot`; defaults false, so anything running without a
+  live context keeps vanilla's POT-and-resample path for mipmapped images.
+  */
+  npot_mipmap = false;
   /**
    * GL_MAX_TEXTURE_SIZE, queried in R_Init. Vanilla hardcoded a 256 cap in
    * GL_Upload32 ("don't ever bother with >256 textures"); the reference

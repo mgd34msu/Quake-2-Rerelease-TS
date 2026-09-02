@@ -1507,6 +1507,28 @@ export function R_Register(): void {
 
 /*
 ===============
+GL_DetectNpotMipmapSupport
+
+Pure predicate behind gl_config.npot_mipmap -- the version-tier half of the
+rule below, with no extension fallback. True for desktop GL 3.0+ and for
+OpenGL ES 3.0+, which is exactly the tier q2repro attaches
+QGL_CAP_TEXTURE_NON_POWER_OF_TWO to (src/refresh/qgl.c:287-293), under its own
+comment that 3.0 is where non-power-of-two support can be relied on "including
+mipmaps". GL_Upload32 requires this, not merely gl_config.npot, before it
+uploads a skin or a wall at a non-power-of-two size.
+===============
+*/
+export function GL_DetectNpotMipmapSupport(versionString: string): boolean {
+  const version = versionString.trim().replace(/^OpenGL ES(-(CM|CL))?\s+/i, "");
+  const m = /^(\d+)\.(\d+)/.exec(version);
+  if (!m) return false;
+  const major = Number(m[1]);
+  const minor = Number(m[2]);
+  return major > 3 || (major === 3 && minor >= 0);
+}
+
+/*
+===============
 GL_DetectNpotSupport
 
 Pure predicate behind gl_config.npot, split out of R_Init so it can be unit
@@ -1522,13 +1544,7 @@ predicate never guesses "supported" from a string it did not understand.
 ===============
 */
 export function GL_DetectNpotSupport(versionString: string, extensionsString: string): boolean {
-  const version = versionString.trim().replace(/^OpenGL ES(-(CM|CL))?\s+/i, "");
-  const m = /^(\d+)\.(\d+)/.exec(version);
-  if (m) {
-    const major = Number(m[1]);
-    const minor = Number(m[2]);
-    if (major > 3 || (major === 3 && minor >= 0)) return true;
-  }
+  if (GL_DetectNpotMipmapSupport(versionString)) return true;
   // Pre-3.0 contexts that advertise the extension by name. Matched on whole
   // space-delimited tokens, so a hypothetical vendor extension that merely
   // starts with the same characters could not satisfy this by prefix.
@@ -1710,18 +1726,24 @@ export function R_Init(hInstance: unknown, wndProc: unknown): boolean {
   // texture upload happens later (GL_InitImages/Draw_InitLocal, below).
   //
   // q2repro grants QGL_CAP_TEXTURE_NON_POWER_OF_TWO in its GL 3.0 / GLES 3.0
-  // capability tier (src/refresh/qgl.c:288-293), with the comment "NPOT
+  // capability tier (src/refresh/qgl.c:287-293), with the comment "NPOT
   // textures are technically GL 2.0, but only enable them on 3.0 to ensure
   // full hardware support, INCLUDING MIPMAPS". That caution is specifically
-  // about mipmapped NPOT textures, which is the one case this port does NOT
-  // take (GL_Upload32 keeps the POT path for every mipmapped image -- see its
-  // own comment there), so the ARB/OES extension is accepted here as well as
-  // the version tier: GL_ARB_texture_non_power_of_two on a pre-3.0 context
-  // guarantees exactly the non-mipmapped NPOT support this port asks for.
-  // Documented deviation, deliberately more permissive than the reference and
-  // only in the direction the reference's own stated reason does not cover.
+  // about mipmapped NPOT textures, so the two are tracked separately here:
+  //
+  //   gl_config.npot        -- version tier OR the ARB/OES extension by name.
+  //                            Deliberately more permissive than the
+  //                            reference, and only for the non-mipmapped 2D
+  //                            pics, where the reference's stated worry (mip
+  //                            chains) does not apply at all.
+  //   gl_config.npot_mipmap -- the reference's unrelaxed version tier, with
+  //                            no extension fallback. GL_Upload32 requires
+  //                            this before a skin or a wall goes to the
+  //                            driver at a non-power-of-two size.
   gl_config.npot = GL_DetectNpotSupport(gl_config.version_string, gl_config.extensions_string);
+  gl_config.npot_mipmap = GL_DetectNpotMipmapSupport(gl_config.version_string);
   ri.Con_Printf(PRINT_DEVELOPER, `...non-power-of-two textures ${gl_config.npot ? "supported" : "unavailable"}\n`);
+  ri.Con_Printf(PRINT_DEVELOPER, `...non-power-of-two mipmapped textures ${gl_config.npot_mipmap ? "supported" : "unavailable"}\n`);
   // GL_MAX_TEXTURE_SIZE (0x0d33). The re-release's own md5 skins are 512x256
   // and a high-resolution replacement pack is larger still; vanilla's
   // hardcoded 256 cap halved them. The reference clamps to the driver's

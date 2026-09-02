@@ -27,10 +27,11 @@ one direct-call test.
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 
 import { ri, glCvars, SetRefImports, gltextures, ImageT, ImagetypeT, SetNumGltextures, gl_state, d_8to24table, gl_config } from "../src/ref_gl/gl_local";
-import { GL_DetectNpotSupport } from "../src/ref_gl/gl_rmain";
+import { GL_DetectNpotSupport, GL_DetectNpotMipmapSupport } from "../src/ref_gl/gl_rmain";
 import type { RefImports } from "../src/client/ref";
 import { CvarT } from "../src/shared/q_shared";
 import { QGLRecording } from "../src/ref_gl/qgl";
+import type { QGL } from "../src/ref_gl/qgl";
 import { SetQGL, GL_Bind, GL_FindImage, GL_Upload8, Scrap_AllocBlock, LoadTGA, LoadPNG, LoadJPG, GL_InitImages, ResetScrapState, GL_TEXTURE_2D, GL_QUADS, GL_RGBA, GL_UNSIGNED_BYTE } from "../src/ref_gl/gl_image";
 import { Draw_InitLocal, Draw_Char, Draw_FindPic, Draw_StretchPicRegion, Draw_Pic, SetGifBeatSeconds } from "../src/ref_gl/gl_draw";
 import { buildBaselineJpeg } from "./support/jpeg_builder";
@@ -328,13 +329,24 @@ smears it -- a 30x30 HUD icon uploaded as 32x32 has soft, shifted edges, and a
 boundaries. 156 of the 179 PNGs under pics/ and fonts/ in the re-release paks
 are non-power-of-two, and so are 116 of the 125 pics in the 1997 baseq2 pak0.
 
-On a context that supports NPOT textures the resample is skipped for
-non-mipmapped images and the driver gets the real pixels. Mipmapped images
-keep the POT path -- see GL_MustMakePowerOfTwo's own comment in gl_image.ts
-for why this port holds those back where q2repro does not.
+On a context that supports NPOT textures the resample is skipped and the driver
+gets the real pixels.
+
+Mipmapped images (it_skin, it_wall, sprites) additionally need a driver that
+can build the mip chain, because gl_image.ts's own GL_MipMap halves a level in
+place assuming even dimensions and would corrupt an odd-sized one. The
+reference does the same thing: native-size level 0, then qglGenerateMipmap
+(q2repro src/refresh/texture.c:534-540). So the native path for a skin or a
+wall needs all three of gl_config.npot, gl_config.npot_mipmap (the reference's
+unrelaxed GL 3.0 tier) and a resolved qglGenerateMipmap; missing any one of
+them falls back to power-of-two rounding plus the in-process GL_MipMap loop,
+which is what every pre-3.0 context still gets.
 */
 describe("GL_Upload32 -- non-power-of-two handling", () => {
   const restore = gl_config.npot;
+  const restoreMip = gl_config.npot_mipmap;
+  const restorePicmip = glCvars.gl_picmip;
+  const restoreRoundDown = glCvars.gl_round_down;
 
   function uploadedSize(): { w: number; h: number } {
     const uploads = qgl.calls.filter((c) => c.name === "qglTexImage2D");
@@ -342,8 +354,24 @@ describe("GL_Upload32 -- non-power-of-two handling", () => {
     return { w: uploads[0]?.args[3] as number, h: uploads[0]?.args[4] as number };
   }
 
+  function cvar(value: number): CvarT {
+    const c = new CvarT();
+    c.value = value;
+    return c;
+  }
+
+  // Every mipmapped-native test needs the whole capability set present; the
+  // QGLRecording installed in beforeEach already provides qglGenerateMipmap.
+  function npotMipmapCapableContext(): void {
+    gl_config.npot = true;
+    gl_config.npot_mipmap = true;
+  }
+
   afterEach(() => {
     gl_config.npot = restore;
+    gl_config.npot_mipmap = restoreMip;
+    glCvars.gl_picmip = restorePicmip;
+    glCvars.gl_round_down = restoreRoundDown;
   });
 
   test("an NPOT-capable context uploads a non-mipmapped image at its native size", () => {
@@ -363,12 +391,124 @@ describe("GL_Upload32 -- non-power-of-two handling", () => {
     expect(uploadedSize()).toEqual({ w: 32, h: 32 });
   });
 
-  test("a mipmapped image keeps the power-of-two path even on an NPOT-capable context", () => {
-    // GL_MipMap halves a level in place assuming even dimensions, and this
-    // port has no GenerateMipmap binding to hand the chain to instead.
+  test("a mipmapped image uploads at its native size and hands the chain to the driver", () => {
+    // 136x60 is a real 1997 pak0 model skin size (one of 146 non-power-of-two
+    // skins there); it used to be resampled up to 256x64.
+    npotMipmapCapableContext();
+    GL_Upload8(new Uint8Array(136 * 60).fill(0), 136, 60, true, false);
+
+    expect(uploadedSize()).toEqual({ w: 136, h: 60 });
+    // exactly one qglTexImage2D: level 0. Every smaller level is the
+    // driver's now, so GL_MipMap's per-level uploads are gone.
+    const uploads = qgl.calls.filter((c) => c.name === "qglTexImage2D");
+    expect(uploads).toHaveLength(1);
+    expect(uploads[0]?.args[1]).toBe(0); // level
+    const gen = qgl.calls.filter((c) => c.name === "qglGenerateMipmap");
+    expect(gen).toHaveLength(1);
+    expect(gen[0]?.args[0]).toBe(GL_TEXTURE_2D);
+    // and it happens after level 0 exists, not before
+    expect(qgl.calls.findIndex((c) => c.name === "qglGenerateMipmap")).toBeGreaterThan(qgl.calls.findIndex((c) => c.name === "qglTexImage2D"));
+  });
+
+  test("a mipmapped image falls back to the power-of-two path when the driver cannot build the chain", () => {
+    // qglGenerateMipmap rides in with the ARB_framebuffer_object group in
+    // qgl.ts, so a context without framebuffer objects has it null -- and
+    // GL_MipMap's even-dimensions assumption means the POT rounding is not
+    // optional there, it is what keeps the chain correct.
+    npotMipmapCapableContext();
+    const capless: QGL = qgl;
+    capless.qglGenerateMipmap = null;
+
+    GL_Upload8(new Uint8Array(136 * 60).fill(0), 136, 60, true, false);
+
+    expect(uploadedSize()).toEqual({ w: 256, h: 64 });
+    expect(qgl.calls.filter((c) => c.name === "qglGenerateMipmap")).toHaveLength(0);
+    // the in-process chain instead: 256x64 down to 1x1 is 8 more levels
+    const uploads = qgl.calls.filter((c) => c.name === "qglTexImage2D");
+    expect(uploads.map((c) => c.args[1])).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8]);
+  });
+
+  test("a mipmapped image falls back to the power-of-two path on a pre-3.0 context that only advertises the extension", () => {
+    // gl_config.npot accepts GL_ARB_texture_non_power_of_two on a pre-3.0
+    // context (see GL_DetectNpotSupport); gl_config.npot_mipmap does not,
+    // which is q2repro's own rule -- "only enable them on 3.0 to ensure full
+    // hardware support, including mipmaps".
     gl_config.npot = true;
-    GL_Upload8(new Uint8Array(24 * 24).fill(0), 24, 24, true, false);
-    expect(uploadedSize()).toEqual({ w: 32, h: 32 });
+    gl_config.npot_mipmap = false;
+
+    GL_Upload8(new Uint8Array(136 * 60).fill(0), 136, 60, true, false);
+    expect(uploadedSize()).toEqual({ w: 256, h: 64 });
+    expect(qgl.calls.filter((c) => c.name === "qglGenerateMipmap")).toHaveLength(0);
+
+    // the non-mipmapped pics that flag was relaxed for are unaffected
+    qgl.clear();
+    GL_Upload8(new Uint8Array(30 * 30).fill(0), 30, 30, false, false);
+    expect(uploadedSize()).toEqual({ w: 30, h: 30 });
+  });
+
+  test("gl_picmip still applies on the native path, shifting the native size", () => {
+    // The reference applies picmip after the power-of-two decision, to
+    // whatever size survived it (q2repro texture.c:472-483), so a 136x60 skin
+    // at gl_picmip 1 is 68x30 -- not 64x32, and not left at 136x60.
+    npotMipmapCapableContext();
+    glCvars.gl_picmip = cvar(1);
+
+    GL_Upload8(new Uint8Array(136 * 60).fill(0), 136, 60, true, false);
+    expect(uploadedSize()).toEqual({ w: 68, h: 30 });
+    expect(qgl.calls.filter((c) => c.name === "qglGenerateMipmap")).toHaveLength(1);
+
+    // and a second shift halves it again
+    qgl.clear();
+    glCvars.gl_picmip = cvar(2);
+    GL_Upload8(new Uint8Array(136 * 60).fill(0), 136, 60, true, false);
+    expect(uploadedSize()).toEqual({ w: 34, h: 15 });
+  });
+
+  test("gl_round_down cannot shrink an image below its own size on the native path", () => {
+    // The reference's test is `if (scaled_width > width)` -- it only gives
+    // back a doubling that the round-UP just introduced. Nothing is rounded
+    // up on the native path, so there is nothing to give back.
+    npotMipmapCapableContext();
+    glCvars.gl_round_down = cvar(1);
+
+    GL_Upload8(new Uint8Array(136 * 60).fill(0), 136, 60, true, false);
+    expect(uploadedSize()).toEqual({ w: 136, h: 60 });
+
+    // it still does its job on the power-of-two path
+    qgl.clear();
+    gl_config.npot = false;
+    gl_config.npot_mipmap = false;
+    GL_Upload8(new Uint8Array(136 * 60).fill(0), 136, 60, true, false);
+    expect(uploadedSize()).toEqual({ w: 128, h: 32 });
+  });
+
+  test("a drop-in higher-resolution replacement uploads at its own size, unwarped", () => {
+    // The 4x upscale of a 136x60 skin that deliverable 3 verifies in-engine:
+    // 544x240 goes to the driver as 544x240. Its texture coordinates come
+    // from the model, normalized, so nothing downstream reads this size --
+    // the image is just sharper. Under vanilla POT rounding the same file
+    // became 1024x256, a different aspect ratio entirely.
+    npotMipmapCapableContext();
+    gl_config.max_texture_size = 16384;
+    GL_Upload8(new Uint8Array(544 * 240).fill(0), 544, 240, true, false);
+    expect(uploadedSize()).toEqual({ w: 544, h: 240 });
+    gl_config.max_texture_size = 256;
+  });
+
+  test("an already-power-of-two mipmapped image is the same size either way, driver chain or not", () => {
+    // The POT walls that make up most of a map do not move: same level 0,
+    // same size. Only who builds the smaller levels changes.
+    npotMipmapCapableContext();
+    GL_Upload8(new Uint8Array(64 * 64).fill(7), 64, 64, true, false);
+    const nativeSize = uploadedSize();
+
+    qgl.clear();
+    gl_config.npot = false;
+    gl_config.npot_mipmap = false;
+    GL_Upload8(new Uint8Array(64 * 64).fill(7), 64, 64, true, false);
+
+    expect(nativeSize).toEqual(uploadedSize());
+    expect(nativeSize).toEqual({ w: 64, h: 64 });
   });
 
   test("an already-power-of-two image is byte-identical either way", () => {
@@ -397,6 +537,31 @@ describe("GL_Upload32 -- non-power-of-two handling", () => {
 /*
 GL_DetectNpotSupport (gl_rmain.ts) -- the pure predicate behind gl_config.npot.
 */
+describe("GL_DetectNpotMipmapSupport", () => {
+  // The version tier only, no extension fallback: q2repro attaches
+  // QGL_CAP_TEXTURE_NON_POWER_OF_TWO to GL 3.0 / GLES 3.0 and says so is
+  // where mipmapped NPOT can be relied on (src/refresh/qgl.c:287-293).
+  test("accepts desktop GL 3.0 and up", () => {
+    expect(GL_DetectNpotMipmapSupport("3.0 Mesa 24.0.0")).toBe(true);
+    expect(GL_DetectNpotMipmapSupport("4.6.0 NVIDIA 550.54.14")).toBe(true);
+  });
+
+  test("rejects pre-3.0 even when the extension string would satisfy gl_config.npot", () => {
+    expect(GL_DetectNpotMipmapSupport("2.1 Mesa 24.0.0")).toBe(false);
+    expect(GL_DetectNpotSupport("2.1 Mesa 24.0.0", "GL_ARB_texture_non_power_of_two")).toBe(true);
+  });
+
+  test("reads the ES spelling and rejects ES 2.0", () => {
+    expect(GL_DetectNpotMipmapSupport("OpenGL ES 3.0 Mesa")).toBe(true);
+    expect(GL_DetectNpotMipmapSupport("OpenGL ES 2.0 Mesa")).toBe(false);
+  });
+
+  test("an unparseable version string is not a capability", () => {
+    expect(GL_DetectNpotMipmapSupport("")).toBe(false);
+    expect(GL_DetectNpotMipmapSupport("some vendor string")).toBe(false);
+  });
+});
+
 describe("GL_DetectNpotSupport", () => {
   test("desktop GL 3.0 and newer are capable, matching q2repro's own 3.0 tier", () => {
     expect(GL_DetectNpotSupport("3.0", "")).toBe(true);

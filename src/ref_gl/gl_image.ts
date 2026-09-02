@@ -1107,6 +1107,41 @@ function setUploadTexParams(mipmap: boolean): void {
 }
 
 /*
+GL_DriverMipmapFn
+
+The driver-side mip chain builder (q2repro src/refresh/texture.c:534-540:
+"if (qglGenerateMipmap) qglGenerateMipmap(GL_TEXTURE_2D); else" the manual
+IMG_MipMap loop). Returns the entry point when this upload may use it, null
+when it must build the chain itself with GL_MipMap (above).
+
+Three things must hold:
+
+  - gl_config.npot_mipmap, the reference's own unrelaxed GL 3.0 / GLES 3.0
+    tier for non-power-of-two textures, NOT the looser gl_config.npot that
+    also accepts a pre-3.0 context advertising the ARB/OES extension. The
+    reference's tier comment says 3.0 is where NPOT can be relied on
+    "including mipmaps"; that is precisely this case, so this side takes the
+    reference's rule rather than the port's relaxed one. (gl_config.npot is
+    still required as well -- see GL_MustMakePowerOfTwo.)
+  - qglGenerateMipmap actually resolved. It rides in with the
+    ARB_framebuffer_object group in qgl.ts, so it is null on a context that
+    has no framebuffer objects, and null on any hand-built QGL in a test that
+    does not provide it.
+  - Paletted texture uploads are off. GL_BuildPalettedTexture uploads each
+    level as GL_COLOR_INDEX8_EXT through qglColorTableEXT, and asking the
+    driver to filter palette INDICES would average index numbers, not
+    colors. The reference has no paletted path at all to follow here, so the
+    legacy 3dfx path keeps building its own chain exactly as it does today.
+    Checked on the cvar and the entry point rather than on the per-image
+    `samples` result, so the decision is available before any size is chosen.
+*/
+function GL_DriverMipmapFn(): ((target: number) => void) | null {
+  if (!gl_config.npot_mipmap) return null;
+  if (qgl.qglColorTableEXT && glCvars.gl_ext_palettedtexture && glCvars.gl_ext_palettedtexture.value) return null;
+  return qgl.qglGenerateMipmap;
+}
+
+/*
 GL_MakePowerOfTwo (q2repro src/refresh/texture.c:432-442), as a predicate.
 
 Returns true when this upload must be rounded up to power-of-two dimensions
@@ -1114,36 +1149,33 @@ and resampled into them, false when it can go to the driver at its native
 size. Vanilla always rounded; q2repro rounds only when the context lacks
 QGL_CAP_TEXTURE_NON_POWER_OF_TWO.
 
-MIPMAPPED IMAGES ARE HELD BACK HERE, and this is the one place this port does
-not follow the reference. q2repro skips the resample for EVERY image type,
-walls and skins included, because its NPOT capability and glGenerateMipmap are
-granted by the same GL 3.0 tier (src/refresh/qgl.c:288-293), so its
-GL_Upload32 can hand an odd-sized level 0 to the driver and let
-qglGenerateMipmap build the chain (texture.c:538-540). This port has no
-GenerateMipmap binding in qgl.ts at all, and its own GL_MipMap (above) halves
-a level in place assuming EVEN dimensions -- `outHeight = height >>> 1` drops
-the last row of an odd-height level, and the `j += 8` inner loop reads one
-texel past the end of the last row pair of an odd-width one. Feeding it a
-native-size 136x60 skin would therefore produce a corrupt mip chain, not a
-sharper one.
+Mipmapped images (it_skin, it_wall, and sprites -- everything GL_LoadPic calls
+in with mipmap=true) additionally need GL_DriverMipmapFn above, because this
+file's own GL_MipMap halves a level in place assuming EVEN dimensions:
+`outHeight = height >>> 1` drops the last row of an odd-height level, and the
+`j += 8` inner loop reads one texel past the end of the last row pair of an
+odd-width one. A native-size 136x60 skin fed to it would produce a corrupt mip
+chain, not a sharper one. So the native size is taken only when the driver
+builds the chain, exactly as the reference does; when qglGenerateMipmap is
+missing the image is rounded up to a power of two first and GL_MipMap's
+even-dimensions assumption holds for every level.
 
-So: native size for everything that needs no mip chain (it_pic -- the 2D pics,
-the font atlases and RegisterRawPic's generated atlases, all of which call in
-with mipmap=false), POT rounding for everything that does. Extending it to
-walls/skins/sprites means adding a GenerateMipmap binding (or an odd-size-safe
-GL_MipMap) first; it is a strictly larger change and it would move every one
-of the 146 non-power-of-two model skins in the 1997 baseq2 pak0, so it is
-deliberately not bundled in here.
+That covers the 146 non-power-of-two model skins in the 1997 baseq2 pak0 and
+the re-release's own larger set, none of which are resampled any more on a
+GL 3.0+ context.
 */
 function GL_MustMakePowerOfTwo(mipmap: boolean): boolean {
-  if (mipmap) return true;
-  return !gl_config.npot;
+  if (!gl_config.npot) return true;
+  return mipmap && GL_DriverMipmapFn() === null;
 }
 
 function GL_Upload32(data: Uint32Array, width: number, height: number, mipmap: boolean): boolean {
   uploaded_paletted = false;
 
   const makePot = GL_MustMakePowerOfTwo(mipmap);
+  // Captured here, next to the decision that depends on it, so the mip-chain
+  // branch at the bottom cannot disagree with the size chosen at the top.
+  const genMipmap = mipmap && !makePot ? GL_DriverMipmapFn() : null;
 
   // Already power-of-two on both axes is the same arithmetic either way (the
   // rounding loops below are no-ops on such a size), so nothing that was
@@ -1161,7 +1193,22 @@ function GL_Upload32(data: Uint32Array, width: number, height: number, mipmap: b
     if (glCvars.gl_round_down && glCvars.gl_round_down.value && scaled_height > height && mipmap) scaled_height >>>= 1;
   }
 
-  // let people sample down the world textures for speed
+  // let people sample down the world textures for speed.
+  //
+  // picmip is applied AFTER the power-of-two decision above, to whatever size
+  // survived it, which on the native path is the image's own size -- the
+  // reference does the same thing in the same order (texture.c:472-483,
+  // where the shift is applied to the scaled_width/scaled_height that
+  // GL_MakePowerOfTwo just left alone). A 136x60 skin at gl_picmip 1 is
+  // therefore 68x30, reached by GL_ResampleTexture below, not 64x32.
+  //
+  // gl_round_down is a no-op on the native path, and that is the reference's
+  // rule too, not an omission: its test is `if (scaled_width > width)`
+  // (texture.c:474-478), i.e. "only give back a doubling that the
+  // round-UP-to-power-of-two just introduced". Nothing was rounded up on the
+  // native path, so there is nothing to round down, and the cvar cannot shrink
+  // an image below its own size. It still applies exactly as before whenever
+  // the power-of-two path runs (see the rounding loops above).
   if (mipmap) {
     const picmip = glCvars.gl_picmip ? glCvars.gl_picmip.value : 0;
     scaled_width >>>= picmip;
@@ -1235,7 +1282,12 @@ function GL_Upload32(data: Uint32Array, width: number, height: number, mipmap: b
     qgl.qglTexImage2D(GL_TEXTURE_2D, 0, comp, scaled_width, scaled_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, scaled);
   }
 
-  if (mipmap) {
+  if (genMipmap) {
+    // q2repro texture.c:534-540. Level 0 is already bound and uploaded, so
+    // the driver builds every smaller level from it -- including the odd
+    // sizes GL_MipMap cannot handle.
+    genMipmap(GL_TEXTURE_2D);
+  } else if (mipmap) {
     let miplevel = 0;
     let sw = scaled_width;
     let sh = scaled_height;

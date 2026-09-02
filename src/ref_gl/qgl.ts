@@ -224,6 +224,16 @@ export interface QGL {
   qglRenderbufferStorage: ((target: number, internalformat: number, width: number, height: number) => void) | null;
   qglFramebufferRenderbuffer: ((target: number, attachment: number, renderbuffertarget: number, renderbuffer: number) => void) | null;
   qglDeleteRenderbuffers: ((n: number, renderbuffers: GLPointer) => void) | null;
+  // glGenerateMipmap, the driver-side replacement for gl_image.ts's own
+  // GL_MipMap loop. It belongs to this same group because it is literally the
+  // same extension: q2repro resolves GenerateMipmap in one list with
+  // BindFramebuffer/GenRenderbuffers/RenderbufferStorage and the rest
+  // (src/refresh/qgl.c:266-285, its "GL 3.0, ES 2.0" tier), and
+  // ARB_framebuffer_object defines all of them together. A context that has
+  // the framebuffer entry points has this one, so it resolves or fails with
+  // them; gl_image.ts still null-checks it on its own before use, since a QGL
+  // built by hand in a test need not have it.
+  qglGenerateMipmap: ((target: number) => void) | null;
 }
 
 export interface QGLCall {
@@ -596,6 +606,9 @@ export class QGLRecording implements QGL {
   };
   qglDeleteRenderbuffers = (n: number, renderbuffers: GLPointer): void => {
     this.record("qglDeleteRenderbuffers", [n, renderbuffers]);
+  };
+  qglGenerateMipmap = (target: number): void => {
+    this.record("qglGenerateMipmap", [target]);
   };
 }
 
@@ -976,6 +989,10 @@ const glFramebufferSymbols = {
   glRenderbufferStorage: { args: [u32, u32, i32, i32], returns: voidType },
   glFramebufferRenderbuffer: { args: [u32, u32, u32, u32], returns: voidType },
   glDeleteRenderbuffers: { args: [i32, ptr], returns: voidType },
+  // same extension as the eleven above -- see the QGL interface's comment on
+  // qglGenerateMipmap. Last in the group so the existing bail-on-first-null
+  // probe order (test/glimp.test.ts pins it) is unchanged.
+  glGenerateMipmap: { args: [u32], returns: voidType },
 } as const;
 
 interface GLFramebufferRawSymbols {
@@ -990,6 +1007,7 @@ interface GLFramebufferRawSymbols {
   glRenderbufferStorage(target: number, internalformat: number, width: number, height: number): void;
   glFramebufferRenderbuffer(target: number, attachment: number, renderbuffertarget: number, renderbuffer: number): void;
   glDeleteRenderbuffers(n: number, renderbuffers: GLPointer): void;
+  glGenerateMipmap(target: number): void;
 }
 
 // Resolves every ARB_framebuffer_object entry point as one all-or-nothing
@@ -1020,6 +1038,8 @@ function resolveGLFramebufferAPI(libraryPath: string, getProcAddress: GLGetProcA
     if (pFramebufferRenderbuffer === null) return null;
     const pDeleteRenderbuffers = getProcAddress("glDeleteRenderbuffers");
     if (pDeleteRenderbuffers === null) return null;
+    const pGenerateMipmap = getProcAddress("glGenerateMipmap");
+    if (pGenerateMipmap === null) return null;
 
     return linkSymbols({
       glGenFramebuffers: { args: [i32, ptr], returns: voidType, ptr: pGenFramebuffers },
@@ -1033,6 +1053,7 @@ function resolveGLFramebufferAPI(libraryPath: string, getProcAddress: GLGetProcA
       glRenderbufferStorage: { args: [u32, u32, i32, i32], returns: voidType, ptr: pRenderbufferStorage },
       glFramebufferRenderbuffer: { args: [u32, u32, u32, u32], returns: voidType, ptr: pFramebufferRenderbuffer },
       glDeleteRenderbuffers: { args: [i32, ptr], returns: voidType, ptr: pDeleteRenderbuffers },
+      glGenerateMipmap: { args: [u32], returns: voidType, ptr: pGenerateMipmap },
     }).symbols;
   }
   try {
@@ -1248,5 +1269,6 @@ export function loadQGLFromSystem(getProcAddress?: GLGetProcAddressFn): QGL {
       ? (target, attachment, renderbuffertarget, renderbuffer) => glFramebuffer.glFramebufferRenderbuffer(target, attachment, renderbuffertarget, renderbuffer)
       : null,
     qglDeleteRenderbuffers: glFramebuffer ? (n, renderbuffers) => glFramebuffer.glDeleteRenderbuffers(n, renderbuffers) : null,
+    qglGenerateMipmap: glFramebuffer ? (target) => glFramebuffer.glGenerateMipmap(target) : null,
   };
 }

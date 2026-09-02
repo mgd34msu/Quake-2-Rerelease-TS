@@ -125,6 +125,10 @@ const FRAMEBUFFER_SYMBOL_NAMES = [
   "glRenderbufferStorage",
   "glFramebufferRenderbuffer",
   "glDeleteRenderbuffers",
+  // glGenerateMipmap is the same ARB_framebuffer_object group (see qgl.ts's
+  // comment on the QGL member) -- probed last, so the bail-on-first-null
+  // order asserted by the test above is unchanged.
+  "glGenerateMipmap",
 ];
 
 describe("src/ref_gl/qgl.ts -- loadQGLFromSystem's getProcAddress wiring", () => {
