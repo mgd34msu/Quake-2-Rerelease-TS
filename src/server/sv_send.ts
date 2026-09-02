@@ -420,7 +420,11 @@ export function SV_RateDrop(c: ClientT): boolean {
 
 export function SV_SendClientMessages(): void {
   let msglen = 0;
-  const msgbuf = new Uint8Array(MAX_MSGLEN);
+  // A demo block is a whole server message: re-release (kex, protocol 2022)
+  // demos carry blocks well past vanilla's 1400-byte MAX_MSGLEN. q2repro
+  // reads demo blocks into msg_write_buffer[MAX_MSGLEN] with its MAX_MSGLEN
+  // of 0x8000 (inc/common/protocol.h:25) -- our MAX_FRAGMENT_MSGLEN.
+  const msgbuf = new Uint8Array(MAX_FRAGMENT_MSGLEN);
 
   // read the next demo message if needed
   if (sv.state === ServerStateT.ss_demo && sv.demofile !== null) {
@@ -445,7 +449,7 @@ export function SV_SendClientMessages(): void {
         SV_DemoCompleted();
         return;
       }
-      if (msglen > MAX_MSGLEN) Com_Error(ERR_DROP, "SV_SendClientMessages: msglen > MAX_MSGLEN");
+      if (msglen > MAX_FRAGMENT_MSGLEN) Com_Error(ERR_DROP, "SV_SendClientMessages: msglen > MAX_MSGLEN");
       if (FS_ReadRaw(msgbuf, msglen, demofile) !== msglen) {
         SV_DemoCompleted();
         return;
