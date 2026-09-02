@@ -34,15 +34,27 @@
 // (need_override_image, images.c:1777-1784, gates load_image_data's
 // override branch at images.c:1831-1833) -- i.e. real q2repro's default
 // texture-override feature can load a "textures/x.png" instead of an
-// existing "textures/x.pcx" even when both are present. This port does not
-// implement r_override_textures at all: the requested extension is always
-// tried first and other extensions are only substituted in on an outright
-// miss (matching the ENOENT-only fallback path above, never the override
-// path). Observably identical on both retail data trees (classic data
-// only ever ships the native extension, rerelease data only ever ships the
-// override extension for a given asset) and keeps "exact name present ->
-// exact name wins, no scanning" true for every asset that actually has a
-// same-name/same-extension file on disk.
+// existing "textures/x.pcx" even when both are present.
+//
+// NO LONGER A DIVERGENCE (2026-09-02). This port used to skip
+// r_override_textures entirely -- the requested extension was always tried
+// first and another was substituted only on an outright miss. That was
+// observably identical on both retail data trees (classic data only ever
+// ships the native extension for an asset, rerelease data only ever ships the
+// override extension), which is why it stood for so long. MEASURED, and that
+// belief turns out to be only MOSTLY true: censusing both installs finds 60
+// basenames in the 1997 tree that ship in both forms -- every env/*.pcx
+// skybox face also ships as env/*.tga, which is exactly why id shipped the
+// .tga versions -- and 43 in the re-release tree (model skins such as
+// models/monsters/shambler/skin). For those, override-first genuinely changes
+// which file wins, to the truecolor one, which is the same choice q2repro's
+// default build makes and the one every modern Quake II client makes.
+//
+// And it is not identical at all for the case neither tree contains: a
+// replacement the PLAYER supplies alongside the original, where the pak's
+// .pcx won and the drop-in was dead weight. imageExtCandidates' `overrideFirst` parameter below implements the
+// override branch; see its own comment, and gl_image.ts's GL_FindImage for
+// where r_override_textures/r_texture_overrides decide to pass it.
 //
 // This module intentionally only computes the ORDERED CANDIDATE LIST of
 // extensions to probe -- a pure function, easy to table-test against
@@ -95,13 +107,39 @@ const SEARCH_ORDER: readonly ImgExtT[] = ["png", "jpg", "tga", "jpeg", "bmp", "g
 // has no .tga decoder at all -- see r_image.ts's own header comment -- so
 // it passes a four-entry set). A candidate outside `supported` is never
 // produced.
-export function imageExtCandidates(requestedExt: ImgExtT | null, isWall: boolean, supported: readonly ImgExtT[]): readonly ImgExtT[] {
+export function imageExtCandidates(requestedExt: ImgExtT | null, isWall: boolean, supported: readonly ImgExtT[], overrideFirst = false): readonly ImgExtT[] {
   const has = (ext: ImgExtT): boolean => supported.includes(ext);
   const candidates: ImgExtT[] = [];
 
+  // r_override_textures (need_override_image, images.c:1777-1784, gating
+  // load_image_data's override branch at images.c:1831-1833). When the caller
+  // says this request is override-eligible, the truecolor formats are probed
+  // BEFORE the literally-requested one, so a replacement a player dropped into
+  // their homedir wins over the original still sitting in a .pak.
+  //
+  // This is the divergence the note at the top of this file used to record as
+  // "this port does not implement r_override_textures at all". It had to stop
+  // being a divergence: without it, dropping a higher-resolution
+  // pics/num_0.png beside the pak's pics/num_0.pcx did nothing whatsoever,
+  // because the requested .pcx was found first and won -- and every asset the
+  // 1997 data ships is a .pcx or a .wal, so NO hi-res replacement of classic
+  // content could ever load. (Owner requirement: "the texture should be aware
+  // of the file resolution and this should all work independently of that. so
+  // if i drop in some hires textures it doesn't just freak the fuck out".)
+  //
+  // The ordering below is the only thing that changes; the CALLER decides
+  // eligibility (see gl_image.ts's GL_FindImage for the r_override_textures /
+  // r_texture_overrides reading of it), and `overrideFirst` defaults false so
+  // every existing caller and table test keeps the pre-existing order.
+  if (overrideFirst) {
+    for (const ext of SEARCH_ORDER) {
+      if (has(ext)) candidates.push(ext);
+    }
+  }
+
   // try_image_format(fmt, ...) -- the requested extension, tried as-is,
   // before any substitution (images.c:1836).
-  if (requestedExt !== null && has(requestedExt)) {
+  if (requestedExt !== null && has(requestedExt) && !candidates.includes(requestedExt)) {
     candidates.push(requestedExt);
   }
 
@@ -109,12 +147,12 @@ export function imageExtCandidates(requestedExt: ImgExtT | null, isWall: boolean
   // formats in r_texture_formats order, skipping the one already tried.
   for (const ext of SEARCH_ORDER) {
     if (ext === requestedExt) continue;
-    if (has(ext)) candidates.push(ext);
+    if (has(ext) && !candidates.includes(ext)) candidates.push(ext);
   }
 
   // try_other_formats' final native-format fallback (images.c:1686-1690).
   const fallback: ImgExtT = isWall ? "wal" : "pcx";
-  if (fallback !== requestedExt && has(fallback)) {
+  if (fallback !== requestedExt && has(fallback) && !candidates.includes(fallback)) {
     candidates.push(fallback);
   }
 

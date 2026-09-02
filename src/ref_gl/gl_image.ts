@@ -87,7 +87,7 @@ deterministically `return false`; reported deviation since a literal
 "undefined value" isn't expressible under TS's strict typing.
 */
 
-import { ERR_DROP, ERR_FATAL, PRINT_ALL, PRINT_DEVELOPER, MAX_QPATH, LittleShort, LittleLong, Q_stricmp, Com_sprintf, CVAR_FILES } from "../shared/q_shared";
+import { ERR_DROP, ERR_FATAL, PRINT_ALL, PRINT_DEVELOPER, MAX_QPATH, LittleShort, LittleLong, Q_stricmp, Com_sprintf, CVAR_FILES, type CvarT } from "../shared/q_shared";
 import { decodePNG } from "../qcommon/png";
 import { decodeJPG } from "../qcommon/jpg";
 import { decodeBMP } from "../qcommon/bmp";
@@ -472,6 +472,17 @@ export function LoadPCX(filename: string): { pic: Uint8Array | null; palette: Ui
   const { data: raw } = ri.FS_LoadFile(filename);
   if (!raw) {
     ri.Con_Printf(PRINT_DEVELOPER, `Bad pcx file ${filename}\n`);
+    return result;
+  }
+
+  // A .pcx shorter than its own 128-byte header cannot be read at all. The C
+  // original casts the buffer straight to a dpcx_t and reads through it, which
+  // in C quietly reads past a short allocation; here the DataView reads below
+  // would throw a RangeError and take the renderer down on a truncated or
+  // otherwise junk file. Rejected the same way every other malformed .pcx is.
+  if (raw.byteLength < PCX_HEADER_SIZE) {
+    ri.Con_Printf(PRINT_ALL, `Bad pcx file ${filename}\n`);
+    ri.FS_FreeFile(raw);
     return result;
   }
 
@@ -1075,6 +1086,12 @@ GL_Upload32
 Returns has_alpha
 ===============
 */
+// r_override_textures / r_texture_overrides, read by GL_NeedOverrideImage
+// below. Held rather than looked up per image: GL_FindImage runs for every
+// texture of every model of every map load.
+let r_override_textures: CvarT | null = null;
+let r_texture_overrides: CvarT | null = null;
+
 let upload_width = 0;
 let upload_height = 0;
 let uploaded_paletted = false;
@@ -1089,16 +1106,60 @@ function setUploadTexParams(mipmap: boolean): void {
   }
 }
 
+/*
+GL_MakePowerOfTwo (q2repro src/refresh/texture.c:432-442), as a predicate.
+
+Returns true when this upload must be rounded up to power-of-two dimensions
+and resampled into them, false when it can go to the driver at its native
+size. Vanilla always rounded; q2repro rounds only when the context lacks
+QGL_CAP_TEXTURE_NON_POWER_OF_TWO.
+
+MIPMAPPED IMAGES ARE HELD BACK HERE, and this is the one place this port does
+not follow the reference. q2repro skips the resample for EVERY image type,
+walls and skins included, because its NPOT capability and glGenerateMipmap are
+granted by the same GL 3.0 tier (src/refresh/qgl.c:288-293), so its
+GL_Upload32 can hand an odd-sized level 0 to the driver and let
+qglGenerateMipmap build the chain (texture.c:538-540). This port has no
+GenerateMipmap binding in qgl.ts at all, and its own GL_MipMap (above) halves
+a level in place assuming EVEN dimensions -- `outHeight = height >>> 1` drops
+the last row of an odd-height level, and the `j += 8` inner loop reads one
+texel past the end of the last row pair of an odd-width one. Feeding it a
+native-size 136x60 skin would therefore produce a corrupt mip chain, not a
+sharper one.
+
+So: native size for everything that needs no mip chain (it_pic -- the 2D pics,
+the font atlases and RegisterRawPic's generated atlases, all of which call in
+with mipmap=false), POT rounding for everything that does. Extending it to
+walls/skins/sprites means adding a GenerateMipmap binding (or an odd-size-safe
+GL_MipMap) first; it is a strictly larger change and it would move every one
+of the 146 non-power-of-two model skins in the 1997 baseq2 pak0, so it is
+deliberately not bundled in here.
+*/
+function GL_MustMakePowerOfTwo(mipmap: boolean): boolean {
+  if (mipmap) return true;
+  return !gl_config.npot;
+}
+
 function GL_Upload32(data: Uint32Array, width: number, height: number, mipmap: boolean): boolean {
   uploaded_paletted = false;
 
-  let scaled_width = 1;
-  while (scaled_width < width) scaled_width <<= 1;
-  if (glCvars.gl_round_down && glCvars.gl_round_down.value && scaled_width > width && mipmap) scaled_width >>>= 1;
+  const makePot = GL_MustMakePowerOfTwo(mipmap);
 
-  let scaled_height = 1;
-  while (scaled_height < height) scaled_height <<= 1;
-  if (glCvars.gl_round_down && glCvars.gl_round_down.value && scaled_height > height && mipmap) scaled_height >>>= 1;
+  // Already power-of-two on both axes is the same arithmetic either way (the
+  // rounding loops below are no-ops on such a size), so nothing that was
+  // power-of-two before -- conchars.pcx, every .wal, the lightmaps -- changes
+  // behavior at all; only genuinely non-power-of-two images take a new path.
+  let scaled_width = makePot ? 1 : width;
+  if (makePot) {
+    while (scaled_width < width) scaled_width <<= 1;
+    if (glCvars.gl_round_down && glCvars.gl_round_down.value && scaled_width > width && mipmap) scaled_width >>>= 1;
+  }
+
+  let scaled_height = makePot ? 1 : height;
+  if (makePot) {
+    while (scaled_height < height) scaled_height <<= 1;
+    if (glCvars.gl_round_down && glCvars.gl_round_down.value && scaled_height > height && mipmap) scaled_height >>>= 1;
+  }
 
   // let people sample down the world textures for speed
   if (mipmap) {
@@ -1107,18 +1168,19 @@ function GL_Upload32(data: Uint32Array, width: number, height: number, mipmap: b
     scaled_height >>>= picmip;
   }
 
-  // don't ever bother with >256 textures
-  if (scaled_width > 256) scaled_width = 256;
-  if (scaled_height > 256) scaled_height = 256;
+  // Vanilla: "don't ever bother with >256 textures". The cap is now the
+  // driver's GL_MAX_TEXTURE_SIZE (gl_config.max_texture_size, 256 until
+  // queried), as the reference clamps, so the re-release's 512x256 md5
+  // skins and any high-resolution replacement upload at full size.
+  const maxSize = gl_config.max_texture_size > 0 ? gl_config.max_texture_size : 256;
+  if (scaled_width > maxSize) scaled_width = maxSize;
+  if (scaled_height > maxSize) scaled_height = maxSize;
   if (scaled_width < 1) scaled_width = 1;
   if (scaled_height < 1) scaled_height = 1;
 
   upload_width = scaled_width;
   upload_height = scaled_height;
 
-  if (scaled_width * scaled_height > 256 * 256) {
-    ri.Sys_Error(ERR_DROP, "GL_Upload32: too big");
-  }
 
   // scan the texture for any non-255 alpha
   const dataBytes = uint32AsBytes(data);
@@ -1372,6 +1434,15 @@ function GL_LoadWal(name: string): ImageT | null {
     return null;
   }
 
+  // Same truncation guard as LoadPCX above: a .wal shorter than the header
+  // fields read here would make the DataView reads throw instead of being
+  // reported as a bad file.
+  if (mt.byteLength < WAL_OFFSET0_OFFSET + 4) {
+    ri.Con_Printf(PRINT_DEVELOPER, `Bad wal file ${name}\n`);
+    ri.FS_FreeFile(mt);
+    return null;
+  }
+
   const view = new DataView(mt.buffer, mt.byteOffset, mt.byteLength);
   const width = LittleLong(view.getUint32(WAL_WIDTH_OFFSET, true));
   const height = LittleLong(view.getUint32(WAL_HEIGHT_OFFSET, true));
@@ -1490,12 +1561,329 @@ function GL_LoadByExt(name: string, ext: ImgExtT, type: ImagetypeT): ImageT | nu
 }
 
 /*
+================
+Glow maps (q2repro src/refresh/images.c:1857-1911, check_for_glow_map)
+
+The rerelease data ships an emissive "glow map" next to many skins and wall
+textures: strip the extension, append "_glow", and load whatever image format
+is actually present -- 1580 of them in rerelease baseq2/pak0.pak (1248 under
+textures/, 328 under models/, 4 under players/; 1568 .png and 12 .tga). The
+1997 data ships none at all, so nothing below ever fires on that tree.
+
+The reference resolves the glow exactly the way it resolves any other image
+(load_image_data with the override-format search), which is what this port's
+own imageExtCandidates chain already does, so the same helper is reused here
+rather than hardcoding ".png".
+
+Two DIFFERENT post-processing rules, straight from images.c:1893-1902 and its
+comment ("model glowmaps should be premultiplied / wal glowmaps just use the
+alpha, so the RGB channels are ignored"). Both are load-bearing, and the data
+confirms both:
+
+  - IT_SKIN: RGB carries a real emissive colour and alpha is the mask, but the
+    RGB OUTSIDE the mask is not zero -- models/monsters/soldier/md5/skin_glow.png
+    has 57706 pixels with alpha 0 and non-zero RGB (mean max-channel 34). Added
+    unpremultiplied, that garbage would wash additive light across the entire
+    model. Premultiplying by alpha zeroes it, and makes the texture directly
+    usable as the source of a plain GL_ONE/GL_ONE additive pass -- which is
+    precisely the reference's `diffuse.rgb += glowmap.rgb * u_intensity2`
+    (shader.c:698-704, the non-lightmapped branch).
+
+  - IT_WALL: the RGB is meaningless -- every wall glow map sampled is pure
+    (255,255,255) wherever alpha is significant (checked textures/e1u1/
+    baselt_1_glow.png, alarm0_glow.png, bluekeypad_glow.png). Only the alpha
+    matters, and the reference uses it to drive the LIT texel toward
+    fullbright: `lightmap.rgb = mix(lightmap.rgb, vec3(1.0), glowmap.a)`
+    before `diffuse.rgb *= lightmap.rgb` (shader.c:660-676). The emissive
+    result is therefore the wall texture's OWN colour at full brightness, not
+    white. A single-texture fixed-function pass cannot multiply two textures
+    together at draw time, so the product is baked here instead: the glow
+    texture uploaded for a wall is `diffuse.rgb * glow.a`, sampled
+    nearest-neighbour when the two images differ in size. gl_rsurf.ts then
+    adds it with GL_ONE_MINUS_DST_COLOR/GL_ONE -- see R_DrawGlowmaps' own
+    comment for why that factor and how close it lands to the reference lerp.
+
+Deliberate deviation: q2repro refuses to load glow maps at all unless
+gl_shaders is on ("not supported in legacy mode due to various corner cases
+that are not worth taking care of", images.c:1865-1868). That gate exists
+because its legacy path has no glow support; THIS renderer's glow support is
+the fixed-function multi-pass one, so gating it on gl_shaders would disable
+the only implementation there is. r_glowmaps alone gates it here.
+================
+*/
+
+// Decodes one candidate glow file to straight (non-premultiplied) RGBA8.
+// Returns null for any format that cannot carry a glow map's alpha channel
+// (.wal has no alpha at all) or that this port only supports as a pic (.gif
+// -- multi-frame registration, see GL_LoadByExt), and for a plain miss.
+function GL_LoadGlowRgba(name: string, ext: ImgExtT): { pic: Uint8Array; width: number; height: number } | null {
+  switch (ext) {
+    case "wal":
+    case "gif":
+      return null;
+    case "pcx": {
+      // No retail glow map is a .pcx (the census above is png/tga only), but
+      // the reference's own final fallback is IM_PCX, so the path exists.
+      //
+      // Expanded through d_8to24table, NOT the .pcx file's own palette --
+      // that is what GL_Upload8 does for every 8-bit image this renderer
+      // uploads, so a .pcx read back here matches the colours it would
+      // actually be drawn with. Entry 255 already carries alpha 0 in that
+      // table (Draw_GetPalette clears it), which is Quake's transparent
+      // index, so the alpha comes straight out of the table too.
+      const { pic, width, height } = LoadPCX(name);
+      if (!pic) return null;
+      const out = new Uint8Array(width * height * 4);
+      for (let i = 0; i < width * height; i++) {
+        const v = d_8to24table[pic[i]];
+        out[i * 4 + 0] = v & 0xff;
+        out[i * 4 + 1] = (v >>> 8) & 0xff;
+        out[i * 4 + 2] = (v >>> 16) & 0xff;
+        out[i * 4 + 3] = (v >>> 24) & 0xff;
+      }
+      return { pic: out, width, height };
+    }
+    case "tga": {
+      const { pic, width, height } = LoadTGA(name);
+      return pic ? { pic, width, height } : null;
+    }
+    case "png": {
+      const { pic, width, height } = LoadPNG(name);
+      return pic ? { pic, width, height } : null;
+    }
+    case "jpg":
+    case "jpeg": {
+      const { pic, width, height } = LoadJPG(name);
+      return pic ? { pic, width, height } : null;
+    }
+    case "bmp": {
+      const { pic, width, height } = LoadBMP(name);
+      return pic ? { pic, width, height } : null;
+    }
+  }
+}
+
+// Re-decodes an already-loaded image's own file back to RGBA8, for the wall
+// bake above. Cheaper alternatives (threading the pixels out of GL_LoadByExt)
+// would push a decode-time buffer through every caller for the sake of the
+// minority of images that have a glow map at all; re-reading the handful that
+// do keeps the change to one function. Returns null when the source is 8-bit
+// .wal (no glow map in any retail tree is paired with a .wal diffuse).
+function GL_DiffuseRgba(image: ImageT): { pic: Uint8Array; width: number; height: number } | null {
+  const dot = image.name.lastIndexOf(".");
+  if (dot <= 0) return null;
+  const ext = glExtOf(image.name.slice(dot + 1));
+  if (ext === null) return null;
+  return GL_LoadGlowRgba(image.name, ext);
+}
+
+export function GL_CheckForGlowMap(image: ImageT): void {
+  if (image.glow) return;
+  if (image.type !== ImagetypeT.it_skin && image.type !== ImagetypeT.it_wall) return;
+  if (!glCvars.r_glowmaps || !glCvars.r_glowmaps.value) return;
+
+  const dot = image.name.lastIndexOf(".");
+  if (dot <= 0) return;
+  const requestedExt = glExtOf(image.name.slice(dot + 1));
+  if (requestedExt === null) return;
+
+  const glowBase = `${image.name.slice(0, dot)}_glow`;
+  if (glowBase.length + 5 >= MAX_QPATH) return; // longest extension is ".jpeg"
+
+  const isWall = image.type === ImagetypeT.it_wall;
+  for (const ext of imageExtCandidates(requestedExt, isWall, GL_SUPPORTED_EXTS)) {
+    const candidateName = `${glowBase}.${ext}`;
+
+    // Same exact-name cache probe GL_FindImage uses, for the same reason:
+    // without it an animated wall texture's shared glow map would burn a
+    // fresh gltextures slot on every registration.
+    let cached: ImageT | null = null;
+    for (let i = 0; i < numgltextures; i++) {
+      if (gltextures[i].name === candidateName) {
+        cached = gltextures[i];
+        break;
+      }
+    }
+    if (cached) {
+      cached.registration_sequence = registration_sequence;
+      image.glow = cached;
+      return;
+    }
+
+    const loaded = GL_LoadGlowRgba(candidateName, ext);
+    if (!loaded) continue;
+
+    const { pic, width, height } = loaded;
+    const count = width * height;
+
+    if (isWall) {
+      // Bake diffuse.rgb * glow.a (see the header comment above).
+      const diffuse = GL_DiffuseRgba(image);
+      for (let i = 0; i < count; i++) {
+        const a = pic[i * 4 + 3] / 255;
+        let dr = 255;
+        let dg = 255;
+        let db = 255;
+        if (diffuse) {
+          // Nearest-neighbour: retail pairs are the same size, but nothing
+          // guarantees a replacement texture is.
+          const x = Math.min(diffuse.width - 1, ((i % width) * diffuse.width / width) | 0);
+          const y = Math.min(diffuse.height - 1, (((i / width) | 0) * diffuse.height / height) | 0);
+          const d = (y * diffuse.width + x) * 4;
+          dr = diffuse.pic[d + 0];
+          dg = diffuse.pic[d + 1];
+          db = diffuse.pic[d + 2];
+        }
+        pic[i * 4 + 0] = (dr * a) | 0;
+        pic[i * 4 + 1] = (dg * a) | 0;
+        pic[i * 4 + 2] = (db * a) | 0;
+      }
+    } else {
+      // IT_SKIN: premultiply (images.c:1893-1902).
+      for (let i = 0; i < count; i++) {
+        const a = pic[i * 4 + 3] / 255;
+        pic[i * 4 + 0] = (pic[i * 4 + 0] * a) | 0;
+        pic[i * 4 + 1] = (pic[i * 4 + 1] * a) | 0;
+        pic[i * 4 + 2] = (pic[i * 4 + 2] * a) | 0;
+      }
+    }
+
+    image.glow = GL_LoadPic(candidateName, pic, width, height, image.type, 32);
+    return;
+  }
+}
+
+/*
+================
+GL_RecoverLogicalDimensions
+(q2repro src/refresh/images.c:1693-1727, get_image_dimensions, called from
+load_image_data at images.c:1843-1846 under its own comment: "if we are
+replacing 8-bit texture with a higher resolution 32-bit texture, we need to
+recover original image dimensions".)
+
+ImageT.width/height are the image's LOGICAL size -- the size the rest of the
+renderer reasons in -- while upload_width/height are what actually reached the
+driver after power-of-two rounding and picmip. For almost everything the two
+can diverge harmlessly, because texture coordinates are normalized 0..1 by the
+time they are used:
+
+  - MD2 skins: the .md2's glcmds store s,t ALREADY divided by the header's
+    skinwidth/skinheight at model-compile time; GL_DrawAliasFrameLerp passes
+    them to qglTexCoord2f untouched. gl_model.ts reads skinwidth/skinheight
+    only to range-check against MAX_LBM_HEIGHT -- they reach no draw call.
+  - MD5 skins: the .md5mesh stores normalized s,t directly (verified across
+    all 138 md5 meshes in rerelease baseq2/pak0.pak).
+  - Sprites: gl_rmain.ts's R_DrawSpriteModel emits hardcoded 0/1 texture
+    coordinates and sizes the quad from the .sp2 frame's own width/height
+    (gl_model.ts's Mod_LoadSpriteModel), never from the loaded image.
+  - Pics: gl_draw.ts draws from the normalized sl/sh/tl/th span (the scrap
+    atlas fractions, or 0..1), and uses width/height only for on-screen size,
+    which SHOULD track the logical size so a replacement pic occupies the
+    same space rather than doubling.
+  - Sky and warp surfaces: gl_warp.ts derives no scale from image dimensions.
+
+The one exception is the world. gl_rsurf.ts's GL_BuildPolygonFromSurface
+divides the BSP texinfo projection by image.width/height (`s /= image.width`),
+because a BSP's texinfo vectors are in the ORIGINAL texture's texel units. So
+for a wall, image.width must stay the size the map was compiled against, no
+matter what file actually got uploaded.
+
+That only matters when the extension-fallback chain resolves a request for an
+8-bit .pcx/.wal to a 32-bit .png/.jpg/.tga/.bmp of a DIFFERENT size, which is
+what a drop-in high-resolution texture pack is. This restores the logical size
+from the original 8-bit file's header when that file is still present, exactly
+as the reference does; upload_width/height keep the real uploaded size, so the
+extra resolution is still used, just not misinterpreted as a different
+mapping.
+================
+*/
+const WAL_HEADER_BYTES = 40; // name[32] + width + height, the fields read below
+const PCX_HEADER_BYTES = 12; // manufacturer..ymax, the fields read below
+// Sanity bound on a recovered logical size. Stands in for the reference's
+// check_image_size (images.c:1722); generous on purpose, since this only has
+// to reject a header that did not parse, not enforce a texture budget.
+const MAX_LOGICAL_DIMENSION = 8192;
+
+function GL_RecoverLogicalDimensions(image: ImageT, originalName: string, originalExt: ImgExtT): void {
+  if (originalExt !== "pcx" && originalExt !== "wal") return;
+
+  const { data } = ri.FS_LoadFile(originalName);
+  if (!data) return;
+
+  let w = 0;
+  let h = 0;
+  if (originalExt === "wal") {
+    if (data.length >= WAL_HEADER_BYTES) {
+      const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+      w = LittleLong(view.getUint32(WAL_WIDTH_OFFSET, true));
+      h = LittleLong(view.getUint32(WAL_HEIGHT_OFFSET, true));
+    }
+  } else if (data.length >= PCX_HEADER_BYTES) {
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    const xmin = view.getUint16(4, true);
+    const ymin = view.getUint16(6, true);
+    const xmax = view.getUint16(8, true);
+    const ymax = view.getUint16(10, true);
+    w = xmax - xmin + 1;
+    h = ymax - ymin + 1;
+  }
+
+  ri.FS_FreeFile(data);
+
+  // check_image_size (images.c:1722) -- reject a header that did not parse
+  // into something sane rather than poisoning the projection with a zero.
+  if (w <= 0 || h <= 0 || w > MAX_LOGICAL_DIMENSION || h > MAX_LOGICAL_DIMENSION) return;
+
+  image.width = w;
+  image.height = h;
+}
+
+/*
 ===============
 GL_FindImage
 
 Finds or loads the given image
 ===============
 */
+/*
+===============
+GL_NeedOverrideImage
+
+need_override_image (q2repro src/refresh/images.c:1777-1784):
+
+    if (r_override_textures->integer < 1)         return false;
+    if (r_override_textures->integer == 1 && fmt > IM_WAL) return false;
+    return r_texture_overrides->integer & (1 << type);
+
+r_override_textures (default "1", images.c:2257) is what makes a player's
+higher-resolution drop-in actually win over the original asset still sitting
+in a .pak: at 1 the truecolor formats are probed first whenever the request
+itself named an 8-bit format (.pcx/.wal), at 2 they are probed first even when
+the request already named a truecolor one, and at 0 the feature is off and the
+literally-requested extension is tried first exactly as this port did before.
+
+r_texture_overrides (default "-1", images.c:2261) is a per-image-type bitmask
+over imagetype_t, so a player can restrict overrides to, say, walls only. Both
+cvars are CVAR_FILES in the C; both are already registered in this file's
+R_Register-equivalent, this is the reader that finally makes them mean
+something.
+
+The one shape difference: q2repro's imagetype_t and this port's ImagetypeT are
+separate enums (PORTING.md's per-file port convention), so the bit tested is
+this port's own ImagetypeT ordinal. The default -1 sets every bit either way,
+so the default behavior is identical and only a hand-set bitmask could differ
+in which types it names.
+===============
+*/
+function GL_NeedOverrideImage(type: ImagetypeT, requestedExt: ImgExtT): boolean {
+  const level = r_override_textures ? r_override_textures.value : 0;
+  if (level < 1) return false;
+  const requestedIs8Bit = requestedExt === "pcx" || requestedExt === "wal";
+  if (level === 1 && !requestedIs8Bit) return false;
+  const mask = r_texture_overrides ? r_texture_overrides.value : -1;
+  return (mask & (1 << type)) !== 0;
+}
+
 export function GL_FindImage(name: string, type: ImagetypeT): ImageT | null {
   if (!name) return null;
   const len = name.length;
@@ -1506,6 +1894,11 @@ export function GL_FindImage(name: string, type: ImagetypeT): ImageT | null {
     const image = gltextures[i];
     if (name === image.name) {
       image.registration_sequence = registration_sequence;
+      // MOD_Reference's own rule (q2repro src/refresh/models.c:1459-1464):
+      // a still-referenced image keeps its glow map alive with it, or
+      // GL_FreeUnusedImages would delete the glow texture out from under a
+      // skin that is still being drawn.
+      if (image.glow) image.glow.registration_sequence = registration_sequence;
       return image;
     }
   }
@@ -1536,7 +1929,7 @@ export function GL_FindImage(name: string, type: ImagetypeT): ImageT | null {
 
   const base = name.slice(0, dot);
   const isWall = type === ImagetypeT.it_wall;
-  const candidates = imageExtCandidates(requestedExt, isWall, GL_SUPPORTED_EXTS);
+  const candidates = imageExtCandidates(requestedExt, isWall, GL_SUPPORTED_EXTS, GL_NeedOverrideImage(type, requestedExt));
 
   for (const ext of candidates) {
     const candidateName = ext === requestedExt ? name : `${base}.${ext}`;
@@ -1556,12 +1949,22 @@ export function GL_FindImage(name: string, type: ImagetypeT): ImageT | null {
         const cached = gltextures[i];
         if (candidateName === cached.name) {
           cached.registration_sequence = registration_sequence;
+          if (cached.glow) cached.glow.registration_sequence = registration_sequence;
           return cached;
         }
       }
     }
     const image = GL_LoadByExt(candidateName, ext, type);
-    if (image) return image;
+    if (image) {
+      // A request for an 8-bit .pcx/.wal that the fallback chain satisfied
+      // with a 32-bit file of another size keeps the ORIGINAL file's logical
+      // dimensions, when that file is still on disk (images.c:1843-1846).
+      if (ext !== requestedExt) GL_RecoverLogicalDimensions(image, name, requestedExt);
+      // images.c:2004-2006 -- checked right after a successful load, for
+      // skins and walls only.
+      GL_CheckForGlowMap(image);
+      return image;
+    }
   }
 
   // Every candidate missed. Vanilla GL_FindImage's own ".wal" branch always
@@ -1598,6 +2001,7 @@ function clearImage(image: ImageT): void {
   image.upload_height = 0;
   image.registration_sequence = 0;
   image.texturechain = null;
+  image.glow = null;
   image.texnum = 0;
   image.sl = 0;
   image.tl = 0;
@@ -1771,15 +2175,15 @@ export function GL_InitImages(): void {
   // src/refresh/images.c:2258's `R_TEXTURE_FORMATS` macro expands (per
   // q2repro's build/config.h:38, generated from meson.build:710's
   // `texture_formats` option) to "png jpg tga" in this reference build.
-  ri.Cvar_Get("r_override_textures", "1", CVAR_FILES); // images.c:2257
+  r_override_textures = ri.Cvar_Get("r_override_textures", "1", CVAR_FILES); // images.c:2257
   ri.Cvar_Get("r_texture_formats", "png jpg tga", 0); // images.c:2258
-  ri.Cvar_Get("r_texture_overrides", "-1", CVAR_FILES); // images.c:2261
+  r_texture_overrides = ri.Cvar_Get("r_texture_overrides", "-1", CVAR_FILES); // images.c:2261
   ri.Cvar_Get("gl_screenshot_format", "png", 0); // images.c:2264-2267 (USE_PNG branch; see note above -- registered only, GL_ScreenShot_f doesn't branch on this)
   ri.Cvar_Get("gl_screenshot_async", "1", 0); // images.c:2269
   ri.Cvar_Get("gl_screenshot_quality", "90", 0); // images.c:2272 (JPEG-only; no JPEG encoder exists in this repo)
   ri.Cvar_Get("gl_screenshot_compression", "6", 0); // images.c:2275 (PNG-only; no PNG encoder exists in this repo)
   ri.Cvar_Get("gl_screenshot_template", "quakeXXX", 0); // images.c:2277
-  ri.Cvar_Get("r_glowmaps", "1", CVAR_FILES); // images.c:2280
+  glCvars.r_glowmaps = ri.Cvar_Get("r_glowmaps", "1", CVAR_FILES); // images.c:2280 -- consumer: GL_CheckForGlowMap above
 
   ri.Cvar_Get("gl_bilerp_chars", "0", 0); // texture.c:1247
   ri.Cvar_Get("gl_bilerp_pics", "0", 0); // texture.c:1249

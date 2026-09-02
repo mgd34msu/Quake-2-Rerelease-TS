@@ -116,6 +116,7 @@ const GL_BLEND = 0x0be2;
 const GL_ZERO = 0;
 const GL_ONE = 1;
 const GL_SRC_COLOR = 0x0300;
+const GL_ONE_MINUS_DST_COLOR = 0x0307;
 const GL_SRC_ALPHA = 0x0302;
 const GL_ONE_MINUS_SRC_ALPHA = 0x0303;
 const GL_MODULATE = 0x2100;
@@ -479,6 +480,101 @@ export function R_BlendLightmaps(): void {
 
 /*
 ================
+Emissive glow maps for world/brush surfaces
+
+q2repro binds the wall texture's glow map as a third sampler and folds it
+into the same shaded pass: `lightmap.rgb = mix(lightmap.rgb, vec3(1.0),
+glowmap.a)` before `diffuse.rgb *= (lightmap.rgb + u_add) * u_modulate`
+(src/refresh/shader.c:660-676), with the glow only bound for surfaces that
+actually have a lightmap and dropped entirely when gl_lightmap is on
+(src/refresh/tess.c:755-761). 1248 of the rerelease's wall textures ship one.
+
+This renderer is GL1.1 multi-pass, so the same result is reached by drawing
+the affected surfaces a second time. Two things follow from that:
+
+  - The glow pass MUST run after the lightmap pass. R_RenderBrushPoly lays
+    down the texture and R_BlendLightmaps multiplies the lightmap over it; a
+    glow added before that multiply would be scaled back down by the very
+    lightmap it is supposed to overrule, which is backwards -- the whole
+    point is that an emissive texel stays bright where the lightmap is dark.
+    Hence the deferred chain below rather than a second draw inside
+    R_RenderBrushPoly.
+
+  - The blend factor is GL_ONE_MINUS_DST_COLOR/GL_ONE, not GL_ONE/GL_ONE.
+    Expanding the reference, the glow contributes `diffuse * a * (1 - lm)`
+    on top of the already-drawn `diffuse * lm`. A plain additive pass would
+    contribute `diffuse * a`, overshooting by `diffuse * lm * a` and blowing
+    an already-bright lamp out to white. GL_ONE_MINUS_DST_COLOR contributes
+    `src * (1 - dst)` where dst is the lit texel `diffuse * lm`, i.e.
+    `diffuse * a * (1 - diffuse * lm)` -- the same shape as the reference,
+    exact in the dark (lm = 0, where it matters most), slightly conservative
+    in bright light, and incapable of clipping. The `src` here is the baked
+    `diffuse.rgb * glow.a` texture GL_CheckForGlowMap uploaded for walls
+    (gl_image.ts), which is why the emissive colour is the wall's own colour
+    and not white.
+
+Intensity rides in the constant vertex colour under GL_MODULATE. glColor
+clamps to [0,1], so gl_glowmap_intensity above 1 saturates rather than
+scaling further -- the reference has no such ceiling (its u_intensity2 is a
+plain float uniform), a documented limit of doing this fixed-function.
+================
+*/
+function R_LinkGlowSurface(image: ImageT | null, fa: MsurfaceT): void {
+  if (!image || !image.glow) return;
+  // One push per surface per frame -- see MsurfaceT.glowframe (gl_model.ts).
+  if (fa.glowframe === r_framecount) return;
+  fa.glowframe = r_framecount;
+  fa.glowchain = image.glowchain;
+  image.glowchain = fa;
+}
+
+export function R_DrawGlowmaps(): void {
+  const intensity = glCvars.gl_glowmap_intensity ? glCvars.gl_glowmap_intensity.value : 1;
+  // tess.c:759-760 drops the glow map entirely in gl_lightmap mode, whose
+  // whole purpose is to show the lightmap unmodified.
+  const suppressed =
+    intensity <= 0 ||
+    Boolean(glCvars.gl_lightmap && glCvars.gl_lightmap.value) ||
+    Boolean(glCvars.r_glowmaps && !glCvars.r_glowmaps.value);
+
+  let drew = false;
+  for (let i = 0; i < numgltextures; i++) {
+    const image = gltextures[i];
+    const first = image.glowchain;
+    if (!first) continue;
+    // The chain is always drained, even when suppressed: leaving surfaces
+    // linked would spill them into the next drain, which for an inline brush
+    // model happens under a different modelview matrix.
+    image.glowchain = null;
+    if (suppressed || !image.glow) continue;
+
+    if (!drew) {
+      drew = true;
+      qgl.qglEnable(GL_BLEND);
+      qgl.qglBlendFunc(GL_ONE_MINUS_DST_COLOR, GL_ONE);
+      qgl.qglDepthMask(false);
+      GL_TexEnv(GL_MODULATE);
+      qgl.qglColor4f(intensity, intensity, intensity, 1);
+    }
+
+    GL_Bind(image.glow.texnum);
+    for (let s: MsurfaceT | null = first; s; s = s.glowchain) {
+      if (s.texinfo && s.texinfo.flags & SURF_FLOWING) DrawGLFlowingPoly(s);
+      else if (s.polys) DrawGLPoly(s.polys);
+    }
+  }
+
+  if (drew) {
+    qgl.qglColor4f(1, 1, 1, 1);
+    GL_TexEnv(GL_REPLACE);
+    qgl.qglDepthMask(true);
+    qgl.qglDisable(GL_BLEND);
+    qgl.qglBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  }
+}
+
+/*
+================
 R_RenderBrushPoly
 ================
 */
@@ -500,6 +596,8 @@ export function R_RenderBrushPoly(fa: MsurfaceT): void {
   } else {
     if (image) GL_Bind(image.texnum);
     GL_TexEnv(GL_REPLACE);
+    // Deferred until after R_BlendLightmaps -- see R_DrawGlowmaps' comment.
+    R_LinkGlowSurface(image, fa);
   }
 
   //======
@@ -707,6 +805,9 @@ function GL_RenderLightmappedPoly(surf: MsurfaceT): void {
   if (!mtexCoord) return;
   const nv = surf.polys ? surf.polys.numverts : 0;
   const image = R_TextureAnimation(surf.texinfo);
+  // Multitexture already composites texture x lightmap in this one pass, so
+  // the glow still has to come afterwards -- same chain, same drain points.
+  R_LinkGlowSurface(image, surf);
   let lmtex = surf.lightmaptexturenum;
 
   let map = 0;
@@ -824,6 +925,11 @@ function R_DrawInlineBModel(): void {
     qgl.qglColor4f(1, 1, 1, 1);
     GL_TexEnv(GL_REPLACE);
   }
+
+  // Drained here, while this brush model's modelview matrix is still the
+  // active one -- R_DrawWorld's drain happens under the world matrix and
+  // would put these polygons in the wrong place.
+  R_DrawGlowmaps();
 }
 
 /*
@@ -1057,6 +1163,7 @@ export function R_DrawWorld(): void {
   // if multitexture is enabled
   DrawTextureChains();
   R_BlendLightmaps();
+  R_DrawGlowmaps();
 
   R_DrawSkyBox();
 

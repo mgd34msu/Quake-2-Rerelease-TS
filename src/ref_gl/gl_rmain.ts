@@ -1426,11 +1426,18 @@ export function R_Register(): void {
   // modulation is unconditional -- registered only.
   ri.Cvar_Get("gl_dlight_falloff", "1", 0);
   ri.Cvar_Get("gl_modulate_entities", "1", 0);
-  // q2repro src/refresh/main.c:1116/1117/1118: glowmap intensity (this
-  // renderer has no glowmap texture pass), lens-flare animation speed (no
-  // flare effect exists here), and font drop-shadow (gl_draw.ts's Draw_Char
-  // has no shadow pass) -- registered only.
-  ri.Cvar_Get("gl_glowmap_intensity", "1", 0);
+  // q2repro src/refresh/main.c:1116/1117/1118. gl_glowmap_intensity now has
+  // a real consumer -- it scales the additive glow pass in gl_mesh.ts
+  // (models) and gl_rsurf.ts (world surfaces); see gl_image.ts's
+  // GL_CheckForGlowMap for how the glow textures themselves are loaded.
+  // The reference folds gl_intensity into the same uniform
+  // (`intensity2 = gl_intensity * gl_glowmap_intensity`, shader.c:1124);
+  // here gl_intensity is already baked into every texture at upload time by
+  // GL_LightScaleTexture, so only the glowmap term is applied at draw time.
+  // Lens-flare animation speed (no flare effect exists here) and font
+  // drop-shadow (gl_draw.ts's Draw_Char has no shadow pass) stay
+  // registered-only.
+  glCvars.gl_glowmap_intensity = ri.Cvar_Get("gl_glowmap_intensity", "1", 0);
   ri.Cvar_Get("gl_flarespeed", "8", 0);
   ri.Cvar_Get("gl_fontshadow", "0", 0);
   // q2repro src/refresh/main.c:1121-1123 (`#if USE_MD5`): MD5 skeletal-model
@@ -1496,6 +1503,37 @@ export function R_Register(): void {
   ri.Cmd_AddCommand("screenshot", GL_ScreenShot_f);
   ri.Cmd_AddCommand("modellist", Mod_Modellist_f);
   ri.Cmd_AddCommand("gl_strings", GL_Strings_f);
+}
+
+/*
+===============
+GL_DetectNpotSupport
+
+Pure predicate behind gl_config.npot, split out of R_Init so it can be unit
+tested without a GL context (test/gl_image.test.ts). See the assignment in
+R_Init for the rule and its q2repro citation.
+
+GL_VERSION is "<major>.<minor>[.<release>] [vendor info]" on desktop GL and
+"OpenGL ES <major>.<minor> ..." on ES (both spellings are in the spec for
+glGetString(GL_VERSION)), so the leading integer pair is read after dropping an
+optional "OpenGL ES[-CM|-CL] " prefix. Anything unparseable falls through to
+the extension check and then to false -- i.e. to vanilla's POT behavior. This
+predicate never guesses "supported" from a string it did not understand.
+===============
+*/
+export function GL_DetectNpotSupport(versionString: string, extensionsString: string): boolean {
+  const version = versionString.trim().replace(/^OpenGL ES(-(CM|CL))?\s+/i, "");
+  const m = /^(\d+)\.(\d+)/.exec(version);
+  if (m) {
+    const major = Number(m[1]);
+    const minor = Number(m[2]);
+    if (major > 3 || (major === 3 && minor >= 0)) return true;
+  }
+  // Pre-3.0 contexts that advertise the extension by name. Matched on whole
+  // space-delimited tokens, so a hypothetical vendor extension that merely
+  // starts with the same characters could not satisfy this by prefix.
+  const tokens = extensionsString.split(/\s+/);
+  return tokens.includes("GL_ARB_texture_non_power_of_two") || tokens.includes("GL_OES_texture_npot");
 }
 
 /*
@@ -1665,6 +1703,37 @@ export function R_Init(hInstance: unknown, wndProc: unknown): boolean {
   // but drop the extension dump to PRINT_DEVELOPER.
   gl_config.extensions_string = qglGetStringSafe(GL_EXTENSIONS);
   ri.Con_Printf(PRINT_DEVELOPER, `GL_EXTENSIONS: ${gl_config.extensions_string}\n`);
+
+  // Non-power-of-two texture capability (gl_local.ts's gl_config.npot -- see
+  // that field's own comment for what it buys). Determined here because this
+  // is the first point in R_Init where a live context exists to ask, and every
+  // texture upload happens later (GL_InitImages/Draw_InitLocal, below).
+  //
+  // q2repro grants QGL_CAP_TEXTURE_NON_POWER_OF_TWO in its GL 3.0 / GLES 3.0
+  // capability tier (src/refresh/qgl.c:288-293), with the comment "NPOT
+  // textures are technically GL 2.0, but only enable them on 3.0 to ensure
+  // full hardware support, INCLUDING MIPMAPS". That caution is specifically
+  // about mipmapped NPOT textures, which is the one case this port does NOT
+  // take (GL_Upload32 keeps the POT path for every mipmapped image -- see its
+  // own comment there), so the ARB/OES extension is accepted here as well as
+  // the version tier: GL_ARB_texture_non_power_of_two on a pre-3.0 context
+  // guarantees exactly the non-mipmapped NPOT support this port asks for.
+  // Documented deviation, deliberately more permissive than the reference and
+  // only in the direction the reference's own stated reason does not cover.
+  gl_config.npot = GL_DetectNpotSupport(gl_config.version_string, gl_config.extensions_string);
+  ri.Con_Printf(PRINT_DEVELOPER, `...non-power-of-two textures ${gl_config.npot ? "supported" : "unavailable"}\n`);
+  // GL_MAX_TEXTURE_SIZE (0x0d33). The re-release's own md5 skins are 512x256
+  // and a high-resolution replacement pack is larger still; vanilla's
+  // hardcoded 256 cap halved them. The reference clamps to the driver's
+  // limit; so does GL_Upload32 now. A context that reports nothing usable
+  // keeps 256.
+  {
+    const maxTex = new Int32Array(1);
+    qgl.qglGetIntegerv(0x0d33, maxTex);
+    const reported = maxTex[0] ?? 0;
+    gl_config.max_texture_size = reported >= 256 ? reported : 256;
+    ri.Con_Printf(PRINT_DEVELOPER, `...max texture size ${gl_config.max_texture_size}\n`);
+  }
 
   const rendererLower = gl_config.renderer_string.toLowerCase();
   const vendorLower = gl_config.vendor_string.toLowerCase();

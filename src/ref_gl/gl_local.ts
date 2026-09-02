@@ -67,6 +67,10 @@ export class ImageT {
   upload_height = 0; // after power of two and picmip
   registration_sequence = 0; // 0 = free
   texturechain: MsurfaceT | null = null; // for sort-by-texture world drawing
+  // Head of this texture's glow-pass surface chain for the current frame,
+  // linked through MsurfaceT.glowchain. Drained (and reset to null) by
+  // gl_rsurf.ts's R_DrawGlowmaps; see MsurfaceT.glowchain's comment.
+  glowchain: MsurfaceT | null = null;
   texnum = 0; // gl texture binding
   sl = 0;
   tl = 0;
@@ -75,6 +79,19 @@ export class ImageT {
   scrap = false;
   has_alpha = false;
   paletted = false;
+
+  // image_t.texnum2 in the reference (q2repro src/refresh/images.c:1908,
+  // check_for_glow_map) -- the emissive glow map that ships next to a skin
+  // or wall texture as "<name>_glow.<ext>", or null (the common case) when
+  // no such file exists. Held as a whole ImageT rather than a bare texture
+  // number because this port's images are objects and the glow needs its
+  // own upload_width/height and registration_sequence like any other.
+  //
+  // q2repro overloads one texnum2 field for both glow maps and the classic
+  // two-layer sky; this renderer's sky path (gl_warp.ts) keeps its own
+  // separate images, so there is no such overload here and the field means
+  // exactly one thing.
+  glow: ImageT | null = null;
 
   // Animated-GIF support (no classic-engine precedent -- see qcommon/
   // gif.ts's own header comment for the design). Null for every ordinary
@@ -328,6 +345,15 @@ export const glCvars: {
   gl_md5_load: CvarT | null;
   gl_md5_use: CvarT | null;
   gl_md5_distance: CvarT | null;
+
+  // Emissive glow maps. r_glowmaps (q2repro src/refresh/images.c:2280)
+  // gates loading a "<skin>_glow.<ext>" next to a skin/wall texture;
+  // gl_glowmap_intensity (main.c:1116) scales how strongly the glow is
+  // added at draw time. Both were registered-only until this unit gave
+  // them real consumers -- gl_image.ts's GL_CheckForGlowMap and the
+  // additive passes in gl_mesh.ts/gl_rsurf.ts.
+  r_glowmaps: CvarT | null;
+  gl_glowmap_intensity: CvarT | null;
 } = {
   r_norefresh: null,
   r_lefthand: null,
@@ -416,6 +442,9 @@ export const glCvars: {
   gl_md5_load: null,
   gl_md5_use: null,
   gl_md5_distance: null,
+
+  r_glowmaps: null,
+  gl_glowmap_intensity: null,
 };
 
 export let gl_lightmap_format = 0;
@@ -546,6 +575,36 @@ export class GlconfigT {
   // vanishingly rare case, since the vendor genuinely cannot be known
   // before this first call either way.
   allow_cds = true;
+
+  /*
+  Non-power-of-two texture support (q2repro's QGL_CAP_TEXTURE_NON_POWER_OF_TWO,
+  src/refresh/gl.h:176, consumed by its GL_MakePowerOfTwo in
+  src/refresh/texture.c:432-442).
+
+  Vanilla always rounds a texture up to the next power of two on each axis and
+  RESAMPLES it into that size (GL_ResampleTexture) -- every GL 1.1 driver
+  required POT dimensions. That resample is a non-integer-step 2x2 box filter,
+  so it does not just enlarge an image, it smears it: a 195x252 font atlas
+  becomes 256x256 with every glyph cell straddling texel boundaries, a 30x30
+  HUD icon becomes 32x32 with soft, shifted edges, a 22x29 menu cursor becomes
+  32x32. 156 of the 179 PNGs under pics/ and fonts/ in the re-release paks are
+  non-power-of-two, and 116 of the 125 pics in the 1997 baseq2 pak0 are too, so
+  in practice almost every 2D image in the game was being resampled.
+
+  Set once in R_Init (gl_rmain.ts), from the live context's GL_VERSION /
+  GL_EXTENSIONS -- see the assignment there for the exact rule and why it is
+  slightly more permissive than q2repro's. Defaults false so that anything
+  reading it before a context exists (and every test that does not install one)
+  gets vanilla's POT behavior.
+  */
+  npot = false;
+  /**
+   * GL_MAX_TEXTURE_SIZE, queried in R_Init. Vanilla hardcoded a 256 cap in
+   * GL_Upload32 ("don't ever bother with >256 textures"); the reference
+   * clamps to the driver's limit instead. 256 until queried, so a context
+   * that never reports stays on vanilla's cap.
+   */
+  max_texture_size = 256;
 }
 
 export class GlstateT {

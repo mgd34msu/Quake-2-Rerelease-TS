@@ -113,6 +113,9 @@ import { type Md5ModelT, calcSkelVert, getSkeletonFrame } from "../qcommon/md5_m
 // standard OpenGL 1.1 enum values (`<GL/gl.h>`) this file calls qgl* with
 // directly; no shared GL-enum module exists yet across gl_*.ts, see
 // gl_light.ts/gl_rsurf.ts/gl_warp.ts/gl_rmain.ts's identical note.
+const GL_ONE = 1;
+const GL_SRC_ALPHA = 0x0302;
+const GL_ONE_MINUS_SRC_ALPHA = 0x0303;
 const GL_TRIANGLES = 0x0004;
 const GL_TRIANGLE_FAN = 0x0006;
 const GL_TRIANGLE_STRIP = 0x0005;
@@ -222,6 +225,51 @@ interface SLerpedState {
   rows: Float32Array[];
 }
 let sLerpedState: SLerpedState | null = null;
+// Emissive glow pass (q2repro src/refresh/shader.c:698-704 -- the
+// non-lightmapped `diffuse.rgb += glowmap.rgb * u_intensity2` branch).
+//
+// The reference does base texel and glow in ONE shaded pass; this
+// fixed-function renderer draws the same geometry a second time with the
+// glow texture bound and GL_ONE/GL_ONE blending, which adds exactly the
+// same term. The one thing the second pass must NOT reuse is the base
+// pass's per-vertex lighting: the reference adds the glow AFTER
+// `diffuse *= color` and never multiplies it by the light, i.e. the glow is
+// fullbright. While this is non-zero, both mesh draw functions below emit a
+// single constant colour (the gl_glowmap_intensity value) instead of their
+// usual per-vertex shadedots term, so the glow reads as emissive -- bright
+// in a dark room, where the lit texel underneath is nearly black.
+let aliasGlowPass = 0;
+
+// CPU-skinning reuse across the base pass and the glow pass.
+//
+// The glow pass re-draws the SAME geometry immediately after the base pass,
+// with identical model/frames/backlerp -- so re-running calcSkelVert over
+// every vertex a second time would double this renderer's (JavaScript, CPU)
+// skinning cost for every model that has a glow map, and base1 alone loads
+// 106 of them. The base pass stashes what it skinned here and the glow pass
+// reuses it. The key is checked rather than assumed: anything that does not
+// match exactly falls back to skinning normally, so this can only ever save
+// work, never draw a stale pose.
+interface SkinnedCacheT {
+  model: Md5ModelT | null;
+  oldframe: number;
+  newframe: number;
+  backlerp: number;
+  positions: Vec3[][];
+  normals: Vec3[][];
+}
+const skinnedCache: SkinnedCacheT = { model: null, oldframe: -1, newframe: -1, backlerp: -1, positions: [], normals: [] };
+
+function skinnedCacheMatches(model: Md5ModelT, oldframe: number, newframe: number, backlerp: number): boolean {
+  return (
+    skinnedCache.model === model &&
+    skinnedCache.oldframe === oldframe &&
+    skinnedCache.newframe === newframe &&
+    skinnedCache.backlerp === backlerp &&
+    skinnedCache.positions.length === model.meshes.length
+  );
+}
+
 function getSLerped(): SLerpedState {
   if (sLerpedState) return sLerpedState;
   const buffer = new Float32Array(MAX_VERTS * 4);
@@ -350,6 +398,10 @@ export function GL_DrawAliasFrameLerp(paliashdr: ParsedMd2T, backlerp: number): 
     // PMM - added double damage shell
     if (isShell) {
       qgl.qglColor4f(shadelight[0], shadelight[1], shadelight[2], alpha);
+    } else if (aliasGlowPass > 0) {
+      // Fullbright: one constant colour, no colour array, so qglArrayElement
+      // below leaves the current colour alone (see aliasGlowPass' comment).
+      qgl.qglColor4f(aliasGlowPass, aliasGlowPass, aliasGlowPass, alpha);
     } else {
       qgl.qglEnableClientState(GL_COLOR_ARRAY);
       qgl.qglColorPointer(3, GL_FLOAT, 0, colorArray);
@@ -439,9 +491,12 @@ export function GL_DrawAliasFrameLerp(paliashdr: ParsedMd2T, backlerp: number): 
           idx += 3;
 
           // normals and vertexes come from the frame list
-          const l = shadedots[verts[index_xyz].lightnormalindex];
-
-          qgl.qglColor4f(l * shadelight[0], l * shadelight[1], l * shadelight[2], alpha);
+          if (aliasGlowPass > 0) {
+            qgl.qglColor4f(aliasGlowPass, aliasGlowPass, aliasGlowPass, alpha);
+          } else {
+            const l = shadedots[verts[index_xyz].lightnormalindex];
+            qgl.qglColor4f(l * shadelight[0], l * shadelight[1], l * shadelight[2], alpha);
+          }
           qgl.qglVertex3fv(s_lerped[index_xyz]);
 
           count--;
@@ -492,13 +547,35 @@ function GL_DrawAliasSkeleton(model: Md5ModelT, oldframe: number, newframe: numb
 
   if (isShell) qgl.qglDisable(GL_TEXTURE_2D);
 
-  for (const mesh of model.meshes) {
-    const positions: Vec3[] = new Array(mesh.numVerts);
-    const normals: Vec3[] = new Array(mesh.numVerts);
-    for (let i = 0; i < mesh.numVerts; i++) {
-      positions[i] = vec3();
-      normals[i] = vec3();
-      calcSkelVert(mesh.vertices[i], mesh, skeleton, positions[i], normals[i]);
+  // Reuse the base pass's skinning when this is the glow pass over the very
+  // same pose (see skinnedCache); otherwise skin normally and stash it.
+  const reuse = aliasGlowPass > 0 && skinnedCacheMatches(model, oldframe, newframe, backlerp);
+  if (!reuse) {
+    skinnedCache.model = model;
+    skinnedCache.oldframe = oldframe;
+    skinnedCache.newframe = newframe;
+    skinnedCache.backlerp = backlerp;
+    skinnedCache.positions = [];
+    skinnedCache.normals = [];
+  }
+
+  for (let m = 0; m < model.meshes.length; m++) {
+    const mesh = model.meshes[m];
+    let positions: Vec3[];
+    let normals: Vec3[];
+    if (reuse) {
+      positions = skinnedCache.positions[m];
+      normals = skinnedCache.normals[m];
+    } else {
+      positions = new Array<Vec3>(mesh.numVerts);
+      normals = new Array<Vec3>(mesh.numVerts);
+      for (let i = 0; i < mesh.numVerts; i++) {
+        positions[i] = vec3();
+        normals[i] = vec3();
+        calcSkelVert(mesh.vertices[i], mesh, skeleton, positions[i], normals[i]);
+      }
+      skinnedCache.positions.push(positions);
+      skinnedCache.normals.push(normals);
     }
 
     qgl.qglBegin(GL_TRIANGLES);
@@ -507,6 +584,9 @@ function GL_DrawAliasSkeleton(model: Md5ModelT, oldframe: number, newframe: numb
 
       if (shellOrColored) {
         qgl.qglColor4f(shadelight[0], shadelight[1], shadelight[2], alpha);
+      } else if (aliasGlowPass > 0) {
+        qgl.qglTexCoord2f(mesh.tcoords[vi].s, mesh.tcoords[vi].t);
+        qgl.qglColor4f(aliasGlowPass, aliasGlowPass, aliasGlowPass, alpha);
       } else {
         let d = DotProduct(normals[vi], shadevector);
         if (d < 0) d *= 0.3;
@@ -891,16 +971,43 @@ export function R_DrawAliasModel(e: EntityT): void {
   R_RotateForEntity(e);
   e.angles[PITCH] = -e.angles[PITCH]; // sigh.
 
-  // select skin
+  // q2repro src/refresh/mesh.c:1092-1095 (`#if USE_MD5`) -- prefer the
+  // skinned MD5 mesh over the MD2 lerp path when one loaded and gl_md5_use
+  // allows it. The original also OR's in `ent->flags & RF_NO_LOD`; this
+  // port's EntityT carries no RF_NO_LOD (a rerelease-only flag, absent from
+  // shared/q_shared.ts's vanilla RF_* set), so only the distance gate is
+  // ported -- no entity in this codebase can currently request it anyway.
+  //
+  // Decided BEFORE the skin is selected because the two mesh paths do not
+  // share a skin array: draw_alias_mesh is handed `mesh->skins` for the MD2
+  // path (mesh.c:1102-1104) and the MD5 model's own `model->skins` for the
+  // skeleton path (mesh.c:871-873). The MD5 texture coordinates address the
+  // md5/ atlas, which has a different layout (and usually a different size)
+  // from the MD2's skin, so drawing one with the other's image puts a
+  // magnified crop of the wrong region on every face.
+  let useSkeleton = false;
+  if (currentmodel.skeleton && (!glCvars.gl_md5_use || glCvars.gl_md5_use.value)) {
+    const maxDist = glCvars.gl_md5_distance ? glCvars.gl_md5_distance.value : 0;
+    let withinDistance = maxDist <= 0;
+    if (!withinDistance) {
+      const delta = vec3();
+      VectorSubtract(currententity.origin, r_newrefdef.vieworg, delta);
+      withinDistance = VectorLength(delta) <= maxDist;
+    }
+    useSkeleton = withinDistance;
+  }
+
+  // select skin (skin_for_mesh, mesh.c:603-625)
+  const skinSet = useSkeleton ? currentmodel.md5skins : currentmodel.skins;
   let skin: ImageT | null;
   const customSkin = narrowImage(currententity.skin);
   if (customSkin) {
     skin = customSkin; // custom player skin
   } else if (currententity.skinnum >= MAX_MD2SKINS) {
-    skin = currentmodel.skins[0];
+    skin = skinSet[0];
   } else {
-    skin = currentmodel.skins[currententity.skinnum];
-    if (!skin) skin = currentmodel.skins[0];
+    skin = skinSet[currententity.skinnum];
+    if (!skin) skin = skinSet[0];
   }
   if (!skin) skin = r_notexture; // fallback...
   GL_Bind(skin ? skin.texnum : 0);
@@ -928,27 +1035,49 @@ export function R_DrawAliasModel(e: EntityT): void {
 
   if (!(glCvars.r_lerpmodels && glCvars.r_lerpmodels.value)) currententity.backlerp = 0;
 
-  // q2repro src/refresh/mesh.c:1092-1095 (`#if USE_MD5`) -- prefer the
-  // skinned MD5 mesh over the MD2 lerp path when one loaded and gl_md5_use
-  // allows it. The original also OR's in `ent->flags & RF_NO_LOD`; this
-  // port's EntityT carries no RF_NO_LOD (a rerelease-only flag, absent from
-  // shared/q_shared.ts's vanilla RF_* set), so only the distance gate is
-  // ported -- no entity in this codebase can currently request it anyway.
-  let usedSkeleton = false;
-  if (currentmodel.skeleton && (!glCvars.gl_md5_use || glCvars.gl_md5_use.value)) {
-    const maxDist = glCvars.gl_md5_distance ? glCvars.gl_md5_distance.value : 0;
-    let withinDistance = maxDist <= 0;
-    if (!withinDistance) {
-      const delta = vec3();
-      VectorSubtract(currententity.origin, r_newrefdef.vieworg, delta);
-      withinDistance = VectorLength(delta) <= maxDist;
+  // Draw whichever mesh path the skin was selected for above.
+  const usedSkeleton = useSkeleton && currentmodel.skeleton !== null;
+  // Bound to locals: the module-level currentmodel/currententity are
+  // `| null` and a closure discards the narrowing the guards above proved.
+  const drawModel = currentmodel;
+  const drawEnt = currententity;
+  const drawMesh = (): void => {
+    if (usedSkeleton && drawModel.skeleton) {
+      GL_DrawAliasSkeleton(drawModel.skeleton, drawEnt.oldframe, drawEnt.frame, drawEnt.backlerp);
+    } else {
+      GL_DrawAliasFrameLerp(paliashdr, drawEnt.backlerp);
     }
-    if (withinDistance) {
-      GL_DrawAliasSkeleton(currentmodel.skeleton, currententity.oldframe, currententity.frame, currententity.backlerp);
-      usedSkeleton = true;
-    }
+  };
+  drawMesh();
+
+  // Emissive glow pass (mesh.c:697-698/713-714 sets GLS_GLOWMAP_ENABLE and
+  // binds skin->texnum2; shader.c:698-704 does the actual add). Skipped for
+  // the shell renders, which draw untextured with GL_TEXTURE_2D off and have
+  // no skin to glow -- the reference likewise takes its GLS_MESH_SHELL path
+  // there. The glow texture was premultiplied by its own alpha at load
+  // (gl_image.ts's GL_CheckForGlowMap), so a plain GL_ONE/GL_ONE add of its
+  // RGB reproduces `diffuse.rgb += glowmap.rgb * u_intensity2` exactly, with
+  // the intensity carried in the constant vertex colour.
+  const glowSkin = skin ? skin.glow : null;
+  const glowIntensity = glCvars.gl_glowmap_intensity ? glCvars.gl_glowmap_intensity.value : 1;
+  if (glowSkin && glowIntensity > 0 && !isShellFlags(currententity.flags)) {
+    const wasBlending = (currententity.flags & RF_TRANSLUCENT) !== 0;
+    GL_Bind(glowSkin.texnum);
+    if (!wasBlending) qgl.qglEnable(GL_BLEND);
+    qgl.qglBlendFunc(GL_ONE, GL_ONE);
+    // The second pass rasterises the same triangles at the same depth, so it
+    // needs no depth writes of its own; GL_LEQUAL lets it through.
+    qgl.qglDepthMask(false);
+
+    aliasGlowPass = glowIntensity;
+    drawMesh();
+    aliasGlowPass = 0;
+
+    qgl.qglDepthMask(true);
+    qgl.qglBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    if (!wasBlending) qgl.qglDisable(GL_BLEND);
+    if (skin) GL_Bind(skin.texnum);
   }
-  if (!usedSkeleton) GL_DrawAliasFrameLerp(paliashdr, currententity.backlerp);
 
   GL_TexEnv(GL_REPLACE);
   qgl.qglShadeModel(GL_FLAT);

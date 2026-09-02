@@ -182,6 +182,18 @@ export class MsurfaceT {
   // outcome rather than reproduce a permanent freeze.
   alphaframe = -1;
 
+  // Emissive glow pass (gl_rsurf.ts's R_DrawGlowmaps). A surface whose wall
+  // texture has a glow map is pushed onto that texture's own glow chain when
+  // it is drawn, and the whole set is drawn additively AFTER the lightmap
+  // pass -- it has to be after, or the lightmap multiply would darken the
+  // glow back down in exactly the dark places it is supposed to light up.
+  // `glowframe` is the same one-push-per-surface-per-frame guard as
+  // `alphaframe` above, and for the same reason: an inline brush model can
+  // present the same surface more than once, and a second push writes
+  // `X.glowchain = X`, self-cycling the walk.
+  glowchain: MsurfaceT | null = null;
+  glowframe = -1;
+
   plane: MplaneT | null = null;
   flags = 0;
 
@@ -388,6 +400,29 @@ export class ModelT {
   // MOD_ALIAS model that has a real, sibling "md5/*.md5mesh"+".md5anim"
   // pair (see Mod_LoadMD5 below); null means "MD2-only", the normal case.
   skeleton: Md5ModelT | null = null;
+
+  // md5_model_t.skins/num_skins (q2repro src/refresh/models.c:1378-1400,
+  // MD5_LoadSkins). The MD5 skins are a SEPARATE array from `skins` above,
+  // exactly as in the reference: `skins` holds the MD2's own skin images
+  // (models.c:460, mesh->skins) and this holds the same skin names
+  // re-resolved under the model's "md5/" subdirectory (models.c:1395), and
+  // the two are chosen between at draw time by which mesh path actually ran
+  // -- draw_alias_mesh gets `mesh->skins` for MD2 (mesh.c:1102-1104) and
+  // `model->skins` for the skeleton (mesh.c:871-873).
+  //
+  // Keeping them separate is load-bearing, not tidiness: Mod_LoadMD5 used to
+  // write its resolved MD5 skins straight into `skins` above, and
+  // R_RegisterModel -- which re-resolves the MD2 skin names from the header
+  // on EVERY registration, as vanilla gl_model.c does -- overwrote them
+  // again on the very next call, every time. The result was that MD5 meshes
+  // drew their own (md5/skin.png, e.g. 512x256) texture coordinates against
+  // the MD2's low-resolution skin (skin.pcx, 184x84), whose atlas layout is
+  // completely different: a wrong, magnified, blurred crop of the skin on
+  // every item, monster and gib that ships an md5/ sibling. The md5_model_t
+  // in qcommon/md5_model.ts deliberately carries no renderer types (it is
+  // shared, ImageT-free code), so the array lives here on ModelT instead of
+  // on Md5ModelT the way the C struct has it.
+  md5skins: (ImageT | null)[] = new Array<ImageT | null>(MAX_MD2SKINS).fill(null);
 
   // BSPX extension data (see qcommon/bspx.ts). null for every classic BSP
   // (no BSPX directory at all) and for any BSPX directory that doesn't
@@ -1815,9 +1850,21 @@ function Mod_LoadMD5(mod: ModelT): void {
     }
 
     // MD5_LoadSkins (models.c:1370-1403) -- re-resolve the MD2's own skin
-    // names under this model's "md5/" subdirectory.
+    // names under this model's "md5/" subdirectory, into the MD5 model's
+    // OWN skin array (models.c:1395 writes mdl->skins[i], never the MD2's
+    // mesh->skins[i]). See ModelT.md5skins' comment for why writing these
+    // into `mod.skins` instead is a bug that R_RegisterModel undoes.
+    //
+    // A miss leaves the entry null rather than falling back to the MD2 skin:
+    // the MD5 mesh's texture coordinates are laid out for the md5/ atlas, so
+    // pointing them at the MD2 skin draws the wrong part of the wrong image
+    // (the exact defect this array exists to fix). R_DrawAliasModel treats a
+    // null MD5 skin the way skin_for_mesh treats R_NOTEXTURE (mesh.c:621-622
+    // -- fall back to entry 0, then to r_notexture). No retail model needs
+    // it: all 138 md5 meshes in rerelease baseq2/pak0.pak resolve all 195 of
+    // their md5/ skin names.
     for (let i = 0; i < paliashdr.num_skins; i++) {
-      mod.skins[i] = safeFindImage(md5SkinPathFor(paliashdr.skinnames[i]), ImagetypeT.it_skin) ?? mod.skins[i];
+      mod.md5skins[i] = safeFindImage(md5SkinPathFor(paliashdr.skinnames[i]), ImagetypeT.it_skin);
     }
 
     mod.skeleton = md5model;
@@ -1941,6 +1988,21 @@ export function R_RegisterModel(name: string): ModelT | null {
       if (hdr instanceof ParsedMd2T) {
         for (let i = 0; i < hdr.num_skins; i++) {
           mod.skins[i] = safeFindImage(hdr.skinnames[i], ImagetypeT.it_skin);
+        }
+        // MOD_Reference (q2repro src/refresh/models.c:1449-1477) keeps BOTH
+        // skin sets alive across a registration: mesh->skins at models.c:1459
+        // and model->skeleton->skins at models.c:1464. Re-resolving by name
+        // here (rather than only bumping registration_sequence as the C does)
+        // matches what the MD2 loop above already does in this port, and has
+        // the same effect: GL_FindImage returns the cached image and stamps
+        // the current registration_sequence on it, so R_FreeUnusedImages
+        // won't drop an MD5 skin that is still in use. Loading is skipped
+        // entirely for a model with no skeleton, so no MD2-only model pays a
+        // lookup for md5/ paths that will never exist.
+        if (mod.skeleton) {
+          for (let i = 0; i < hdr.num_skins; i++) {
+            mod.md5skins[i] = safeFindImage(md5SkinPathFor(hdr.skinnames[i]), ImagetypeT.it_skin);
+          }
         }
         mod.numframes = hdr.num_frames;
       }

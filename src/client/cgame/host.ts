@@ -85,7 +85,6 @@ import { CL_Wheel_Precache } from "../cl_wheel";
 // doc comment -- this file's ensureActiveKfont() below is that contract's
 // prescribed caller, implemented for real).
 import { parseFont, buildFontAtlas, latin1Codepoints } from "../../qcommon/ttf";
-import { decodePNG } from "../../qcommon/png";
 // re.RegisterRawPic: the INTEGRATION CONTRACT's step 4 registration
 // primitive, reached through RefExports (ref.ts) so it works under EITHER
 // renderer -- see that interface member's own doc comment for the full
@@ -247,96 +246,29 @@ function loadTtfKfontAsset(name: string, pxSize: number): ActiveKfontT | null {
 // texture actually exist" check mirrors Draw_RegisterPic's own existing
 // convention just below in this file, rather than the documented
 //0-vs-(-1) DrawGetPicSize mismatch noted on that member.
-function nextPowerOfTwo(n: number): number {
-  let p = 1;
-  while (p < n) p <<= 1;
-  return p;
-}
-
 /*
-POWER-OF-TWO ATLAS PADDING -- why a font atlas cannot go through the normal
-pic-registration path.
+ONE MECHANISM, not a font-specific one.
 
-gl_image.ts's GL_Upload32 does what vanilla's does: it rounds the image up to
-the next power of two on each axis and, when that differs from the source
-size, RESAMPLES the whole image into it (GL_ResampleTexture) -- a
-point-sampled 2x2 box filter with a non-integer step. That is harmless for an
-ordinary pic, which is drawn whole: the resample stretches it uniformly and
-the 0..1 texcoords still cover exactly the same picture.
+This function briefly carried its own power-of-two PADDING path: it decoded
+fonts/qconfont.png itself, copied it into the corner of a power-of-two RGBA
+buffer and registered that through RegisterRawPic, because gl_image.ts's
+GL_Upload32 resampled the 195x252 atlas up to 256x256 and smeared every 8x14
+glyph cell across texel boundaries.
 
-It is NOT harmless for an ATLAS, which is drawn one small sub-rectangle at a
-time (Draw_StretchPicRegion, from drawKfontChar below). The retail
-fonts/qconfont.png is 195x252 -- neither axis a power of two -- so every
-glyph cell in it is resampled by 256/195 horizontally and 256/252 vertically.
-The cell boundaries no longer land on texel boundaries, so the region
-srcX..srcX+ch.w for one glyph samples a smeared mixture of that glyph and the
-columns of its neighbours. On screen that is a HUD string of broken,
-half-overlapping letterforms with fragments of other glyphs inside them
-("Primary Objective" on the help computer, the owner's play-test report). It
-is purely an upload-side artifact: the .kfont metrics, ParseKfont, the glyph
-lookup and the draw call are all correct, and the draw already scales the
-glyph quad and the pen advance by the same factor (dest ch.w*scale, advance
-ch.w*scale -- see drawKfontChar).
+The atlas was never special. A census of the re-release paks finds 156 of the
+179 PNGs under pics/ and fonts/ are non-power-of-two -- damage_indicator.png
+(96x96), friend.png (30x30), loc_ping.png and marker.png (48x48), every
+m_cursorN.png (22x29) -- and so were 116 of the 125 pics in the 1997 baseq2
+pak0. All of them were being resampled the same way; the font was simply the
+one where a sub-rectangle draw made the smear unmistakable. That is now fixed
+where it belongs, once, for every image: GL_Upload32 uploads a non-mipmapped
+image at its native size on a context that supports non-power-of-two textures
+(gl_config.npot, gl_local.ts / gl_rmain.ts's GL_DetectNpotSupport).
 
-The fix keeps the atlas at 1:1 texels by PADDING it to the next power of two
-instead of letting the renderer resample it: decode the PNG here (qcommon/
-png.ts, already used for every other rerelease truecolor asset), copy it into
-the top-left corner of a power-of-two RGBA buffer, and register that through
-RefExports.RegisterRawPic -- the exact primitive loadTtfKfontAsset above
-already uses for its own generated atlas, which is why the TTF path never had
-this problem. Padding is at the right/bottom, so every glyph's (x, y, w, h)
-from the .kfont file still addresses the same texels; only the divisor in
-Draw_StretchPicRegion's texcoord math changes, from the source width to the
-padded width, and it now divides exact texel counts.
-
-Scoped to this asset deliberately. Fixing it in GL_Upload32 instead (uploading
-non-power-of-two pics at native size) would change EVERY npot pic in the
-game, including the 16x24 sb_nums digits and the 128x24 menu plaques the
-1997-era data ships -- a renderer-wide change with no bearing on the defect.
-
-Falls back to the original re.RegisterPic path whenever the padding path
-cannot run: a non-PNG atlas (a mod shipping .tga/.pcx), an undecodable file,
-an already-power-of-two atlas (nothing to pad -- GL_Upload32 uploads those
-untouched anyway), or a RegisterRawPic failure. That fallback is byte-for-byte
-the behavior this function had before.
+So the padding is gone and this is back to the plain registration it always
+was -- the atlas is now exactly as special as every other pic, which is
+the point.
 */
-function registerKfontAtlas(textureToken: string): string | null {
-  if (!re) return null;
-  const pic = "/" + textureToken;
-
-  if (textureToken.toLowerCase().endsWith(".png")) {
-    const raw = FS_LoadFile(textureToken);
-    if (raw) {
-      const decoded = decodePNG(raw);
-      if (decoded.ok) {
-        const { width, height, pixels } = decoded.image;
-        const pw = nextPowerOfTwo(width);
-        const ph = nextPowerOfTwo(height);
-        if (pw !== width || ph !== height) {
-          const padded = new Uint8Array(pw * ph * 4);
-          for (let y = 0; y < height; y++) {
-            padded.set(pixels.subarray(y * width * 4, (y + 1) * width * 4), y * pw * 4);
-          }
-          // Distinct name so this padded upload never collides with a plain
-          // re.RegisterPic of the same file elsewhere (which would still be
-          // the resampled one).
-          //
-          // REGISTERED WITHOUT the leading "/", HANDED OUT WITH it: both
-          // renderers' GL_LoadPic stores `name` verbatim, while Draw_FindPic
-          // STRIPS a leading "/" before looking a name up (that is what the
-          // "/" convention means -- "exact path, no pics/*.pcx default").
-          // Registering the slashed form would store a name no Draw_FindPic
-          // lookup can ever match again.
-          const atlasName = `kfontatlas:${textureToken}:${pw}x${ph}`;
-          if (re.RegisterRawPic(atlasName, padded, pw, ph)) return "/" + atlasName;
-        }
-      }
-    }
-  }
-
-  return re.RegisterPic(pic) ? pic : null;
-}
-
 function loadKfontAsset(filename: string): KfontT | null {
   if (!re) return null;
   const raw = FS_LoadFile(filename);
@@ -344,8 +276,8 @@ function loadKfontAsset(filename: string): KfontT | null {
   const text = Buffer.from(raw).toString("latin1");
   const parsed = ParseKfont(text);
   if (!parsed) return null;
-  const pic = registerKfontAtlas(parsed.textureToken);
-  if (!pic) return null;
+  const pic = "/" + parsed.textureToken;
+  if (!re.RegisterPic(pic)) return null;
   return { pic, chars: parsed.chars, line_height: parsed.line_height };
 }
 

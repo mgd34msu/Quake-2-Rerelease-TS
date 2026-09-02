@@ -132,3 +132,59 @@ describe("imageExtCandidates -- exact-name-first invariant", () => {
     }
   });
 });
+
+/*
+r_override_textures -- the `overrideFirst` probe order.
+
+Without it, dropping a higher-resolution pics/num_0.png into a homedir beside
+the pak's own pics/num_0.pcx did nothing at all: the requested .pcx was probed
+first, it existed, and it won. Every asset the 1997 data ships is a .pcx or a
+.wal, so no hi-res replacement of classic content could load. q2repro's
+default build has this on (r_override_textures "1", images.c:2257); so does
+this port now. See imageExtCandidates' own comment for the full note.
+*/
+describe("imageExtCandidates -- r_override_textures probe order", () => {
+  test("override-first puts every truecolor format ahead of the requested .pcx", () => {
+    expect(imageExtCandidates("pcx", false, GL_EXTS, true)).toEqual(["png", "jpg", "tga", "jpeg", "bmp", "gif", "pcx"]);
+  });
+
+  test("override-first puts every truecolor format ahead of the requested .wal", () => {
+    expect(imageExtCandidates("wal", true, GL_EXTS, true)).toEqual(["png", "jpg", "tga", "jpeg", "bmp", "gif", "wal"]);
+  });
+
+  test("the requested extension is still probed -- it moves to last, it is never dropped", () => {
+    // The original must still load when the player has supplied no
+    // replacement, which is every asset in both retail trees.
+    for (const [req, isWall] of [
+      ["pcx", false],
+      ["wal", true],
+      ["pcx", true],
+    ] satisfies [ImgExtT, boolean][]) {
+      expect(imageExtCandidates(req, isWall, GL_EXTS, true)).toContain(req);
+    }
+  });
+
+  test("override-first never repeats a candidate and never loses one", () => {
+    for (const isWall of [false, true]) {
+      for (const req of GL_EXTS) {
+        const plain = imageExtCandidates(req, isWall, GL_EXTS, false);
+        const over = imageExtCandidates(req, isWall, GL_EXTS, true);
+        expect(new Set(over).size).toBe(over.length);
+        // Same SET of candidates either way -- only the order moves.
+        expect(new Set(over)).toEqual(new Set(plain));
+      }
+    }
+  });
+
+  test("the software renderer's narrower format set is respected in override order too", () => {
+    // No .tga decoder in ref_soft, so .tga must not appear even when it is
+    // being promoted ahead of the requested extension.
+    expect(imageExtCandidates("pcx", false, SOFT_EXTS, true)).not.toContain("tga");
+    expect(imageExtCandidates("pcx", false, SOFT_EXTS, true)).toEqual(["png", "jpg", "jpeg", "bmp", "gif", "pcx"]);
+  });
+
+  test("overrideFirst defaults off, so every existing caller keeps the pre-existing order", () => {
+    expect(imageExtCandidates("pcx", false, GL_EXTS)).toEqual(imageExtCandidates("pcx", false, GL_EXTS, false));
+    expect(imageExtCandidates("pcx", false, GL_EXTS)[0]).toBe("pcx");
+  });
+});

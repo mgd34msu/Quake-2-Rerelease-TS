@@ -24,9 +24,10 @@ reset hook, so this suite avoids scrap allocation everywhere except that
 one direct-call test.
 */
 
-import { describe, test, expect, beforeEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 
-import { glCvars, SetRefImports, gltextures, ImageT, ImagetypeT, SetNumGltextures, gl_state, d_8to24table } from "../src/ref_gl/gl_local";
+import { glCvars, SetRefImports, gltextures, ImageT, ImagetypeT, SetNumGltextures, gl_state, d_8to24table, gl_config } from "../src/ref_gl/gl_local";
+import { GL_DetectNpotSupport } from "../src/ref_gl/gl_rmain";
 import type { RefImports } from "../src/client/ref";
 import { CvarT } from "../src/shared/q_shared";
 import { QGLRecording } from "../src/ref_gl/qgl";
@@ -302,7 +303,10 @@ describe("GL_Upload8", () => {
     }
   });
 
-  test("rounds a non-power-of-two width up before uploading", () => {
+  test("rounds a non-power-of-two width up before uploading when the context has no NPOT support", () => {
+    // gl_config.npot defaults false and no R_Init runs in this suite, so this
+    // is vanilla's behavior on a GL 1.1-era context -- still the fallback.
+    expect(gl_config.npot).toBe(false);
     const data = new Uint8Array(3 * 2).fill(0);
 
     GL_Upload8(data, 3, 2, false, false);
@@ -311,6 +315,116 @@ describe("GL_Upload8", () => {
     expect(uploads).toHaveLength(1);
     expect(uploads[0]?.args[3]).toBe(4); // 3 rounds up to 4
     expect(uploads[0]?.args[4]).toBe(2); // 2 is already power-of-two
+  });
+});
+
+/*
+NON-POWER-OF-TWO UPLOADS (q2repro's GL_MakePowerOfTwo, src/refresh/texture.c).
+
+Rounding a texture up to a power of two RESAMPLES it (GL_ResampleTexture, a
+non-integer-step 2x2 box filter), which does not merely enlarge an image, it
+smears it -- a 30x30 HUD icon uploaded as 32x32 has soft, shifted edges, and a
+195x252 font atlas uploaded as 256x256 has every glyph cell straddling texel
+boundaries. 156 of the 179 PNGs under pics/ and fonts/ in the re-release paks
+are non-power-of-two, and so are 116 of the 125 pics in the 1997 baseq2 pak0.
+
+On a context that supports NPOT textures the resample is skipped for
+non-mipmapped images and the driver gets the real pixels. Mipmapped images
+keep the POT path -- see GL_MustMakePowerOfTwo's own comment in gl_image.ts
+for why this port holds those back where q2repro does not.
+*/
+describe("GL_Upload32 -- non-power-of-two handling", () => {
+  const restore = gl_config.npot;
+
+  function uploadedSize(): { w: number; h: number } {
+    const uploads = qgl.calls.filter((c) => c.name === "qglTexImage2D");
+    expect(uploads.length).toBeGreaterThan(0);
+    return { w: uploads[0]?.args[3] as number, h: uploads[0]?.args[4] as number };
+  }
+
+  afterEach(() => {
+    gl_config.npot = restore;
+  });
+
+  test("an NPOT-capable context uploads a non-mipmapped image at its native size", () => {
+    gl_config.npot = true;
+    // 30x30 is friend.png's real size; 22x29 is every m_cursorN.png's.
+    GL_Upload8(new Uint8Array(30 * 30).fill(0), 30, 30, false, false);
+    expect(uploadedSize()).toEqual({ w: 30, h: 30 });
+
+    qgl.clear();
+    GL_Upload8(new Uint8Array(22 * 29).fill(0), 22, 29, false, false);
+    expect(uploadedSize()).toEqual({ w: 22, h: 29 });
+  });
+
+  test("the same image on a context without NPOT support is still rounded and resampled", () => {
+    gl_config.npot = false;
+    GL_Upload8(new Uint8Array(30 * 30).fill(0), 30, 30, false, false);
+    expect(uploadedSize()).toEqual({ w: 32, h: 32 });
+  });
+
+  test("a mipmapped image keeps the power-of-two path even on an NPOT-capable context", () => {
+    // GL_MipMap halves a level in place assuming even dimensions, and this
+    // port has no GenerateMipmap binding to hand the chain to instead.
+    gl_config.npot = true;
+    GL_Upload8(new Uint8Array(24 * 24).fill(0), 24, 24, true, false);
+    expect(uploadedSize()).toEqual({ w: 32, h: 32 });
+  });
+
+  test("an already-power-of-two image is byte-identical either way", () => {
+    gl_config.npot = true;
+    GL_Upload8(new Uint8Array(16 * 8).fill(3), 16, 8, false, false);
+    const withNpot = qgl.calls.filter((c) => c.name === "qglTexImage2D").map((c) => c.args);
+
+    qgl.clear();
+    gl_config.npot = false;
+    GL_Upload8(new Uint8Array(16 * 8).fill(3), 16, 8, false, false);
+    const withoutNpot = qgl.calls.filter((c) => c.name === "qglTexImage2D").map((c) => c.args);
+
+    expect(withNpot).toEqual(withoutNpot);
+  });
+
+  test("an oversized image is still clamped down to 256 on either kind of context", () => {
+    // The >256 clamp is vanilla's own and is unrelated to POT rounding; a
+    // 300x300 pic must not start uploading at native size just because the
+    // context is capable.
+    gl_config.npot = true;
+    GL_Upload8(new Uint8Array(300 * 300).fill(0), 300, 300, false, false);
+    expect(uploadedSize()).toEqual({ w: 256, h: 256 });
+  });
+});
+
+/*
+GL_DetectNpotSupport (gl_rmain.ts) -- the pure predicate behind gl_config.npot.
+*/
+describe("GL_DetectNpotSupport", () => {
+  test("desktop GL 3.0 and newer are capable, matching q2repro's own 3.0 tier", () => {
+    expect(GL_DetectNpotSupport("3.0", "")).toBe(true);
+    expect(GL_DetectNpotSupport("4.6.0 NVIDIA 610.57.04", "")).toBe(true);
+    expect(GL_DetectNpotSupport("10.1", "")).toBe(true);
+  });
+
+  test("GLES 3.0 and newer are capable, in either spelling of the version string", () => {
+    expect(GL_DetectNpotSupport("OpenGL ES 3.2 Mesa 24.0", "")).toBe(true);
+    expect(GL_DetectNpotSupport("OpenGL ES-CM 3.0", "")).toBe(true);
+  });
+
+  test("a pre-3.0 context is capable only if it names the extension", () => {
+    expect(GL_DetectNpotSupport("2.1 Mesa", "")).toBe(false);
+    expect(GL_DetectNpotSupport("2.1 Mesa", "GL_ARB_multitexture GL_ARB_texture_non_power_of_two GL_EXT_bgra")).toBe(true);
+    expect(GL_DetectNpotSupport("OpenGL ES 2.0", "GL_OES_texture_npot")).toBe(true);
+    expect(GL_DetectNpotSupport("1.1", "GL_EXT_paletted_texture")).toBe(false);
+  });
+
+  test("the extension is matched as a whole token, never as a prefix", () => {
+    expect(GL_DetectNpotSupport("2.1", "GL_ARB_texture_non_power_of_two_something")).toBe(false);
+    expect(GL_DetectNpotSupport("2.1", "GL_VENDOR_GL_ARB_texture_non_power_of_two")).toBe(false);
+  });
+
+  test("an unparseable version string falls back to vanilla POT behavior, never guesses", () => {
+    expect(GL_DetectNpotSupport("", "")).toBe(false);
+    expect(GL_DetectNpotSupport("not a version at all", "")).toBe(false);
+    expect(GL_DetectNpotSupport("v3.0", "")).toBe(false);
   });
 });
 
@@ -552,14 +666,17 @@ describe("GL_FindImage", () => {
     expect(image?.height).toBe(8);
   });
 
-  test("an existing .pcx wins over a .png sibling (classic-data path unchanged)", () => {
+  test("a truecolor .png sibling wins over the requested .pcx (r_override_textures, the reference's default)", () => {
+    // The owner's rule: a dropped-in high-resolution replacement must load.
+    // Before override-first lookup the pak's .pcx always won and no
+    // replacement of classic content could ever load.
     files.set("pics/both.pcx", buildPcxBytes(2, 2, () => 3));
     files.set("pics/both.png", buildPngRgba(2, 2, () => [10, 20, 30, 255]));
 
     const image = GL_FindImage("pics/both.pcx", ImagetypeT.it_wall);
 
     expect(image).not.toBeNull();
-    expect(image?.name).toBe("pics/both.pcx");
+    expect(image?.name).toBe("pics/both.png");
   });
 });
 
