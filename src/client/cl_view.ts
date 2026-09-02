@@ -362,6 +362,57 @@ function V_TestLights(): void {
 
 /*
 =================
+CL_SetSky
+
+q2repro src/client/precache.c's CL_SetSky(): parses CS_SKYROTATE and
+CS_SKYAXIS and hands the result to the renderer's SetSky. Extracted out of
+CL_PrepRefresh (below) so cl_parse.ts's CL_ParseConfigString can call the
+exact same parse path when a mid-level target_sky rewrites CS_SKYROTATE or
+CS_SKYAXIS -- q2repro's own CL_UpdateConfigstring does the same (re-invokes
+CL_SetSky() rather than duplicating its parse logic).
+
+CS_SKYROTATE carries a single token ("<rotate>") under the classic/narrow
+configstring layout, and two ("<rotate> <autorotate>") under the rerelease/
+wide layout (cls.csr.extended) -- mirrors precache.c:380-383's
+`cl.csr.extended ? sscanf(..., "%f %d", ...) : Q_atof(...)`. See
+g_spawn.ts's SP_worldspawn for the write side of this same gate (the
+classic game module only emits the two-token form when the session itself
+is on the wide layout).
+=================
+*/
+export function CL_SetSky(): void {
+  if (!re) return;
+
+  let rotate = 0;
+  let autorotate = true;
+
+  const rotateStr = cl.configstrings[CS_SKYROTATE].trim();
+  if (cls.csr.extended) {
+    const parts = rotateStr.split(/\s+/);
+    if (parts[0]) {
+      const r = parseFloat(parts[0]);
+      if (!Number.isNaN(r)) rotate = r;
+    }
+    if (parts[1]) {
+      const a = parseInt(parts[1], 10);
+      if (!Number.isNaN(a)) autorotate = a !== 0;
+    }
+  } else {
+    const r = parseFloat(rotateStr);
+    if (!Number.isNaN(r)) rotate = r;
+  }
+
+  const axisParts = cl.configstrings[CS_SKYAXIS].trim().split(/\s+/).map(Number);
+  const axis = vec3();
+  axis[0] = axisParts[0] ?? 0;
+  axis[1] = axisParts[1] ?? 0;
+  axis[2] = axisParts[2] ?? 0;
+
+  re.SetSky(cl.configstrings[CS_SKY], rotate, autorotate, axis);
+}
+
+/*
+=================
 CL_PrepRefresh
 
 Call before entering a new level, or after changing dlls
@@ -467,13 +518,7 @@ export function CL_PrepRefresh(): void {
   // set sky textures and speed
   Com_Printf("sky\r");
   SCR_UpdateScreen();
-  const rotate = parseFloat(cl.configstrings[CS_SKYROTATE]);
-  const axisParts = cl.configstrings[CS_SKYAXIS].trim().split(/\s+/).map(Number);
-  const axis = vec3();
-  axis[0] = axisParts[0] ?? 0;
-  axis[1] = axisParts[1] ?? 0;
-  axis[2] = axisParts[2] ?? 0;
-  re.SetSky(cl.configstrings[CS_SKY], rotate, axis);
+  CL_SetSky();
   Com_Printf("                                     \r");
 
   // the renderer can now free unneeded stuff

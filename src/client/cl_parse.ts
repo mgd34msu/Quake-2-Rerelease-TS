@@ -30,6 +30,7 @@ import {
 } from "../qcommon/qcommon";
 import { cl, cls, ConnstateT, svc_strings, clCvars, cl_entities, type ClientinfoT, num_cl_weaponmodels, cl_weaponmodels, re } from "./client";
 import type { ImageS } from "./ref";
+import { CL_SetSky } from "./cl_view";
 import type { ProtocolCodec } from "../qcommon/protocol/codec";
 import { VANILLA_CODEC } from "../qcommon/protocol/vanilla";
 import { Q2REPRO_CODEC, Q2REPRO_CLASSIC_CODEC } from "../qcommon/protocol/q2repro";
@@ -60,6 +61,8 @@ import {
   EntityStateT,
   type CmodelT,
   CS_CDTRACK,
+  CS_SKYROTATE,
+  CS_SKYAXIS,
   MAX_CLIENTS,
   MAX_LIGHTSTYLES,
   PRINT_CHAT,
@@ -828,6 +831,12 @@ export function CL_ParseConfigString(): void {
     if (cl.refresh_prepped) cl.image_precache[i - cls.csr.images] = CL_RegisterImage(cl.configstrings[i]);
   } else if (i >= cls.csr.playerskins && i < cls.csr.playerskins + MAX_CLIENTS) {
     if (cl.refresh_prepped) CL_ParseClientinfo(i - cls.csr.playerskins);
+  } else if (i === CS_SKYROTATE || i === CS_SKYAXIS) {
+    // q2repro precache.c:744 (`if (index == CS_SKYROTATE || index ==
+    // CS_SKYAXIS) CL_SetSky();`) -- this is how a mid-level target_sky
+    // (g_target.ts's use_target_sky) reaches the renderer: it rewrites one
+    // or both of these configstrings, and the update lands here.
+    if (cl.refresh_prepped) CL_SetSky();
   } else if (cls.csr.shadowlights !== -1 && i >= cls.csr.shadowlights && i < cls.csr.shadowlights + cls.csr.max_shadowlights) {
     // task #25 (v1.1.0) -- q2repro src/client/precache.c's CS_LoadShadowLight
     // dispatch. cls.csr.shadowlights is -1 under the classic (OLD)

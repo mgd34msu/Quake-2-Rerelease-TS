@@ -2071,7 +2071,7 @@ export function GetRefAPI(imp: RefImports): RefExports {
     RegisterSkin: (name: string) => R_RegisterSkin(name),
     RegisterPic: (name: string) => Draw_FindPic(name),
     RegisterRawPic: (name: string, pixels: Uint8Array, width: number, height: number) => (width <= 0 || height <= 0 ? null : GL_LoadPic(name, pixels, width, height, ImagetypeT.it_pic, 32)),
-    SetSky: (name: string, rotate: number, axis: Vec3) => R_SetSky(name, rotate, axis),
+    SetSky: (name: string, rotate: number, autorotate: boolean, axis: Vec3) => R_SetSky(name, rotate, autorotate, axis),
     EndRegistration: () => R_EndRegistration(),
 
     RenderFrame: (fd) => R_RenderFrame(fd),

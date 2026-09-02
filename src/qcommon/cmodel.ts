@@ -10,7 +10,7 @@ import { CplaneT, CmodelT, MapsurfaceT, TraceT, CONTENTS_SOLID, CONTENTS_MONSTER
 import { Com_Error, Com_DPrintf, Com_Printf } from "./common";
 import { ERR_DROP } from "./qcommon";
 import { Cvar_Get, Cvar_VariableValue } from "./cvar";
-import { FS_LoadFile } from "./files";
+import { FS_LoadFile, FS_Generation } from "./files";
 import { Com_BlockChecksum } from "./md4";
 import {
   type LumpT,
@@ -109,6 +109,14 @@ class CareaT {
 let checkcount = 0;
 
 let map_name = "";
+
+// The FS_Generation() value map_name was loaded at. The cache hit below is a
+// pure NAME comparison in the C original, which is sound for an engine whose
+// search path is built once at boot -- but a `data_root` switch re-roots the
+// whole filesystem mid-process, and "maps/base1.bsp" then names a different
+// file with a different inline-model count. See files.ts's fs_generation
+// header for the play-test failure this closes.
+let map_generation = -1;
 
 // Fixed-size C arrays (`cbrushside_t map_brushsides[MAX_MAP_BRUSHSIDES]` etc.)
 // become growable JS arrays here rather than preallocated MAX_MAP_*-sized
@@ -815,6 +823,22 @@ function CMod_LoadEntityString(l: LumpT): void {
 }
 
 /*
+================
+CM_MapIsCurrentContent
+
+Is the collision map currently loaded still the one the mounted content
+resolves to? False for exactly one situation: a `data_root` switch re-rooted
+the filesystem after this map was loaded, so "maps/<name>.bsp" now names a
+different file (see files.ts's fs_generation header). Not a port of anything
+in cmodel.c -- the C engine's search path never moves under a running map, so
+the question cannot come up there.
+================
+*/
+export function CM_MapIsCurrentContent(): boolean {
+  return map_generation === FS_Generation();
+}
+
+/*
 ==================
 CM_LoadMap
 
@@ -838,7 +862,11 @@ export function CM_LoadMap(name: string, clientload: boolean): { model: CmodelT;
   // PVS data is used as-loaded, never regenerated/patched.
   Cvar_Get("map_visibility_patch", "1", 0);
 
-  if (map_name === name && (clientload || !Cvar_VariableValue("flushmap"))) {
+  // `map_generation === FS_Generation()` is the added half of the C
+  // original's name test: same name AND still the same mounted content. A
+  // data-root switch invalidates the cache for the client path too
+  // (clientload), which otherwise never re-reads at all.
+  if (map_name === name && map_generation === FS_Generation() && (clientload || !Cvar_VariableValue("flushmap"))) {
     const checksum = last_checksum;
     if (!clientload) {
       portalopen.fill(false);
@@ -856,6 +884,7 @@ export function CM_LoadMap(name: string, clientload: boolean): { model: CmodelT;
   numentitychars = 0;
   map_entitystring = "";
   map_name = "";
+  map_generation = -1;
 
   if (!name || name.length === 0) {
     numleafs = 1;
@@ -951,6 +980,7 @@ export function CM_LoadMap(name: string, clientload: boolean): { model: CmodelT;
   FloodAreaConnections();
 
   map_name = name;
+  map_generation = FS_Generation();
 
   return { model: map_cmodels[0], checksum };
 }

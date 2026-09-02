@@ -18,7 +18,7 @@ import { CvarT, RDF_NOWORLDMODEL } from "../src/shared/q_shared";
 import { SWimp_SetMode } from "../src/platform/swimp";
 import { LoadPCX } from "../src/ref_soft/r_image";
 import { DotProduct, VectorCopy, type Vec3, vec3 } from "../src/shared/math";
-import { Draw_GetPalette, R_GammaCorrectAndSetPalette, R_RenderFrame, R_SetSky, skyaxis, skyname, skyrotate } from "../src/ref_soft/r_main";
+import { Draw_GetPalette, R_GammaCorrectAndSetPalette, R_RenderFrame, R_SetSky, skyaxis, skyautorotate, skyname, skyrotate } from "../src/ref_soft/r_main";
 import { R_TransformFrustum, TransformVector, WritePCX } from "../src/ref_soft/r_misc";
 
 const VID_WIDTH = 64;
@@ -291,10 +291,11 @@ describe("WritePCX / LoadPCX round trip", () => {
 describe("R_SetSky", () => {
   test("stores name/rotate/axis", () => {
     const axis: Vec3 = vec3(0, 0, 1);
-    R_SetSky("unit", 90, axis);
+    R_SetSky("unit", 90, true, axis);
 
     expect(skyname).toBe("unit");
     expect(skyrotate).toBe(90);
+    expect(skyautorotate).toBe(true);
     expect(Array.from(skyaxis)).toEqual([0, 0, 1]);
   });
 
@@ -308,7 +309,7 @@ describe("R_SetSky", () => {
       },
     });
 
-    R_SetSky("unit", 0, vec3(0, 0, 1));
+    R_SetSky("unit", 0, true, vec3(0, 0, 1));
 
     for (const suf of ["rt", "bk", "lf", "ft", "up", "dn"]) {
       expect(requested).toContain(`env/unit${suf}.pcx`);

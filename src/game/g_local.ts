@@ -492,7 +492,14 @@ export class SpawnTempT {
   // spawns wrong. shadowlight* in particular is read by the rerelease
   // dynamic/shadow light entities this port now spawns.
   // =====================================================================
-  skyautorotate = 0;
+  // g_local.h:1274 declares `int32_t skyautorotate = 1;` (default 1, not 0)
+  // -- see src/kexgame/g_spawn.ts's header comment (the canonical
+  // defaultSpawnTemp() for the OTHER game module) for the same latent
+  // default-value bug independently repeated in four other files before
+  // that one existed. This field was still wrong here; a worldspawn that
+  // never explicitly sets skyautorotate (the overwhelmingly common case)
+  // must default to "spin continuously", matching the rerelease game DLL.
+  skyautorotate = 1;
   music: string | null = null;
   instantitems = 0;
   radius = 0;

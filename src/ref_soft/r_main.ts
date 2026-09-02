@@ -182,6 +182,15 @@ import { Sys_Milliseconds } from "../platform/sys";
 
 export let skyname = "";
 export let skyrotate = 0;
+// q2repro src/refresh/sky.c's `skyautorotate` static. Accepted and stored
+// faithfully for parity with the RefExports.SetSky contract (ref.ts), but
+// this software renderer's sky drawing path (D_SkySurf-derived code in
+// r_surf.ts/r_edge.ts) never applied any rotation to the sky surfaces to
+// begin with -- vanilla's software renderer draws the sky flat, unrotated,
+// same as this port already does. There is nothing here for skyautorotate
+// to gate, so no rotation path is invented; the flag is just kept around
+// in case a future change adds software sky rotation.
+export let skyautorotate = true;
 export const skyaxis: Vec3 = vec3();
 
 const MINSURFACES = 1000; // NUMSTACKSURFACES (r_local.ts)
@@ -1181,9 +1190,10 @@ R_SetSky
 const suf = fixedLength("suf", 6, ["rt", "bk", "lf", "ft", "up", "dn"]);
 const r_skysideimage = fixedLength("r_skysideimage", 6, [5, 2, 4, 1, 0, 3]);
 
-export function R_SetSky(name: string, rotate: number, axis: Vec3): void {
+export function R_SetSky(name: string, rotate: number, autorotate: boolean, axis: Vec3): void {
   skyname = name;
   skyrotate = rotate;
+  skyautorotate = rotate !== 0 && autorotate;
   VectorCopy(axis, skyaxis);
 
   for (let i = 0; i < 6; i++) {
@@ -1248,7 +1258,7 @@ export function GetRefAPI(imp: RefImports): RefExports {
     RegisterSkin: (name: string) => R_RegisterSkin(name),
     RegisterPic: (name: string) => Draw_FindPic(name),
     RegisterRawPic: (name: string, pixels: Uint8Array, width: number, height: number) => R_RegisterRawPic(name, pixels, width, height),
-    SetSky: (name: string, rotate: number, axis: Vec3) => R_SetSky(name, rotate, axis),
+    SetSky: (name: string, rotate: number, autorotate: boolean, axis: Vec3) => R_SetSky(name, rotate, autorotate, axis),
     EndRegistration: () => R_EndRegistration(),
 
     RenderFrame: (fd: RefdefT) => R_RenderFrame(fd),

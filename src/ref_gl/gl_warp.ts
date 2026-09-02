@@ -69,6 +69,10 @@ const SUBDIVIDE_SIZE = 64;
 
 export let skyname = "";
 export let skyrotate = 0;
+// q2repro src/refresh/sky.c's `skyautorotate` static (line 22). true is the
+// vanilla-compatible default (no re-release worldspawn key means "spin
+// continuously", matching every pre-rerelease map that ever set skyrotate).
+export let skyautorotate = true;
 export const skyaxis: Vec3 = vec3();
 export const sky_images: (ImageT | null)[] = fixedLength("sky_images", 6, [null, null, null, null, null, null]);
 
@@ -536,7 +540,13 @@ export function R_DrawSkyBox(): void {
 
   qgl.qglPushMatrix();
   qgl.qglTranslatef(r_origin[0], r_origin[1], r_origin[2]);
-  qgl.qglRotatef(r_newrefdef.time * skyrotate, skyaxis[0], skyaxis[1], skyaxis[2]);
+  // q2repro sky.c:251-253/363-364: continuous spin (time * skyrotate) only
+  // when skyautorotate is set; otherwise skyrotate is a FIXED rotation
+  // amount in degrees, applied every frame with no time scaling -- this is
+  // how a re-release target_sky with skyautorotate=0 holds the sky at a
+  // static rotated orientation instead of spinning it.
+  const skyAngle = skyautorotate ? r_newrefdef.time * skyrotate : skyrotate;
+  qgl.qglRotatef(skyAngle, skyaxis[0], skyaxis[1], skyaxis[2]);
 
   for (let i = 0; i < 6; i++) {
     if (skyrotate) {
@@ -580,9 +590,15 @@ R_SetSky
 // 3dstudio environment map names
 const suf: readonly string[] = fixedLength("suf", 6, ["rt", "bk", "lf", "ft", "up", "dn"]);
 
-export function R_SetSky(name: string, rotate: number, axis: Vec3): void {
+export function R_SetSky(name: string, rotate: number, autorotate: boolean, axis: Vec3): void {
   skyname = name.slice(0, MAX_QPATH - 1);
   skyrotate = rotate;
+  // q2repro sky.c:462-463 (`if (!rotate) autorotate = false;`): keeps the
+  // stored flag consistent when there is no rotation to begin with, so a
+  // later `skyrotate` truthiness check (the "hack, forces full sky to draw
+  // when rotating" branch below and in R_DrawSkyBox) is never fooled by a
+  // stale autorotate=true left over from a previous sky.
+  skyautorotate = rotate !== 0 && autorotate;
   VectorCopy(axis, skyaxis);
 
   for (let i = 0; i < 6; i++) {

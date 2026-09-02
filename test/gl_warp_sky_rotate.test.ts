@@ -54,7 +54,7 @@ beforeEach(() => {
 
 describe("gl_warp.ts -- R_DrawSkyBox rotation", () => {
   test("rotatedegrees = skyrotate * refdef.time (seconds): 8 deg/s * 2.0s = 16 degrees", () => {
-    R_SetSky("unit", 8, vec3(0, 0, 1));
+    R_SetSky("unit", 8, true, vec3(0, 0, 1));
     r_newrefdef.time = 2.0;
 
     // mark face 0 visible so R_DrawSkyBox's "nothing visible" early-out
@@ -83,7 +83,7 @@ describe("gl_warp.ts -- R_DrawSkyBox rotation", () => {
     // documents the bug shape this test suite guards against: if refdef.time
     // were still in milliseconds (cl.time un-scaled), 8 deg/s * 2000ms =
     // 16000 degrees for the same 2-second mark -- 1000x the correct angle.
-    R_SetSky("unit", 8, vec3(0, 0, 1));
+    R_SetSky("unit", 8, true, vec3(0, 0, 1));
     r_newrefdef.time = 2000; // the bug shape: milliseconds instead of seconds
 
     skymins[0][0] = -0.5;

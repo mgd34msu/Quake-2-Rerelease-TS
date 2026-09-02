@@ -266,7 +266,13 @@ export interface RefExports {
   // Draw_FindPic/r_draw.ts's Draw_FindPic just below RegisterPic's own
   // wiring in both GetRefAPIs).
   RegisterRawPic(name: string, pixels: Uint8Array, width: number, height: number): ImageS | null;
-  SetSky(name: string, rotate: number, axis: Vec3): void;
+  // q2repro src/refresh/sky.c's R_SetSky(name, rotate, autorotate, axis):
+  // `autorotate` false makes `rotate` a FIXED rotation amount (degrees, not
+  // degrees/sec) applied about `axis` every frame instead of a continuous
+  // spin driven by r_newrefdef.time. Re-release worldspawn's skyautorotate
+  // key (default 1) and target_sky both flow through this flag -- see
+  // cl_view.ts's CL_SetSky.
+  SetSky(name: string, rotate: number, autorotate: boolean, axis: Vec3): void;
   EndRegistration(): void;
 
   RenderFrame(fd: RefdefT): void;

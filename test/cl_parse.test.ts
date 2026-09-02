@@ -2,12 +2,14 @@ import { describe, test, expect, beforeEach } from "bun:test";
 import { ComError, SvcOpsT } from "../src/qcommon/qcommon";
 import { SZ_Clear, MSG_BeginReading, MSG_WriteByte, MSG_WriteShort, MSG_WriteLong, MSG_WriteDeltaEntity } from "../src/qcommon/sizebuf";
 import { net_message } from "../src/qcommon/net_chan";
-import { EntityStateT, CvarT, CS_MODELS } from "../src/shared/q_shared";
+import { EntityStateT, CvarT, CS_MODELS, CS_SKY, CS_SKYROTATE, CS_SKYAXIS } from "../src/shared/q_shared";
 import { MAX_MAP_AREAS } from "../src/qcommon/qfiles";
+import { CS_REMAP_OLD, CS_REMAP_RERELEASE } from "../src/shared/cs_remap";
 import { cl, cls, ConnstateT, clCvars, cl_entities, setRe } from "../src/client/client";
+import { API_VERSION, type RefExports } from "../src/client/ref";
 import { CL_ParseServerMessage, CL_ParseServerData, CL_ParseConfigString, CL_ParseStartSoundPacket, SHOWNET } from "../src/client/cl_parse";
 import { CL_ParseEntityBits, CL_ParseDelta, CL_AddEntities, CL_GetEntitySoundOrigin } from "../src/client/cl_ents";
-import { V_ClearScene, r_entities, r_numentities } from "../src/client/cl_view";
+import { V_ClearScene, r_entities, r_numentities, CL_SetSky } from "../src/client/cl_view";
 
 // Every net_message read in this suite starts from a clean read cursor;
 // tests build the wire bytes with MSG_Write* directly onto the shared
@@ -172,6 +174,48 @@ describe("CL_ParseServerMessage -- svc_* dispatch", () => {
     expect(cl.model_draw[3]).toBeNull();
   });
 
+  // task: "the sky rotates when the map says it should not" -- q2repro
+  // precache.c:744 re-invokes CL_SetSky() whenever a runtime update lands on
+  // CS_SKYROTATE or CS_SKYAXIS, which is how a mid-level target_sky
+  // (kexgame/g_target.ts's use_target_sky) reaches the renderer. Bypassing
+  // that dispatch entirely was the root cause of the client never seeing a
+  // target_sky's skyautorotate=0 at all.
+  test("svc_configstring on CS_SKYROTATE calls into the renderer with the parsed (rotate, autorotate) -- two-token wide form", () => {
+    const calls: Array<{ name: string; rotate: number; autorotate: boolean; axis: [number, number, number] }> = [];
+    setRe(fakeReForSky(calls));
+    cls.csr = CS_REMAP_RERELEASE;
+    cl.refresh_prepped = true;
+    cl.configstrings[CS_SKY] = "unit1_";
+    cl.configstrings[CS_SKYAXIS] = "0 0 1";
+
+    MSG_WriteByte(net_message, SvcOpsT.svc_configstring);
+    MSG_WriteShort(net_message, CS_SKYROTATE);
+    writeCString("15 0"); // rotate=15, autorotate=0 (target_sky holding a FIXED offset)
+    MSG_BeginReading(net_message);
+
+    expect(() => CL_ParseServerMessage()).not.toThrow();
+    expect(cl.configstrings[CS_SKYROTATE]).toBe("15 0");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.rotate).toBeCloseTo(15, 5);
+    expect(calls[0]?.autorotate).toBe(false);
+  });
+
+  test("svc_configstring on CS_SKYROTATE updates cl.configstrings without touching the renderer while refresh_prepped is false", () => {
+    const calls: Array<{ name: string; rotate: number; autorotate: boolean; axis: [number, number, number] }> = [];
+    setRe(fakeReForSky(calls));
+    cls.csr = CS_REMAP_RERELEASE;
+    expect(cl.refresh_prepped).toBe(false);
+
+    MSG_WriteByte(net_message, SvcOpsT.svc_configstring);
+    MSG_WriteShort(net_message, CS_SKYROTATE);
+    writeCString("15 0");
+    MSG_BeginReading(net_message);
+
+    expect(() => CL_ParseServerMessage()).not.toThrow();
+    expect(cl.configstrings[CS_SKYROTATE]).toBe("15 0");
+    expect(calls).toHaveLength(0);
+  });
+
   test("svc_configstring out of range calls Com_Error(ERR_DROP)", () => {
     MSG_WriteByte(net_message, SvcOpsT.svc_configstring);
     MSG_WriteShort(net_message, 99999);
@@ -304,6 +348,91 @@ function writeCString(s: string): void {
   for (let i = 0; i < s.length; i++) MSG_WriteByte(net_message, s.charCodeAt(i));
   MSG_WriteByte(net_message, 0);
 }
+
+// Minimal RefExports fixture recording SetSky calls, modeled on
+// test/cl_menu.test.ts's own fakeRe (every other member is a no-op stub;
+// this suite only asserts on SetSky's arguments).
+function fakeReForSky(calls: Array<{ name: string; rotate: number; autorotate: boolean; axis: [number, number, number] }>): RefExports {
+  return {
+    api_version: API_VERSION,
+    Init: () => true,
+    Shutdown: () => {},
+    BeginRegistration: () => {},
+    RegisterModel: () => null,
+    RegisterSkin: () => null,
+    RegisterPic: () => null,
+    RegisterRawPic: () => null,
+    SetSky: (name, rotate, autorotate, axis) => {
+      calls.push({ name, rotate, autorotate, axis: [axis[0], axis[1], axis[2]] });
+    },
+    EndRegistration: () => {},
+    RenderFrame: () => {},
+    SupportsPerPixelLighting: () => false,
+    DrawGetPicSize: () => ({ w: 0, h: 0 }),
+    DrawPic: () => {},
+    DrawStretchPic: () => {},
+    DrawColorPic: () => {},
+    DrawStretchPicRegion: () => {},
+    DrawChar: () => {},
+    DrawTileClear: () => {},
+    DrawFill: () => {},
+    DrawFadeScreen: () => {},
+    DrawStretchRaw: () => {},
+    CinematicSetPalette: () => {},
+    SetGifBeatSeconds: () => {},
+    BeginFrame: () => {},
+    EndFrame: () => {},
+    AppActivate: () => {},
+  };
+}
+
+/*
+task: "the sky rotates when the map says it should not" -- CL_SetSky
+(cl_view.ts) is q2repro precache.c's CL_SetSky(): CS_SKYROTATE carries one
+token ("<rotate>") under the classic/narrow configstring layout and two
+("<rotate> <autorotate>") under the rerelease/wide layout (cls.csr.extended),
+exactly like precache.c:380-383's `cl.csr.extended ? sscanf(..., "%f %d",
+...) : Q_atof(...)`. This is the direct fix for the reported bug: the old
+code (`parseFloat(cl.configstrings[CS_SKYROTATE])`) threw the autorotate
+token away entirely, so a worldspawn/target_sky with skyautorotate=0 still
+spun continuously in gl_warp.ts's R_DrawSkyBox.
+*/
+describe("CL_SetSky (cl_view.ts) -- CS_SKYROTATE parse", () => {
+  function callSetSky(rotateCs: string, wide: boolean): { name: string; rotate: number; autorotate: boolean; axis: [number, number, number] } | undefined {
+    const calls: Array<{ name: string; rotate: number; autorotate: boolean; axis: [number, number, number] }> = [];
+    setRe(fakeReForSky(calls));
+    cls.csr = wide ? CS_REMAP_RERELEASE : CS_REMAP_OLD;
+    cl.configstrings[CS_SKY] = "unit1_";
+    cl.configstrings[CS_SKYROTATE] = rotateCs;
+    cl.configstrings[CS_SKYAXIS] = "0 0 1";
+    CL_SetSky();
+    return calls[0];
+  }
+
+  test("narrow layout (classic 1997 wire): CS_SKYROTATE is a bare float, autorotate defaults to true", () => {
+    const call = callSetSky("8.000000", false);
+    expect(call?.rotate).toBeCloseTo(8, 5);
+    expect(call?.autorotate).toBe(true);
+  });
+
+  test("wide layout, two-token form, autorotate=1: continuous spin (the vanilla-compatible default)", () => {
+    const call = callSetSky("8 1", true);
+    expect(call?.rotate).toBeCloseTo(8, 5);
+    expect(call?.autorotate).toBe(true);
+  });
+
+  test("wide layout, two-token form, autorotate=0: FIXED rotation -- the bug this task fixes", () => {
+    const call = callSetSky("8 0", true);
+    expect(call?.rotate).toBeCloseTo(8, 5);
+    expect(call?.autorotate).toBe(false);
+  });
+
+  test("wide layout, single-token form (a target_sky that only ever set rotate): autorotate stays at its default (true)", () => {
+    const call = callSetSky("8", true);
+    expect(call?.rotate).toBeCloseTo(8, 5);
+    expect(call?.autorotate).toBe(true);
+  });
+});
 
 describe("CL_ParseStartSoundPacket", () => {
   test("returns without calling S_StartSound (still a pending stub) when the sound isn't precached", () => {

@@ -190,6 +190,40 @@ let fs_data_roots: string[] = [];
 let fs_data_root_packs: PackT[] = [];
 
 /*
+How many times the mounted content has been re-rooted under this process.
+Bumped by FS_SetDataRoot and by nothing else.
+
+WHY ANYTHING NEEDS THIS. The engine caches loaded content BY FILENAME and
+treats a name match as proof the cached copy is still the right one:
+cmodel.ts's CM_LoadMap returns its cached collision map when `map_name ===
+name`, and the renderers' Mod_ForName/R_BeginRegistration keep mod_known[0]
+when the world model's name matches. Both assumptions hold for the entire
+life of a classic engine process, where the search path is laid down once at
+boot. They stop holding the moment a `data_root` switch re-roots the whole
+filesystem: "maps/base1.bsp" is then a DIFFERENT file than the one that name
+resolved to a second ago -- the 1997 base1 has 35 inline models, the 2023 one
+has 45.
+
+That is Mike's 2026-09-02 play test, finding 1. Launching classic-ruleset/
+classic-maps after any earlier launch left the server holding the re-release
+base1 from its name cache ("Map carries the fog_color key ...", 41 entities
+inhibited) while the renderer -- flushed by the vid_restart the switch
+queues -- reloaded the 1997 base1 with 35 submodels, so the first "*35"
+inline-model configstring the client registered died on gl_model.ts's "bad
+inline model number".
+
+Consumers compare the value they loaded at against FS_Generation() and treat
+a difference as a cache miss.
+*/
+let fs_generation = 0;
+
+// See fs_generation's header. Consumers cache this alongside whatever they
+// loaded and reload when it no longer matches.
+export function FS_Generation(): number {
+  return fs_generation;
+}
+
+/*
 The single path-prefix preference described at FS_FOpenFile's own carve-out
 comment: files under `prefix` are looked for in `root` before the normal
 search order is walked. Null unless a `data_root ... maps=<tree>` switch
@@ -216,6 +250,43 @@ function searchPathLocation(search: SearchPathT): string {
 function preferredRootFor(filename: string): string | null {
   if (!fs_path_pref) return null;
   return filename.toLowerCase().startsWith(fs_path_pref.prefix) ? fs_path_pref.root : null;
+}
+
+// Does `path` sit at or below `root`, counting whole path components only?
+// A plain startsWith() would also accept "/q2/baseq2-old" for root "/q2/
+// baseq2", which is not the same directory at all.
+function pathIsUnder(path: string, root: string): boolean {
+  if (!root.length) return false;
+  const r = root.endsWith("/") ? root.slice(0, -1) : root;
+  return path === r || path.startsWith(`${r}/`);
+}
+
+/*
+Which mounted data root a search-path entry actually belongs to: the DEEPEST
+(longest) one that contains it, or null for an entry no data root mounted
+(the homedir tier, or a cddir mount).
+
+THE LONGEST MATCH IS THE WHOLE POINT, and this is not a theoretical nicety.
+The retail Steam layout -- and this machine -- nests the 2023 tree INSIDE the
+1997 one: /home/buzzkill/q2rets is the classic root and
+/home/buzzkill/q2rets/rerelease is the re-release root. Every re-release pack
+path therefore also has the classic root as a prefix. Asking "does this entry
+start with the preferred root" answered "yes" for both trees' packs, so the
+`maps=classic` carve-out below walked the RE-RELEASE packs first (they are
+mounted primary under the kex ruleset, so they sit nearer the head of the
+search path) and handed back the re-release maps/base1.bsp for a launch that
+had explicitly asked for the 1997 geometry -- Mike's 2026-09-02 play test,
+finding 2 ("even though i said use the classic maps it's using the
+rerelease"). Attributing each entry to its deepest containing root makes the
+two trees distinguishable again.
+*/
+function owningDataRoot(location: string): string | null {
+  let best: string | null = null;
+  for (const root of fs_data_roots) {
+    if (!pathIsUnder(location, root)) continue;
+    if (best === null || root.length > best.length) best = root;
+  }
+  return best;
 }
 
 // closeSync that tolerates an fd another teardown already closed, and marks
@@ -299,6 +370,11 @@ export function FS_TestRestoreSearchPaths(snapshot: FsSearchPathSnapshotT): void
   fs_data_roots = [...snapshot.dataRoots];
   fs_data_root_packs = [...snapshot.dataRootPacks];
   fs_path_pref = snapshot.pathPref;
+  // What every filename resolves to just changed, exactly as it does for a
+  // real data-root switch -- so the name-keyed caches (see fs_generation)
+  // have to miss here too, or one test file's fixture map stays live inside
+  // cmodel.ts for the next one that loads a map of the same name.
+  fs_generation++;
 }
 
 // Read-only view of the mounted search path, head (highest priority) first,
@@ -688,7 +764,11 @@ export function FS_FOpenFile(filename: string): FsOpenResult | null {
   const preferredRoot = preferredRootFor(filename);
   if (preferredRoot !== null) {
     for (let search = fs_searchpaths; search; search = search.next) {
-      if (!searchPathLocation(search).startsWith(preferredRoot)) continue;
+      // owningDataRoot, not a prefix test: the two data trees can be NESTED
+      // (this machine's re-release install is a subdirectory of its classic
+      // one), so only the deepest containing root identifies an entry's tree.
+      // See owningDataRoot's own header for the play-test finding this fixes.
+      if (owningDataRoot(searchPathLocation(search)) !== preferredRoot) continue;
       const hit = openFromSearchPath(search, filename);
       if (hit) return hit;
     }
@@ -1297,17 +1377,67 @@ export function FS_SetDataRoot(roots: readonly string[], mapsFromRoot = ""): voi
   const gamedir = cvarMod().Cvar_VariableString("gamedir");
   if (gamedir.length) mountGamedirTier(gamedir);
 
+  // Every name-keyed content cache in the engine is now stale (see
+  // fs_generation's header). Bump BEFORE the restarts below so anything they
+  // trigger already reloads against the new roots.
+  fs_generation++;
+
   // flush all data, so it will be forced to reload -- every cached texture,
   // model and sound just changed which tree it comes from. Same mechanism
   // and same reason as FS_SetGamedir's own flush.
+  //
+  // Cbuf_InsertText, NOT Cbuf_AddText -- and this is the difference between
+  // working and not. The New Game screen queues its whole launch as ONE
+  // string (menu_content.ts's PerformLaunch: "loading ; killserver ; wait ;
+  // data_root ... ; wait ; map <bsp>"), so by the time this runs the command
+  // buffer still holds the `map` command that is the entire point of the
+  // switch. Appending puts the renderer restart AFTER that map load -- the
+  // renderer then drops and reloads its world model out from under a server
+  // that has already published inline-model configstrings for the OTHER
+  // tree's copy of the same map. Inserting runs it immediately after the
+  // current command, so the flush lands before the map load and both sides
+  // read the same file. FS_SetGamedir's own append is left alone: it is
+  // vanilla-faithful and runs from inside `map` itself, where there is no
+  // pending load left to get ahead of.
+  //
+  // `killserver` leads, for the console-typed case. The New Game screen
+  // already kills the server before it gets here, but `data_root` is a plain
+  // console command and typing it mid-level used to hard-error: the running
+  // session's configstrings still name the OLD tree's inline models ("*35"
+  // through "*44" for the 2023 base1), while the vid_restart below makes the
+  // client re-prep its refresh against the NEW tree, where base1 has 35
+  // submodels total -- gl_model.ts's "bad inline model number", observed
+  // directly. Nothing loaded under the old roots survives a re-root, so the
+  // session that was running on them has to end. It is a no-op when no
+  // server is up (sv_ccmds.ts's SV_KillServer_f returns immediately unless
+  // svs.initialized), which is what makes it safe to lead with
+  // unconditionally.
   if (dedicated && !dedicated.value) {
-    cmdMod().Cbuf_AddText("vid_restart\nsnd_restart\n");
+    cmdMod().Cbuf_InsertText("killserver\nvid_restart\nsnd_restart\n");
   }
 
   // Record what this call opened, so the next one closes exactly it.
   fs_data_root_packs = mountedPacks();
 
   Com_Printf("Data root: %s%s\n", wanted.slice().reverse().join(" over "), fs_path_pref ? ` (maps/ from ${fs_path_pref.root})` : "");
+
+  // Re-read the localization table against the tree stack that is now
+  // mounted. Loc_Init runs exactly once, as the last statement of
+  // FS_InitFilesystem (mirroring q2repro's files.c:4046), which is correct
+  // for a process whose search path never moves -- but the whole loc table
+  // comes out of Q2Game.kpf, and which roots contribute a Q2Game.kpf is
+  // precisely what this function just changed.
+  //
+  // On this machine that is the difference between localized objective text
+  // and raw keys: basedir is the 1997 tree (/home/buzzkill/q2rets), which has
+  // no Q2Game.kpf at all, so boot loads ZERO localization strings and every
+  // `$g_primary_mission_objective` renders as its own key -- Mike's
+  // 2026-09-02 play test, finding 3. The re-release tree nested underneath it
+  // does carry the kpf, and mountBaseTier's add_game_kpf mounts it for every
+  // root it lays down, so re-reading here makes the lookup resolve under
+  // every arrangement that has a kpf anywhere in the stack (re-release
+  // primary, or classic primary with re-release as the fallback root).
+  locMod().Loc_ReloadFile();
 }
 
 // Resolve a data-tree id ("classic"/"rerelease") to its configured root

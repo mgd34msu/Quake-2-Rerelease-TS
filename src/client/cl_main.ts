@@ -99,7 +99,7 @@ import {
 } from "../qcommon/net_chan";
 import { SizeBuf, SZ_Init, SZ_Clear, SZ_Print, MSG_WriteByte, MSG_WriteChar, MSG_WriteShort, MSG_WriteLong, MSG_WriteString, MSG_ReadString, MSG_ReadStringLine, MSG_BeginReading, MSG_ReadLong } from "../qcommon/sizebuf";
 import { FS_Gamedir, FS_CreatePath, FS_FOpenFileWrite, FS_Write, FS_FCloseFile, FS_ExecAutoexec, FS_LoadFile } from "../qcommon/files";
-import { CM_LoadMap, CM_NumTexinfo, CM_TexinfoName } from "../qcommon/cmodel";
+import { CM_LoadMap, CM_MapIsCurrentContent, CM_NumTexinfo, CM_TexinfoName } from "../qcommon/cmodel";
 import { readMd2SkinNames } from "../qcommon/qfiles";
 import { COM_FileExtension } from "../shared/math";
 import { SV_Shutdown } from "../server/sv_main";
@@ -2161,7 +2161,19 @@ export function CL_Frame(msec: number): void {
 
   // allow rendering DLL change
   VID_CheckChanges();
-  if (!cl.refresh_prepped && cls.state === ConnstateT.ca_active) CL_PrepRefresh();
+  // CM_MapIsCurrentContent is the added third condition (see its own header
+  // in cmodel.ts). A `data_root` switch re-roots the filesystem underneath a
+  // session that is still running: the server's inline-model configstrings
+  // still describe the OLD tree's copy of the map (the 2023 base1 publishes
+  // "*35" through "*44"), while the vid_restart the switch queues clears
+  // cl.refresh_prepped and sends the client straight back through
+  // CL_PrepRefresh -- which now resolves maps/base1.bsp to the NEW tree's
+  // copy, 35 submodels in total, and dies in gl_model.ts's Mod_ForName with
+  // "bad inline model number". Observed directly by typing `data_root` mid-
+  // level. The switch tears the server down as part of the same remount, so
+  // the connection is ending regardless; skipping the doomed re-prep turns a
+  // hard ERR_DROP into the clean teardown that was already coming.
+  if (!cl.refresh_prepped && cls.state === ConnstateT.ca_active && CM_MapIsCurrentContent()) CL_PrepRefresh();
 
   // update the screen
   SCR_UpdateScreen();

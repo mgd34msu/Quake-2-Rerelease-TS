@@ -1345,7 +1345,24 @@ export function SP_worldspawn(ent: EdictT): void {
     gi.configstring(CS_SKY, "unit1_");
   }
 
-  gi.configstring(CS_SKYROTATE, Com_sprintf("%f", st.skyrotate));
+  // Client-side gate (cl_view.ts's CL_SetSky / cl_parse.ts's
+  // CL_ParseConfigString): `cls.csr.extended` decides whether CS_SKYROTATE
+  // is parsed as "<rotate>" or "<rotate> <autorotate>" (q2repro
+  // precache.c:380-383). `gi.extended_layout()` is this module's mirror of
+  // that same session-wide layout decision (sv_init.ts's "CONTENT-DRIVEN
+  // LAYOUT CHOICE"), so it has to be the gate here too: a classic-module
+  // session running 1997 map data always runs on the narrow layout, and
+  // MUST keep emitting exactly the bare `%f` string it always has -- that
+  // byte-for-byte content is what keeps a narrow session's traffic (and
+  // rendered frame) identical to the pre-existing build. Only a WIDE
+  // session (rerelease content through the classic module) gets the
+  // two-token form, matching src/kexgame/g_spawn.ts:1877's own
+  // `${st.skyrotate} ${st.skyautorotate}` write for the kex module.
+  if (gi.extended_layout?.() === true) {
+    gi.configstring(CS_SKYROTATE, `${st.skyrotate} ${st.skyautorotate}`);
+  } else {
+    gi.configstring(CS_SKYROTATE, Com_sprintf("%f", st.skyrotate));
+  }
 
   gi.configstring(CS_SKYAXIS, Com_sprintf("%f %f %f", st.skyaxis[0], st.skyaxis[1], st.skyaxis[2]));
 
