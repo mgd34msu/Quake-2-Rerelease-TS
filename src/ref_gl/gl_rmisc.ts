@@ -28,6 +28,7 @@ guards it is kept.
 import { PRINT_ALL, Com_sprintf } from "../shared/q_shared";
 import { fixedLength } from "../shared/fixed";
 import { ri, glCvars, vid, gl_config, gl_filter_min, gl_filter_max, d_8to24table, ImagetypeT, SetParticleTexture, SetNoTexture } from "./gl_local";
+import type * as GlRmainModule from "./gl_rmain";
 import {
   qgl,
   GL_TEXTURE_2D,
@@ -52,6 +53,14 @@ import {
 // gl_*.ts, see gl_light.ts/gl_rsurf.ts's identical note.
 const GL_FRONT = 0x0404;
 const GL_FRONT_AND_BACK = 0x0408;
+// ARB_framebuffer_object / GL3.0 core -- see glimp.ts's own identical
+// constants (this file needs only these two, for GL_ScreenShot_f's
+// read-framebuffer redirect below; qgl.ts's QGL interface takes numeric
+// target/attachment arguments as plain `number`, same reason glimp.ts
+// defines its own copies rather than sharing a GL-enum module that doesn't
+// exist yet -- see this file's own note above GL_FRONT).
+const GL_READ_FRAMEBUFFER = 0x8ca8;
+const GL_FRAMEBUFFER = 0x8d40;
 const GL_FILL = 0x1b02;
 const GL_FLAT = 0x1d00;
 const GL_GREATER = 0x0204;
@@ -119,6 +128,16 @@ export function R_InitParticleTexture(): void {
   SetNoTexture(GL_LoadPic("***r_notexture***", notextureData, 8, 8, ImagetypeT.it_wall, 32));
 }
 
+// gl_rmain.ts statically imports this file's GL_ScreenShot_f (see this
+// file's own header comment) -- importing its `glimp` back from here would
+// close that loop, so it is resolved lazily on this (less fundamental)
+// side, the same idiom vid.ts/glimp.ts/sdl.ts already use for their own
+// back-references. Only GL_ScreenShot_f's read-framebuffer redirect below
+// needs it.
+function gl_rmainMod(): typeof GlRmainModule {
+  return require("./gl_rmain");
+}
+
 /*
 ==================
 GL_ScreenShot_f
@@ -156,7 +175,27 @@ export function GL_ScreenShot_f(): void {
   buffer[15] = (vid.height >> 8) & 255;
   buffer[16] = 24; // pixel size
 
+  // Bug fix (Mike, 2026-09-02): client/cl_main.ts's own per-frame order
+  // runs Cbuf_Execute() (what actually invokes this "screenshot" command)
+  // BEFORE that frame's R_BeginFrame(), so without this redirect
+  // qglReadPixels below reads whatever framebuffer 0 (the real window) was
+  // left holding by the PREVIOUS frame's already-blitted, letterboxed
+  // content -- see glimp.ts's GLimp_GetScaleReadFramebuffer doc comment
+  // for the full story and how this was actually observed (a real
+  // captured screenshot with a stray letterbox-color stripe baked in).
+  // `readFbo` is null (no bind needed -- framebuffer 0 already IS the
+  // clean render target) whenever vid_scale's render-resolution FBO isn't
+  // active, or this GLimp doesn't implement the concept at all.
+  const readFbo = gl_rmainMod().glimp.GetScaleReadFramebuffer?.();
+  if (readFbo !== null && readFbo !== undefined && qgl.qglBindFramebuffer) {
+    qgl.qglBindFramebuffer(GL_READ_FRAMEBUFFER, readFbo);
+  }
+
   qgl.qglReadPixels(0, 0, vid.width, vid.height, GL_RGB, GL_UNSIGNED_BYTE, buffer.subarray(18));
+
+  if (readFbo !== null && readFbo !== undefined && qgl.qglBindFramebuffer) {
+    qgl.qglBindFramebuffer(GL_FRAMEBUFFER, 0); // restore -- see this block's own comment above
+  }
 
   // swap rgb to bgr
   const c = 18 + vid.width * vid.height * 3;

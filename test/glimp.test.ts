@@ -107,7 +107,25 @@ const SHADER_SYMBOL_NAMES = [
 // v1.0.0 RC vid_scale (resolution-scaling render target, src/platform/glimp.ts):
 // qgl.ts's resolveGLFramebufferAPI resolves this ARB_framebuffer_object
 // group the same all-or-nothing way as the GL2 program-object group above.
-const FRAMEBUFFER_SYMBOL_NAMES = ["glGenFramebuffers", "glBindFramebuffer", "glFramebufferTexture2D", "glCheckFramebufferStatus", "glBlitFramebuffer", "glDeleteFramebuffers"];
+// Bug fix (Mike, 2026-09-02): the five renderbuffer entry points
+// (glGenRenderbuffers..glDeleteRenderbuffers) joined this same
+// all-or-nothing group -- the render-scale FBO now attaches a real depth
+// renderbuffer (see glimp.ts's GLScale_Setup) instead of a color-only
+// target that broke depth-dependent rendering (world/lightmap geometry
+// missing from the frame -- confirmed with a real capture).
+const FRAMEBUFFER_SYMBOL_NAMES = [
+  "glGenFramebuffers",
+  "glBindFramebuffer",
+  "glFramebufferTexture2D",
+  "glCheckFramebufferStatus",
+  "glBlitFramebuffer",
+  "glDeleteFramebuffers",
+  "glGenRenderbuffers",
+  "glBindRenderbuffer",
+  "glRenderbufferStorage",
+  "glFramebufferRenderbuffer",
+  "glDeleteRenderbuffers",
+];
 
 describe("src/ref_gl/qgl.ts -- loadQGLFromSystem's getProcAddress wiring", () => {
   test("queries every *_EXT/*_SGIS name through the resolver and falls back to a no-op when it comes back empty", () => {

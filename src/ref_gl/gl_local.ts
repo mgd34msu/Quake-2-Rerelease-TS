@@ -295,6 +295,13 @@ export const glCvars: {
   // already use; glimp.ts reads the cvar's live value directly, not through
   // this struct.
   vid_scale: CvarT | null;
+  // Bug fix (Mike, 2026-09-02): same reason as vid_scale immediately above
+  // -- tracked here so R_BeginFrame can detect "modified" and force a mode
+  // restart when only "scale to fullscreen" changes (previously missing
+  // entirely, so that toggle alone never took effect until some other
+  // video-menu change also forced a restart). glimp.ts still reads the
+  // cvar's live value directly, not through this struct.
+  vid_scale_fit: CvarT | null;
 
   intensity: CvarT | null;
 
@@ -394,6 +401,7 @@ export const glCvars: {
   vid_fullscreen: null,
   vid_gamma: null,
   vid_scale: null,
+  vid_scale_fit: null,
 
   intensity: null,
 
@@ -503,7 +511,41 @@ export class GlconfigT {
   version_string = "";
   extensions_string = "";
 
-  allow_cds = false;
+  // Bug fix (Mike, 2026-09-02, owner's play-test report: fullscreen simply
+  // never engaged -- "fit screen ... was not applied at all"). Root cause
+  // #3 (see src/platform/sdl.ts's desktopDisplaySize for #1 and
+  // gl_rmain.ts's R_BeginFrame OR-condition for #2), and the decisive one:
+  // gl_rmain.ts's R_SetMode gates vid_fullscreen on `gl_config.allow_cds`,
+  // but R_Init calls R_SetMode BEFORE it can determine allow_cds at all --
+  // that requires GL_VENDOR/GL_RENDERER strings, which requires the live
+  // context R_SetMode itself is what creates. This field used to default
+  // false, so on the very first R_SetMode of a process (this module-level
+  // gl_config is a true singleton -- constructed once, same "static
+  // persists across re-init" semantics the real allow_cds detection below
+  // relies on -- so this default is read exactly once per process, ever)
+  // vid_fullscreen.modified is unconditionally true (Cvar_Get sets it on
+  // every cvar's first-ever registration, and R_Register -- called from
+  // inside this same R_Init, right before R_SetMode -- is that first
+  // registration for a session that boots straight into `vid_ref gl`),
+  // and the CDS gate fired unconditionally, force-flipping vid_fullscreen
+  // to 0 regardless of what was actually requested (`vid_fullscreen 1` in
+  // config.cfg, `+set vid_fullscreen 1`, or the video menu) -- confirmed
+  // empirically: every headless verification run for this fix printed
+  // "R_SetMode() - CDS not allowed with this driver" and booted windowed
+  // even with `+set vid_fullscreen 1 +set vid_ref gl` on the command line.
+  // Once R_Init completes one time, this field is set for real (line
+  // ~1690 below: true for every renderer except a 3dlabs card with
+  // gl_3dlabs_broken on) and STAYS set for the rest of the process, so
+  // this default is only ever actually consulted on that first call --
+  // defaulting it to true (the same value the real detection lands on for
+  // every non-3dlabs-broken card, i.e. essentially all hardware in 2026)
+  // means the gate no longer misfires on a fresh boot for the overwhelming
+  // majority of players, at the cost of a 3dlabs-broken card's first-ever
+  // boot behaving the same permissive way every OTHER card's first boot
+  // already did under the old default -- no worse than before for that
+  // vanishingly rare case, since the vendor genuinely cannot be known
+  // before this first call either way.
+  allow_cds = true;
 }
 
 export class GlstateT {

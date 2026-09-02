@@ -546,6 +546,13 @@ export const rCvars: {
   // can detect "modified" the same way sw_mode/vid_fullscreen already do;
   // swimp.ts reads the cvar's live value directly, not through this struct.
   vid_scale: CvarT | null;
+  // Bug fix (Mike, 2026-09-02): same reason as vid_scale immediately above
+  // -- tracked here so R_BeginFrame's mode-restart loop can detect
+  // "modified" when only "scale to fullscreen" changes (previously missing
+  // entirely: that toggle alone never took effect until some other
+  // video-menu change also forced a restart). swimp.ts still reads the
+  // cvar's live value directly, not through this struct.
+  vid_scale_fit: CvarT | null;
 } = {
   sw_aliasstats: null,
   sw_clearcolor: null,
@@ -576,6 +583,7 @@ export const rCvars: {
   vid_fullscreen: null,
   vid_gamma: null,
   vid_scale: null,
+  vid_scale_fit: null,
 };
 
 export const view_clipplanes: [ClipplaneT, ClipplaneT, ClipplaneT, ClipplaneT] = [

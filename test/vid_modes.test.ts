@@ -161,9 +161,15 @@ describe("src/platform/vid.ts -- VID_GetScale/VID_ClampScale (vid_scale cvar, ba
     expect(VID_GetScale()).toBeCloseTo(0.5, 6);
   });
 
-  test("a value above 1.0 clamps to VID_SCALE_MAX -- no supersampling", () => {
+  // Bug fix (Mike, 2026-09-02, owner's play-test report: "you max out the
+  // scale at 1.0x ... how are we supposed to scale the screen up if it
+  // ends at 1.0x?"): VID_SCALE_MAX is now 2.0, real supersampling (see
+  // vid_scale.ts's header comment) -- this used to read "no supersampling"
+  // when MAX was still 1.0; still clamps above the new ceiling the same way.
+  test("a value above VID_SCALE_MAX clamps to it -- 2.0x supersampling is the real ceiling now, not 1.0x", () => {
     Cvar_SetValue("vid_scale", 4);
     expect(VID_GetScale()).toBe(VID_SCALE_MAX);
+    expect(VID_SCALE_MAX).toBe(2.0);
   });
 
   test("a zero, negative, or non-numeric value clamps to VID_SCALE_MIN or the default, never 0", () => {
@@ -202,7 +208,10 @@ describe("src/platform/vid_scale.ts -- VID_CalcRenderSize (display size * scale 
   });
 
   test("an out-of-range scale is clamped before being applied", () => {
-    expect(VID_CalcRenderSize(1000, 1000, 5)).toEqual({ width: 1000, height: 1000 }); // clamped to 1.0
+    // Bug fix (Mike, 2026-09-02): clamped to VID_SCALE_MAX, now 2.0 (real
+    // supersampling), not the old 1.0 ceiling -- see vid_scale.ts's header
+    // comment and this file's own "no supersampling" test above.
+    expect(VID_CalcRenderSize(1000, 1000, 5)).toEqual({ width: 2000, height: 2000 }); // clamped to VID_SCALE_MAX (2.0)
     expect(VID_CalcRenderSize(1000, 1000, 0)).toEqual({ width: 100, height: 100 }); // clamped to VID_SCALE_MIN (0.1)
   });
 });

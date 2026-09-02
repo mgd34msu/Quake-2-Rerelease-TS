@@ -140,3 +140,38 @@ describe("gl_rmain.ts -- R_Init's GL string dump matches q2repro's verbosity", (
     expect(src).not.toMatch(/ri\.Con_Printf\(PRINT_ALL, `GL_EXTENSIONS:/);
   });
 });
+
+describe("gl_rmain.ts -- R_BeginFrame's mode-restart trigger covers vid_scale_fit", () => {
+  // Bug fix (Mike, 2026-09-02, owner's play-test report: "scale to
+  // fullscreen: fit screen ... was not applied at all"). Root cause #2 (see
+  // src/platform/sdl.ts's desktopDisplaySize for #1): vid_scale_fit was
+  // missing from glCvars entirely, so R_BeginFrame's OR-condition below
+  // could never see it modified -- toggling ONLY "scale to fullscreen" in
+  // the video menu (no other mode/scale/fullscreen change) wrote the cvar
+  // but never forced R_SetMode to run again, leaving GLimp_SetMode's cached
+  // scaleFit at whatever it was the last time a real mode-restart happened.
+  //
+  // R_BeginFrame itself can't be driven end to end headlessly (same reason
+  // the R_Init test above reads source rather than calling in: it goes
+  // straight into glimp.BeginFrame/live qgl calls this test environment has
+  // no real GL context for -- see this file's own top-of-file note and
+  // test/glimp.test.ts's header comment on why VID_LoadRefresh("ref_gl")
+  // through R_Init/R_BeginFrame is deliberately not driven end-to-end in
+  // this suite either), so this pins the same exact source shape the
+  // GL_VENDOR/GL_EXTENSIONS tests above do.
+  const src = readFileSync(join(import.meta.dir, "..", "src", "ref_gl", "gl_rmain.ts"), "utf8");
+
+  test("vid_scale_fit.modified joins gl_mode/vid_fullscreen/vid_scale in the vid_ref-restart OR-condition", () => {
+    expect(src).toContain(
+      "if ((glCvars.gl_mode && glCvars.gl_mode.modified) || (glCvars.vid_fullscreen && glCvars.vid_fullscreen.modified) || (glCvars.vid_scale && glCvars.vid_scale.modified) || (glCvars.vid_scale_fit && glCvars.vid_scale_fit.modified)) {",
+    );
+  });
+
+  test("R_SetMode clears vid_scale_fit.modified alongside gl_mode/vid_fullscreen/vid_scale (no re-trigger loop every frame)", () => {
+    expect(src).toContain("if (glCvars.vid_scale_fit) glCvars.vid_scale_fit.modified = false;");
+  });
+
+  test("glCvars registers vid_scale_fit with CVAR_ARCHIVE, matching vid.ts's VID_GetScaleFit default", () => {
+    expect(src).toMatch(/glCvars\.vid_scale_fit = ri\.Cvar_Get\("vid_scale_fit", "1", CVAR_ARCHIVE\);/);
+  });
+});

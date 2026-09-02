@@ -58,7 +58,7 @@ import { Cvar_Get, Cvar_Set, Cvar_SetValue, Cvar_VariableValue } from "../qcommo
 import { CVAR_ARCHIVE, CVAR_FILES, type CvarT } from "../shared/q_shared";
 import { viddef } from "../client/vid";
 import { re } from "../client/client";
-import { VID_ClampCustomHeight, VID_ClampCustomWidth, VID_ClampScale, VID_SCALE_MAX } from "./vid_scale";
+import { VID_ClampCustomHeight, VID_ClampCustomWidth, VID_ClampScale, VID_SCALE_DEFAULT, VID_SCALE_MAX, VID_SCALE_MIN } from "./vid_scale";
 
 const REF_SOFT = 0;
 const REF_SOFTX11 = 1;
@@ -265,7 +265,13 @@ export const CUSTOM_MODE_INDEX = resolutions.length - 1;
 // exports.
 export function ScaleFormatter(curvalue: number): string {
   const scale = curvalue / 10;
-  const native = scale >= VID_SCALE_MAX ? " (native)" : "";
+  // Bug fix (Mike, 2026-09-02): this used to compare against VID_SCALE_MAX,
+  // which was a correct proxy for "native" only because MAX and DEFAULT
+  // both happened to be 1.0 -- now that MAX is 2.0 (supersampling, see
+  // vid_scale.ts's header comment), "native" has to key off DEFAULT
+  // (always 1.0) directly, not off whatever the top of the slider's range
+  // happens to be.
+  const native = scale === VID_SCALE_DEFAULT ? " (native)" : "";
   return `${scale.toFixed(2)}x${native}`;
 }
 
@@ -516,8 +522,14 @@ export function VID_MenuInit(): void {
     s_scale_slider[i].generic.x = 0;
     s_scale_slider[i].generic.y = 64;
     s_scale_slider[i].generic.name = "resolution scale";
-    s_scale_slider[i].minvalue = 1; // VID_SCALE_MIN (0.1) * 10
-    s_scale_slider[i].maxvalue = 10; // VID_SCALE_MAX (1.0) * 10
+    // Bug fix (Mike, 2026-09-02): maxvalue used to be a hardcoded 10 (i.e.
+    // VID_SCALE_MAX(1.0)*10), capping the slider at "native" with nothing
+    // above it -- see vid_scale.ts's header comment on why 2.0x
+    // (supersampling) is now a real, allocated render size. Driven off the
+    // constants directly rather than re-hardcoded, so this can't drift from
+    // vid_scale.ts's own range again.
+    s_scale_slider[i].minvalue = VID_SCALE_MIN * 10;
+    s_scale_slider[i].maxvalue = VID_SCALE_MAX * 10;
     s_scale_slider[i].valueFormatter = ScaleFormatter;
 
     // QoL addition (Mike, 2026-09-01): "scale to fullscreen" -- see this

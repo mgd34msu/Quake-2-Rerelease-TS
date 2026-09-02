@@ -348,6 +348,13 @@ export function R_Register(): void {
   rCvars.vid_fullscreen = ri.Cvar_Get("vid_fullscreen", "0", CVAR_ARCHIVE);
   rCvars.vid_gamma = ri.Cvar_Get("vid_gamma", "1.0", CVAR_ARCHIVE);
   rCvars.vid_scale = ri.Cvar_Get("vid_scale", "1", CVAR_ARCHIVE);
+  // Bug fix (Mike, 2026-09-02): was missing from this file entirely, so
+  // toggling "scale to fullscreen" alone (no other video-menu change) and
+  // hitting Apply wrote the cvar but never reached R_BeginFrame's
+  // mode-restart loop below -- SWimp_SetMode's cached fit choice stayed
+  // whatever it was at the last real mode set. See vid.ts's
+  // VID_GetScaleFit for the cvar's own registration/default.
+  rCvars.vid_scale_fit = ri.Cvar_Get("vid_scale_fit", "1", CVAR_ARCHIVE);
 
   ri.Cmd_AddCommand("modellist", Mod_Modellist_f);
   ri.Cmd_AddCommand("screenshot", R_ScreenShot_f);
@@ -1019,7 +1026,7 @@ export function R_BeginFrame(camera_separation: number): void {
     rCvars.vid_gamma.modified = false;
   }
 
-  while ((rCvars.sw_mode && rCvars.sw_mode.modified) || (rCvars.vid_fullscreen && rCvars.vid_fullscreen.modified) || (rCvars.vid_scale && rCvars.vid_scale.modified)) {
+  while ((rCvars.sw_mode && rCvars.sw_mode.modified) || (rCvars.vid_fullscreen && rCvars.vid_fullscreen.modified) || (rCvars.vid_scale && rCvars.vid_scale.modified) || (rCvars.vid_scale_fit && rCvars.vid_scale_fit.modified)) {
     const modeVal = rCvars.sw_mode ? rCvars.sw_mode.value : 0;
     const fsVal = rCvars.vid_fullscreen ? rCvars.vid_fullscreen.value !== 0 : false;
 
@@ -1034,6 +1041,7 @@ export function R_BeginFrame(camera_separation: number): void {
       if (rCvars.vid_fullscreen) rCvars.vid_fullscreen.modified = false;
       if (rCvars.sw_mode) rCvars.sw_mode.modified = false;
       if (rCvars.vid_scale) rCvars.vid_scale.modified = false;
+      if (rCvars.vid_scale_fit) rCvars.vid_scale_fit.modified = false;
     } else if (err === RserrT.rserr_invalid_mode) {
       // clear the flags BEFORE retrying prev_mode: Cvar_SetValue re-marks
       // sw_mode modified only when the value actually changes, so a retry
@@ -1042,6 +1050,7 @@ export function R_BeginFrame(camera_separation: number): void {
       if (rCvars.sw_mode) rCvars.sw_mode.modified = false;
       if (rCvars.vid_fullscreen) rCvars.vid_fullscreen.modified = false;
       if (rCvars.vid_scale) rCvars.vid_scale.modified = false;
+      if (rCvars.vid_scale_fit) rCvars.vid_scale_fit.modified = false;
       ri.Cvar_SetValue("sw_mode", sw_state.prev_mode);
       ri.Con_Printf(PRINT_ALL, "ref_soft::R_BeginFrame() - could not set mode\n");
     } else if (err === RserrT.rserr_invalid_fullscreen) {

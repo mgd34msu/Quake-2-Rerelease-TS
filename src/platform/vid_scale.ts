@@ -54,12 +54,30 @@ export function VID_ClampCustomHeight(value: number): number {
 }
 
 // vid_scale: fraction of the display resolution actually rendered internally.
-// 1.0 (default) renders at full resolution -- byte-for-byte the pre-existing
-// behavior. Below MIN_SCALE the source image degrades faster than any
-// plausible use case wants; above 1.0 there is nothing to blit down to, so
-// values are clamped rather than treated as supersampling (not implemented).
+// 1.0 (default/"native") renders at full resolution -- byte-for-byte the
+// pre-existing behavior. Below MIN_SCALE the source image degrades faster
+// than any plausible use case wants.
+//
+// Bug fix (Mike, 2026-09-02, owner's play-test report: "you max out the
+// scale at 1.0x ... how exactly are we supposed to be able to scale the
+// screen up if it ends at 1.0x?"): MAX used to be 1.0 (the header comment
+// here used to say "above 1.0 there is nothing to blit down to, so values
+// are clamped rather than treated as supersampling (not implemented)") --
+// that was wrong on two counts: it made the slider's own top step
+// unreachable-feeling ("why does it stop exactly at native"), and it
+// treated the render target as though it could only ever be <= the display
+// size, when GLScale_Setup (glimp.ts)/SDLVID_Init (swimp.ts) both already
+// allocate the render target/texture at whatever size VID_CalcRenderSize
+// below returns -- nothing clamps that allocation to the display's own
+// size. Raising MAX to 2.0 makes >1.0 values real supersampling: the render
+// target is allocated LARGER than the display and the existing blit
+// (GLimp_EndFrame's qglBlitFramebuffer with GL_LINEAR, SDLVID_Present's
+// SDL_RenderCopy) downsamples it on the way to the screen -- the same blit
+// path already used for the <1.0 upscale case, just running in the other
+// direction. VID_SCALE_DEFAULT stays 1.0 ("native") -- see ScaleFormatter
+// in vid_menu.ts for the UI label that keys off this exact constant.
 export const VID_SCALE_MIN = 0.1;
-export const VID_SCALE_MAX = 1.0;
+export const VID_SCALE_MAX = 2.0;
 export const VID_SCALE_DEFAULT = 1.0;
 
 export function VID_ClampScale(value: number): number {

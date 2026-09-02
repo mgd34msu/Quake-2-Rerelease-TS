@@ -218,6 +218,26 @@ export interface GLimp {
   // qgl.h resolves extensions via wglGetProcAddress/glXGetProcAddress;
   // undefined = no live context source (tests, headless), dlsym fallback.
   GetProcAddress?: GLGetProcAddressFn;
+  // Bug fix (Mike, 2026-09-02): optional, same reason GetProcAddress is --
+  // not every GLimp implementation needs it (nothing but glimp.ts's own
+  // vid_scale FBO setup does), but where it exists R_Init calls it once,
+  // right after its second/authoritative SetQGL re-resolution below, so a
+  // cold boot's render-scale FBO setup gets the same "retry once the
+  // context is reliably resolved" treatment GL_InitShaderPath already gets
+  // for the exact same class of bug -- see glimp.ts's GLimp_RetryScaleSetup
+  // doc comment for the full story and the reproduced symptom.
+  RetryScaleSetup?(): void;
+  // Bug fix (Mike, 2026-09-02): optional, same reasoning as
+  // RetryScaleSetup/GetProcAddress above. gl_rmisc.ts's GL_ScreenShot_f
+  // calls this (through this interface, not a direct glimp.ts import --
+  // see that file's own header comment on why) to read pixels from the
+  // real render-resolution FBO instead of whatever framebuffer 0 happened
+  // to hold from the previous frame's already-blitted, letterboxed window
+  // -- see glimp.ts's GLimp_GetScaleReadFramebuffer doc comment for the
+  // full story. Returns null when there is nothing to redirect to
+  // (scaling isn't active, or this GLimp doesn't implement the concept at
+  // all) -- framebuffer 0 already is the correct read target then.
+  GetScaleReadFramebuffer?(): number | null;
 }
 
 function defaultGLimp(): GLimp {
@@ -1283,6 +1303,15 @@ export function R_Register(): void {
   glCvars.vid_fullscreen = ri.Cvar_Get("vid_fullscreen", "0", CVAR_ARCHIVE);
   glCvars.vid_gamma = ri.Cvar_Get("vid_gamma", "1.0", CVAR_ARCHIVE);
   glCvars.vid_scale = ri.Cvar_Get("vid_scale", "1", CVAR_ARCHIVE);
+  // Bug fix (Mike, 2026-09-02): was missing from this file entirely, so
+  // toggling "scale to fullscreen" alone (no other video-menu change) and
+  // hitting Apply wrote the cvar but never reached R_BeginFrame's
+  // mode-restart check below -- GLimp_SetMode's cached scaleFit stayed
+  // whatever it was at the last real mode set, so the new choice was
+  // silently ignored until something else (gl_mode/vid_fullscreen/
+  // vid_scale) also changed and forced a restart. See vid.ts's
+  // VID_GetScaleFit for the cvar's own registration/default.
+  glCvars.vid_scale_fit = ri.Cvar_Get("vid_scale_fit", "1", CVAR_ARCHIVE);
   // vid_ref: gl_local.ts has no field for it (client-owned elsewhere);
   // registered here purely for its console-visibility side effect, matching
   // the original's own local (non-stored) `cvar_t *vid_ref` use.
@@ -1486,6 +1515,7 @@ function R_SetMode(): boolean {
   if (glCvars.vid_fullscreen) glCvars.vid_fullscreen.modified = false;
   if (glCvars.gl_mode) glCvars.gl_mode.modified = false;
   if (glCvars.vid_scale) glCvars.vid_scale.modified = false;
+  if (glCvars.vid_scale_fit) glCvars.vid_scale_fit.modified = false;
 
   const modeValue = glCvars.gl_mode ? glCvars.gl_mode.value : 0;
   let result = glimp.SetMode(vid.width, vid.height, modeValue, fullscreen);
@@ -1607,6 +1637,14 @@ export function R_Init(hInstance: unknown, wndProc: unknown): boolean {
     ri.Con_Printf(PRINT_ALL, `ref_gl::R_Init() - could not load "${glCvars.gl_driver ? glCvars.gl_driver.string : ""}"\n`);
     return false;
   }
+
+  // Bug fix (Mike, 2026-09-02): give glimp's own vid_scale FBO setup the
+  // same "retry now that QGL is reliably resolved" treatment
+  // GL_InitShaderPath gets below -- see GLimp interface's RetryScaleSetup
+  // doc comment and glimp.ts's GLimp_RetryScaleSetup. No-op for any GLimp
+  // that doesn't implement it, and for this one when scaling was never
+  // requested or already succeeded on the first (unreliable) attempt.
+  glimp.RetryScaleSetup?.();
 
   ri.Vid_MenuInit();
 
@@ -1820,7 +1858,7 @@ export function R_BeginFrame(camera_separation: number): void {
   /*
   ** change modes if necessary
   */
-  if ((glCvars.gl_mode && glCvars.gl_mode.modified) || (glCvars.vid_fullscreen && glCvars.vid_fullscreen.modified) || (glCvars.vid_scale && glCvars.vid_scale.modified)) {
+  if ((glCvars.gl_mode && glCvars.gl_mode.modified) || (glCvars.vid_fullscreen && glCvars.vid_fullscreen.modified) || (glCvars.vid_scale && glCvars.vid_scale.modified) || (glCvars.vid_scale_fit && glCvars.vid_scale_fit.modified)) {
     // FIXME: only restart if CDS is required
     const ref = ri.Cvar_Get("vid_ref", "gl", 0);
     if (ref) ref.modified = true;

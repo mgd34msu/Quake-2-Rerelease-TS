@@ -239,6 +239,12 @@ const symbols = {
   SDL_DestroyWindow: { args: ["ptr"], returns: "void" },
   SDL_SetWindowTitle: { args: ["ptr", "cstring"], returns: "void" },
   SDL_GetWindowSize: { args: ["ptr", "ptr", "ptr"], returns: "void" },
+  // Mike, 2026-09-02: the real fix for the "postage stamp" fullscreen bug
+  // (see desktopDisplaySize's doc comment below) -- SDL_GetWindowDisplayIndex
+  // + SDL_GetDesktopDisplayMode read the display's own native mode directly,
+  // instead of asking the just-created window what size it thinks it is.
+  SDL_GetWindowDisplayIndex: { args: ["ptr"], returns: "i32" },
+  SDL_GetDesktopDisplayMode: { args: ["i32", "ptr"], returns: "i32" },
 
   SDL_CreateRenderer: { args: ["ptr", "i32", "u32"], returns: "ptr" },
   SDL_DestroyRenderer: { args: ["ptr"], returns: "void" },
@@ -446,6 +452,63 @@ export function SDLGL_GetWindowSize(): { width: number; height: number } {
   return sdlWindowSize();
 }
 
+// SDL_DisplayMode (SDL_video.h): Uint32 format (0), int w (4), int h (8),
+// int refresh_rate (12), void *driverdata (16, 8-byte aligned/sized on a
+// 64-bit target) -- 24 bytes total. Only w/h (index 1/2 as Int32) are read.
+const displayModeBuf = new Int32Array(6);
+
+// Bug fix (Mike, 2026-09-02, the "postage stamp" fullscreen bug -- owner's
+// play-test report: a small video mode (1280x960) picked with vid_fullscreen
+// 1 on a larger real display (1920x1080) drew unscaled in the top-left
+// corner with the rest of the screen black, whether or not vid_scale_fit
+// was on). Root cause: SDLGL_CreateWindow/SDLVID_Init below create the
+// window with SDL_WINDOW_FULLSCREEN_DESKTOP, which silently retargets the
+// window to the desktop's native resolution -- but that retarget is a round
+// trip through the window manager (an X11 ConfigureNotify, on X11/XWayland),
+// not something SDL_CreateWindow finishes before returning. The callers
+// used to read the "actual" post-creation size straight back with
+// sdlWindowSize() (SDL_GetWindowSize) with no event pump in between; on a
+// real WM that races the WM's resize and reads back the window's PRE-
+// fullscreen size (the small mode's own dimensions) more often than not, so
+// render size == "display" size, VID_CalcOutputSize/GLScale_Setup's
+// size-mismatch check never fires, and the frame is drawn 1:1 into a
+// viewport sized to the small mode while the rest of the real (already
+// fullscreen-sized) window is never cleared -- exactly the reported corner/
+// black-fill symptom. This never reproduced under this port's own Xvfb test
+// runs because a bare Xvfb server (no window manager at all) resizes the
+// window synchronously, so the race window doesn't exist there.
+//
+// The fix: don't ask the window what size the WM has (or hasn't yet) made
+// it -- ask the DISPLAY what its own native mode is, which has no
+// dependency on window state or any WM round trip whatsoever.
+// SDL_GetWindowDisplayIndex is itself window-state-free (the window's
+// display assignment is fixed locally at SDL_CreateWindow time from the
+// x/y position given, before any WM interaction). Falls back to
+// sdlWindowSize() -- and, transitively, the caller's own requested size --
+// if the desktop-mode query itself fails (e.g. a driver that doesn't
+// populate display-mode info; harmless no-op under the "dummy" driver where
+// window is never set at all).
+function desktopDisplaySize(): { width: number; height: number } {
+  const l = lib();
+  if (!l || !window) return { width: 0, height: 0 };
+  const displayIndex = l.symbols.SDL_GetWindowDisplayIndex(window);
+  if (displayIndex < 0) return sdlWindowSize();
+  const rc = l.symbols.SDL_GetDesktopDisplayMode(displayIndex, displayModeBuf);
+  if (rc !== 0) return sdlWindowSize();
+  const w = displayModeBuf[1] ?? 0;
+  const h = displayModeBuf[2] ?? 0;
+  if (w <= 0 || h <= 0) return sdlWindowSize();
+  return { width: w, height: h };
+}
+
+// Exported for glimp.ts's GLimp_SetMode -- see desktopDisplaySize's doc
+// comment. This is the size callers actually want in fullscreen; plain
+// SDLGL_GetWindowSize above is kept for callers that genuinely want the
+// window's own reported size (and as this function's own fallback).
+export function SDLGL_GetDesktopSize(): { width: number; height: number } {
+  return desktopDisplaySize();
+}
+
 export function SDLVID_Active(): boolean {
   return texture !== null;
 }
@@ -521,15 +584,17 @@ export function SDLVID_Init(renderWidth: number, renderHeight: number, fullscree
 
   // QoL addition (Mike, 2026-09-01): SDL_WINDOW_FULLSCREEN_DESKTOP resizes
   // the real window to the desktop's native resolution regardless of the
-  // displayWidth/displayHeight just passed to SDL_CreateWindow above -- see
-  // sdlWindowSize's doc comment. Query the real size in fullscreen so the
-  // present-time blit/clear geometry covers the whole actual surface
-  // instead of leaving the rest of a larger real window never painted
-  // (falls back to the requested size if the query comes back 0x0, e.g. the
-  // "dummy" SDL video driver under the test harness). Windowed mode keeps
+  // displayWidth/displayHeight just passed to SDL_CreateWindow above.
+  // Bug fix (Mike, 2026-09-02): query it via desktopDisplaySize(), not
+  // sdlWindowSize() -- see desktopDisplaySize's doc comment for why reading
+  // the window's own size here raced the window manager's fullscreen
+  // resize on a real WM (this port's own Xvfb tests never caught it: a
+  // bare Xvfb has no WM, so the race window doesn't exist there). Falls
+  // back to the requested size if the query comes back 0x0, e.g. the
+  // "dummy" SDL video driver under the test harness. Windowed mode keeps
   // using the requested size directly -- it IS the real size there.
   if (fullscreen) {
-    const actual = sdlWindowSize();
+    const actual = desktopDisplaySize();
     dispWidth = actual.width > 0 ? actual.width : displayWidth;
     dispHeight = actual.height > 0 ? actual.height : displayHeight;
   } else {

@@ -69,7 +69,18 @@ describe("ref_gl/gl_local.ts and gl_model.ts type core", () => {
     const config = new GlconfigT();
     expect(config.renderer).toBe(0);
     expect(config.renderer_string).toBe("");
-    expect(config.allow_cds).toBe(false);
+    // Bug fix (Mike, 2026-09-02, owner's play-test report: fullscreen never
+    // actually engaged on a fresh boot -- "fit screen ... was not applied
+    // at all"). allow_cds used to zero-init false (faithful to the C
+    // original's static bool), but R_SetMode (gl_rmain.ts) reads this
+    // BEFORE R_Init can ever determine the real value (needs a live GL
+    // context's vendor string, which R_SetMode itself is what creates) --
+    // so a false default unconditionally disabled vid_fullscreen on every
+    // process's first-ever mode set, regardless of what was actually
+    // requested. See gl_local.ts's GlconfigT.allow_cds doc comment for the
+    // full story; this is a deliberate deviation from the faithful
+    // zero-init default, not an oversight.
+    expect(config.allow_cds).toBe(true);
 
     const state = new GlstateT();
     expect(state.inverse_intensity).toBe(0);

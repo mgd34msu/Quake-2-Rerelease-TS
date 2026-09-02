@@ -5,16 +5,28 @@ a slider with a formatter set draws its live curvalue -> display-string just
 past the track; a slider with no formatter renders byte-for-byte the same as
 before the patch.
 
+Bug fix (Mike, 2026-09-02, owner's play-test report on the Video menu: "the
+formatting is shit on that screen") extends this file's own scope: the
+describe block below ("SpinControl_Draw's value column matches
+Slider_Draw's readout column") pins the fix for a real misalignment --
+SpinControl_Draw used to draw its value at plain RCOLUMN_OFFSET (x=16)
+while Slider_Draw's readout (above) draws past the slider track at
+READOUT_X (x=120); any menu mixing the two widget types (Video, Options,
+Controller -- every one of them does) had its value text staggered between
+two different columns row to row. Both draw functions now share
+VALUE_COLUMN_OFFSET (qmenu_impl.ts) -- READOUT_X below is that same
+constant's value, reused for both describe blocks in this file.
+
 Self-sufficient per PORTING.md rule 13: fabricates its own MenuframeworkS/
-MenusliderS rather than reaching into any real per-screen menu, and installs
-a fresh spying RefExports (setRe) per test rather than relying on another
-test file's state.
+MenusliderS/MenulistS rather than reaching into any real per-screen menu,
+and installs a fresh spying RefExports (setRe) per test rather than relying
+on another test file's state.
 */
 
 import { describe, test, expect, beforeEach } from "bun:test";
 import { setRe } from "../src/client/client";
 import type { RefExports, ImageS, DrawColorT } from "../src/client/ref";
-import { MenuframeworkS, MenusliderS } from "../src/client/qmenu";
+import { MenuframeworkS, MenulistS, MenusliderS } from "../src/client/qmenu";
 import { Menu_AddItem, Menu_Draw } from "../src/client/qmenu_impl";
 
 interface DrawCharCall {
@@ -179,5 +191,82 @@ describe("Slider_Draw -- formatter set draws the live value past the track", () 
     Menu_Draw(menu);
 
     expect(seen).toEqual([7]);
+  });
+});
+
+function buildMenuWithSpinControl(itemnames: string[], curvalue: number): { menu: MenuframeworkS; spin: MenulistS } {
+  const menu = new MenuframeworkS();
+  const spin = new MenulistS();
+  spin.generic.type = 3; // MTYPE_SPINCONTROL -- see qmenu.ts
+  spin.generic.x = 0;
+  spin.generic.y = 0;
+  // generic.name left null, same isolation reason buildMenuWithSlider uses.
+  spin.itemnames = itemnames;
+  spin.curvalue = curvalue;
+  Menu_AddItem(menu, spin);
+  return { menu, spin };
+}
+
+describe("SpinControl_Draw's value column matches Slider_Draw's readout column", () => {
+  test("single-word value: drawn starting at READOUT_X, not RCOLUMN_OFFSET(16)", () => {
+    const fake = makeFakeRe();
+    setRe(fake);
+    const { menu } = buildMenuWithSpinControl(["no", "yes"], 1);
+
+    Menu_Draw(menu);
+
+    const str = "yes";
+    expect(fake.drawCharCalls.length).toBe(str.length + 1); // value chars + cursor frame
+    const value = fake.drawCharCalls.slice(0, str.length);
+    for (let i = 0; i < str.length; i++) {
+      expect(value[i]).toEqual({ x: READOUT_X + i * 8, y: TRACK_Y, c: str.charCodeAt(i) });
+    }
+  });
+
+  test("the owner's own reported strings ('1:1 pixels'/'fit screen', 'high (picmip 0)') land on the exact same column a slider readout would", () => {
+    const fake = makeFakeRe();
+    setRe(fake);
+    const { menu } = buildMenuWithSpinControl(["1:1 pixels", "fit screen"], 1);
+
+    Menu_Draw(menu);
+
+    const str = "fit screen";
+    const value = fake.drawCharCalls.slice(0, str.length);
+    expect(value[0]).toEqual({ x: READOUT_X, y: TRACK_Y, c: str.charCodeAt(0) });
+  });
+
+  test("a spin-control row and a slider row in the same menu column-align: both values start at READOUT_X", () => {
+    const fake = makeFakeRe();
+    setRe(fake);
+    const menu = new MenuframeworkS();
+
+    const slider = new MenusliderS();
+    slider.generic.type = 0; // MTYPE_SLIDER
+    slider.generic.x = 0;
+    slider.generic.y = 0;
+    slider.minvalue = 0;
+    slider.maxvalue = 10;
+    slider.curvalue = 10;
+    slider.valueFormatter = () => "1.00x (native)";
+    Menu_AddItem(menu, slider);
+
+    const spin = new MenulistS();
+    spin.generic.type = 3; // MTYPE_SPINCONTROL
+    spin.generic.x = 0;
+    spin.generic.y = 10;
+    spin.itemnames = ["1:1 pixels", "fit screen"];
+    spin.curvalue = 1;
+    Menu_AddItem(menu, spin);
+
+    Menu_Draw(menu);
+
+    const sliderRowChars = fake.drawCharCalls.filter((c) => c.y === 0);
+    const spinRowChars = fake.drawCharCalls.filter((c) => c.y === 10);
+    // slider row: thumb char first, then the readout -- the readout's first
+    // char is the second entry.
+    const sliderValueStartX = sliderRowChars[1]?.x;
+    const spinValueStartX = spinRowChars[0]?.x;
+    expect(sliderValueStartX).toBe(READOUT_X);
+    expect(spinValueStartX).toBe(READOUT_X);
   });
 });

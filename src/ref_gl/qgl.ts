@@ -208,6 +208,22 @@ export interface QGL {
     (srcX0: number, srcY0: number, srcX1: number, srcY1: number, dstX0: number, dstY0: number, dstX1: number, dstY1: number, mask: number, filter: number) => void
   ) | null;
   qglDeleteFramebuffers: ((n: number, framebuffers: GLPointer) => void) | null;
+  // Bug fix (Mike, 2026-09-02): renderbuffer entry points, same
+  // all-or-nothing group as the six above -- see glimp.ts's GLScale_Setup.
+  // The render-scale FBO originally attached only a color texture, no
+  // depth buffer, so GL_DEPTH_TEST (and any depth-equal multipass
+  // technique, e.g. the world's lightmap modulation pass) could not work
+  // correctly against it: confirmed broken by a real rendered frame
+  // (world/lightmap surfaces missing, only sky and alias models drew,
+  // since those don't depend on the same depth-equal pass). These add a
+  // depth renderbuffer sized to match, the same way the real window's
+  // default framebuffer always has one (SDLGL_CreateWindow's
+  // SDL_GL_DEPTH_SIZE attribute).
+  qglGenRenderbuffers: ((n: number, renderbuffers: GLPointer) => void) | null;
+  qglBindRenderbuffer: ((target: number, renderbuffer: number) => void) | null;
+  qglRenderbufferStorage: ((target: number, internalformat: number, width: number, height: number) => void) | null;
+  qglFramebufferRenderbuffer: ((target: number, attachment: number, renderbuffertarget: number, renderbuffer: number) => void) | null;
+  qglDeleteRenderbuffers: ((n: number, renderbuffers: GLPointer) => void) | null;
 }
 
 export interface QGLCall {
@@ -560,6 +576,26 @@ export class QGLRecording implements QGL {
   };
   qglDeleteFramebuffers = (n: number, framebuffers: GLPointer): void => {
     this.record("qglDeleteFramebuffers", [n, framebuffers]);
+  };
+
+  private nextRenderbufferName = 1;
+  qglGenRenderbuffers = (n: number, renderbuffers: GLPointer): void => {
+    this.record("qglGenRenderbuffers", [n, renderbuffers]);
+    if (renderbuffers instanceof Uint32Array) {
+      for (let i = 0; i < n; i++) renderbuffers[i] = this.nextRenderbufferName++;
+    }
+  };
+  qglBindRenderbuffer = (target: number, renderbuffer: number): void => {
+    this.record("qglBindRenderbuffer", [target, renderbuffer]);
+  };
+  qglRenderbufferStorage = (target: number, internalformat: number, width: number, height: number): void => {
+    this.record("qglRenderbufferStorage", [target, internalformat, width, height]);
+  };
+  qglFramebufferRenderbuffer = (target: number, attachment: number, renderbuffertarget: number, renderbuffer: number): void => {
+    this.record("qglFramebufferRenderbuffer", [target, attachment, renderbuffertarget, renderbuffer]);
+  };
+  qglDeleteRenderbuffers = (n: number, renderbuffers: GLPointer): void => {
+    this.record("qglDeleteRenderbuffers", [n, renderbuffers]);
   };
 }
 
@@ -933,6 +969,13 @@ const glFramebufferSymbols = {
   glCheckFramebufferStatus: { args: [u32], returns: u32 },
   glBlitFramebuffer: { args: [i32, i32, i32, i32, i32, i32, i32, i32, u32, u32], returns: voidType },
   glDeleteFramebuffers: { args: [i32, ptr], returns: voidType },
+  // Bug fix (Mike, 2026-09-02): renderbuffer entry points, same
+  // all-or-nothing group -- see the QGL interface's own comment on these.
+  glGenRenderbuffers: { args: [i32, ptr], returns: voidType },
+  glBindRenderbuffer: { args: [u32, u32], returns: voidType },
+  glRenderbufferStorage: { args: [u32, u32, i32, i32], returns: voidType },
+  glFramebufferRenderbuffer: { args: [u32, u32, u32, u32], returns: voidType },
+  glDeleteRenderbuffers: { args: [i32, ptr], returns: voidType },
 } as const;
 
 interface GLFramebufferRawSymbols {
@@ -942,6 +985,11 @@ interface GLFramebufferRawSymbols {
   glCheckFramebufferStatus(target: number): number;
   glBlitFramebuffer(srcX0: number, srcY0: number, srcX1: number, srcY1: number, dstX0: number, dstY0: number, dstX1: number, dstY1: number, mask: number, filter: number): void;
   glDeleteFramebuffers(n: number, framebuffers: GLPointer): void;
+  glGenRenderbuffers(n: number, renderbuffers: GLPointer): void;
+  glBindRenderbuffer(target: number, renderbuffer: number): void;
+  glRenderbufferStorage(target: number, internalformat: number, width: number, height: number): void;
+  glFramebufferRenderbuffer(target: number, attachment: number, renderbuffertarget: number, renderbuffer: number): void;
+  glDeleteRenderbuffers(n: number, renderbuffers: GLPointer): void;
 }
 
 // Resolves every ARB_framebuffer_object entry point as one all-or-nothing
@@ -962,6 +1010,16 @@ function resolveGLFramebufferAPI(libraryPath: string, getProcAddress: GLGetProcA
     if (pBlitFramebuffer === null) return null;
     const pDeleteFramebuffers = getProcAddress("glDeleteFramebuffers");
     if (pDeleteFramebuffers === null) return null;
+    const pGenRenderbuffers = getProcAddress("glGenRenderbuffers");
+    if (pGenRenderbuffers === null) return null;
+    const pBindRenderbuffer = getProcAddress("glBindRenderbuffer");
+    if (pBindRenderbuffer === null) return null;
+    const pRenderbufferStorage = getProcAddress("glRenderbufferStorage");
+    if (pRenderbufferStorage === null) return null;
+    const pFramebufferRenderbuffer = getProcAddress("glFramebufferRenderbuffer");
+    if (pFramebufferRenderbuffer === null) return null;
+    const pDeleteRenderbuffers = getProcAddress("glDeleteRenderbuffers");
+    if (pDeleteRenderbuffers === null) return null;
 
     return linkSymbols({
       glGenFramebuffers: { args: [i32, ptr], returns: voidType, ptr: pGenFramebuffers },
@@ -970,6 +1028,11 @@ function resolveGLFramebufferAPI(libraryPath: string, getProcAddress: GLGetProcA
       glCheckFramebufferStatus: { args: [u32], returns: u32, ptr: pCheckFramebufferStatus },
       glBlitFramebuffer: { args: [i32, i32, i32, i32, i32, i32, i32, i32, u32, u32], returns: voidType, ptr: pBlitFramebuffer },
       glDeleteFramebuffers: { args: [i32, ptr], returns: voidType, ptr: pDeleteFramebuffers },
+      glGenRenderbuffers: { args: [i32, ptr], returns: voidType, ptr: pGenRenderbuffers },
+      glBindRenderbuffer: { args: [u32, u32], returns: voidType, ptr: pBindRenderbuffer },
+      glRenderbufferStorage: { args: [u32, u32, i32, i32], returns: voidType, ptr: pRenderbufferStorage },
+      glFramebufferRenderbuffer: { args: [u32, u32, u32, u32], returns: voidType, ptr: pFramebufferRenderbuffer },
+      glDeleteRenderbuffers: { args: [i32, ptr], returns: voidType, ptr: pDeleteRenderbuffers },
     }).symbols;
   }
   try {
@@ -1176,5 +1239,14 @@ export function loadQGLFromSystem(getProcAddress?: GLGetProcAddressFn): QGL {
           glFramebuffer.glBlitFramebuffer(srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter)
       : null,
     qglDeleteFramebuffers: glFramebuffer ? (n, framebuffers) => glFramebuffer.glDeleteFramebuffers(n, framebuffers) : null,
+    qglGenRenderbuffers: glFramebuffer ? (n, renderbuffers) => glFramebuffer.glGenRenderbuffers(n, renderbuffers) : null,
+    qglBindRenderbuffer: glFramebuffer ? (target, renderbuffer) => glFramebuffer.glBindRenderbuffer(target, renderbuffer) : null,
+    qglRenderbufferStorage: glFramebuffer
+      ? (target, internalformat, width, height) => glFramebuffer.glRenderbufferStorage(target, internalformat, width, height)
+      : null,
+    qglFramebufferRenderbuffer: glFramebuffer
+      ? (target, attachment, renderbuffertarget, renderbuffer) => glFramebuffer.glFramebufferRenderbuffer(target, attachment, renderbuffertarget, renderbuffer)
+      : null,
+    qglDeleteRenderbuffers: glFramebuffer ? (n, renderbuffers) => glFramebuffer.glDeleteRenderbuffers(n, renderbuffers) : null,
   };
 }

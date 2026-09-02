@@ -701,6 +701,21 @@ function Slider_DoSlide(s: MenusliderS, dir: number): void {
 
 const SLIDER_RANGE = 10;
 
+// Bug fix (Mike, 2026-09-02, owner's play-test report on the Video menu:
+// "the formatting is shit on that screen" -- long value strings like
+// "1.00x (native)" and "high (picmip 0)" ran past the column, and slider
+// rows didn't line up with spin-control rows). Root cause: Slider_Draw's
+// QoL value readout (added 2026-09-01) draws past the slider track, at
+// RCOLUMN_OFFSET + trackW + 8, while SpinControl_Draw drew its own value
+// right after the label at plain RCOLUMN_OFFSET -- two different value
+// columns in the same menu, so a slider row's value (e.g. "resolution
+// scale") sat far to the right of a spin row's value (e.g. "scale to
+// fullscreen") directly above or below it. One shared column, positioned
+// past the slider track (sliders need the clearance; spin rows don't, but
+// sharing it is what makes every row line up) -- both draw functions below
+// use this instead of computing/hardcoding their own offset.
+const VALUE_COLUMN_OFFSET = RCOLUMN_OFFSET + (SLIDER_RANGE + 2) * 8 + 8;
+
 function Slider_Draw(s: MenusliderS): void {
   if (!re) return;
   const parent = parentOf(s.generic);
@@ -730,9 +745,14 @@ function Slider_Draw(s: MenusliderS): void {
   DrawChar(8 + RCOLUMN_OFFSET + parent.x + s.generic.x + (SLIDER_RANGE - 1) * 8 * s.range, s.generic.y + parent.y, 131);
 
   // QoL addition (Mike, 2026-09-01): live value readout just past the
-  // track, same row -- see MenusliderS.valueFormatter in qmenu.ts.
+  // track, same row -- see MenusliderS.valueFormatter in qmenu.ts. Shares
+  // VALUE_COLUMN_OFFSET with SpinControl_Draw below (see that constant's
+  // comment); trackX + trackW + 8 -- the track's own actual right edge --
+  // is numerically identical (trackX = x + parent.x + RCOLUMN_OFFSET) but
+  // is spelled out via the shared constant here for a spin row's value to
+  // land on the exact same column with no separate offset to keep in sync.
   if (s.valueFormatter) {
-    Menu_DrawString(trackX + trackW + 8, trackY, s.valueFormatter(s.curvalue));
+    Menu_DrawString(s.generic.x + parent.x + VALUE_COLUMN_OFFSET, trackY, s.valueFormatter(s.curvalue));
   }
 }
 
@@ -760,12 +780,20 @@ function SpinControl_Draw(s: MenulistS): void {
     Menu_DrawStringR2LDark(s.generic.x + parent.x + LCOLUMN_OFFSET, s.generic.y + parent.y, s.generic.name);
   }
 
+  // Bug fix (Mike, 2026-09-02): was RCOLUMN_OFFSET (x+16, right after the
+  // label) -- see VALUE_COLUMN_OFFSET's comment above Slider_Draw. Any menu
+  // mixing MTYPE_SPINCONTROL rows with MTYPE_SLIDER rows that use the
+  // valueFormatter QoL addition (Video, Options, Controller -- see the
+  // three sliders each of the latter two register with one) had this same
+  // two-different-value-columns misalignment; this is the shared drawing
+  // function both widget types go through, so the fix belongs here rather
+  // than in any one menu's own layout.
   const current = s.itemnames[s.curvalue] ?? "";
   const nl = current.indexOf("\n");
   if (nl === -1) {
-    Menu_DrawString(RCOLUMN_OFFSET + s.generic.x + parent.x, s.generic.y + parent.y, current);
+    Menu_DrawString(VALUE_COLUMN_OFFSET + s.generic.x + parent.x, s.generic.y + parent.y, current);
   } else {
-    Menu_DrawString(RCOLUMN_OFFSET + s.generic.x + parent.x, s.generic.y + parent.y, current.slice(0, nl));
-    Menu_DrawString(RCOLUMN_OFFSET + s.generic.x + parent.x, s.generic.y + parent.y + 10, current.slice(nl + 1));
+    Menu_DrawString(VALUE_COLUMN_OFFSET + s.generic.x + parent.x, s.generic.y + parent.y, current.slice(0, nl));
+    Menu_DrawString(VALUE_COLUMN_OFFSET + s.generic.x + parent.x, s.generic.y + parent.y + 10, current.slice(nl + 1));
   }
 }

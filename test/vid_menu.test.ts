@@ -46,6 +46,7 @@ import {
   modeLabel,
 } from "../src/platform/vid_menu";
 import { QMF_GRAYED } from "../src/client/qmenu";
+import { VID_SCALE_MIN, VID_SCALE_MAX } from "../src/platform/vid_scale";
 
 // A table mode a few rows into resolutions[] (see vid_menu.ts's own list):
 // index 5 is "[960 720]".
@@ -194,9 +195,32 @@ describe("vid_menu.ts formatter value tables", () => {
   test.each([
     [1, "0.10x"], // VID_SCALE_MIN * 10
     [5, "0.50x"],
-    [10, "1.00x (native)"], // VID_SCALE_MAX * 10 -- the owner's own reference point
+    [10, "1.00x (native)"], // VID_SCALE_DEFAULT * 10 -- the owner's own reference point
+    // Bug fix (Mike, 2026-09-02): the owner's play-test report -- "you max
+    // out the scale at 1.0x ... how are we supposed to scale the screen up
+    // if it ends at 1.0x?" -- VID_SCALE_MAX is now 2.0 (see vid_scale.ts's
+    // header comment), so values above native are reachable, and "(native)"
+    // must key off exactly 1.0 (VID_SCALE_DEFAULT), not off wherever the
+    // slider's range happens to top out.
+    [15, "1.50x"],
+    [20, "2.00x"], // VID_SCALE_MAX * 10
   ])("ScaleFormatter(%p) -> %p", (curvalue, expected) => {
     expect(ScaleFormatter(curvalue)).toBe(expected);
+  });
+
+  // Bug fix (Mike, 2026-09-02): the slider's own reachable range must track
+  // vid_scale.ts's VID_SCALE_MIN/MAX directly (curvalue is scale*10) --
+  // asserted as live values off VID_MenuInit's real widget, not a
+  // hardcoded re-statement of the constants, so this fails the moment the
+  // slider setup drifts from vid_scale.ts again the way it silently did
+  // before (maxvalue was hardcoded to 10 there).
+  test("s_scale_slider's minvalue/maxvalue span VID_SCALE_MIN..VID_SCALE_MAX after VID_MenuInit", () => {
+    VID_MenuInit();
+
+    expect(s_scale_slider[SOFTWARE_MENU]?.minvalue).toBe(VID_SCALE_MIN * 10);
+    expect(s_scale_slider[SOFTWARE_MENU]?.maxvalue).toBe(VID_SCALE_MAX * 10);
+    expect(s_scale_slider[OPENGL_MENU]?.minvalue).toBe(VID_SCALE_MIN * 10);
+    expect(s_scale_slider[OPENGL_MENU]?.maxvalue).toBe(VID_SCALE_MAX * 10);
   });
 
   test.each([
