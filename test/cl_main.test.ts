@@ -32,7 +32,7 @@ import { SV_Shutdown, SV_Frame } from "../src/server/sv_main";
 
 import { cl, cls, clCvars, ConnstateT } from "../src/client/client";
 import { CL_InitLocal, CL_SendCommand, CL_ReadPackets, CL_Disconnect } from "../src/client/cl_main";
-import { in_forward, in_back, CL_KeyState, CL_BaseMove, CL_ClampPitch, CL_CreateCmd } from "../src/client/cl_input";
+import { in_forward, in_back, CL_KeyState, CL_BaseMove, CL_ClampPitch, CL_CreateCmd, Sys_SendKeyEvents } from "../src/client/cl_input";
 import { CL_CheckPredictionError } from "../src/client/cl_pred";
 import { UsercmdT, PITCH } from "../src/shared/q_shared";
 
@@ -82,10 +82,18 @@ describe("cl_input.ts -- kbutton_t state bits", () => {
   });
 
   test("CL_KeyState returns 0 for accumulated msec of 0, and clamps to 1 for a huge accumulated msec", async () => {
-    // establish a real, non-zero frame_msec via CL_CreateCmd (frame_msec is
-    // module-private to cl_input.ts; CL_CreateCmd is the only way to move it)
+    // Establish a real, non-zero frame_msec. frame_msec is module-private to
+    // cl_input.ts and CL_CreateCmd is the only thing that moves it, but it is
+    // computed as `sys_frame_time - old_sys_frame_time` and CL_CreateCmd does
+    // NOT touch sys_frame_time -- platform/sys.ts's Sys_SendKeyEvents does,
+    // once per frame, which is exactly why cl_main.ts's CL_SendCommand calls
+    // it first. Calling CL_CreateCmd alone leaves the frame clock frozen,
+    // frame_msec clamped to its 1ms floor, and every held key reading as 0
+    // after its first frame.
+    Sys_SendKeyEvents();
     CL_CreateCmd();
     await Bun.sleep(5);
+    Sys_SendKeyEvents();
     CL_CreateCmd();
 
     // in_back was never pressed in this test group (state 0, msec 0)
@@ -111,23 +119,46 @@ describe("cl_input.ts -- kbutton_t state bits", () => {
     expect(CL_KeyState(in_forward)).toBe(1); // clamped: 100000 / frame_msec(<=200) > 1
   });
 
-  test("CL_KeyState reports a fraction in [0,1] for a key held across a real frame boundary, growing as the hold continues", async () => {
+  test("CL_KeyState is consume-once per frame: CL_CreateCmd takes the accumulated msec, a second read in the same frame is 0", async () => {
+    // This used to be spelled "reports a fraction in [0,1] ... growing as the
+    // hold continues", reading CL_KeyState AFTER CL_CreateCmd and asserting
+    // only 0 <= v <= 1. That is vacuous: CL_CreateCmd -> CL_BaseMove already
+    // called CL_KeyState(in_forward), which zeroes key.msec and re-latches
+    // key.downtime to sys_frame_time as a side effect (cl_input.c's own
+    // design -- the comment there calls it "returns the fraction of the frame
+    // the key was down", and the frame's worth of time is consumed by the
+    // read). So the second read always saw 0 and the assertion passed no
+    // matter what the per-frame path did. A "+moveup only lasts one frame"
+    // bug report was investigated against this test; it could not have caught
+    // one either way.
+    //
+    // The real property -- a held key contributes its full cl_*speed on EVERY
+    // frame -- is asserted at the cmd level, where the client actually reads
+    // it, in test/cl_input_wave_b.test.ts group E. Here we pin down the
+    // consume-once semantics that made the old assertion vacuous, so the
+    // ordering dependency is documented by a failing test if it ever changes.
+    //
     // "+forward 12" with no timestamp arg -> KeyDown's fallback downtime of
     // `sys_frame_time - 100` (cl_input.c's own "typed manually" case).
     Cmd_ExecuteString("+forward 12");
     await Bun.sleep(5);
-    CL_CreateCmd(); // advances sys_frame_time and sets frame_msec from the real elapsed delta
 
-    const firstVal = CL_KeyState(in_forward);
-    expect(firstVal).toBeGreaterThanOrEqual(0);
-    expect(firstVal).toBeLessThanOrEqual(1);
+    // frame 1: CL_CreateCmd consumes the hold, so forwardmove is non-zero...
+    Sys_SendKeyEvents(); // latch this frame's sys_frame_time, as CL_SendCommand does
+    const firstCmd = CL_CreateCmd();
+    expect(firstCmd.forwardmove).not.toBe(0);
+    // ...and the immediately following read in the same frame gets nothing.
+    expect(CL_KeyState(in_forward)).toBe(0);
+    expect(in_forward.state & 1).toBe(1); // but the key is still held
 
-    // still held: msec keeps accumulating from a fresh downtime baseline
+    // frame 2: the key is still down, so the next frame's cmd is non-zero
+    // again -- the consumed msec does not end the hold.
     await Bun.sleep(5);
-    CL_CreateCmd();
-    const secondVal = CL_KeyState(in_forward);
-    expect(secondVal).toBeGreaterThanOrEqual(0);
-    expect(secondVal).toBeLessThanOrEqual(1);
+    Sys_SendKeyEvents();
+    const secondCmd = CL_CreateCmd();
+    expect(secondCmd.forwardmove).not.toBe(0);
+    expect(secondCmd.forwardmove).toBe(firstCmd.forwardmove);
+    expect(CL_KeyState(in_forward)).toBe(0);
 
     Cmd_ExecuteString("-forward 12");
   });
