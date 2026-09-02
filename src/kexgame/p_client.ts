@@ -327,6 +327,7 @@ import {
   WeaponstateT,
   AnimPriorityT,
   LADDER_SOUND_TIME,
+  SPAWNFLAG_LANDMARK_KEEP_Z,
 } from "./g_local";
 import type { ClientPersistantT, ClientRespawnT, GhostT, GitemT } from "./g_local_types";
 import { CtfteamT } from "./g_local_types";
@@ -1907,10 +1908,13 @@ export function TryLandmarkSpawn(ent: EdictT, originBox: [Vec3], anglesBox: [Vec
 
   let angles = vec3_add(ent.client.oldviewangles, landmark.s.angles);
 
-  if (SpawnFlags_has(landmark.spawnflags, SpawnFlags_from(0x1000))) {
-    // SPAWNFLAG_LANDMARK_KEEP_Z -- not yet ported as a named constant
-    // anywhere in this port line (grepped: zero matches); the numeric
-    // literal matches g_local.h's own bit position for this one-off flag.
+  if (SpawnFlags_has(landmark.spawnflags, SPAWNFLAG_LANDMARK_KEEP_Z)) {
+    // g_local.h: `constexpr spawnflags_t SPAWNFLAG_LANDMARK_KEEP_Z = 1_spawnflag`
+    // (bit 0, as g_local.ts declares). This site used to test 0x1000, a bit
+    // no shipped info_landmark carries (47 of the retail tree's 245 carry
+    // bit 0, none carry 0x1000), so KEEP_Z never applied: the computed spot
+    // landed under the destination floor, G_FixStuckObject_Generic gave up,
+    // and every landmark transition silently fell back to the spawn point.
     origin[2] = spot_origin[2];
   }
 
