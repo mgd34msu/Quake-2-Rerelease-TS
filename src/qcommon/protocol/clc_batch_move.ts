@@ -50,6 +50,13 @@
 // not usercmd_t.upmove, which is why real q2repro clients never need the bit
 // q2repro's own decoder rejects.
 //
+// ONE EXCEPTION, and it is not an upstream protocol: this engine's own
+// protocol 4038 (Q2REPRO_CLASSIC_CODEC in q2repro.ts) runs the CLASSIC game
+// module over the 1038 wire, and the classic module has no BUTTON_JUMP/
+// BUTTON_CROUCH handling at all -- qcommon/pmove.ts reads cmd.upmove directly.
+// 4038 therefore DOES set CM_UP and DOES apply the decoded upmove. No other
+// implementation speaks 4038, and 1038/36 are untouched.
+//
 // ---------------------------------------------------------------------------
 // KEY FINDING: the per-command "lightlevel" byte is decoded but never used
 // ---------------------------------------------------------------------------
@@ -59,6 +66,11 @@
 // apply_usercmd_delta never reads move_delta->lightlevel, so it never reaches
 // usercmd_t.lightlevel on the real server -- this port reads and discards the
 // byte for wire-alignment only (see q2repro.ts's/q2pro.ts's readBatchMove).
+//
+// Same 4038 exception as above: the classic module's ClientThink assigns
+// `ent.light_level = ucmd.lightlevel` and g_ai.ts's FindTarget gates monster
+// sighting on it ("is client in an spot too dark to be seen?", light_level
+// <= 5), so on 4038 the byte carries the real value and IS applied.
 
 import type { SizeBuf } from "../sizebuf";
 import { MSG_ReadByte, MSG_WriteByte } from "../sizebuf";

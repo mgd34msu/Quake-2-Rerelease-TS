@@ -109,6 +109,16 @@
 // writeDeltaUsercmd throws if upmove changes, exactly mirroring upstream's
 // Q2P_ERR_BAD_DATA rather than silently dropping vertical movement input.
 //
+// The batched format IS implemented below (writeBatchMove/readBatchMove), and
+// it is what this port's own client actually sends -- cl_input.ts takes the
+// `cls.codec.writeBatchMove` branch for every 1038-family session. On 1038
+// that format's missing upmove is correct, because the rerelease game module
+// reads BUTTON_JUMP/BUTTON_CROUCH instead. On 4038 it is NOT: that session
+// runs the CLASSIC module, whose qcommon/pmove.ts reads cmd.upmove and whose
+// FindTarget reads ucmd.lightlevel. Q2REPRO_CLASSIC_CODEC therefore overrides
+// both batch ops to carry those two fields -- see its own doc comment at the
+// bottom of this file, and makeWriteBatchMove/decodeQ2ReproBatchCmd below.
+//
 // ---------------------------------------------------------------------------
 // RESOLVED: frame envelope (svc_frame combining playerstate + packetentities)
 // ---------------------------------------------------------------------------
@@ -953,7 +963,20 @@ function readDeltaUsercmd(msg: SizeBuf, from: UsercmdT, move: UsercmdT): void {
 // even q2pro's plain-tier format, which CAN carry the bit, never has it
 // applied server-side, so a real client sending vertical movement here would
 // gain nothing and 1038's own encoder simply never emits it).
-function decodeQ2ReproBatchCmd(br: BitReader, prev: UsercmdT | null): UsercmdT {
+//
+// `classicFields` is set ONLY by Q2REPRO_CLASSIC_CODEC (protocol 4038, this
+// engine's own number -- see PROTOCOL_VERSION_RERELEASE_CLASSIC's doc comment
+// in qcommon.ts). That session runs the CLASSIC game module over the wide
+// wire, and qcommon/pmove.ts reads `cmd.upmove` directly for jumping
+// (PM_CheckJump's `upmove < 10` early-out), ducking (PM_CheckDuck's
+// `upmove < 0`), swimming (PM_WaterMove's `wishvel[2] += upmove`) and
+// spectator flight (PM_FlyMove). It has no BUTTON_JUMP/BUTTON_CROUCH handling
+// at all -- those bits are a rerelease-movement concept. So on 4038, and only
+// there, CM_UP carries a signed 10-bit upmove (the same field width q2pro's
+// plain-tier batch format uses, q2proto_proto_q2pro.c:2457-2461) instead of
+// being a protocol violation. 1038 keeps rejecting it exactly as q2repro does,
+// so nothing a real q2repro peer can send or receive changes.
+function decodeQ2ReproBatchCmd(br: BitReader, prev: UsercmdT | null, classicFields = false): UsercmdT {
   const cmd = seedFromPrev(prev);
 
   const hasContents = br.readUnsigned(1);
@@ -967,9 +990,12 @@ function decodeQ2ReproBatchCmd(br: BitReader, prev: UsercmdT | null): UsercmdT {
   if (bits & CM_FORWARD) cmd.forwardmove = br.readSigned(10);
   if (bits & CM_SIDE) cmd.sidemove = br.readSigned(10);
   if (bits & CM_UP) {
-    throw new ClcBatchMoveError(
-      "clc_q2pro_move_batched (1038): CM_UP bit set -- q2repro's own decoder rejects this (Q2P_ERR_BAD_DATA, q2proto_proto_q2repro.c:2662-2663)",
-    );
+    if (!classicFields) {
+      throw new ClcBatchMoveError(
+        "clc_q2pro_move_batched (1038): CM_UP bit set -- q2repro's own decoder rejects this (Q2P_ERR_BAD_DATA, q2proto_proto_q2repro.c:2662-2663)",
+      );
+    }
+    cmd.upmove = br.readSigned(10);
   }
 
   if (bits & CM_BUTTONS) cmd.buttons = br.readUnsigned(8); // full byte, unlike Q2PRO's 3-bit remap -- see q2pro.ts's decodeCmd
@@ -992,7 +1018,12 @@ function decodeQ2ReproBatchCmd(br: BitReader, prev: UsercmdT | null): UsercmdT {
 // q2proto_proto_q2repro.c:2662-2663 -- vertical intent travels as
 // BUTTON_JUMP/BUTTON_CROUCH in the kex usercmd, matching q2repro's own
 // client input.c:824-827).
-function encodeQ2ReproBatchCmd(bw: BitWriter, cmd: UsercmdT, prev: UsercmdT | null): void {
+// `classicFields` mirrors the decode half above: on 4038 a changed upmove sets
+// CM_UP and writes the signed 10-bit field, so the classic module's Pmove
+// receives the same analog value the local prediction in cl_pred.ts already
+// replays (cl.cmds[] keeps the real CL_BaseMove upmove either way). On 1038 it
+// stays unset, exactly as before.
+function encodeQ2ReproBatchCmd(bw: BitWriter, cmd: UsercmdT, prev: UsercmdT | null, classicFields = false): void {
   bw.writeUnsigned(1, 1); // hasContents
 
   let bits = CM_IMPULSE; // msec byte always explicit
@@ -1004,6 +1035,7 @@ function encodeQ2ReproBatchCmd(bw: BitWriter, cmd: UsercmdT, prev: UsercmdT | nu
   if (cmd.angles[2] !== p2) bits |= CM_ANGLE3;
   if (cmd.forwardmove !== (prev ? prev.forwardmove : 0)) bits |= CM_FORWARD;
   if (cmd.sidemove !== (prev ? prev.sidemove : 0)) bits |= CM_SIDE;
+  if (classicFields && cmd.upmove !== (prev ? prev.upmove : 0)) bits |= CM_UP;
   if (cmd.buttons !== (prev ? prev.buttons : 0)) bits |= CM_BUTTONS;
   bw.writeUnsigned(bits, 8);
 
@@ -1021,38 +1053,81 @@ function encodeQ2ReproBatchCmd(bw: BitWriter, cmd: UsercmdT, prev: UsercmdT | nu
   // config-forced cl_forwardspeed can never corrupt the bitstream.
   if (bits & CM_FORWARD) bw.writeSigned(Math.max(-512, Math.min(511, cmd.forwardmove)), 10);
   if (bits & CM_SIDE) bw.writeSigned(Math.max(-512, Math.min(511, cmd.sidemove)), 10);
+  // cl_upspeed defaults to 200 and CL_BaseMove doubles it when running, so the
+  // real range is +/-400 -- inside the signed 10-bit field. Clamped for the
+  // same reason forwardmove/sidemove are: a config-forced cl_upspeed must
+  // never corrupt the bitstream.
+  if (bits & CM_UP) bw.writeSigned(Math.max(-512, Math.min(511, Math.trunc(cmd.upmove))), 10);
   if (bits & CM_BUTTONS) bw.writeUnsigned(cmd.buttons, 8);
   bw.writeUnsigned(cmd.msec, 8); // CM_IMPULSE's msec byte
 }
 
 // Write half of readBatchMove below: opcode byte is the CALLER's (nodelta
 // selects CLC_Q2PRO_MOVE_NODELTA and passes lastframe null). numDups =
-// frames.length - 1; lightlevel byte written 0 (the read side discards it).
-function writeBatchMove(msg: SizeBuf, lastframe: number | null, frames: ClcBatchMoveFrameT[]): void {
-  if (lastframe !== null) MSG_WriteLong(msg, lastframe);
-  MSG_WriteByte(msg, frames.length - 1);
-  MSG_WriteByte(msg, 0); // lightlevel
-  const bw = new BitWriter(msg);
-  writeBatchMoveFrames(bw, frames, encodeQ2ReproBatchCmd);
+// frames.length - 1.
+//
+// The lightlevel byte is a real field of this message on both protocols
+// (q2proto_proto_q2repro.c:2704 reads one per MESSAGE and stamps it onto every
+// decoded command). On 1038 it is written 0 and discarded on read, because the
+// rerelease server's apply_usercmd_delta never copies it into usercmd_t -- see
+// clc_batch_move.ts's "lightlevel" finding. On 4038 it carries the client's
+// real cl.cmds lightlevel, because the CLASSIC game module does consume it:
+// p_client.ts's ClientThink assigns `ent.light_level = ucmd.lightlevel` and
+// g_ai.ts's FindTarget then early-outs with "is client in an spot too dark to
+// be seen?" (`client.light_level <= 5`). r_lightlevel is the renderer's
+// per-frame light value at the eye point (gl_rmain.ts's R_SetLightLevel, the
+// original "BIG HACK"), so leaving it 0 makes every classic monster treat the
+// player as unlit and never acquire him -- indistinguishable from notarget.
+function makeWriteBatchMove(classicFields: boolean) {
+  return function writeBatchMove(msg: SizeBuf, lastframe: number | null, frames: ClcBatchMoveFrameT[]): void {
+    if (lastframe !== null) MSG_WriteLong(msg, lastframe);
+    MSG_WriteByte(msg, frames.length - 1);
+
+    let lightlevel = 0;
+    if (classicFields) {
+      // The newest command in the batch is the one whose light level is
+      // current; the read side stamps it onto every command in the message,
+      // exactly as q2repro's own reader does.
+      for (const frame of frames) for (const cmd of frame.cmds) lightlevel = cmd.lightlevel;
+    }
+    MSG_WriteByte(msg, lightlevel & 0xff);
+
+    const bw = new BitWriter(msg);
+    writeBatchMoveFrames(bw, frames, (bw2, cmd, prev) => encodeQ2ReproBatchCmd(bw2, cmd, prev, classicFields));
+  };
 }
 
 // q2repro_server_read_batch_move, q2proto_proto_q2repro.c:2679-2709.
-function readBatchMove(msg: SizeBuf, nodelta: boolean, _opcodeExtra: number): ClcBatchMoveT {
-  const lastframe = nodelta ? -1 : MSG_ReadLong(msg);
+function makeReadBatchMove(classicFields: boolean) {
+  return function readBatchMove(msg: SizeBuf, nodelta: boolean, _opcodeExtra: number): ClcBatchMoveT {
+    const lastframe = nodelta ? -1 : MSG_ReadLong(msg);
 
-  const numDups = MSG_ReadByte(msg);
-  if (numDups < 0) throw new ClcBatchMoveError("clc_q2pro_move_batched (1038): truncated message (num_dups)");
-  if (numDups >= MAX_CLC_BATCH_MOVE_FRAMES - 1) {
-    throw new ClcBatchMoveError("clc_q2pro_move_batched (1038): num_dups out of range (Q2P_ERR_BAD_DATA, q2proto_proto_q2repro.c:2687-2688)");
-  }
+    const numDups = MSG_ReadByte(msg);
+    if (numDups < 0) throw new ClcBatchMoveError("clc_q2pro_move_batched (1038): truncated message (num_dups)");
+    if (numDups >= MAX_CLC_BATCH_MOVE_FRAMES - 1) {
+      throw new ClcBatchMoveError("clc_q2pro_move_batched (1038): num_dups out of range (Q2P_ERR_BAD_DATA, q2proto_proto_q2repro.c:2687-2688)");
+    }
 
-  const lightlevel = MSG_ReadByte(msg); // decoded, never applied -- see clc_batch_move.ts's file header finding
-  if (lightlevel < 0) throw new ClcBatchMoveError("clc_q2pro_move_batched (1038): truncated message (lightlevel)");
+    const lightlevel = MSG_ReadByte(msg);
+    if (lightlevel < 0) throw new ClcBatchMoveError("clc_q2pro_move_batched (1038): truncated message (lightlevel)");
 
-  const br = new BitReader(msg);
-  const frames = readBatchMoveFrames(br, numDups, decodeQ2ReproBatchCmd);
-  return { lastframe, numDups, frames };
+    const br = new BitReader(msg);
+    const frames = readBatchMoveFrames(br, numDups, (br2, prev) => decodeQ2ReproBatchCmd(br2, prev, classicFields));
+
+    // q2repro.c:2704 stamps the message's single lightlevel byte onto every
+    // decoded command. On 1038 the value is discarded (written 0, never
+    // applied); on 4038 the classic ClientThink reads it -- see
+    // makeWriteBatchMove's comment.
+    if (classicFields) {
+      for (const frame of frames) for (const cmd of frame.cmds) cmd.lightlevel = lightlevel;
+    }
+
+    return { lastframe, numDups, frames };
+  };
 }
+
+const writeBatchMove = makeWriteBatchMove(false);
+const readBatchMove = makeReadBatchMove(false);
 
 // q2repro_server_read_userinfo_delta, q2proto_proto_q2repro.c:2718-2724.
 function readUserinfoDelta(msg: SizeBuf): ClcUserinfoDeltaT {
@@ -1674,8 +1749,24 @@ export const Q2REPRO_CODEC: ProtocolCodec = {
 // no second implementation to keep in sync, because there is no second wire
 // format: see PROTOCOL_VERSION_RERELEASE_CLASSIC's doc comment in qcommon.ts
 // for why the number alone has to differ.
+//
+// EXCEPTION to "every other function is shared by reference": the batched
+// client-move pair. The classic game module reads two usercmd fields the
+// rerelease module does not -- `upmove` (qcommon/pmove.ts: jump, duck, swim,
+// spectator flight) and `lightlevel` (p_client.ts's ClientThink -> g_ai.ts's
+// FindTarget "too dark to be seen" test) -- and q2repro's batched move carries
+// neither, by design, because 1038 exists to serve the rerelease module.
+// Sharing 1038's encoder here delivered upmove 0 and lightlevel 0 to the
+// classic module on every frame of a widened session: the player could not
+// jump or crouch, and no monster ever acquired him. 4038 is this engine's own
+// protocol number and no other implementation ever speaks it (see
+// PROTOCOL_VERSION_RERELEASE_CLASSIC in qcommon.ts), so it carries both fields
+// -- upmove in CM_UP, lightlevel in the message byte 1038 already reserves and
+// writes as 0. Q2REPRO_CODEC (1038) is untouched and still rejects CM_UP.
 export const Q2REPRO_CLASSIC_CODEC: ProtocolCodec = {
   ...Q2REPRO_CODEC,
   name: "q2repro-classic",
   writeServerData: writeServerDataClassic,
+  writeBatchMove: makeWriteBatchMove(true),
+  readBatchMove: makeReadBatchMove(true),
 };
