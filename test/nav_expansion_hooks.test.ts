@@ -166,27 +166,37 @@ describe("expansion-module nav hooks on base1's real .nav (skipped if the retail
     expect(unreachable.returnCode).not.toBe(8);
   });
 
-  test.skipIf(!havePak)("pathDistSqr is 0 for a found path here, exactly as it is under the classic module", () => {
-    // NOT an oversight in this unit, and not a difference between the trees:
-    // the reference leaves this field alone. q2repro's inc/shared/game.h:285
-    // declares `float pathDistSqr /*= 0.0f*/` and NOTHING in q2repro's own
-    // tree ever assigns it -- its nav.c reimplementation of the KEX engine's
-    // pathfinder simply does not fill it in -- so src/server/nav.ts's
-    // Nav_Path leaves it 0 too, and every consumer sees 0.
+  test.skipIf(!havePak)("pathDistSqr is the real walked distance now, matching the real re-release engine rather than q2repro's reference", () => {
+    // q2repro's inc/shared/game.h:285 declares `float pathDistSqr
+    // /*= 0.0f*/` and nothing in q2repro's own nav.c reimplementation of the
+    // KEX engine's pathfinder ever assigns it -- the open-source reference
+    // this port otherwise mirrors line-for-line leaves the field alone. The
+    // real re-release engine DOES fill it, and this port now matches that
+    // (see src/server/nav.ts's Nav_ReachedGoal for where and why:
+    // distance_to_poi and target_poi's SPAWNFLAG_POI_NEAREST ranking need a
+    // genuine walked distance to break ties, not a tie at zero).
     //
-    // The practical effect on distance_to_poi is the same under all three
-    // trees: reachable candidates tie at 0 and are decided by style then scan
-    // order, unreachable ones are Infinity and are skipped. Pinned here so
-    // that if nav.ts ever starts computing a real walked length, the change
-    // shows up as this case failing rather than as silent drift between the
-    // classic module and the expansions.
+    // This case used to pin pathDistSqr at 0 across all three trees, with a
+    // comment saying it should start failing the day nav.ts computes a real
+    // length -- that day is this one. It now asserts the walked distance is
+    // at least the straight-line distance (base1's start and its POI are not
+    // mutually visible, so the nav-mesh route can only be as long or longer
+    // than a straight line) and that it comes back identical across all
+    // three legacy trees, since they all reach the same src/server/nav.ts
+    // A* query.
     const imports = BuildLegacyImports();
     const classic = (imports as ClassicImports).get_path_to_goal!(compassQuery<ClassicQueryT>(null));
     const xatrix = (imports as XatrixImports).get_path_to_goal!(compassQuery<XatrixQueryT>(null));
     const rogue = (imports as RogueImports).get_path_to_goal!(compassQuery<RogueQueryT>(null));
 
     expect(classic.found).toBe(true);
-    expect(classic.pathDistSqr).toBe(0);
+
+    const dx = BASE1_POI[0] - BASE1_START[0];
+    const dy = BASE1_POI[1] - BASE1_START[1];
+    const dz = BASE1_POI[2] - BASE1_START[2];
+    const straightSqr = dx * dx + dy * dy + dz * dz;
+
+    expect(classic.pathDistSqr).toBeGreaterThanOrEqual(straightSqr);
     expect(xatrix.pathDistSqr).toBe(classic.pathDistSqr);
     expect(rogue.pathDistSqr).toBe(classic.pathDistSqr);
   });

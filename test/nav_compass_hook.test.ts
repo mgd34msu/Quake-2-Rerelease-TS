@@ -159,6 +159,34 @@ describe("compass nav-mesh query through both game bindings, on base1's real .na
     expect(walked).toBeGreaterThan(straight);
   });
 
+  test.skipIf(!havePak)("pathDistSqr equals the squared sum of the returned path's segment lengths", () => {
+    // Independent check on info.pathDistSqr, computed from the OUTPUT
+    // (request.start, the pathPoints buffer GetPathToGoal filled, then
+    // request.goal) rather than by re-deriving it from nav.ts's internals.
+    // The buffer is large enough here that nothing is truncated -- prepending
+    // start and appending goal is safe even when Nav_ReachedGoal already put
+    // one or both of them in the buffer itself (PATH_POINT_TOO_CLOSE, nav.ts)
+    // since that just sums an extra zero-length segment.
+    const points = buffer();
+    const info = freshInfo();
+    const ok = BuildKexImports().GetPathToGoal(kexCompassRequest(BASE1_START, BASE1_POI, points), info);
+
+    expect(ok).toBe(true);
+    // Has to be unfilled headroom, or "the returned points" would be a
+    // truncated prefix rather than nav.ts's whole path.
+    expect(info.numPathPoints).toBeLessThan(MAX_TEMP_POI_POINTS);
+
+    let walked = 0;
+    let prev = BASE1_START;
+    for (let i = 0; i < info.numPathPoints; i++) {
+      walked += dist(prev, points[i]!);
+      prev = points[i]!;
+    }
+    walked += dist(prev, BASE1_POI);
+
+    expect(info.pathDistSqr).toBeCloseTo(walked * walked, 3);
+  });
+
   test.skipIf(!havePak)("the classic binding's get_path_to_goal hook returns the same points as the kex binding's", () => {
     const kexPoints = buffer();
     const kexInfo = freshInfo();

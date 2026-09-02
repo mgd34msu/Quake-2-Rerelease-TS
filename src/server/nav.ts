@@ -655,6 +655,39 @@ function Nav_ReachedGoal(path: NavPathT, info: PathInfo, request: PathRequest, c
     }
   }
 
+  // pathDistSqr -- NOT in nav.c/q2repro: inc/shared/game.h:285 declares
+  // PathInfo::pathDistSqr with a `/*= 0.0f*/` default and q2repro's
+  // Nav_ReachedGoal never assigns it, so the reference this port otherwise
+  // mirrors line-for-line just leaves it zero. The real re-release engine
+  // DOES fill it, and kexgame consumers depend on a genuine walked
+  // distance: distance_to_poi (src/game/g_kextarg.ts and the src/xatrix /
+  // src/rogue copies) and target_poi's SPAWNFLAG_POI_NEAREST ranking
+  // (src/kexgame/g_items.ts) use it to pick the objective that is actually
+  // nearest to walk to. Left at 0, every reachable candidate ties at zero
+  // and NEAREST degenerates to style-then-scan-order -- this is one place
+  // this port goes beyond q2repro to match the real re-release behavior.
+  //
+  // Computed over the FULL path this search found -- request.start, every
+  // node from went_to[first_point] through went_to[num_points - 1], then
+  // request.goal -- not the prefix Nav_PushPathPoint below actually copies
+  // into request.pathPoints.array. Runs unconditionally (unlike the
+  // point-copy block below, which is gated on request.pathPoints.count):
+  // distance_to_poi's query passes points: null / maxPoints: 0 (it wants
+  // only pathDistSqr, per src/game/game.ts's PathQueryT doc comment) and
+  // still needs the true walked length even though nothing gets copied
+  // into a point buffer.
+  {
+    let walked = 0;
+    let prev = request.start;
+    for (let dp = first_point; dp < num_points; dp++) {
+      const node_origin = nav_data.nodes[ctx.went_to[dp]].origin;
+      walked += VectorDistance(prev, node_origin);
+      prev = node_origin;
+    }
+    walked += VectorDistance(prev, request.goal);
+    info.pathDistSqr = walked * walked;
+  }
+
   if (request.pathPoints.count) {
     let dist = VectorDistance(request.start, nav_data.nodes[ctx.went_to[first_point]].origin);
     if (dist > PATH_POINT_TOO_CLOSE) Nav_PushPathPoint(info, request, request.start);
