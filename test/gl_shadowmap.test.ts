@@ -73,6 +73,7 @@ import {
   shadowCubeAxialDistance,
   shadowCubeWindowDepth,
   shadowCubeFar,
+  GL_ShadowMapsActive,
 } from "../src/ref_gl/gl_shadowmap";
 
 function makeFakeRi(): RefImports {
@@ -423,16 +424,6 @@ describe("gl_shadowmap.ts -- GL_InitShadowMaps (call sequence + graceful fallbac
     expect(texImage?.args[6]).toBe(0x1902); // GL_DEPTH_COMPONENT format
   });
 
-  test("gl_shadowmaps 0 allocates nothing at all", () => {
-    const rec = new QGLRecording();
-    SetQGL(rec);
-    glCvars.gl_shadowmaps = makeCvar(0);
-
-    expect(GL_InitShadowMaps()).toBe(false);
-    expect(GL_ShadowMapsReady()).toBe(false);
-    expect(names(rec)).not.toContain("qglGenFramebuffers");
-  });
-
   test("a context without framebuffer objects falls back cleanly instead of throwing", () => {
     const rec: QGL = new QGLRecording();
     rec.qglGenFramebuffers = null;
@@ -697,15 +688,81 @@ describe("gl_shadowmap.ts -- R_RenderShadowMaps (depth pass call sequence)", () 
     expect(names(rec)).toContain("qglBegin");
   });
 
-  test("nothing happens at all when shadow maps were never initialized", () => {
+  // Was "nothing happens at all when shadow maps were never initialized".
+  // R_RenderShadowMaps now allocates the atlas on the first frame it is
+  // wanted, so a plain GL_ShutdownShadowMaps no longer keeps it quiet -- the
+  // genuine "nothing happens" case is a context that cannot do FBOs at all,
+  // which is what this now pins.
+  test("a context without framebuffer objects does nothing at all, every frame, without re-warning", () => {
     const rec = new QGLRecording();
+    // the null-out needs the QGL view (QGLRecording types these non-nullable);
+    // `rec` itself stays typed so the call log below is reachable.
+    const capless: QGL = rec;
+    capless.qglGenFramebuffers = null;
+    capless.qglBindFramebuffer = null;
+    capless.qglFramebufferTexture2D = null;
+    capless.qglCheckFramebufferStatus = null;
     SetQGL(rec);
     GL_ShutdownShadowMaps();
 
     R_RenderShadowMaps(world, [coneLight], 1);
     expect(GL_ShadowMapBindings().length).toBe(0);
-    expect(rec.calls.length).toBe(0);
+    expect(GL_ShadowMapsReady()).toBe(false);
+
+    // the failure latches, so the second frame does not retry the probe
+    const before = rec.calls.length;
+    R_RenderShadowMaps(world, [coneLight], 1);
+    expect(rec.calls.length).toBe(before);
+    expect(GL_ShadowMapsActive()).toBe(false);
   });
+
+  // The cvar gate moved OUT of GL_InitShadowMaps and into GL_ShadowMapsActive,
+  // which R_Init and R_RenderShadowMaps both consult. Keeping it inside init
+  // meant a session that BOOTED with shadow mapping off could never turn it
+  // back on without a vid_restart, which is the defect this pair now pins.
+  test("gl_shadowmaps 0 leaves the shadow-map system inactive, so nothing allocates", () => {
+    const rec = new QGLRecording();
+    SetQGL(rec);
+    glCvars.gl_shadowmaps = makeCvar(0);
+
+    expect(GL_ShadowMapsActive()).toBe(false);
+    R_RenderShadowMaps(world, [coneLight], 1);
+    expect(GL_ShadowMapsReady()).toBe(false);
+    expect(names(rec)).not.toContain("qglGenFramebuffers");
+    expect(GL_ShadowMapBindings().length).toBe(0);
+  });
+
+  test("gl_shadowmaps flipped 0 -> 1 at runtime allocates the atlas on the next frame", () => {
+    const rec = new QGLRecording();
+    SetQGL(rec);
+    GL_ShutdownShadowMaps(); // fresh context: clears any capability latch
+    glCvars.gl_shadowmaps = makeCvar(0);
+    R_RenderShadowMaps(world, [coneLight], 1);
+    expect(GL_ShadowMapsReady()).toBe(false);
+
+    glCvars.gl_shadowmaps = makeCvar(1);
+    R_RenderShadowMaps(world, [coneLight], 1);
+    expect(GL_ShadowMapsReady()).toBe(true);
+    expect(names(rec)).toContain("qglGenFramebuffers");
+    expect(GL_ShadowMapBindings().length).toBe(1);
+  });
+
+  test("gl_shaders 0 makes the shadow-map system inactive whatever gl_shadowmaps says", () => {
+    const rec = new QGLRecording();
+    SetQGL(rec);
+    glCvars.gl_shadowmaps = makeCvar(1);
+    const savedShaders = glCvars.gl_shaders;
+    glCvars.gl_shaders = makeCvar(0);
+    try {
+      expect(GL_ShadowMapsActive()).toBe(false);
+      R_RenderShadowMaps(world, [coneLight], 1);
+      expect(GL_ShadowMapsReady()).toBe(false);
+      expect(GL_ShadowMapBindings().length).toBe(0);
+    } finally {
+      glCvars.gl_shaders = savedShaders;
+    }
+  });
+
 
   test("a null worldmodel is a no-op rather than a crash", () => {
     SetQGL(new QGLRecording());
@@ -723,6 +780,9 @@ describe("gl_shadowmap.ts -- R_RenderShadowMaps (depth pass call sequence)", () 
     glCvars.gl_shadowmaps = makeCvar(0);
     R_RenderShadowMaps(world, [coneLight], 1);
     expect(GL_ShadowMapBindings().length).toBe(0);
+    // ...and the 16MB atlas goes back, rather than sitting allocated for a
+    // feature the player just turned off.
+    expect(GL_ShadowMapsReady()).toBe(false);
   });
 });
 

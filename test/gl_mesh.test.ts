@@ -31,6 +31,10 @@ import { SetQGL, GL_TEXTURE_2D } from "../src/ref_gl/gl_image";
 import { SetRefImports, SetCurrentModel, SetCurrentEntity, glCvars, r_newrefdef, ImageT } from "../src/ref_gl/gl_local";
 import { ModelT, ParsedMd2T } from "../src/ref_gl/gl_model";
 import { R_DrawAliasModel, r_avertexnormals, r_avertexnormal_dots } from "../src/ref_gl/gl_mesh";
+import { GL_InitShadowMaps } from "../src/ref_gl/gl_shadowmap";
+import { Md5ModelT, Md5MeshT, Md5VertexT, Md5WeightT, Md5TCoordT, Md5SkeletonJointT } from "../src/qcommon/md5_model";
+import { vec3 } from "../src/shared/math";
+import { CvarT } from "../src/shared/q_shared";
 
 function xyz(x: number, y: number, z: number): [number, number, number] {
   return [x, y, z];
@@ -311,5 +315,218 @@ describe("gl_mesh.ts -- R_DrawAliasModel / GL_DrawAliasFrameLerp", () => {
       expect(b).toBe(0);
       expect(r / g).toBeCloseTo(0.9 / 0.7, 6);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The 1997 planar shadow decal (gl_shadows): when it draws, what geometry it
+// projects, and the shadow-map interaction.
+//
+// Motivated by a play-test that showed giant fans of overlapping black
+// triangles spraying across the floor around every monster in the rerelease
+// content, plus black patches on the monsters' own skins. Two independent
+// causes, one test group:
+//
+//   * the decal drew AT ALL while shadow mapping was on (gl_shadows had been
+//     given q2repro's "2" default while keeping id's 1997 implementation),
+//     and
+//   * for a model drawn through the MD5 skeleton path -- every rerelease
+//     monster, item and gib -- it projected `s_lerped`, which only the MD2
+//     path ever fills, so it drew a stale unrelated mesh.
+// ---------------------------------------------------------------------------
+
+function makeSkeletonModel(positions: readonly [number, number, number][]): Md5ModelT {
+  const md5 = new Md5ModelT();
+  md5.numMeshes = 1;
+  md5.numJoints = 1;
+  md5.numFrames = 1;
+
+  // one joint at the origin with an identity axis, so calcSkelVert reduces to
+  // "the weight position is the vertex position" and the test can assert on
+  // the projection alone rather than on the skinning.
+  const joint = new Md5SkeletonJointT();
+  joint.scale = 1;
+  joint.axis = [vec3(1, 0, 0), vec3(0, 1, 0), vec3(0, 0, 1)];
+  md5.skeletonFrames = [joint];
+
+  const mesh = new Md5MeshT();
+  mesh.numVerts = positions.length;
+  mesh.numIndices = positions.length;
+  mesh.numWeights = positions.length;
+  mesh.indices = positions.map((_p, i) => i);
+  for (let i = 0; i < positions.length; i++) {
+    const v = new Md5VertexT();
+    v.start = i;
+    v.count = 1;
+    mesh.vertices.push(v);
+    const w = new Md5WeightT();
+    w.bias = 1;
+    w.pos = vec3(positions[i][0], positions[i][1], positions[i][2]);
+    mesh.weights.push(w);
+    mesh.jointnums.push(0);
+    mesh.tcoords.push(new Md5TCoordT());
+  }
+  md5.meshes = [mesh];
+  return md5;
+}
+
+function makeCvar(value: number): CvarT {
+  const c = new CvarT();
+  c.name = "test";
+  c.string = String(value);
+  c.value = value;
+  return c;
+}
+
+// every qglBegin..qglEnd pair, in order
+function drawBlocks(calls: readonly QGLCall[]): QGLCall[][] {
+  const blocks: QGLCall[][] = [];
+  let current: QGLCall[] | null = null;
+  for (const c of calls) {
+    if (c.name === "qglBegin") current = [];
+    if (current) current.push(c);
+    if (c.name === "qglEnd" && current) {
+      blocks.push(current);
+      current = null;
+    }
+  }
+  return blocks;
+}
+
+describe("gl_mesh.ts -- gl_shadows planar decal", () => {
+  function setupMd2Entity(): EntityT {
+    const model = new ModelT();
+    model.name = "test.md2";
+    model.extradata = buildTestMd2();
+    const skin = new ImageT();
+    skin.texnum = 7;
+    model.skins[0] = skin;
+    SetCurrentModel(model);
+
+    const e = makeEntity(0);
+    e.origin = vec3(0, 0, 40);
+    SetCurrentEntity(e);
+    return e;
+  }
+
+  beforeEach(() => {
+    // GL_ShadowMapsActive latches a permanent "this context cannot do shadow
+    // maps" flag on a failed init. A successful init here clears it, so this
+    // file does not depend on whether gl_shadowmap.test.ts ran first.
+    SetQGL(new QGLRecording());
+    glCvars.gl_shaders = makeCvar(1);
+    glCvars.gl_shadowmaps = makeCvar(1);
+    GL_InitShadowMaps();
+    glCvars.gl_md5_use = makeCvar(1);
+    glCvars.gl_md5_distance = makeCvar(0);
+  });
+
+  test("shadow mapping ON suppresses the decal entirely, even with gl_shadows set", () => {
+    const e = setupMd2Entity();
+    glCvars.gl_shadows = makeCvar(1);
+    glCvars.gl_shadowmaps = makeCvar(1);
+
+    const rec = new QGLRecording();
+    SetQGL(rec);
+    R_DrawAliasModel(e);
+
+    // exactly one draw block: the model itself. No second, untextured one.
+    expect(drawBlocks(rec.calls).length).toBe(1);
+  });
+
+  test("shadow mapping OFF lets the decal draw, as its own untextured blended block", () => {
+    const e = setupMd2Entity();
+    glCvars.gl_shadows = makeCvar(1);
+    glCvars.gl_shadowmaps = makeCvar(0);
+
+    const rec = new QGLRecording();
+    SetQGL(rec);
+    R_DrawAliasModel(e);
+
+    const blocks = drawBlocks(rec.calls);
+    expect(blocks.length).toBe(2);
+    // the decal emits positions only -- no texcoords, no per-vertex colours
+    const decal = blocks[1] ?? [];
+    expect(decal.map((c) => c.name)).toEqual(["qglBegin", "qglVertex3fv", "qglVertex3fv", "qglVertex3fv", "qglEnd"]);
+    // ...under the 1997 fixed black half-alpha colour
+    expect(rec.calls.some((c) => c.name === "qglColor4f" && c.args[0] === 0 && c.args[1] === 0 && c.args[2] === 0 && c.args[3] === 0.5)).toBe(true);
+  });
+
+  test("gl_shaders 0 leaves the decal available: it is the only alias shadow that configuration can have", () => {
+    const e = setupMd2Entity();
+    glCvars.gl_shadows = makeCvar(1);
+    glCvars.gl_shadowmaps = makeCvar(1); // still 1 -- but nothing can sample an atlas
+    glCvars.gl_shaders = makeCvar(0);
+
+    const rec = new QGLRecording();
+    SetQGL(rec);
+    R_DrawAliasModel(e);
+
+    expect(drawBlocks(rec.calls).length).toBe(2);
+  });
+
+  test("an MD5-skinned model projects its OWN skeleton, not the MD2 path's stale s_lerped", () => {
+    // Draw an MD2 model FIRST, so s_lerped holds that unrelated model's
+    // vertices. Before the fix the MD5 model's decal projected exactly these.
+    const stale = setupMd2Entity();
+    glCvars.gl_shadows = makeCvar(0);
+    SetQGL(new QGLRecording());
+    R_DrawAliasModel(stale);
+
+    // now an MD5 model at the same origin, with a deliberately distinctive
+    // skeleton the MD2 above shares no coordinate with
+    const skelPositions: [number, number, number][] = [
+      [100, 0, 0],
+      [0, 100, 0],
+      [0, 0, 100],
+    ];
+    const model = new ModelT();
+    model.name = "monster.md2";
+    model.extradata = buildTestMd2();
+    model.skeleton = makeSkeletonModel(skelPositions);
+    const skin = new ImageT();
+    skin.texnum = 7;
+    model.skins[0] = skin;
+    SetCurrentModel(model);
+
+    const e = makeEntity(0);
+    e.origin = vec3(0, 0, 40);
+    SetCurrentEntity(e);
+
+    glCvars.gl_shadows = makeCvar(1);
+    glCvars.gl_shadowmaps = makeCvar(0);
+
+    const rec = new QGLRecording();
+    SetQGL(rec);
+    R_DrawAliasModel(e);
+
+    const blocks = drawBlocks(rec.calls);
+    expect(blocks.length).toBe(2);
+    const decal = blocks[1] ?? [];
+    const vertexCalls = decal.filter((c) => c.name === "qglVertex3fv");
+    expect(vertexCalls.length).toBe(3);
+
+    // Both decal paths reuse one scratch `point` for every qglVertex3fv, the
+    // way gl_mesh.c does; the real qgl reads it immediately, but QGLRecording
+    // keeps the reference, so all three recorded args alias the LAST vertex.
+    // That last vertex is still the discriminating one, so assert on it.
+    const last = vertexArgAsTriplet(vertexCalls[2] as QGLCall);
+
+    // GL_DrawAliasShadow's projection applied to the SKELETON's last position.
+    // lightspot is (0,0,0) in this harness (no world model was ever loaded),
+    // so lheight == origin[2] == 40 and height == -lheight + 1 == -39.
+    // shadevector == normalize(cos(0), sin(0), 1) == (1,0,1)/sqrt(2).
+    const s = 1 / Math.SQRT2;
+    const p = skelPositions[2];
+    expect(last[0]).toBeCloseTo(p[0] - s * (p[2] + 40), 3);
+    expect(last[1]).toBeCloseTo(p[1], 3);
+    expect(last[2]).toBeCloseTo(-39, 3);
+
+    // ...and it is NOT what the MD2 glcmds path would have produced from the
+    // stale s_lerped the first draw left behind (that model's last strip
+    // vertex is (10+7, 20+8, 30+9) before projection). This is the whole
+    // point of the fix: the two values are nowhere near each other.
+    const staleX = 17 - s * (39 + 40);
+    expect(Math.abs(last[0] - staleX)).toBeGreaterThan(1);
   });
 });

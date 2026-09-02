@@ -66,6 +66,60 @@
 // before this unit. A light with a walking monster in range rebuilds every
 // frame it moves, which for a point light is six faces.
 //
+// ── The rules, in full ─────────────────────────────────────────────────────
+// Written out because the two shadow techniques in this renderer have to
+// agree about who draws what, and because a play-test found them both
+// drawing at once.
+//
+// 1. WHO CASTS. Every alias-model entity (players, monsters, corpses, gibs,
+//    items) and every inline brush model, plus the static world. Life and
+//    death make no difference: a dead monster and its gibs are alias
+//    entities like any other, and shadowCasterKind excludes them for none
+//    of its reasons. The exclusions are exactly RF_BEAM / RF_FLARE (no
+//    geometry), RF_TRANSLUCENT (you can see through it), RF_NOSHADOW (the
+//    rerelease's own opt-out), RF_WEAPONMODEL / RF_DEPTHHACK (the view
+//    weapon is not in the world), and sprites (no stable silhouette).
+//
+// 2. WHO RECEIVES. World BSP surfaces only, because the shadow test lives in
+//    gl_shader.ts's world-surface program and alias models are drawn through
+//    the fixed-function path with R_LightPoint colours. A monster standing
+//    inside another caster's shadow is therefore still lit by that light.
+//    Stated as a limit, not a defect to hide: making models receivers needs
+//    a shadow-sampling entity-mesh program, which is a separate change.
+//
+// 3. WHICH LIGHT. Only CS_SHADOWLIGHTS-fed lights (DlightT.isShadowLight)
+//    and cone lights get a depth map -- see R_RenderShadowMaps. A classic
+//    transient dlight (muzzle flash, rocket trail, blaster glow) has never
+//    cast a shadow in any Quake 2 and does not start here. There is no sun.
+//
+// 4. WHICH VOLUME. A cone light gets one perspective frustum aimed down its
+//    cone, with SHADOW_FOV_MARGIN slack and far = shadowCubeFar(intensity);
+//    a point light gets six 90-degree faces covering everything within the
+//    same far distance. Neither is an orthographic fit around the casters:
+//    the light's own radius IS the volume, which is what keeps a depth map
+//    cacheable across frames while casters move inside it.
+//
+// 5. PLANAR SHADOW INTERACTION (gl_shadows). id's 1997 projected decal
+//    (gl_mesh.ts's GL_DrawAliasShadow) and this file are mutually exclusive.
+//    When GL_ShadowMapsActive() is true the decal does not draw at all --
+//    not dimmed, not offset, not drawn. When it is false (gl_shadowmaps 0,
+//    or gl_shaders 0, or a context with no framebuffer objects) the decal is
+//    available under its own cvar and renders exactly what id shipped, which
+//    since gl_rmain.ts's default is back to "0" means: off unless asked for.
+//    Turning shadow mapping off in the Video menu therefore removes every
+//    shadow this engine draws, in the same session, with no vid_restart.
+//
+// 6. gl_shaders 0. There is no shadow mapping at all: nothing sampling the
+//    atlas exists, so R_RenderShadowMaps never allocates it and
+//    GL_ShadowMapsActive() is false regardless of gl_shadowmaps. The Video
+//    menu greys both shadow rows and says "requires gl_shaders 1" rather
+//    than letting the player set a value that does nothing.
+//
+// 7. ORDER WITHIN THE FRAME. The atlas is fully rendered and the framebuffer
+//    binding restored before R_DrawWorld samples it, and long before
+//    gl_fog.ts's screen-space pass reads the scene depth buffer at the end
+//    of the frame -- the two never share a bound framebuffer.
+//
 // ── Why a single atlas and not one FBO per light ───────────────────────────
 // GLSL 1.10 only guarantees sampler array indexing by a constant-index-
 // expression, so `uniform sampler2D u_shadow[8]` indexed by the fragment
@@ -719,9 +773,41 @@ let shadowFbo = 0;
 let shadowTexture = 0;
 let shadowReady = false;
 let shadowWarned = false;
+// Set when GL_InitShadowMaps has failed on THIS context (no FBO entry points,
+// or an incomplete depth framebuffer). One failure is permanent for the life
+// of the context: retrying it every frame would spam the console and reprobe
+// hardware that is not going to change its mind.
+let shadowInitFailed = false;
 const cached = new Map<number, CachedShadowT>();
 let activeBindings: ShadowMapBindingT[] = [];
 let shadowStats: ShadowMapStatsT = NO_STATS;
+
+/*
+====================
+GL_ShadowMapsActive
+
+"Is the shadow-map system the thing drawing shadows this frame?" -- the one
+answer both this file and gl_mesh.ts's planar-decal gate ask, so that the two
+shadow techniques can never both run over the same model (see the header's
+"Planar shadow interaction").
+
+Deliberately answered from the CVARS and the context's capability, not from
+whether any light actually got an atlas rectangle this frame. Keying it on
+live bindings would switch the 1997 decal on and off as a monster walked in
+and out of a shadow light's radius, which is a far worse artifact than the
+one it would be avoiding.
+
+gl_shaders is read directly rather than through gl_shader.ts's
+GL_UsingShaderPath() only because gl_shader.ts imports THIS file; the cvar is
+an accurate proxy, since GL_InitShaderPath sets it to 0 itself when the
+context turns out not to support program objects.
+====================
+*/
+export function GL_ShadowMapsActive(): boolean {
+  if (shadowInitFailed) return false;
+  if (glCvars.gl_shaders && !glCvars.gl_shaders.value) return false;
+  return !glCvars.gl_shadowmaps || glCvars.gl_shadowmaps.value !== 0;
+}
 
 export function GL_ShadowMapTexture(): number {
   return shadowTexture;
@@ -756,9 +842,17 @@ lighting shader falls back to its unshadowed permutation.
 */
 export function GL_InitShadowMaps(): boolean {
   GL_ShutdownShadowMaps();
+  // A fresh attempt on a (possibly new) context: the caller re-arms the latch
+  // if this attempt fails too.
+  shadowInitFailed = false;
 
-  if (glCvars.gl_shadowmaps && !glCvars.gl_shadowmaps.value) return false;
-
+  // No gl_shadowmaps check here on purpose. This used to return early when
+  // the cvar was 0, which meant a session that BOOTED with shadow mapping
+  // off could never turn it back on: R_Init ran once, shadowReady stayed
+  // false, and the Video menu's "shadow mapping: yes" wrote a cvar nothing
+  // ever looked at again without a vid_restart. The cvar is now read once
+  // per frame in R_RenderShadowMaps, which allocates the atlas on the first
+  // frame it is wanted and releases it on the first frame it is not.
   const genFramebuffers = qgl.qglGenFramebuffers;
   const bindFramebuffer = qgl.qglBindFramebuffer;
   const framebufferTexture2D = qgl.qglFramebufferTexture2D;
@@ -821,6 +915,10 @@ export function GL_ShutdownShadowMaps(): void {
   shadowFbo = 0;
   shadowTexture = 0;
   shadowReady = false;
+  // The "this context cannot do shadow maps" latch lives exactly as long as
+  // the context does. Tearing the atlas down (R_Shutdown, or a vid_restart's
+  // R_Init) is the point at which a fresh attempt becomes reasonable again.
+  shadowInitFailed = false;
   cached.clear();
   activeBindings = [];
   shadowStats = NO_STATS;
@@ -991,8 +1089,20 @@ export function R_RenderShadowMaps(
 ): void {
   activeBindings = [];
   shadowStats = NO_STATS;
-  if (!shadowReady || !worldmodel) return;
-  if (glCvars.gl_shadowmaps && !glCvars.gl_shadowmaps.value) return;
+
+  // Follow the cvar every frame, in both directions. Turning shadow mapping
+  // off in the Video menu has to stop drawing shadows in the SAME session
+  // (and give the 16MB atlas back), and turning it on has to start again
+  // without a vid_restart.
+  if (!GL_ShadowMapsActive()) {
+    if (shadowReady) GL_ShutdownShadowMaps();
+    return;
+  }
+  if (!shadowReady && !GL_InitShadowMaps()) {
+    shadowInitFailed = true;
+    return;
+  }
+  if (!worldmodel) return;
 
   const bindFramebuffer = qgl.qglBindFramebuffer;
   if (!bindFramebuffer) return;

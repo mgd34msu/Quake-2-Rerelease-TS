@@ -361,7 +361,18 @@ const MANIFEST: ManifestEntry[] = [
   { name: "gl_screenshot_quality", default: "90", flags: 0 },
   { name: "gl_screenshot_template", default: "quakeXXX", flags: 0 },
   { name: "gl_shaders", default: "1", flags: CVAR_FILES },
-  { name: "gl_shadows", default: "2", flags: CVAR_ARCHIVE },
+  // DELIBERATE q2repro DIVERGENCE. q2repro's main.c:1100 does default this to
+  // "2", but its gl_shadows drives a different renderer: mesh.c's
+  // cull_shadow/setup_shadow project onto glr.lightpoint.plane through a real
+  // projection matrix, reject planes steeper than 0.5, frustum-cull the blob
+  // and fade it out -- and "2" specifically selects that bottom_z fade. This
+  // port renders id's 1997 GL_DrawAliasShadow instead (gl_mesh.ts): no
+  // stencil, no steepness test, no cull, no fade. Carrying q2repro's NUMBER
+  // with id's IMPLEMENTATION put a permanent smear of overlapping half-alpha
+  // triangles under every alias model, which is what Mike's 2026-09-02 play
+  // test reported. The default follows the implementation: id's "0"
+  // (ref_gl/gl_rmain.c:999).
+  { name: "gl_shadows", default: "0", flags: CVAR_ARCHIVE },
   { name: "gl_showbloom", default: "0", flags: CVAR_CHEAT },
   { name: "gl_showcull", default: "0", flags: CVAR_CHEAT },
   { name: "gl_showerrors", default: "1", flags: 0 },

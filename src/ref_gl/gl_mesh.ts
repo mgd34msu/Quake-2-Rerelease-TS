@@ -36,14 +36,24 @@ needing to export anything new, keeping this file inside its own SCOPE.
 
 `lightspot` (`extern vec3_t lightspot;`, defined by gl_light.c's
 RecursiveLightPoint as a side effect of R_LightPoint, read here by
-GL_DrawAliasShadow's `lheight` calc) is module-private in gl_light.ts (not
-exported -- out of this unit's SCOPE to change). GL_DrawAliasShadow below
-uses a local always-zero stand-in instead; reported deviation: the shadow
-decal's vertical placement (`lheight`) is wrong whenever the real lightspot
-isn't at world Z=0, until a follow-up unit exports gl_light.ts's lightspot
-(or a getter for it). This only affects the shadow-decal path, gated behind
-`gl_shadows` (default off) and skipped entirely for translucent/weapon-model
-entities -- it does not affect core alias-model rendering.
+GL_DrawAliasShadow's `lheight` calc) is exported by gl_light.ts and imported
+below, so the decal's vertical placement is the real one, not the always-zero
+stand-in an earlier revision of this file used.
+
+Two 1997 quirks in that decal are kept on purpose, because gl_shadows is
+specified to render exactly what id shipped:
+
+  * lightspot is only refreshed by the R_LightPoint call in the `else` branch
+    of the shade-colour selection below. An RF_FULLBRIGHT or RF_SHELL_* entity
+    skips that call, so its decal is placed at whatever floor the PREVIOUS
+    entity stood on. gl_mesh.c has the same ordering.
+  * the decal is a flat z with no polygon offset and no stencil, so
+    overlapping triangles blend twice and it can z-fight a sloped floor.
+
+Both were invisible in 1997 because gl_shadows shipped defaulting to 0, which
+is where gl_rmain.ts puts it again. What is NOT kept is the stale-`s_lerped`
+projection for MD5-skinned models -- see GL_DrawAliasSkeletonShadow below,
+which is a defect in this port, not in gl_mesh.c (which has no MD5 path).
 
 No literal `#ifdef __linux__` block exists anywhere in gl_mesh.c (confirmed
 by grepping the file) -- the `gl_vertex_arrays->value` branch in
@@ -96,6 +106,7 @@ import { ParsedMd2T, MAX_VERTS, MAX_MD2SKINS } from "./gl_model";
 import { qgl, GL_Bind, GL_TexEnv, GL_TEXTURE_2D, GL_REPLACE, GL_BLEND } from "./gl_image";
 import { R_RotateForEntity, MYgluPerspective } from "./gl_rmain";
 import { lightspot, R_LightPoint } from "./gl_light";
+import { GL_ShadowMapsActive } from "./gl_shadowmap";
 import { fixedLength } from "../shared/fixed";
 import { type Md5ModelT, calcSkelVert, getSkeletonFrame } from "../qcommon/md5_model";
 
@@ -563,6 +574,61 @@ export function GL_DrawAliasShadow(paliashdr: ParsedMd2T, posenum: number): void
 }
 
 /*
+=============
+GL_DrawAliasSkeletonShadow
+
+The 1997 planar decal for a model that was drawn through the MD5 SKELETON
+path, projecting the skeleton's own posed vertices.
+
+This exists because GL_DrawAliasShadow above reads `s_lerped`, and s_lerped
+is filled in exactly one place: GL_DrawAliasFrameLerp, the MD2 path. When
+R_DrawAliasModel chose GL_DrawAliasSkeleton instead -- which for the
+re-release content is EVERY monster, item and gib that ships an md5/ sibling
+(models/monsters/soldier/md5/tris.md5mesh and 750 more in baseq2/pak0.pak) --
+s_lerped still held whichever unrelated MD2 entity last went through the
+lerp, and the decal projected that stale mesh, indexed through THIS model's
+MD2 glcmds. That is the giant fan of overlapping half-alpha triangles
+spraying across the floor around monsters, and (where the garbage happened
+to project above the floor) the black patches across their own skins.
+
+The projection itself is GL_DrawAliasShadow's, unchanged: the same lheight
+from `lightspot`, the same flat `height`, the same shadevector skew. Only
+the vertex source differs, so an MD5 model's decal matches what was drawn.
+=============
+*/
+export function GL_DrawAliasSkeletonShadow(model: Md5ModelT): void {
+  if (!currententity) return;
+
+  const lheight = currententity.origin[2] - lightspot[2];
+  const height = -lheight + 1.0;
+
+  const backlerp = Math.min(Math.max(currententity.backlerp, 0), 1);
+  const skeleton = getSkeletonFrame(model, currententity.oldframe, currententity.frame, backlerp, 1 - backlerp);
+  const position = vec3();
+  const normal = vec3();
+  const point = vec3();
+
+  for (const mesh of model.meshes) {
+    const positions: Vec3[] = new Array(mesh.numVerts);
+    for (let i = 0; i < mesh.numVerts; i++) {
+      calcSkelVert(mesh.vertices[i], mesh, skeleton, position, normal);
+      positions[i] = vec3(position[0], position[1], position[2]);
+    }
+
+    qgl.qglBegin(GL_TRIANGLES);
+    for (let i = 0; i < mesh.numIndices; i++) {
+      const src = positions[mesh.indices[i]];
+      if (!src) continue;
+      point[0] = src[0] - shadevector[0] * (src[2] + lheight);
+      point[1] = src[1] - shadevector[1] * (src[2] + lheight);
+      point[2] = height;
+      qgl.qglVertex3fv(point);
+    }
+    qgl.qglEnd();
+  }
+}
+
+/*
 ** R_CullAliasModel
 */
 function R_CullAliasModel(bbox: Vec3[], e: EntityT): boolean {
@@ -904,13 +970,25 @@ export function R_DrawAliasModel(e: EntityT): void {
 
   if (currententity.flags & RF_DEPTHHACK) qgl.qglDepthRange(gldepthmin, gldepthmax);
 
-  if (glCvars.gl_shadows && glCvars.gl_shadows.value && !(currententity.flags & (RF_TRANSLUCENT | RF_WEAPONMODEL))) {
+  // gl_shadows is id's 1997 planar decal and stays byte-for-byte theirs (the
+  // block below is gl_mesh.c:823-834 verbatim). It is suppressed outright
+  // whenever the shadow-MAP system is the one drawing shadows: the two
+  // techniques disagree about where a shadow goes, and drawing both put a
+  // hard black skewed silhouette on the floor next to the soft mapped one.
+  // GL_ShadowMapsActive() is false at gl_shaders 0 and on a context with no
+  // framebuffer objects, so turning the decal on there still works -- it is
+  // the only alias shadow those configurations can have.
+  const shadowMapped = GL_ShadowMapsActive();
+  if (!shadowMapped && glCvars.gl_shadows && glCvars.gl_shadows.value && !(currententity.flags & (RF_TRANSLUCENT | RF_WEAPONMODEL))) {
     qgl.qglPushMatrix();
     R_RotateForEntity(e);
     qgl.qglDisable(GL_TEXTURE_2D);
     qgl.qglEnable(GL_BLEND);
     qgl.qglColor4f(0, 0, 0, 0.5);
-    GL_DrawAliasShadow(paliashdr, currententity.frame);
+    // Project whatever was actually drawn. usedSkeleton is R_DrawAliasModel's
+    // own record of which of the two mesh paths ran a few lines above.
+    if (usedSkeleton && currentmodel.skeleton) GL_DrawAliasSkeletonShadow(currentmodel.skeleton);
+    else GL_DrawAliasShadow(paliashdr, currententity.frame);
     qgl.qglEnable(GL_TEXTURE_2D);
     qgl.qglDisable(GL_BLEND);
     qgl.qglPopMatrix();

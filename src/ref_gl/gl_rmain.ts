@@ -128,7 +128,7 @@ import {
 } from "./gl_local";
 import { R_BeginRegistration, R_EndRegistration, R_RegisterModel, Mod_PointInLeaf, Mod_Init, Mod_FreeAll, Mod_Modellist_f, ModtypeT, ModelT, ParsedSp2T } from "./gl_model";
 import { GL_InitShaderPath, GL_ShutdownShaderPath, GL_UsingShaderPath } from "./gl_shader";
-import { GL_InitShadowMaps, GL_ShutdownShadowMaps, GL_ShadowMapsNewMap, GL_ShadowMapStats, R_RenderShadowMaps } from "./gl_shadowmap";
+import { GL_InitShadowMaps, GL_ShutdownShadowMaps, GL_ShadowMapsNewMap, GL_ShadowMapsActive, GL_ShadowMapStats, R_RenderShadowMaps } from "./gl_shadowmap";
 import {
   R_RegisterSkin,
   GL_InitImages,
@@ -1207,10 +1207,21 @@ export function R_Register(): void {
   glCvars.gl_mode = ri.Cvar_Get("gl_mode", "3", CVAR_ARCHIVE);
   // q2repro src/refresh/main.c:1160 flags this CVAR_CHEAT (cvar-parity fix).
   glCvars.gl_lightmap = ri.Cvar_Get("gl_lightmap", "0", CVAR_CHEAT);
-  // q2repro src/refresh/main.c:1100: `gl_shadows = Cvar_Get("gl_shadows", "2", CVAR_ARCHIVE);`
-  // -- default fixed from this port's prior "0" to q2repro's "2"; flags
-  // already matched (CVAR_ARCHIVE), left unchanged.
-  glCvars.gl_shadows = ri.Cvar_Get("gl_shadows", "2", CVAR_ARCHIVE);
+  // ref_gl/gl_rmain.c:999: `gl_shadows = ri.Cvar_Get("gl_shadows", "0", CVAR_ARCHIVE);`
+  // -- back to id's "0" after a mis-citation. q2repro's main.c:1100 does
+  // default this to "2", but q2repro's gl_shadows drives a COMPLETELY
+  // different shadow: mesh.c's cull_shadow/setup_shadow build a real
+  // plane-projection matrix onto glr.lightpoint.plane, reject planes steeper
+  // than 0.5, frustum-cull the blob, and fade it out with distance -- and
+  // the value 2 specifically selects that bottom_z fade. What this file
+  // renders is gl_mesh.ts's GL_DrawAliasShadow, id's 1997 original: no
+  // stencil, no steepness test, no cull, no fade, every triangle blended
+  // separately onto a single flat z. Taking q2repro's NUMBER without
+  // q2repro's IMPLEMENTATION is what put an un-turn-off-able smear of
+  // overlapping half-alpha triangles under every alias model in the game.
+  // The 1997 decal stays available exactly as 1997 shipped it, behind the
+  // cvar, off by default. See gl_shadowmap.ts's "Planar shadow interaction".
+  glCvars.gl_shadows = ri.Cvar_Get("gl_shadows", "0", CVAR_ARCHIVE);
   glCvars.gl_dynamic = ri.Cvar_Get("gl_dynamic", "1", 0);
   // q2repro src/refresh/main.c:1145 flags this CVAR_CHEAT (cvar-parity fix).
   glCvars.gl_nobind = ri.Cvar_Get("gl_nobind", "0", CVAR_CHEAT);
@@ -1758,7 +1769,7 @@ export function R_Init(hInstance: unknown, wndProc: unknown): boolean {
   // context that fell back to fixed-function has no lighting shader to
   // sample a depth atlas from and should not be handed a 2048x2048 depth
   // texture it will never read. Same never-fails-R_Init contract.
-  if (GL_UsingShaderPath()) GL_InitShadowMaps();
+  if (GL_UsingShaderPath() && GL_ShadowMapsActive()) GL_InitShadowMaps();
 
   const err = qgl.qglGetError();
   if (err !== GL_NO_ERROR) {
