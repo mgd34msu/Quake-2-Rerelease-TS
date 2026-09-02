@@ -154,15 +154,54 @@ export function NET_IsLocalAddress(adr: NetadrT): boolean {
 //=============================================================================
 // LOOPBACK BUFFERS FOR LOCAL PLAYER
 
-const MAX_LOOPBACK = 4;
+// net_udp.c / q2repro src/common/net.c: `#define MAX_LOOPBACK 4`, a
+// 4-deep ring whose oldest entries NET_GetLoopPacket below silently
+// discards ("if (loop->send - loop->get > MAX_LOOPBACK) loop->get =
+// loop->send - MAX_LOOPBACK;"). Widened here, and ONLY here -- the ring
+// semantics, the discard rule and every caller are unchanged.
+//
+// WHY. id's 4 is sized for id's own pacing: one server frame and one client
+// frame per Qcommon_Frame, both at 10Hz, so at most one or two packets are
+// ever in flight across the in-process loopback. Two things in this port
+// break that assumption at the same time, and only for `demomap` playback:
+//
+//   1. The kex family runs its server at the re-release tick rate (40Hz,
+//      sv_init.ts's SV_ComputeFramerate), while cl_main.ts's CL_Frame still
+//      holds id's "don't flood packets out while connecting" gate --
+//      `if (cls.state === ca_connected && extratime < 100) return;` -- so a
+//      client that has not yet received a frame drains the ring at 10Hz
+//      while the server fills it at 40Hz.
+//   2. A demo server's payload is the ONLY traffic in the engine that is
+//      irreplaceable AND sent unreliably: sv_send.ts's SV_SendClientMessages
+//      hands each `.dm2` block to Netchan_Transmit as the unreliable part
+//      (sv_send.c:501-527 does the same). Every other bulk server->client
+//      message -- configstrings, baselines, downloads -- goes through the
+//      netchan's RELIABLE buffer and is retransmitted until acked, so a
+//      dropped loopback packet costs nothing.
+//
+// Together those made `demomap` on a kex session drop the demo's very first
+// block -- the one carrying svc_serverdata -- while the client was still
+// stuck at ca_connected. The client then parsed the surviving configstring
+// blocks with no protocol/codec/configstring layout selected yet and died on
+// "configstring > MAX_CONFIGSTRINGS". Demo playback is also the only path
+// that cannot ask for a retransmit: sv_main.ts's SVC_DirectConnect refuses
+// non-local clients on an attractloop server ("attractloop servers are ONLY
+// for local clients", sv_main.c), so this ring IS the demo transport.
+//
+// 1024 slots is ~25 seconds of 40Hz demo blocks; the array holds references
+// to per-packet Uint8Arrays that only exist while queued, so the idle cost
+// is one 1024-entry array of empty views per direction. The bound (and the
+// drop-oldest behavior when it IS exceeded) is kept rather than growing
+// without limit so a loopback ring nobody drains -- a dedicated server, a
+// test that writes without reading -- still cannot grow unboundedly.
+const MAX_LOOPBACK = 1024;
 
 class LoopbackT {
-  msgs: Uint8Array[] = fixedLength("LoopbackT.msgs", MAX_LOOPBACK, [
-    new Uint8Array(0),
-    new Uint8Array(0),
-    new Uint8Array(0),
-    new Uint8Array(0),
-  ]);
+  msgs: Uint8Array[] = fixedLength(
+    "LoopbackT.msgs",
+    MAX_LOOPBACK,
+    Array.from({ length: MAX_LOOPBACK }, () => new Uint8Array(0)),
+  );
   get = 0;
   send = 0;
 }

@@ -7,7 +7,7 @@ import { Cmd_AddCommand, Cmd_Argc, Cmd_Argv } from "../qcommon/cmd";
 import { Cvar_Get } from "../qcommon/cvar";
 import { Com_Error, Com_Printf } from "../qcommon/common";
 import { ERR_DROP } from "../qcommon/qcommon";
-import { CM_InlineModel } from "../qcommon/cmodel";
+import { CM_InlineModel, CM_LoadMap } from "../qcommon/cmodel";
 import { DlightT, EntityT, LightstyleT, MAX_DLIGHTS, MAX_ENTITIES, MAX_LIGHTSTYLES, MAX_PARTICLES, ParticleT } from "./ref";
 import {
   cl,
@@ -380,6 +380,31 @@ export function CL_PrepRefresh(): void {
   // let the render dll load the map
   const mapstring = cl.configstrings[cls.csr.models + 1];
   const mapname = mapstring.slice(5, mapstring.length - 4); // skip "maps/", cut off ".bsp"
+
+  // Load the COLLISION model for this same map before the model loop below
+  // resolves any "*N" inline-model configstring through CM_InlineModel --
+  // that helper Com_Errors "CM_InlineModel: bad number" whenever cmodel.ts's
+  // numcmodels is still 0, which is exactly the state a demo server leaves it
+  // in (sv_init.ts's SV_SpawnServer calls CM_LoadMap("") for every non-
+  // ss_game state, "no real map").
+  //
+  // NOT in cl_view.c: there, the CM_LoadMap always comes from the caller --
+  // CL_Precache_f's "yet another hack to let old demos work" branch
+  // (cl_main.c/cl_main.ts) runs `CM_LoadMap(cl.configstrings[CS_MODELS+1],
+  // true)` immediately before calling here. That call still happens and this
+  // one is a no-op behind cmodel.ts's map_name cache whenever it did (same
+  // for a listen server, where SV_SpawnServer already loaded the very same
+  // file). It is load-bearing only for CL_Frame's catch-up call
+  // (`if (!cl.refresh_prepped && cls.state === ConnstateT.ca_active)
+  // CL_PrepRefresh()`, cl_main.ts, itself straight out of cl_main.c): on a
+  // `demomap` server the demo's own frames can push the client to ca_active
+  // in the same client frame that queues the demo's stuffed "precache", and
+  // any command already sitting in the command buffer (a `wait` from an
+  // exec'd config, say) defers that "precache" past the catch-up call. id's
+  // client only ever spoke one protocol and reached CL_PrepRefresh through
+  // CL_Precache_f in practice; making the function load the map it is about
+  // to register keeps that hazard from being fatal.
+  CM_LoadMap(mapstring, true);
 
   // register models, pics, and skins
   Com_Printf(`Map: ${mapname}\r`);

@@ -141,6 +141,16 @@ export interface BoxRoomOptions {
   that stores the whole tail of the shared array.
   */
   partialLeafFaces?: boolean;
+  /*
+  Emit this many EXTRA submodels after the world model, so cmodel.ts's
+  numcmodels ends up at 1 + inlineModels and CM_InlineModel("*1") ..
+  CM_InlineModel("*<inlineModels>") resolve instead of Com_Erroring with
+  "bad number". Each extra submodel is the same box rooted at node 0 (a real
+  map's inline models are separate brush-model subtrees; nothing that reads
+  them here cares which subtree they point at, only that the index exists).
+  Zero by default, so every existing caller keeps its exact lumps.
+  */
+  inlineModels?: number;
 }
 
 const PARTIAL_FIRST_LEAFFACE = 2;
@@ -326,8 +336,10 @@ export function buildBoxRoomBsp(entityString: string = WORLDSPAWN_ONLY_ENTITIES,
     view.setInt16(base + 2, 0, true); // texinfo
   });
 
-  // ---- MODELS (1): the whole room, rooted at node 0 ----
-  const modelsLump = buildLump(1, DMODEL_T_SIZE, (view, base) => {
+  // ---- MODELS (1 + options.inlineModels): the whole room, rooted at node
+  // 0, followed by any extra inline-model entries the caller asked for (see
+  // BoxRoomOptions.inlineModels) ----
+  const modelsLump = buildLump(1 + (options.inlineModels ?? 0), DMODEL_T_SIZE, (view, base) => {
     const h = ROOM_HALF;
     view.setFloat32(base, -h, true);
     view.setFloat32(base + 4, -h, true);

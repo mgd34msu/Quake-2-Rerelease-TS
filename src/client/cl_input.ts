@@ -718,6 +718,45 @@ export function CL_SendCmd(): void {
     return;
   }
 
+  // q2repro src/client/input.c:1246-1249 (CL_SendCmd): "generate usercmds
+  // while playing a demo, but do not send them" -- everything above this
+  // point (CL_CreateCmd, the cl.cmds ring, cl.cmd) still runs, exactly as it
+  // does there; only the transmit is suppressed, and the netchan is kept
+  // alive with the same empty keepalive/reliable-flush transmit the
+  // ca_connected branch just above uses.
+  //
+  // cl_main.c has no such branch because id's client only ever spoke one
+  // protocol, so its moves were parseable by the fake `demomap` server no
+  // matter what the demo contained. This port negotiates a protocol per
+  // connection AND re-selects cls.codec from whatever svc_serverdata the
+  // stream carries (cl_parse.ts's CL_ParseServerData -> selectServerCodec).
+  // On a demo server those two are different by construction: sv_ccmds.ts's
+  // `demomap` spins up an ordinary loopback connection that negotiates the
+  // SESSION's protocol (34 for an unwidened classic session), then pipes a
+  // file recorded at some other protocol (1038, 4038, 2022...) down it. The
+  // client switched to the recorded stream's codec and started writing
+  // clc_q2pro_move_batched/checksum-less clc_move upstream; the server was
+  // still reading with the negotiated codec, mis-framed the body and dropped
+  // the client with "SV_ReadClientMessage: unknown command char", which
+  // svc_disconnect'd the client into an endless drop/reconnect/restart-the-
+  // demo loop. The demo server has no game state for a usercmd to affect
+  // (SV_SpawnServer's non-ss_game branch loads no map and spawns no
+  // entities), so not sending them costs nothing observable.
+  //
+  // cls.demoplayback covers cl_demo.ts's own in-client buffer playback; the
+  // attract-loop flag is the `demomap` path's equivalent, set from the
+  // stream's own svc_serverdata (cl_parse.ts: `cl.attractloop =
+  // sd.attractloop`) -- CL_Record_f writes it as 1 for every recording
+  // ("demos are always attract loops") and sv_ccmds.ts's server-side
+  // recorder does the same, which is also what cl_ents.ts already keys its
+  // PM_FREEZE demo-playback pmove off.
+  if (cls.demoplayback || cl.attractloop) {
+    if (cls.netchan.message.cursize || cls.realtime - cls.netchan.last_sent > 1000) {
+      Netchan_Transmit(cls.netchan, 0, new Uint8Array(0));
+    }
+    return;
+  }
+
   // send a userinfo update if needed.
   if (userinfo_modified) {
     CL_FixUpGender();
