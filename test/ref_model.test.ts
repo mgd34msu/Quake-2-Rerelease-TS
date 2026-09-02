@@ -28,12 +28,13 @@ last line of the function) with every node/leaf/plane/submodel field
 already correctly populated.
 */
 
-import { describe, test, expect, beforeEach } from "bun:test";
+import { afterAll, describe, test, expect, beforeEach } from "bun:test";
 import type { RefImports } from "../src/client/ref";
 import { SetRefImports } from "../src/ref_soft/r_local";
 import { vec3 } from "../src/shared/math";
 import { CONTENTS_SOLID } from "../src/shared/q_shared";
 import { Mod_FreeAll,
+  Mod_TestFreeAllKnown,
   Mod_ForName,
   Mod_PointInLeaf,
   Mod_ClusterPVS,
@@ -121,10 +122,22 @@ function makeFakeRi(): RefImports {
   };
 }
 
+// Rule 13: leave r_model.ts's mod_known/mod_inline table exactly as empty as
+// a fresh process would. This file's error-path tests (unknown fileid,
+// not-found-with-crash, bad sprite version) leave mod_known slots holding a
+// NAME with extradatasize 0 -- the one thing Mod_FreeAll cannot reclaim --
+// and a leftover slot 0 pushes a LATER file's world model into mod_known[1],
+// tripping Mod_LoadBrushModel's "Loaded a brush model after the world" guard
+// there (test/mod_leaf_marksurfaces.test.ts is the file that noticed). See
+// Mod_TestFreeAllKnown's own comment in r_model.ts.
+afterAll(() => {
+  Mod_TestFreeAllKnown();
+});
+
 beforeEach(() => {
   SetRefImports(makeFakeRi());
   Mod_Init(); // fills mod_novis with 0xff, matching r_main.c's startup sequence
-  Mod_FreeAll(); // rule 13: the frame-render suite caches models by name
+  Mod_TestFreeAllKnown(); // not Mod_FreeAll -- see the afterAll above
 });
 
 // ---------------------------------------------------------------------------

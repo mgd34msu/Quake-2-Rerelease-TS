@@ -29,7 +29,7 @@ import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Cvar_ForceSet, Cvar_Get } from "../src/qcommon/cvar";
+import { Cvar_ForceSet, Cvar_Get, Cvar_VariableString } from "../src/qcommon/cvar";
 import { Cbuf_AddText } from "../src/qcommon/cmd";
 import { NET_Shutdown } from "../src/platform/net_udp";
 import { Qcommon_Init, runFrames } from "../src/main";
@@ -55,6 +55,8 @@ const MAP_POLL_LIMIT = 200;
 
 describe("kex game family boot -- Q2REPRO_CODEC selection (src/qcommon/protocol/q2repro.ts)", () => {
   let tmpRoot: string;
+  let preTestGame = "";
+  let preTestBasedir = "";
 
   beforeAll(async () => {
     tmpRoot = mkdtempSync(join(tmpdir(), "q2repro-boot-"));
@@ -64,6 +66,8 @@ describe("kex game family boot -- Q2REPRO_CODEC selection (src/qcommon/protocol/
     mkdirSync(mapsDir);
     writeFileSync(join(mapsDir, "q2reprotest.bsp"), buildBoxRoomBsp(BOOT_ENTITIES));
 
+    preTestGame = Cvar_VariableString("game");
+    preTestBasedir = Cvar_VariableString("basedir");
     Cvar_ForceSet("basedir", tmpRoot);
     // Pre-register with the engine's real default+flags (files.ts:1189) so
     // this throwaway override can never become the cvar's default_string via
@@ -88,6 +92,15 @@ describe("kex game family boot -- Q2REPRO_CODEC selection (src/qcommon/protocol/
   afterAll(async () => {
     SV_Shutdown("q2repro boot test finished\n", false);
     await NET_Shutdown();
+    // Rule 13: "game" and "basedir" are process-wide cvars this boot
+    // overrode. A later suite's FS_InitFilesystem re-reads "game" at its
+    // very end and calls FS_SetGamedir on any non-empty value, which moves
+    // FS_Gamedir() off basedir/baseq2 onto <that suite's basedir>/kex --
+    // exactly what test/fs_homedir.test.ts's write-root assertions measure.
+    // Put both back so this throwaway boot is not observable from the next
+    // file in the process.
+    Cvar_ForceSet("game", preTestGame);
+    Cvar_ForceSet("basedir", preTestBasedir);
     rmSync(tmpRoot, { recursive: true, force: true });
   });
 

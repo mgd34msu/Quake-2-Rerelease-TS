@@ -17,7 +17,7 @@ width/height texture registered via SetNoTexture is enough to let the whole
 brush-model load run to completion, including GL_BuildPolygonFromSurface.
 */
 
-import { describe, test, expect, beforeEach } from "bun:test";
+import { afterAll, describe, test, expect, beforeEach } from "bun:test";
 import type { RefImports } from "../src/client/ref";
 import { SetRefImports, SetNoTexture, ImageT } from "../src/ref_gl/gl_local";
 import { SetQGL } from "../src/ref_gl/gl_image";
@@ -26,6 +26,7 @@ import { vec3 } from "../src/shared/math";
 import { CplaneT, CONTENTS_SOLID } from "../src/shared/q_shared";
 import {
   Mod_FreeAll,
+  Mod_TestFreeAllKnown,
   Mod_ForName,
   Mod_PointInLeaf,
   Mod_Init,
@@ -88,10 +89,22 @@ function makeFakeRi(): RefImports {
   };
 }
 
+// Rule 13: leave gl_model.ts's mod_known/mod_inline table exactly as empty
+// as a fresh process would. The "Mod_ForName: dispatch and error paths"
+// describe below loads models that Sys_Error out partway, which leaves
+// mod_known slots holding a NAME with extradatasize 0 -- the one thing
+// Mod_FreeAll cannot reclaim -- and a leftover slot 0 pushes a LATER file's
+// world model into mod_known[1], tripping Mod_LoadBrushModel's "Loaded a
+// brush model after the world" guard there (test/mod_leaf_marksurfaces.test.ts
+// is the file that noticed). See Mod_TestFreeAllKnown's own comment.
+afterAll(() => {
+  Mod_TestFreeAllKnown();
+});
+
 beforeEach(() => {
   SetRefImports(makeFakeRi());
   Mod_Init();
-  Mod_FreeAll(); // rule 13: other suites in this file cache models by name
+  Mod_TestFreeAllKnown(); // not Mod_FreeAll -- see the afterAll above
 
   // GL_FindImage (gl_image.ts) is real now, but a synthetic BSP's texture
   // names never resolve to a real file on disk, so gl_model.ts's

@@ -49,8 +49,8 @@ import { NET_CompareBaseAdr } from "../src/platform/net_udp";
 import { Cmd_TokenizeString } from "../src/qcommon/cmd";
 import { SZ_Init, MSG_WriteByte } from "../src/qcommon/sizebuf";
 import { SetConPrintHandler } from "../src/qcommon/common";
-import { Cvar_FullSet } from "../src/qcommon/cvar";
-import { FS_InitFilesystem } from "../src/qcommon/files";
+import { Cvar_FullSet, Cvar_ForceSet, Cvar_VariableString } from "../src/qcommon/cvar";
+import { FS_InitFilesystem, FS_TestSnapshotSearchPaths, FS_TestRestoreSearchPaths, type FsSearchPathSnapshotT } from "../src/qcommon/files";
 import { CM_LoadMap } from "../src/qcommon/cmodel";
 import { MulticastT, EntityStateT, PlayerStateT, CVAR_LATCH, CVAR_SERVERINFO } from "../src/shared/q_shared";
 import { LinkT, SolidT, MAX_ENT_CLUSTERS, type Edict, type GameExports } from "../src/game/game";
@@ -174,6 +174,9 @@ afterEach(() => {
 // "maps/testroom.bsp" with the classic-fixture suites let whichever ran
 // first in the shared process decide which BSP every later suite got.
 let tmpRoot: string;
+let fsSnapshot: FsSearchPathSnapshotT;
+let preTestBasedir = "";
+let preTestMaxclients = "";
 
 beforeAll(() => {
   tmpRoot = mkdtempSync(join(tmpdir(), "q2solk-"));
@@ -183,14 +186,43 @@ beforeAll(() => {
   mkdirSync(mapsDir);
   writeFileSync(join(mapsDir, "sv_send_overflow_kex_room.bsp"), buildBoxRoomBspQbsp());
 
-  Cvar_FullSet("basedir", tmpRoot, 0);
+  fsSnapshot = FS_TestSnapshotSearchPaths();
+  preTestBasedir = Cvar_VariableString("basedir");
+  preTestMaxclients = Cvar_VariableString("maxclients");
+
+  // Cvar_ForceSet, not Cvar_FullSet(..., 0): FullSet REPLACES the flag word,
+  // so the old call also stripped CVAR_NOSET off "basedir" for the rest of
+  // the process. ForceSet writes the value and leaves the flags alone --
+  // same idiom as every other suite that repoints basedir at a fixture.
+  Cvar_ForceSet("basedir", tmpRoot);
   FS_InitFilesystem();
 
   const { model } = CM_LoadMap("maps/sv_send_overflow_kex_room.bsp", false);
   sv.models[1] = model;
 });
 
+// Rule 13. setupServer() below leaves a fully fabricated server behind:
+// sv.state on ss_game with sv.models[1] holding this file's fixture and
+// sv.multicast re-inited with allowoverflow set, maxclients latched to 1,
+// svs holding one hand-built ClientT plus this file's loopback challenge
+// entry, geHolder.ge on a stub GameExports, and a search path rooted at a
+// tmpRoot this teardown deletes.
+//
+// The leaked `sv` is the one that actually broke a later file:
+// test/cl_main.test.ts issues "connect localhost" BEFORE booting its server
+// precisely because CL_Connect_f calls SV_Shutdown() first whenever
+// Com_ServerState() is already non-zero -- which would tear down the server
+// it is about to boot. A leftover sv.state === ss_game from THIS file makes
+// Com_ServerState() non-zero at that moment, sends CL_Connect_f down the
+// SV_Shutdown branch, and the handshake never reaches ca_connected. Put the
+// whole lot back to what a fresh process would hand the next file.
 afterAll(() => {
+  geHolder.ge = null;
+  sv.clear();
+  svs.clear();
+  Cvar_FullSet("maxclients", preTestMaxclients, CVAR_SERVERINFO | CVAR_LATCH);
+  FS_TestRestoreSearchPaths(fsSnapshot);
+  Cvar_ForceSet("basedir", preTestBasedir);
   rmSync(tmpRoot, { recursive: true, force: true });
 });
 

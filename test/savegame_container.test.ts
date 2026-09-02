@@ -55,13 +55,13 @@ svs.codec) is set up in this file's own beforeAll/beforeEach, not assumed
 from another test file's run order.
 */
 
-import { describe, test, expect, beforeAll, beforeEach } from "bun:test";
+import { describe, test, expect, afterAll, beforeAll, beforeEach } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { FS_InitFilesystem, FS_ReadRawFile, FS_Gamedir, FS_FOpenFileWrite, FS_FCloseFile, FS_WriteFile } from "../src/qcommon/files";
-import { Cvar_ForceSet, Cvar_Get } from "../src/qcommon/cvar";
+import { FS_InitFilesystem, FS_ReadRawFile, FS_Gamedir, FS_FOpenFileWrite, FS_FCloseFile, FS_WriteFile, FS_TestSnapshotSearchPaths, FS_TestRestoreSearchPaths, type FsSearchPathSnapshotT } from "../src/qcommon/files";
+import { Cvar_ForceSet, Cvar_Get, Cvar_VariableString } from "../src/qcommon/cvar";
 import { CVAR_LATCH, CVAR_SERVERINFO, CS_NAME, EntityStateT, Com_sprintf, MAX_TOKEN_CHARS, MAX_OSPATH, MAX_CONFIGSTRINGS, MAX_QPATH, CVAR_NOARCHIVE } from "../src/shared/q_shared";
 import { cvar_vars } from "../src/qcommon/cvar";
 import type { GameExports, Edict } from "../src/game/game";
@@ -189,12 +189,33 @@ function makeFakeGe(gameJson: string | null, levelJson: string | null): FakeGe {
 }
 
 let tmpRoot: string;
+let fsSnapshot: FsSearchPathSnapshotT;
+let preTestGame = "";
+let preTestBasedir = "";
 
 beforeAll(() => {
   tmpRoot = mkdtempSync(join(tmpdir(), "q2save-"));
   mkdirSync(join(tmpRoot, "baseq2"));
+  fsSnapshot = FS_TestSnapshotSearchPaths();
+  preTestGame = Cvar_VariableString("game");
+  preTestBasedir = Cvar_VariableString("basedir");
   Cvar_ForceSet("basedir", tmpRoot);
   FS_InitFilesystem();
+});
+
+// Rule 13: "game", "basedir" and fs_searchpaths are process-wide singletons,
+// and the describes below leave "game" on "kex" (the last group to run sets
+// it). A later suite's FS_InitFilesystem re-reads "game" at its very end and
+// calls FS_SetGamedir on a non-empty value, which moves FS_Gamedir() off
+// basedir/baseq2 onto <that suite's basedir>/kex -- exactly what
+// test/fs_homedir.test.ts's write-root assertions measure. Put all three
+// back, and unmount this file's throwaway tree, so nothing this file did is
+// observable from the next one.
+afterAll(() => {
+  FS_TestRestoreSearchPaths(fsSnapshot);
+  Cvar_ForceSet("game", preTestGame);
+  Cvar_ForceSet("basedir", preTestBasedir);
+  rmSync(tmpRoot, { recursive: true, force: true });
 });
 
 function resetServerState(): void {

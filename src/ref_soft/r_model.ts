@@ -2243,3 +2243,28 @@ export function Mod_FreeAll(): void {
     if (mod_known[i].extradatasize) Mod_Free(mod_known[i]);
   }
 }
+
+/*
+================
+Mod_TestFreeAllKnown
+
+TEST SEAM (not part of the C engine; same rationale as files.ts's
+FS_TestSnapshotSearchPaths). Mod_FreeAll only reclaims models that finished
+loading: `extradatasize` is assigned at the very END of Mod_ForName, so a
+load that Sys_Errors out partway -- unknown fileid, a missing file with
+crash=true, a bad sprite version, all of which suites deliberately exercise
+-- leaves its mod_known slot holding a NAME with extradatasize 0, which
+Mod_FreeAll skips over forever. In the C that state is unreachable because
+Sys_Error does not return. Under one long `bun test` process it does return
+(the ref imports throw), the slot stays taken for the rest of the run, and
+the NEXT suite's world model lands in mod_known[1] instead of mod_known[0]
+-- tripping Mod_LoadBrushModel's "Loaded a brush model after the world"
+guard in a file that did nothing wrong. Clearing the whole table is what a
+fresh process would have given it.
+================
+*/
+export function Mod_TestFreeAllKnown(): void {
+  for (const mod of mod_known) mod.clear();
+  for (const mod of mod_inline) mod.clear();
+  mod_numknown = 0;
+}

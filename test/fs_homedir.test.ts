@@ -27,7 +27,7 @@ import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Cvar_ForceSet } from "../src/qcommon/cvar";
+import { Cvar_ForceSet, Cvar_VariableString } from "../src/qcommon/cvar";
 import {
   FS_InitFilesystem,
   FS_LoadFile,
@@ -49,14 +49,40 @@ function textOf(buf: Uint8Array): string {
   return new TextDecoder().decode(buf);
 }
 
-// The "homedir" cvar is process-global: every describe below force-sets it,
-// and the per-block afterAll teardowns restore fs_searchpaths but a cvar has
-// no unmount. Without this file-level reset the LAST block's temp homedir
-// (an rmSync'd, dead path) would leak into every later suite in the same
-// bun process and silently redirect their FS_SetGamedir write roots (rule
-// 13: this file cleans up everything it set).
+// "homedir", "basedir", "game" and "gamedir" are all process-global cvars:
+// every describe below force-sets the first two, and the last describe's
+// FS_SetGamedir("xatrix") writes the fourth. The per-block afterAll
+// teardowns restore fs_searchpaths, but a cvar has no unmount. Without this
+// file-level reset the LAST block's temp roots (rmSync'd, dead paths) would
+// leak into every later suite in the same bun process and silently redirect
+// their FS_SetGamedir write roots (rule 13: this file cleans up everything
+// it set).
+//
+// "game" is force-set to "" on the way IN, not restored on the way out: it
+// is a precondition of every FS_Gamedir() assertion below, because
+// FS_InitFilesystem re-reads "game" as its last step and calls
+// FS_SetGamedir on any non-empty value -- which moves the write root off
+// baseq2 onto that mod directory. Any suite that leaves "game" set is
+// itself out of rule-13 compliance and is fixed at its own end; this makes
+// the precondition explicit rather than assumed.
+let preTestHomedir = "";
+let preTestBasedir = "";
+let preTestGame = "";
+let preTestGamedir = "";
+
+beforeAll(() => {
+  preTestHomedir = Cvar_VariableString("homedir");
+  preTestBasedir = Cvar_VariableString("basedir");
+  preTestGame = Cvar_VariableString("game");
+  preTestGamedir = Cvar_VariableString("gamedir");
+  Cvar_ForceSet("game", "");
+});
+
 afterAll(() => {
-  Cvar_ForceSet("homedir", "");
+  Cvar_ForceSet("homedir", preTestHomedir);
+  Cvar_ForceSet("basedir", preTestBasedir);
+  Cvar_ForceSet("game", preTestGame);
+  Cvar_ForceSet("gamedir", preTestGamedir);
 });
 
 describe("platform/sys.ts -- Sys_GetDefaultHomedir", () => {

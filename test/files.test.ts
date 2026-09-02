@@ -2,8 +2,18 @@ import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Cvar_ForceSet } from "../src/qcommon/cvar";
-import { FS_InitFilesystem, FS_LoadFile, FS_FreeFile, FS_ListFiles, FS_Gamedir, FS_SetGamedir } from "../src/qcommon/files";
+import { Cvar_ForceSet, Cvar_VariableString } from "../src/qcommon/cvar";
+import {
+  FS_InitFilesystem,
+  FS_LoadFile,
+  FS_FreeFile,
+  FS_ListFiles,
+  FS_Gamedir,
+  FS_SetGamedir,
+  FS_TestSnapshotSearchPaths,
+  FS_TestRestoreSearchPaths,
+  type FsSearchPathSnapshotT,
+} from "../src/qcommon/files";
 
 const HEADER_SIZE = 12;
 const ENTRY_SIZE = 64; // 56-char name + filepos (int32) + filelen (int32)
@@ -60,8 +70,22 @@ function textOf(buf: Uint8Array): string {
 describe("files.ts -- FS_* virtual filesystem", () => {
   let tmpRoot: string;
   let baseq2Dir: string;
+  let fsSnapshot: FsSearchPathSnapshotT;
+  let preTestBasedir = "";
+  let preTestGamedir = "";
 
   beforeAll(() => {
+    // Rule 13: fs_searchpaths, "basedir" and "gamedir" are process-wide
+    // singletons. Without the snapshot below this suite's pak0.pak stays
+    // mounted (on a tmpRoot that afterAll deletes, with its file descriptor
+    // still open) for every later suite's FS_LoadFile, and the
+    // FS_SetGamedir("mymod") at the end of this file leaves the "gamedir"
+    // cvar naming a directory that no longer exists. See files.ts's own
+    // "TEST SEAM" comment on FS_TestSnapshotSearchPaths.
+    fsSnapshot = FS_TestSnapshotSearchPaths();
+    preTestBasedir = Cvar_VariableString("basedir");
+    preTestGamedir = Cvar_VariableString("gamedir");
+
     tmpRoot = mkdtempSync(join(tmpdir(), "q2fs-"));
     baseq2Dir = join(tmpRoot, "baseq2");
     mkdirSync(baseq2Dir);
@@ -88,6 +112,9 @@ describe("files.ts -- FS_* virtual filesystem", () => {
   });
 
   afterAll(() => {
+    FS_TestRestoreSearchPaths(fsSnapshot);
+    Cvar_ForceSet("basedir", preTestBasedir);
+    Cvar_ForceSet("gamedir", preTestGamedir);
     rmSync(tmpRoot, { recursive: true, force: true });
   });
 

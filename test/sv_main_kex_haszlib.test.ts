@@ -37,7 +37,7 @@
 // test/net_chan_maxpacketlen_parity.test.ts's own driveConnect/setupServer
 // fixtures (that file exports none of them) rather than importing them.
 
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { NetadrT, NetadrtypeT, NetsrcT, PROTOCOL_VERSION_RERELEASE } from "../src/qcommon/qcommon";
 import { net_from } from "../src/qcommon/net_chan";
 import { sv, svs, ServerStateT, ClientStateT, ClientT, maxclients, RedirectT } from "../src/server/server";
@@ -46,7 +46,8 @@ import { geHolder } from "../src/server/sv_game";
 import { NET_CompareBaseAdr } from "../src/platform/net_udp";
 import { Cmd_TokenizeString } from "../src/qcommon/cmd";
 import { Cvar_FullSet, Cvar_Get, Cvar_ForceSet } from "../src/qcommon/cvar";
-import { Com_BeginRedirect, Com_EndRedirect, setDeveloper } from "../src/qcommon/common";
+import type { CvarT } from "../src/shared/q_shared";
+import { Com_BeginRedirect, Com_EndRedirect, developer, setDeveloper } from "../src/qcommon/common";
 import { CVAR_LATCH, CVAR_SERVERINFO, EntityStateT } from "../src/shared/q_shared";
 import { vec3 } from "../src/shared/math";
 import { LinkT, SolidT, MAX_ENT_CLUSTERS, type Edict, type GameExports } from "../src/game/game";
@@ -54,8 +55,31 @@ import { CS_REMAP_RERELEASE } from "../src/shared/cs_remap";
 
 // developer=1 so Com_DPrintf's own "if (!developer || !developer.value)
 // return" guard doesn't swallow the diagnostic before this suite can see it.
-setDeveloper(Cvar_Get("developer", "1", 0));
-Cvar_ForceSet("developer", "1");
+//
+// Rule 13: "developer" is a process-wide cvar shared with every other suite
+// in the same `bun test` process (test/cvar_parity.test.ts boots the whole
+// engine and asserts it still reads its q2repro default "0"), so this is
+// registered with the parity-correct "0" default, raised only for the
+// duration of this file's tests, and put back to whatever it was before --
+// rather than force-set once at module scope where it would outlive the
+// file. common.ts's `developer` holder is pointed at the same CvarT object
+// Qcommon_Init would install, so restoring the value is enough; the holder
+// is restored too for the case where this file ran before any boot.
+const developerCvar = Cvar_Get("developer", "0", 0);
+let priorDeveloperValue = "0";
+let priorDeveloperHolder: CvarT | null = null;
+
+beforeAll(() => {
+  priorDeveloperValue = developerCvar ? developerCvar.string : "0";
+  priorDeveloperHolder = developer;
+  setDeveloper(developerCvar);
+  Cvar_ForceSet("developer", "1");
+});
+
+afterAll(() => {
+  Cvar_ForceSet("developer", priorDeveloperValue);
+  setDeveloper(priorDeveloperHolder);
+});
 
 function netAdr(type: NetadrtypeT): NetadrT {
   const a = new NetadrT();

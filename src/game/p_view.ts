@@ -137,6 +137,28 @@ export function SV_SetRightVectorForTesting(newRight: Vec3): void {
   VectorCopy(newRight, right);
 }
 
+// TEST SEAM, same rationale as the two above. xyspeed/bobmove/bobcycle/
+// bobfracsin/painAnimIndex are frame-to-frame carry-over state that only
+// ClientEndServerFrame ever writes (xyspeed at its top, from the CURRENT
+// player's velocity, immediately before it calls G_SetClientEvent and
+// G_SetClientFrame -- both of which read it). A suite that calls those two
+// directly is therefore reading whatever the last full ClientEndServerFrame
+// anywhere in the process left behind: a suite that ran a moving player
+// leaves xyspeed != 0, which flips G_SetClientFrame's `run` from false to
+// true and lands the player on FRAME_run1 instead of FRAME_stand01. In a
+// real process that carry-over is correct and wanted; in one `bun test`
+// process it is cross-file state, so a suite driving these entry points out
+// of pipeline order resets them to their fresh-process values first.
+export function P_ResetViewStaticsForTesting(): void {
+  current_player = null;
+  current_client = null;
+  xyspeed = 0;
+  bobmove = 0;
+  bobcycle = 0;
+  bobfracsin = 0;
+  painAnimIndex = 0;
+}
+
 /*
 ===============
 SV_CalcRoll

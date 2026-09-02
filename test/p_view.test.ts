@@ -29,6 +29,7 @@ import { FindItem, InitItems, ITEM_INDEX, SetItemNames } from "../src/game/g_ite
 import {
   G_SetClientFrame,
   P_FallingDamage,
+  P_ResetViewStaticsForTesting,
   P_SetCurrentPlayerForTesting,
   P_WorldEffects,
   SV_CalcBlend,
@@ -117,6 +118,16 @@ const MAXENTITIES = 16;
 
 function setupWorld(): void {
   GetGameAPI(buildFakeImports());
+
+  // Rule 13: p_view.ts's xyspeed/bobmove/bobcycle/bobfracsin/current_player
+  // carry over between frames and between FILES -- only ClientEndServerFrame
+  // writes them, and the tests below call G_SetClientFrame/P_WorldEffects
+  // directly, out of that pipeline. Any earlier suite that ran a real game
+  // frame with a moving player leaves xyspeed != 0, which makes
+  // G_SetClientFrame pick the run animation (FRAME_run1) instead of the
+  // stand one. Start from the fresh-process values instead of inheriting
+  // them. See that seam's own comment in p_view.ts.
+  P_ResetViewStaticsForTesting();
 
   const edicts: EdictT[] = Array.from({ length: MAXENTITIES }, () => new EdictT());
   edicts.forEach((e, i) => {
