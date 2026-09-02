@@ -26,7 +26,7 @@ one direct-call test.
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 
-import { glCvars, SetRefImports, gltextures, ImageT, ImagetypeT, SetNumGltextures, gl_state, d_8to24table, gl_config } from "../src/ref_gl/gl_local";
+import { ri, glCvars, SetRefImports, gltextures, ImageT, ImagetypeT, SetNumGltextures, gl_state, d_8to24table, gl_config } from "../src/ref_gl/gl_local";
 import { GL_DetectNpotSupport } from "../src/ref_gl/gl_rmain";
 import type { RefImports } from "../src/client/ref";
 import { CvarT } from "../src/shared/q_shared";
@@ -670,13 +670,44 @@ describe("GL_FindImage", () => {
     // The owner's rule: a dropped-in high-resolution replacement must load.
     // Before override-first lookup the pak's .pcx always won and no
     // replacement of classic content could ever load.
+    // r_override_textures is registered by GL_InitImages (the real init path);
+    // without it the lookup has no override level and falls back to the
+    // requested extension. GL_InitImages needs a loadable colormap and the
+    // paletted-texture cvar off (see the GL_InitImages describe below).
+    files.set("pics/colormap.pcx", buildPcxBytes(2, 2, () => 1));
+    glCvars.gl_ext_palettedtexture = new CvarT();
+    glCvars.gl_ext_palettedtexture.value = 0;
+    // This file's ri stub hands back blank cvars (value 0), which would read
+    // as "overrides off"; give GL_InitImages cvars that carry their default
+    // strings (r_override_textures "1", r_texture_overrides "-1") for this
+    // one init, then restore the stub.
+    const savedCvarGet = ri.Cvar_Get;
+    ri.Cvar_Get = (name: string, value: string) => {
+      const c = new CvarT();
+      c.name = name;
+      c.string = value;
+      c.value = Number.parseFloat(value);
+      return c;
+    };
+    try {
+      GL_InitImages();
+    } finally {
+      ri.Cvar_Get = savedCvarGet;
+    }
     files.set("pics/both.pcx", buildPcxBytes(2, 2, () => 3));
-    files.set("pics/both.png", buildPngRgba(2, 2, () => [10, 20, 30, 255]));
+    files.set("pics/both.png", buildPngRgba(4, 4, () => [10, 20, 30, 255]));
 
-    const image = GL_FindImage("pics/both.pcx", ImagetypeT.it_wall);
+    const image = GL_FindImage("pics/both.pcx", ImagetypeT.it_pic);
 
+    // The image keeps the REQUESTED name as its lookup key (the reference
+    // does the same), so the proof is in the data: the 4x4 png uploaded
+    // (upload size 4) while the 2x2 pcx header stays the logical size
+    // (GL_RecoverLogicalDimensions), so the on-screen draw does not grow.
     expect(image).not.toBeNull();
-    expect(image?.name).toBe("pics/both.png");
+    expect(image?.upload_width).toBe(4);
+    expect(image?.upload_height).toBe(4);
+    expect(image?.width).toBe(2);
+    expect(image?.height).toBe(2);
   });
 });
 
