@@ -1,5 +1,7 @@
 /*
 Copyright (C) 1997-2001 Id Software, Inc.
+Ported from xatrix/m_chick.c (GNU GPL v2 or later), diffed against the
+baseq2 port at src/game/m_chick.ts.
 */
 /*
 ==============================================================================
@@ -30,7 +32,7 @@ import {
 } from "./g_local";
 import { SolidT, SVF_DEADMONSTER } from "./game";
 import { ai_charge, ai_move, ai_run, ai_stand, ai_walk, range, visible } from "./g_ai";
-import { fire_hit } from "./g_weapon";
+import { fire_hit, monster_fire_heat } from "./g_weapon";
 import { monster_fire_rocket, walkmonster_start } from "./g_monster";
 import { G_FreeEdict, G_ProjectSource } from "./g_utils";
 import { ThrowGib, ThrowHead } from "./g_misc";
@@ -258,7 +260,9 @@ function chick_pain(self: EdictT, _other: EdictT, _kick: number, damage: number)
   else if (r < 0.66) gi.sound(self, CHAN_VOICE, sound_pain2, 1, ATTN_NORM, 0);
   else gi.sound(self, CHAN_VOICE, sound_pain3, 1, ATTN_NORM, 0);
 
-  if (cvarNum(gameCvars.skill) === 3) return; // no pain anims in nightmare
+  // xatrix/m_chick.c drops baseq2's "no pain anims in nightmare" early
+  // return here (game/m_chick.c:283-284 vs xatrix/m_chick.c) -- nightmare
+  // skill now plays pain animations for this monster.
 
   if (damage <= 10) self.monsterinfo.currentmove = chick_move_pain1;
   else if (damage <= 25) self.monsterinfo.currentmove = chick_move_pain2;
@@ -409,7 +413,11 @@ function ChickRocket(self: EdictT): void {
   VectorSubtract(vec, start, dir);
   VectorNormalize(dir);
 
-  monster_fire_rocket(self, start, dir, 50, 500, MZ2_CHICK_ROCKET_1);
+  // xatrix/m_chick.c: skinnum > 1 marks the "heat-seeking" chick variant
+  // (SP_monster_chick_heat sets skinnum = 3) -- fires a heat-seeking round
+  // instead of a dumb rocket.
+  if (self.s.skinnum > 1) monster_fire_heat(self, start, dir, 50, 500, MZ2_CHICK_ROCKET_1);
+  else monster_fire_rocket(self, start, dir, 50, 500, MZ2_CHICK_ROCKET_1);
 }
 
 function Chick_PreAttack1(self: EdictT): void {
@@ -583,6 +591,13 @@ export function SP_monster_chick(self: EdictT): void {
   self.monsterinfo.scale = FRAME.MODEL_SCALE;
 
   walkmonster_start(self);
+}
+
+/*QUAKED monster_chick_heat (1 .5 0) (-16 -16 -24) (16 16 32) Ambush Trigger_Spawn Sight
+*/
+export function SP_monster_chick_heat(self: EdictT): void {
+  SP_monster_chick(self);
+  self.s.skinnum = 3;
 }
 
 // -------------------------------------------------------------------------

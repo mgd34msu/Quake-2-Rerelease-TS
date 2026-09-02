@@ -367,18 +367,36 @@ describe("SpawnEntities", () => {
     expect(game.spawnpoint).toBe("start");
   });
 
-  // Mike's ruling (2026-08-31): "quiet it" -- see .orch/followups.md finding
-  // 14 and the deviation comment in g_spawn.ts above C_atoi. A
-  // rerelease-authored entity string carrying KEX-era fields/classnames the
-  // frozen LEGACY game DLL has never heard of (fog_color, shadowlight,
-  // mangle / dynamic_light, info_landmark, target_poi -- the exact examples
-  // from finding 14) drives both gates through the real SpawnEntities path.
-  // "fog_color" repeats across two entities to prove distinct-name counting.
+  // Mike's ruling (2026-08-31): "quiet it" -- see the deviation comment in
+  // g_spawn.ts above C_atoi. These two tests exercise the suppression/
+  // summary machinery itself, so they need an entity string carrying
+  // fields and classnames this module genuinely does not know.
+  //
+  // UPDATED BY THE RERELEASE CONTENT PORT. This fixture used to be built
+  // from dynamic_light / info_landmark / target_poi and fog_color /
+  // shadowlight / mangle, on the premise that a KEX-era entity string is
+  // full of things "the frozen LEGACY game DLL has never heard of". That
+  // premise is no longer true and was itself the bug the port fixed: the
+  // classic module now spawns all three of those classnames as
+  // first-class content (g_kexmisc.ts / g_kextarg.ts) and parses fog_color
+  // and mangle as real fields (g_save.ts's FIELDS). Keeping the old
+  // fixture would have pinned the exact behavior the port removes -- so
+  // the fixture moved to names that are still unknown, and a third test
+  // below asserts the ported ones now resolve.
+  //
+  // Deliberately-unknown picks, and why each stays unknown:
+  //   "monster_bitterman"    -- not a Quake 2 classname in any ruleset
+  //   "target_nonexistent"   -- ditto
+  //   "shadowlight"          -- the REAL rerelease keys are shadowlightradius,
+  //                             shadowlightintensity, ... ; the bare word is
+  //                             not a key in either module's field table
+  //   "kex_unknown_field"    -- not a key anywhere
+  // "shadowlight" repeats across two entities to prove distinct-name counting.
   const noisyEntities =
     '{ "classname" "worldspawn" } ' +
-    '{ "classname" "dynamic_light" "fog_color" "1 1 1" } ' +
-    '{ "classname" "info_landmark" "shadowlight" "1" } ' +
-    '{ "classname" "target_poi" "mangle" "0 0 0" "fog_color" "1 1 1" }';
+    '{ "classname" "monster_bitterman" "shadowlight" "1" } ' +
+    '{ "classname" "target_nonexistent" "kex_unknown_field" "1" } ' +
+    '{ "classname" "func_not_a_real_thing" "shadowlight" "1" }';
 
   test("developer 0 (default): unknown fields/classnames are suppressed and rolled into one correctly-counted summary line", () => {
     const rec = makeRecorder();
@@ -392,10 +410,10 @@ describe("SpawnEntities", () => {
     expect(rec.dprintf.some((m) => m.includes("is not a field"))).toBe(false);
     expect(rec.dprintf.some((m) => m.includes("doesn't have a spawn function"))).toBe(false);
 
-    // 3 distinct unknown fields (fog_color counted once despite 2
+    // 2 distinct unknown fields ("shadowlight" counted once despite 2
     // occurrences), 3 distinct unknown classnames.
     expect(rec.dprintf).toContain(
-      "SpawnEntities: 3 unknown fields, 3 unknown classnames suppressed (developer 1 for detail)\n",
+      "SpawnEntities: 2 unknown fields, 3 unknown classnames suppressed (developer 1 for detail)\n",
     );
 
     rec.developerCvar.value = 0; // restore, rule 13
@@ -409,17 +427,47 @@ describe("SpawnEntities", () => {
 
     expect(() => SpawnEntities("mgu1_rerelease", noisyEntities, "")).not.toThrow();
 
-    expect(rec.dprintf).toContain("fog_color is not a field\n");
     expect(rec.dprintf).toContain("shadowlight is not a field\n");
-    expect(rec.dprintf).toContain("mangle is not a field\n");
-    expect(rec.dprintf).toContain("dynamic_light doesn't have a spawn function\n");
-    expect(rec.dprintf).toContain("info_landmark doesn't have a spawn function\n");
-    expect(rec.dprintf).toContain("target_poi doesn't have a spawn function\n");
-    // "fog_color is not a field\n" prints once per occurrence under
+    expect(rec.dprintf).toContain("kex_unknown_field is not a field\n");
+    expect(rec.dprintf).toContain("monster_bitterman doesn't have a spawn function\n");
+    expect(rec.dprintf).toContain("target_nonexistent doesn't have a spawn function\n");
+    expect(rec.dprintf).toContain("func_not_a_real_thing doesn't have a spawn function\n");
+    // "shadowlight is not a field\n" prints once per occurrence under
     // developer 1 (2 occurrences), unlike developer 0's deduped count.
-    expect(rec.dprintf.filter((m) => m === "fog_color is not a field\n")).toHaveLength(2);
+    expect(rec.dprintf.filter((m) => m === "shadowlight is not a field\n")).toHaveLength(2);
 
     expect(rec.dprintf.some((m) => m.startsWith("SpawnEntities:"))).toBe(false);
+
+    rec.developerCvar.value = 0; // restore, rule 13
+  });
+
+  // RERELEASE CONTENT PORT: the positive counterpart to the two tests
+  // above, and the direct regression guard for the defect this port
+  // fixed. The exact entity string that used to produce "3 unknown
+  // fields, 3 unknown classnames" -- the one the old fixture was built
+  // from -- must now spawn completely silently, because the classic
+  // module spawns these rerelease classnames as first-class content and
+  // parses these rerelease keys as real fields.
+  test("rerelease classnames and keys that used to be unknown now resolve silently", () => {
+    const rec = makeRecorder();
+    setupWorld(rec);
+    InitItems();
+    rec.developerCvar.value = 1; // per-line detail, so nothing can hide
+
+    const rereleaseEntities =
+      '{ "classname" "worldspawn" } ' +
+      '{ "classname" "dynamic_light" "fog_color" "1 1 1" } ' +
+      '{ "classname" "info_landmark" "mangle" "0 0 0" } ' +
+      '{ "classname" "target_poi" "image" "friend" "alpha" "0.5" "scale" "2" } ' +
+      '{ "classname" "misc_flare" "rgba" "255 128 0 255" "fade_start_dist" "64" } ' +
+      '{ "classname" "trigger_fog" "heightfog_density" "0.5" "fog_density" "0.1" }';
+
+    expect(() => SpawnEntities("mgu1_rerelease", rereleaseEntities, "")).not.toThrow();
+
+    const unknownField = rec.dprintf.filter((m) => m.includes("is not a field"));
+    const unknownClass = rec.dprintf.filter((m) => m.includes("doesn't have a spawn function"));
+    expect(unknownField).toEqual([]);
+    expect(unknownClass).toEqual([]);
 
     rec.developerCvar.value = 0; // restore, rule 13
   });

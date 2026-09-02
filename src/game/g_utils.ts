@@ -384,6 +384,17 @@ export function G_InitEdict(e: EdictT): void {
   // a plain array (see game.ts's GameExports.edicts comment), so the offset
   // is recovered by identity lookup instead of address arithmetic.
   e.s.number = g_edicts.indexOf(e);
+
+  // RERELEASE CONTENT PORT (rogue/g_utils.c's ROGUE_GRAVITY block, which
+  // is unconditionally compiled in the shipped binary): set the gravity
+  // direction BEFORE the spawn function runs, so a spawn function can
+  // override it. The ported rerelease content that flips gravity
+  // (target_gravity, the reverse-gravity areas the rerelease campaigns
+  // use) depends on every edict starting with a real downward vector
+  // rather than the all-zero one the field declaration leaves.
+  e.gravityVector[0] = 0.0;
+  e.gravityVector[1] = 0.0;
+  e.gravityVector[2] = -1.0;
 }
 
 /*
@@ -531,4 +542,44 @@ export function KillBox(ent: EdictT): boolean {
   }
 
   return true; // all clear
+}
+
+/*
+=================
+vectoangles2
+
+RERELEASE CONTENT PORT (rogue/g_utils.c). A second vector-to-angles
+conversion the ported rerelease content uses. It differs from vanilla's
+vectoangles above in the degenerate straight-up/straight-down case and in
+negating pitch at the end, which is what the spheres, the tracker and
+g_newdm's spawn-point logic expect. Kept as a separate function rather than
+folded into vectoangles, exactly as the C has it -- vanilla callers must
+keep vanilla behavior.
+=================
+*/
+export function vectoangles2(vec: Vec3, angles: Vec3): void {
+  let yaw: number;
+  let pitch: number;
+
+  if (vec[1] === 0 && vec[0] === 0) {
+    yaw = 0;
+    pitch = vec[2] > 0 ? 90 : 270;
+  } else {
+    if (vec[0]) {
+      yaw = (Math.atan2(vec[1], vec[0]) * 180) / M_PI;
+    } else if (vec[1] > 0) {
+      yaw = 90;
+    } else {
+      yaw = 270;
+    }
+    if (yaw < 0) yaw += 360;
+
+    const forward = Math.sqrt(vec[0] * vec[0] + vec[1] * vec[1]);
+    pitch = (Math.atan2(vec[2], forward) * 180) / M_PI;
+    if (pitch < 0) pitch += 360;
+  }
+
+  angles[PITCH] = -pitch;
+  angles[YAW] = yaw;
+  angles[ROLL] = 0;
 }

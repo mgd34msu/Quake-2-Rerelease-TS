@@ -25,6 +25,7 @@ import {
   CS_PLAYERSKINS,
   type CvarT,
   PmTypeT,
+  RDF_IRGOGGLES,
   RDF_UNDERWATER,
   STAT_AMMO,
   STAT_AMMO_ICON,
@@ -97,6 +98,15 @@ export function MoveClientToIntermission(ent: EdictT): void {
   client.invincible_framenum = 0;
   client.breather_framenum = 0;
   client.enviro_framenum = 0;
+  // RERELEASE CONTENT PORT -- ROGUE (rogue/p_hud.c)
+  client.ps.rdflags &= ~RDF_IRGOGGLES;
+  client.ir_framenum = 0;
+  client.nuke_framenum = 0;
+  client.double_framenum = 0;
+  // RERELEASE CONTENT PORT -- RAFAEL (xatrix/p_hud.c)
+  client.quadfire_framenum = 0;
+  client.trap_blew_up = false;
+  client.trap_time = 0;
   client.grenade_blew_up = false;
   client.grenade_time = 0;
 
@@ -425,9 +435,26 @@ export function G_SetStats(ent: EdictT): void {
   //
   // timers
   //
+  // RERELEASE CONTENT PORT -- the mission-pack powerup timers slot into this
+  // chain in each pack's own position: rogue puts Double Damage right after
+  // quad and the sphere/IR pair right after breather (rogue/p_hud.c), xatrix
+  // puts DualFire right after quad (xatrix/p_hud.c). The chain is
+  // `else if`, so only ONE icon is ever shown -- with several powerups
+  // running at once the later tiers are invisible. That is exactly how each
+  // pack behaves on its own; it is not a merge artefact.
   if (client.quad_framenum > level.framenum) {
     client.ps.stats[STAT_TIMER_ICON] = gi.imageindex("p_quad");
     client.ps.stats[STAT_TIMER] = ((client.quad_framenum - level.framenum) / 10) | 0;
+    // ROGUE
+  } else if (client.double_framenum > level.framenum) {
+    client.ps.stats[STAT_TIMER_ICON] = gi.imageindex("p_double");
+    client.ps.stats[STAT_TIMER] = ((client.double_framenum - level.framenum) / 10) | 0;
+    // ROGUE
+    // RAFAEL
+  } else if (client.quadfire_framenum > level.framenum) {
+    client.ps.stats[STAT_TIMER_ICON] = gi.imageindex("p_quadfire");
+    client.ps.stats[STAT_TIMER] = ((client.quadfire_framenum - level.framenum) / 10) | 0;
+    // RAFAEL
   } else if (client.invincible_framenum > level.framenum) {
     client.ps.stats[STAT_TIMER_ICON] = gi.imageindex("p_invulnerability");
     client.ps.stats[STAT_TIMER] = ((client.invincible_framenum - level.framenum) / 10) | 0;
@@ -437,6 +464,18 @@ export function G_SetStats(ent: EdictT): void {
   } else if (client.breather_framenum > level.framenum) {
     client.ps.stats[STAT_TIMER_ICON] = gi.imageindex("p_rebreather");
     client.ps.stats[STAT_TIMER] = ((client.breather_framenum - level.framenum) / 10) | 0;
+    // ROGUE
+  } else if (client.owned_sphere !== null) {
+    if (client.owned_sphere.spawnflags === 1) client.ps.stats[STAT_TIMER_ICON] = gi.imageindex("p_defender");
+    else if (client.owned_sphere.spawnflags === 2) client.ps.stats[STAT_TIMER_ICON] = gi.imageindex("p_hunter");
+    else if (client.owned_sphere.spawnflags === 4) client.ps.stats[STAT_TIMER_ICON] = gi.imageindex("p_vengeance");
+    else client.ps.stats[STAT_TIMER_ICON] = gi.imageindex("i_fixme"); // error case
+
+    client.ps.stats[STAT_TIMER] = (client.owned_sphere.wait - level.time) | 0;
+  } else if (client.ir_framenum > level.framenum) {
+    client.ps.stats[STAT_TIMER_ICON] = gi.imageindex("p_ir");
+    client.ps.stats[STAT_TIMER] = ((client.ir_framenum - level.framenum) / 10) | 0;
+    // ROGUE
   } else {
     client.ps.stats[STAT_TIMER_ICON] = 0;
     client.ps.stats[STAT_TIMER] = 0;

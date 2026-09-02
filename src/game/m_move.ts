@@ -1,13 +1,66 @@
 /*
 Copyright (C) 1997-2001 Id Software, Inc.
 Ported from game/m_move.c (GNU GPL v2 or later).
+
+rogue/m_move.c is a modified copy of baseq2/m_move.c. ROGUE_GRAVITY is
+unconditionally on in the shipped rogue binary (see g_local.ts's
+ROGUE_GRAVITY export), so every gravityVector-relative branch below is the
+*live* path, not dead code -- and since every edict's gravityVector defaults
+to (0,0,-1) (G_InitEdict/ED_CallSpawn reset it there), these branches are
+byte-identical to the base game for every entity that never customizes it.
+Deltas applied on top of the base m_move.c port:
+  - IsBadAhead (new, ROGUE-only): direction-of-approach check used to decide
+    whether to back away from a tesla mine instead of always reversing.
+  - M_CheckBottom: gravity-relative probe direction.
+  - SV_movestep: bad-area handling is gated on `ent.health > 0`; a tesla
+    enemy only triggers the move-reversal when IsBadAhead says the tesla is
+    in front of us; a carrier-specific minheight of 104 (vs 40) for airborne
+    monsters tracking a client goalentity; gravity-relative step trace and
+    water-check point; and the post-step CheckForBadArea() re-check calls
+    TargetTesla() and sets AI_BLOCKED on the monster.
+  - SV_StepDirection: two `!ent.inuse` early-outs ("g_touchtrigger free
+    problem"), clears AI_BLOCKED after a successful step, and skips the
+    "didn't turn far enough" undo for `monster_widow*` classnames (bosses can
+    turn as far as they need to without losing the step).
+  - SV_NewChaseDir: falls through to monsterinfo.blocked(actor, dist) when no
+    cardinal direction works, gated on `actor.inuse && actor.health > 0`.
+  - M_MoveToGoal: AI_CHARGING monsters never deflect randomly, and when the
+    bump-around branch is taken and AI_BLOCKED is set (a tesla attack was
+    just triggered by SV_movestep), the monster clears AI_BLOCKED and skips
+    SV_NewChaseDir entirely.
+  - M_walkmove: clears AI_BLOCKED after every step.
+
+All of the above is inert for any entity that never sets AI_CHARGING/
+AI_BLOCKED, never has a tesla-classed enemy, and is never near a bad_area
+trigger -- none of which exist outside this port's rogue monsters and rogue
+weapons, so classic monster movement is unaffected.
+
+Deviation: the C's `else if (!strcmp(ent->enemy->classname, "telsa"))` is a
+genuine id/Rogue typo -- "telsa" never matches "tesla", so that branch is
+unreachable in the shipped binary. Preserved dead, per PORTING.md's
+bug-for-bug fidelity rule, rather than "fixed" to "tesla".
 */
 // m_move.c -- monster movement
 
-import { anglemod, vec3, vec3_origin, type Vec3, VectorAdd, VectorCopy } from "../shared/math";
+import {
+  AngleVectors,
+  anglemod,
+  DotProduct,
+  vec3,
+  vec3_origin,
+  type Vec3,
+  VectorAdd,
+  VectorCopy,
+  VectorMA,
+  VectorNormalize,
+  VectorScale,
+  VectorSubtract,
+} from "../shared/math";
 import { CONTENTS_SOLID, M_PI, MASK_MONSTERSOLID, MASK_WATER, YAW } from "../shared/q_shared";
-import { AI_NOSTEP, FL_FLY, FL_PARTIALGROUND, FL_SWIM, g_edicts, gi, type EdictT } from "./g_local";
+import { AI_BLOCKED, AI_CHARGING, AI_NOSTEP, FL_FLY, FL_PARTIALGROUND, FL_SWIM, g_edicts, gi, type EdictT } from "./g_local";
 import type { Edict } from "./game";
+import { CheckForBadArea, TargetTesla } from "./g_newai";
+import { FoundTarget, visible } from "./g_ai";
 import { G_TouchTriggers } from "./g_utils";
 
 const STEPSIZE = 18;
@@ -18,6 +71,11 @@ const STEPSIZE = 18;
 // logic below.
 let c_yes = 0;
 let c_no = 0;
+
+// this is used for communications out of SV_movestep to say what entity is
+// blocking us. Nothing outside this file reads it in the C source; kept as
+// module state for fidelity.
+let new_bad: EdictT | null = null;
 
 // trace_t.ent recovery idiom (see g_phys.ts's traceEdict): sv_world.c
 // defaults an unset trace.ent to the world edict, never NULL, so a null
@@ -48,7 +106,11 @@ export function M_CheckBottom(ent: EdictT): boolean {
   // if all of the points under the corners are solid world, don't bother
   // with the tougher checks
   // the corners must be within 16 of the midpoint
+  //
+  // FIXME - this will only handle 0,0,1 and 0,0,-1 gravity vectors
   start[2] = mins[2] - 1;
+  if (ent.gravityVector[2] > 0) start[2] = maxs[2] + 1;
+
   let allCornersSolid = true;
   for (let x = 0; x <= 1 && allCornersSolid; x++) {
     for (let y = 0; y <= 1 && allCornersSolid; y++) {
@@ -76,7 +138,15 @@ export function M_CheckBottom(ent: EdictT): boolean {
   stop[0] = start[0];
   start[1] = (mins[1] + maxs[1]) * 0.5;
   stop[1] = start[1];
-  stop[2] = start[2] - 2 * STEPSIZE;
+
+  if (ent.gravityVector[2] < 0) {
+    start[2] = mins[2];
+    stop[2] = start[2] - STEPSIZE - STEPSIZE;
+  } else {
+    start[2] = maxs[2];
+    stop[2] = start[2] + STEPSIZE + STEPSIZE;
+  }
+
   let trace = gi.trace(start, vec3_origin, vec3_origin, stop, ent, MASK_MONSTERSOLID);
 
   if (trace.fraction === 1.0) return false;
@@ -93,14 +163,55 @@ export function M_CheckBottom(ent: EdictT): boolean {
 
       trace = gi.trace(start, vec3_origin, vec3_origin, stop, ent, MASK_MONSTERSOLID);
 
-      if (trace.fraction !== 1.0 && trace.endpos[2] > bottom) bottom = trace.endpos[2];
-      if (trace.fraction === 1.0 || mid - trace.endpos[2] > STEPSIZE) return false;
+      // FIXME - this will only handle 0,0,1 and 0,0,-1 gravity vectors
+      if (ent.gravityVector[2] > 0) {
+        if (trace.fraction !== 1.0 && trace.endpos[2] < bottom) bottom = trace.endpos[2];
+        if (trace.fraction === 1.0 || trace.endpos[2] - mid > STEPSIZE) return false;
+      } else {
+        if (trace.fraction !== 1.0 && trace.endpos[2] > bottom) bottom = trace.endpos[2];
+        if (trace.fraction === 1.0 || mid - trace.endpos[2] > STEPSIZE) return false;
+      }
     }
   }
 
   c_yes++;
   return true;
 }
+
+//============
+// ROGUE
+/*
+=============
+IsBadAhead
+
+Returns true if the bad area `bad` is roughly in the direction `move` is
+about to take us (both dot products with our facing agree in sign), so a
+tesla we're backing away from is genuinely ahead of us rather than behind.
+=============
+*/
+function IsBadAhead(self: EdictT, bad: EdictT, move: Vec3): boolean {
+  const dir = vec3();
+  const forward = vec3();
+  const move_copy = vec3();
+
+  VectorCopy(move, move_copy);
+
+  VectorSubtract(bad.s.origin, self.s.origin, dir);
+  VectorNormalize(dir);
+  AngleVectors(self.s.angles, forward, null, null);
+  const dp_bad = DotProduct(forward, dir);
+
+  VectorNormalize(move_copy);
+  AngleVectors(self.s.angles, forward, null, null);
+  const dp_move = DotProduct(forward, move_copy);
+
+  if (dp_bad < 0 && dp_move < 0) return true;
+  if (dp_bad > 0 && dp_move > 0) return true;
+
+  return false;
+}
+// ROGUE
+//============
 
 /*
 =============
@@ -120,6 +231,34 @@ function SV_movestep(ent: EdictT, move: Vec3, relink: boolean): boolean {
   const end = vec3();
   const test = vec3();
 
+  //======
+  //PGM
+  // PMM - who cares about bad areas if you're dead?
+  let current_bad: EdictT | null = null;
+  if (ent.health > 0) {
+    current_bad = CheckForBadArea(ent);
+    if (current_bad) {
+      ent.bad_area = current_bad;
+
+      const enemy = ent.enemy;
+      if (enemy && enemy.classname === "tesla") {
+        // if the tesla is in front of us, back up...
+        if (IsBadAhead(ent, current_bad, move)) VectorScale(move, -1, move);
+      }
+    } else if (ent.bad_area) {
+      // if we're no longer in a bad area, get back to business.
+      ent.bad_area = null;
+      if (ent.oldenemy) {
+        ent.enemy = ent.oldenemy;
+        ent.goalentity = ent.oldenemy;
+        FoundTarget(ent);
+        return true;
+      }
+    }
+  }
+  //PGM
+  //======
+
   // try the move
   VectorCopy(ent.s.origin, oldorg);
   VectorAdd(ent.s.origin, move, neworg);
@@ -133,8 +272,11 @@ function SV_movestep(ent: EdictT, move: Vec3, relink: boolean): boolean {
         if (!ent.goalentity) ent.goalentity = ent.enemy;
         const dz = ent.s.origin[2] - ent.goalentity.s.origin[2];
         if (ent.goalentity.client) {
-          if (dz > 40) neworg[2] -= 8;
-          if (!(ent.flags & FL_SWIM && ent.waterlevel < 2)) if (dz < 30) neworg[2] += 8;
+          // we want the carrier to stay a certain distance off the ground, to help prevent him
+          // from shooting his fliers, who spawn in below him
+          const minheight = ent.classname === "monster_carrier" ? 104 : 40;
+          if (dz > minheight) neworg[2] -= 8;
+          if (!(ent.flags & FL_SWIM && ent.waterlevel < 2)) if (dz < minheight - 10) neworg[2] += 8;
         } else {
           if (dz > 8) neworg[2] -= 8;
           else if (dz > 0) neworg[2] -= dz;
@@ -166,13 +308,23 @@ function SV_movestep(ent: EdictT, move: Vec3, relink: boolean): boolean {
         }
       }
 
-      if (trace.fraction === 1) {
+      // PMM - changed from a bare `trace.fraction == 1` check to also
+      // require !allsolid && !startsolid.
+      if (trace.fraction === 1 && !trace.allsolid && !trace.startsolid) {
         VectorCopy(trace.endpos, ent.s.origin);
-        if (relink) {
-          gi.linkentity(ent);
-          G_TouchTriggers(ent);
+        //=====
+        //PGM
+        if (!current_bad && CheckForBadArea(ent)) {
+          VectorCopy(oldorg, ent.s.origin);
+        } else {
+          if (relink) {
+            gi.linkentity(ent);
+            G_TouchTriggers(ent);
+          }
+          return true;
         }
-        return true;
+        //PGM
+        //=====
       }
 
       if (!ent.enemy) break;
@@ -184,9 +336,9 @@ function SV_movestep(ent: EdictT, move: Vec3, relink: boolean): boolean {
   // push down from a step height above the wished position
   const stepsize = ent.monsterinfo.aiflags & AI_NOSTEP ? 1 : STEPSIZE;
 
-  neworg[2] += stepsize;
-  VectorCopy(neworg, end);
-  end[2] -= stepsize * 2;
+  // trace from 1 stepsize gravityUp to 2 stepsize gravityDown.
+  VectorMA(neworg, -1 * stepsize, ent.gravityVector, neworg);
+  VectorMA(neworg, 2 * stepsize, ent.gravityVector, end);
 
   let trace = gi.trace(neworg, ent.mins, ent.maxs, end, ent, MASK_MONSTERSOLID);
 
@@ -202,7 +354,7 @@ function SV_movestep(ent: EdictT, move: Vec3, relink: boolean): boolean {
   if (ent.waterlevel === 0) {
     test[0] = trace.endpos[0];
     test[1] = trace.endpos[1];
-    test[2] = trace.endpos[2] + ent.mins[2] + 1;
+    test[2] = ent.gravityVector[2] > 0 ? trace.endpos[2] + ent.maxs[2] - 1 : trace.endpos[2] + ent.mins[2] + 1;
     const contents = gi.pointcontents(test);
 
     if (contents & MASK_WATER) return false;
@@ -225,6 +377,42 @@ function SV_movestep(ent: EdictT, move: Vec3, relink: boolean): boolean {
 
   // check point traces down for dangling corners
   VectorCopy(trace.endpos, ent.s.origin);
+
+  //PGM
+  // PMM - don't bother with bad areas if we're dead
+  if (ent.health > 0) {
+    // use AI_BLOCKED to tell the calling layer that we're now mad at a tesla
+    new_bad = CheckForBadArea(ent);
+    if (!current_bad && new_bad) {
+      if (new_bad.owner) {
+        const owner = new_bad.owner;
+        if (owner.classname === "tesla") {
+          const enemy = ent.enemy;
+          if (!enemy || !enemy.inuse) {
+            TargetTesla(ent, owner);
+            ent.monsterinfo.aiflags |= AI_BLOCKED;
+          } else if (enemy.classname === "telsa") {
+            // C typo preserved: "telsa" never matches "tesla", so this
+            // branch is dead in the original -- kept dead here too.
+          } else if (enemy.client) {
+            if (visible(ent, enemy)) {
+              // we can see him, no need to attack the tesla yet
+            } else {
+              TargetTesla(ent, owner);
+              ent.monsterinfo.aiflags |= AI_BLOCKED;
+            }
+          } else {
+            TargetTesla(ent, owner);
+            ent.monsterinfo.aiflags |= AI_BLOCKED;
+          }
+        }
+      }
+
+      VectorCopy(oldorg, ent.s.origin);
+      return false;
+    }
+  }
+  //PGM
 
   if (!M_CheckBottom(ent)) {
     if (ent.flags & FL_PARTIALGROUND) {
@@ -266,6 +454,9 @@ facing it.
 function SV_StepDirection(ent: EdictT, yawIn: number, dist: number): boolean {
   const oldorigin = vec3();
 
+  // PGM g_touchtrigger free problem
+  if (!ent.inuse) return true;
+
   ent.ideal_yaw = yawIn;
   M_ChangeYaw(ent);
 
@@ -274,10 +465,18 @@ function SV_StepDirection(ent: EdictT, yawIn: number, dist: number): boolean {
 
   VectorCopy(ent.s.origin, oldorigin);
   if (SV_movestep(ent, move, false)) {
+    ent.monsterinfo.aiflags &= ~AI_BLOCKED;
+
+    // PGM g_touchtrigger free problem
+    if (!ent.inuse) return true;
+
     const delta = ent.s.angles[YAW] - ent.ideal_yaw;
-    if (delta > 45 && delta < 315) {
-      // not turned far enough, so don't take the step
-      VectorCopy(oldorigin, ent.s.origin);
+    // widow bosses can turn as far as they need to without losing the step
+    if (!(ent.classname !== null && ent.classname.startsWith("monster_widow"))) {
+      if (delta > 45 && delta < 315) {
+        // not turned far enough, so don't take the step
+        VectorCopy(oldorigin, ent.s.origin);
+      }
     }
     gi.linkentity(ent);
     G_TouchTriggers(ent);
@@ -343,6 +542,14 @@ function SV_NewChaseDir(actor: EdictT, enemy: EdictT | null, dist: number): void
 
   if (d[2] !== DI_NODIR && d[2] !== turnaround && SV_StepDirection(actor, d[2], dist)) return;
 
+  //ROGUE
+  if (actor.monsterinfo.blocked) {
+    if (actor.inuse && actor.health > 0) {
+      if (actor.monsterinfo.blocked(actor, dist)) return;
+    }
+  }
+  //ROGUE
+
   /* there is no direct path to the player, so pick another direction */
 
   if (olddir !== DI_NODIR && SV_StepDirection(actor, olddir, dist)) return;
@@ -396,7 +603,16 @@ export function M_MoveToGoal(ent: EdictT, dist: number): void {
   if (ent.enemy && SV_CloseEnough(ent, ent.enemy, dist)) return;
 
   // bump around...
-  if (Math.floor(Math.random() * 4) === 1 || !SV_StepDirection(ent, ent.ideal_yaw, dist)) {
+  // PMM - charging monsters (AI_CHARGING) don't deflect unless they have to
+  if (
+    (Math.floor(Math.random() * 4) === 1 && !(ent.monsterinfo.aiflags & AI_CHARGING)) ||
+    !SV_StepDirection(ent, ent.ideal_yaw, dist)
+  ) {
+    if (ent.monsterinfo.aiflags & AI_BLOCKED) {
+      // tesla attack detected, not changing direction
+      ent.monsterinfo.aiflags &= ~AI_BLOCKED;
+      return;
+    }
     if (ent.inuse) SV_NewChaseDir(ent, goal, dist);
   }
 }
@@ -441,5 +657,8 @@ export function M_walkmove(ent: EdictT, yawIn: number, dist: number): boolean {
 
   const move = vec3(Math.cos(yaw) * dist, Math.sin(yaw) * dist, 0);
 
-  return SV_movestep(ent, move, true);
+  // PMM
+  const retval = SV_movestep(ent, move, true);
+  ent.monsterinfo.aiflags &= ~AI_BLOCKED;
+  return retval;
 }

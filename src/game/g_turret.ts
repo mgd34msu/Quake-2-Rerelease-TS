@@ -1,4 +1,15 @@
 // g_turret.c
+//
+// rogue/g_turret.c vs baseq2/g_turret.c: a diagnostic dprintf when
+// turret_breach_finish_init's G_PickTarget() call fails (additive; this
+// path already didn't dereference a null target_ent), and a new
+// turret_brain_* family (turret_brain_think/_link/_deactivate/_activate,
+// SP_turret_invisible_brain) -- an invisible turret "driver" that fires at
+// the center of its enemy's bounding box instead of a visible
+// turret_driver's origin, letting mappers make unmanned turrets that shoot
+// at func_trains and similar bmodel targets. This file is g_turret.c (the
+// turret_breach/turret_base/turret_driver mount), not m_turret.c (the
+// monster_turret body, this round's own file).
 
 import {
   AngleVectors,
@@ -6,6 +17,7 @@ import {
   type Vec3,
   vec3,
   vec3_origin,
+  VectorAdd,
   VectorCopy,
   VectorLength,
   VectorMA,
@@ -13,10 +25,10 @@ import {
   VectorSet,
   VectorSubtract,
 } from "../shared/math";
-import { ATTN_NORM, CHAN_WEAPON, M_PI, MASK_MONSTERSOLID, PITCH, RF_FRAMELERP, YAW } from "../shared/q_shared";
+import { ATTN_NORM, CHAN_WEAPON, M_PI, MASK_MONSTERSOLID, MASK_SHOT, PITCH, RF_FRAMELERP, YAW } from "../shared/q_shared";
 import { T_Damage } from "./g_combat";
 import { visible, FindTarget } from "./g_ai";
-import { SolidT, SVF_MONSTER } from "./game";
+import { type Edict, SolidT, SVF_MONSTER } from "./game";
 import {
   AI_DUCKED,
   AI_LOST_SIGHT,
@@ -26,6 +38,7 @@ import {
   FL_NO_KNOCKBACK,
   FL_TEAMSLAVE,
   FRAMETIME,
+  g_edicts,
   gameCvars,
   gi,
   level,
@@ -40,6 +53,15 @@ import { G_FreeEdict, G_PickTarget, vectoangles, vtos } from "./g_utils";
 
 function cvarNum(c: { value: number } | null): number {
   return c === null ? 0 : c.value;
+}
+
+// trace_t.ent recovery idiom (see g_monster.ts's/g_ai.ts's own copy):
+// sv_world.c defaults an unset trace.ent to the world edict, never NULL, so
+// a null GTraceT.ent here falls back to g_edicts[0] the same way.
+// Module-local per PORTING.md.
+function traceEdict(ent: Edict | null): EdictT {
+  if (ent === null) return g_edicts[0];
+  return g_edicts[ent.s.number];
 }
 
 // g_turret.c declares these extern with a 4-arg infantry_die while the real
@@ -195,6 +217,8 @@ export function turret_breach_finish_init(self: EdictT): void {
     if (self.target_ent !== null) {
       VectorSubtract(self.target_ent.s.origin, self.s.origin, self.move_origin);
       G_FreeEdict(self.target_ent);
+    } else {
+      gi.dprintf(`could not find target entity for ${self.classname} at ${vtos(self.s.origin)}\n`);
     }
   }
 
@@ -388,3 +412,181 @@ export function SP_turret_driver(self: EdictT): void {
 
   gi.linkentity(self);
 }
+
+//============
+// ROGUE
+
+// invisible turret drivers so we can have unmanned turrets.
+// originally designed to shoot at func_trains and such, so they
+// fire at the center of the bounding box, rather than the entity's
+// origin.
+
+export function turret_brain_think(self: EdictT): void {
+  const target = vec3();
+  const endpos = vec3();
+
+  self.nextthink = level.time + FRAMETIME;
+
+  if (self.enemy !== null) {
+    if (!self.enemy.inuse) self.enemy = null;
+    else if (self.enemy.takedamage && self.enemy.health <= 0) self.enemy = null;
+  }
+
+  if (self.enemy === null) {
+    if (!FindTarget(self)) return;
+    self.monsterinfo.trail_time = level.time;
+    self.monsterinfo.aiflags &= ~AI_LOST_SIGHT;
+  } else {
+    if (self.target_ent === null) return; // C assumes target_ent is always set by turret_brain_link
+
+    VectorAdd(self.enemy.absmax, self.enemy.absmin, endpos);
+    VectorScale(endpos, 0.5, endpos);
+
+    const trace = gi.trace(self.target_ent.s.origin, vec3_origin, vec3_origin, endpos, self.target_ent, MASK_SHOT);
+    if (trace.fraction === 1 || traceEdict(trace.ent) === self.enemy) {
+      if (self.monsterinfo.aiflags & AI_LOST_SIGHT) {
+        self.monsterinfo.trail_time = level.time;
+        self.monsterinfo.aiflags &= ~AI_LOST_SIGHT;
+      }
+    } else {
+      self.monsterinfo.aiflags |= AI_LOST_SIGHT;
+      return;
+    }
+  }
+
+  if (self.target_ent === null) return; // C assumes target_ent is always set by turret_brain_link
+
+  // let the turret know where we want it to aim
+  VectorCopy(endpos, target);
+  const dir = vec3();
+  VectorSubtract(target, self.target_ent.s.origin, dir);
+  vectoangles(dir, self.target_ent.move_angles);
+
+  // decide if we should shoot
+  if (level.time < self.monsterinfo.attack_finished) return;
+
+  let reaction_time: number;
+  if (self.delay) reaction_time = self.delay;
+  else reaction_time = (3 - cvarNum(gameCvars.skill)) * 1.0;
+  if (level.time - self.monsterinfo.trail_time < reaction_time) return;
+
+  self.monsterinfo.attack_finished = level.time + reaction_time + 1.0;
+  //FIXME how do we really want to pass this along?
+  self.target_ent.spawnflags |= 65536;
+}
+
+// =================
+// =================
+export function turret_brain_link(self: EdictT): void {
+  const vec = vec3();
+
+  if (self.killtarget) {
+    self.enemy = G_PickTarget(self.killtarget);
+  }
+
+  self.think = turret_brain_think;
+  self.nextthink = level.time + FRAMETIME;
+
+  self.target_ent = G_PickTarget(self.target);
+  if (self.target_ent === null) return; // C assumes G_PickTarget always succeeds here
+  self.target_ent.owner = self;
+  if (self.target_ent.teammaster !== null) self.target_ent.teammaster.owner = self;
+  VectorCopy(self.target_ent.s.angles, self.s.angles);
+
+  vec[0] = self.target_ent.s.origin[0] - self.s.origin[0];
+  vec[1] = self.target_ent.s.origin[1] - self.s.origin[1];
+  vec[2] = 0;
+  self.move_origin[0] = VectorLength(vec);
+
+  VectorSubtract(self.s.origin, self.target_ent.s.origin, vec);
+  vectoangles(vec, vec);
+  AnglesNormalize(vec);
+  self.move_origin[1] = vec[1];
+
+  self.move_origin[2] = self.s.origin[2] - self.target_ent.s.origin[2];
+
+  // add the driver to the end of them team chain
+  if (self.target_ent.teammaster !== null) {
+    let ent = self.target_ent.teammaster;
+    while (ent.teamchain !== null) ent = ent.teamchain;
+    ent.teamchain = self;
+    self.teammaster = self.target_ent.teammaster;
+  }
+  self.flags |= FL_TEAMSLAVE;
+}
+
+// =================
+// =================
+export function turret_brain_deactivate(self: EdictT, _other: EdictT | null, _activator: EdictT | null): void {
+  self.think = null;
+  self.nextthink = 0;
+}
+
+// =================
+// =================
+export function turret_brain_activate(self: EdictT, _other: EdictT | null, activator: EdictT | null): void {
+  if (self.enemy === null) {
+    self.enemy = activator;
+  }
+
+  // wait at least 3 seconds to fire.
+  self.monsterinfo.attack_finished = level.time + 3;
+  self.use = turret_brain_deactivate;
+
+  self.think = turret_brain_link;
+  self.nextthink = level.time + FRAMETIME;
+}
+
+/*QUAKED turret_invisible_brain (1 .5 0) (-16 -16 -16) (16 16 16)
+Invisible brain to drive the turret.
+
+Does not search for targets. If targeted, can only be turned on once
+and then off once. After that they are completely disabled.
+
+"delay" the delay between firing (default ramps for skill level)
+"Target" the turret breach
+"Killtarget" the item you want it to attack.
+Target the brain if you want it activated later, instead of immediately. It will wait 3 seconds
+before firing to acquire the target.
+*/
+export function SP_turret_invisible_brain(self: EdictT): void {
+  if (!self.killtarget) {
+    gi.dprintf("turret_invisible_brain with no killtarget!\n");
+    G_FreeEdict(self);
+    return;
+  }
+  if (!self.target) {
+    gi.dprintf("turret_invisible_brain with no target!\n");
+    G_FreeEdict(self);
+    return;
+  }
+
+  if (self.targetname) {
+    self.use = turret_brain_activate;
+  } else {
+    self.think = turret_brain_link;
+    self.nextthink = level.time + FRAMETIME;
+  }
+
+  self.movetype = MovetypeT.MOVETYPE_PUSH;
+  gi.linkentity(self);
+}
+
+// ROGUE
+//============
+
+// -------------------------------------------------------------------------
+// Savegame function/mmove registry -- so a save containing an entity that
+// references one of these callbacks restores a real think/use function
+// instead of null (see g_save.ts's registerSaveFunction name registry).
+// This round only registers the new turret_brain_* additions above; the
+// file's pre-existing turret_breach/turret_driver functions were not
+// previously registered and are left as-is (outside this round's SCOPE).
+// -------------------------------------------------------------------------
+
+import { registerSaveFunction } from "./g_save";
+
+registerSaveFunction("g_turret:turret_brain_think", turret_brain_think);
+registerSaveFunction("g_turret:turret_brain_link", turret_brain_link);
+registerSaveFunction("g_turret:turret_brain_deactivate", turret_brain_deactivate);
+registerSaveFunction("g_turret:turret_brain_activate", turret_brain_activate);

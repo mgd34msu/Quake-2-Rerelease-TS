@@ -24,8 +24,11 @@ import {
 import { FS_ReadRawFile, FS_WriteFile } from "../qcommon/files";
 import { type EdictStringKey } from "./g_utils";
 import {
+  type BmodelAnimT,
   ClientPersistantT,
   EdictT,
+  type FogT,
+  type HeightFogT,
   GAMEVERSION,
   GClientT,
   gameCvars,
@@ -42,6 +45,7 @@ import {
   SetGEdicts,
 } from "./g_local";
 import { FindItemByClassname, InitItems } from "./g_items";
+import { InitGameRules } from "./g_newdm";
 
 // -------------------------------------------------------------------------
 // field_t / fields[] -- moved here from g_spawn.ts per that file's own
@@ -68,6 +72,14 @@ type SpawnTempStringKey = {
   [K in keyof SpawnTempT]: SpawnTempT[K] extends string | null ? K : never;
 }[keyof SpawnTempT];
 type SpawnTempNumberKey = { [K in keyof SpawnTempT]: SpawnTempT[K] extends number ? K : never }[keyof SpawnTempT];
+type EntityStateNumberKey = { [K in keyof EntityStateT]: EntityStateT[K] extends number ? K : never }[keyof EntityStateT];
+type MonsterInfoNumberKey = { [K in keyof MonsterInfoT]: MonsterInfoT[K] extends number ? K : never }[keyof MonsterInfoT];
+type FogVectorKey = { [K in keyof FogT]: FogT[K] extends Vec3 ? K : never }[keyof FogT];
+type FogNumberKey = { [K in keyof FogT]: FogT[K] extends number ? K : never }[keyof FogT];
+type HeightFogVectorKey = { [K in keyof HeightFogT]: HeightFogT[K] extends Vec3 ? K : never }[keyof HeightFogT];
+type HeightFogNumberKey = { [K in keyof HeightFogT]: HeightFogT[K] extends number ? K : never }[keyof HeightFogT];
+type BmodelAnimNumberKey = { [K in keyof BmodelAnimT]: BmodelAnimT[K] extends number ? K : never }[keyof BmodelAnimT];
+type BmodelAnimBoolKey = { [K in keyof BmodelAnimT]: BmodelAnimT[K] extends boolean ? K : never }[keyof BmodelAnimT];
 type SpawnTempVectorKey = { [K in keyof SpawnTempT]: SpawnTempT[K] extends Vec3 ? K : never }[keyof SpawnTempT];
 
 export type FieldSpawn =
@@ -80,6 +92,23 @@ export type FieldSpawn =
   | { key: string; type: "F_VECTOR"; target: "edict"; prop: EdictVectorKey }
   | { key: string; type: "F_VECTOR"; target: "spawntemp"; prop: SpawnTempVectorKey }
   | { key: string; type: "F_VECTOR"; target: "edict_s"; prop: EntityStateVectorKey }
+  // RERELEASE CONTENT PORT: the rerelease field table writes several keys
+  // straight onto the entity_state_t (alpha/scale/effects/renderfx/frame)
+  // and onto monsterinfo (power armor, monster_slots). Vanilla's fields[]
+  // never needed either target, so both are new here.
+  | { key: string; type: "F_INT"; target: "edict_s"; prop: EntityStateNumberKey }
+  | { key: string; type: "F_FLOAT"; target: "edict_s"; prop: EntityStateNumberKey }
+  | { key: string; type: "F_INT"; target: "monsterinfo"; prop: MonsterInfoNumberKey }
+  | { key: string; type: "F_FLOAT"; target: "monsterinfo"; prop: MonsterInfoNumberKey }
+  | { key: string; type: "F_VECTOR"; target: "fog"; prop: FogVectorKey }
+  | { key: string; type: "F_FLOAT"; target: "fog"; prop: FogNumberKey }
+  | { key: string; type: "F_VECTOR"; target: "heightfog"; prop: HeightFogVectorKey }
+  | { key: string; type: "F_FLOAT"; target: "heightfog"; prop: HeightFogNumberKey }
+  | { key: string; type: "F_INT"; target: "bmodel_anim"; prop: BmodelAnimNumberKey }
+  | { key: string; type: "F_BOOL"; target: "bmodel_anim"; prop: BmodelAnimBoolKey }
+  // rgba: "r g b a" bytes packed into s.skinnum, the way the rerelease
+  // ED_LoadColor does it.
+  | { key: string; type: "F_COLOR"; target: "edict_s"; prop: EntityStateNumberKey }
   | { key: string; type: "F_ANGLEHACK"; target: "edict"; prop: EdictVectorKey }
   | { key: string; type: "F_ANGLEHACK"; target: "spawntemp"; prop: SpawnTempVectorKey }
   | { key: string; type: "F_ANGLEHACK"; target: "edict_s"; prop: EntityStateVectorKey }
@@ -136,6 +165,129 @@ export const FIELDS: FieldSpawn[] = [
   { key: "minpitch", type: "F_FLOAT", target: "spawntemp", prop: "minpitch" },
   { key: "maxpitch", type: "F_FLOAT", target: "spawntemp", prop: "maxpitch" },
   { key: "nextmap", type: "F_LSTRING", target: "spawntemp", prop: "nextmap" },
+
+  // =====================================================================
+  // RERELEASE CONTENT PORT -- every spawn key the shipped rerelease maps
+  // actually use that vanilla 3.21's fields[] does not name.
+  //
+  // Derived by scanning the entity lump of all 222 .bsp files shipped in
+  // /home/buzzkill/q2rets/rerelease (baseq2/pak0.pak) and diffing the 179
+  // distinct keys they use against this table. Every row below is ported
+  // from src/kexgame/g_spawn.ts's TEMP_FIELDS / ENTITY_FIELDS tables --
+  // the rerelease game DLL's own parser -- so a key means here exactly
+  // what it means there.
+  //
+  // Without these rows, ED_ParseField counts each one as "<key> is not a
+  // field" and, far worse, the ported entity that needed the value spawns
+  // with a default instead. Vanilla maps name none of these keys, so
+  // vanilla behavior is untouched.
+  // =====================================================================
+
+  // --- rerelease spawn_temp_t keys ---
+  { key: "skyautorotate", type: "F_INT", target: "spawntemp", prop: "skyautorotate" },
+  { key: "music", type: "F_LSTRING", target: "spawntemp", prop: "music" },
+  { key: "instantitems", type: "F_INT", target: "spawntemp", prop: "instantitems" },
+  { key: "radius", type: "F_FLOAT", target: "spawntemp", prop: "radius" },
+  { key: "hub_map", type: "F_INT", target: "spawntemp", prop: "hub_map" },
+  { key: "achievement", type: "F_LSTRING", target: "spawntemp", prop: "achievement" },
+  { key: "goals", type: "F_LSTRING", target: "spawntemp", prop: "goals" },
+  { key: "image", type: "F_LSTRING", target: "spawntemp", prop: "image" },
+  { key: "fade_start_dist", type: "F_INT", target: "spawntemp", prop: "fade_start_dist" },
+  { key: "fade_end_dist", type: "F_INT", target: "spawntemp", prop: "fade_end_dist" },
+  { key: "start_items", type: "F_LSTRING", target: "spawntemp", prop: "start_items" },
+  { key: "no_grapple", type: "F_INT", target: "spawntemp", prop: "no_grapple" },
+  { key: "health_multiplier", type: "F_FLOAT", target: "spawntemp", prop: "health_multiplier" },
+  { key: "reinforcements", type: "F_LSTRING", target: "spawntemp", prop: "reinforcements" },
+  { key: "noise_start", type: "F_LSTRING", target: "spawntemp", prop: "noise_start" },
+  { key: "noise_middle", type: "F_LSTRING", target: "spawntemp", prop: "noise_middle" },
+  { key: "noise_end", type: "F_LSTRING", target: "spawntemp", prop: "noise_end" },
+  { key: "loop_count", type: "F_INT", target: "spawntemp", prop: "loop_count" },
+
+  // --- shadow-light keys. Parsed and stored so the entity is complete and
+  // so they stop counting as unknown fields; the classic renderer has no
+  // shadow-light pass and protocol 34 carries no message that could
+  // describe one, so they have no visual effect. See the report. ---
+  { key: "shadowlightradius", type: "F_FLOAT", target: "spawntemp", prop: "shadowlightradius" },
+  { key: "shadowlightresolution", type: "F_INT", target: "spawntemp", prop: "shadowlightresolution" },
+  { key: "shadowlightintensity", type: "F_FLOAT", target: "spawntemp", prop: "shadowlightintensity" },
+  { key: "shadowlightstartfadedistance", type: "F_FLOAT", target: "spawntemp", prop: "shadowlightstartfadedistance" },
+  { key: "shadowlightendfadedistance", type: "F_FLOAT", target: "spawntemp", prop: "shadowlightendfadedistance" },
+  { key: "shadowlightstyle", type: "F_INT", target: "spawntemp", prop: "shadowlightstyle" },
+  { key: "shadowlightconeangle", type: "F_FLOAT", target: "spawntemp", prop: "shadowlightconeangle" },
+  { key: "shadowlightstyletarget", type: "F_LSTRING", target: "spawntemp", prop: "shadowlightstyletarget" },
+
+  // --- rerelease edict keys ---
+  { key: "healthtarget", type: "F_LSTRING", target: "edict", prop: "healthtarget" },
+  { key: "itemtarget", type: "F_LSTRING", target: "edict", prop: "itemtarget" },
+  { key: "style_on", type: "F_LSTRING", target: "edict", prop: "style_on" },
+  { key: "style_off", type: "F_LSTRING", target: "edict", prop: "style_off" },
+  { key: "crosslevel_flags", type: "F_INT", target: "edict", prop: "crosslevel_flags" },
+  { key: "hackflags", type: "F_INT", target: "edict", prop: "hackflags" },
+  { key: "mins", type: "F_VECTOR", target: "edict", prop: "mins" },
+  { key: "maxs", type: "F_VECTOR", target: "edict", prop: "maxs" },
+  // kexgame/g_spawn.ts maps eye_position onto move_origin and message2
+  // onto `map`; kept identical here rather than "fixed".
+  { key: "eye_position", type: "F_VECTOR", target: "edict", prop: "move_origin" },
+  { key: "message2", type: "F_LSTRING", target: "edict", prop: "map" },
+  { key: "vision_cone", type: "F_FLOAT", target: "edict", prop: "yaw_speed" },
+  // editor-only fields the compiler consumes; named so they stop counting
+  // as unknown, exactly as the rerelease table does with load: null.
+  { key: "mangle", type: "F_IGNORE" },
+  { key: "mapversion", type: "F_IGNORE" },
+
+  // --- entity_state_t keys ---
+  { key: "frame", type: "F_INT", target: "edict_s", prop: "frame" },
+  { key: "effects", type: "F_INT", target: "edict_s", prop: "effects" },
+  { key: "renderfx", type: "F_INT", target: "edict_s", prop: "renderfx" },
+  // PROTOCOL DEGRADATION (documented, deliberate): s.alpha and s.scale are
+  // rerelease-only entity_state_t fields. They are parsed and stored, so
+  // the entity spawns with the mapper's intent recorded and any
+  // server-side logic that reads them behaves correctly, but protocol 34
+  // has no room for either in its delta -- so a rerelease entity authored
+  // translucent or half-size renders opaque and full-size under the
+  // classic ruleset. The entity is never dropped over this.
+  { key: "alpha", type: "F_FLOAT", target: "edict_s", prop: "alpha" },
+  { key: "scale", type: "F_FLOAT", target: "edict_s", prop: "scale" },
+  { key: "rgba", type: "F_COLOR", target: "edict_s", prop: "skinnum" },
+
+  // --- monsterinfo keys ---
+  { key: "monster_slots", type: "F_INT", target: "monsterinfo", prop: "monster_slots" },
+  { key: "power_armor_power", type: "F_INT", target: "monsterinfo", prop: "power_armor_power" },
+  { key: "power_armor_type", type: "F_INT", target: "monsterinfo", prop: "power_armor_type" },
+
+  // --- fog / heightfog (see the FogT note in g_local.ts: stored and
+  // updated server-side, not transmissible over protocol 34) ---
+  { key: "fog_color", type: "F_VECTOR", target: "fog", prop: "color" },
+  { key: "fog_color_off", type: "F_VECTOR", target: "fog", prop: "color_off" },
+  { key: "fog_density", type: "F_FLOAT", target: "fog", prop: "density" },
+  { key: "fog_density_off", type: "F_FLOAT", target: "fog", prop: "density_off" },
+  { key: "fog_sky_factor", type: "F_FLOAT", target: "fog", prop: "sky_factor" },
+  { key: "fog_sky_factor_off", type: "F_FLOAT", target: "fog", prop: "sky_factor_off" },
+  { key: "heightfog_falloff", type: "F_FLOAT", target: "heightfog", prop: "falloff" },
+  { key: "heightfog_density", type: "F_FLOAT", target: "heightfog", prop: "density" },
+  { key: "heightfog_start_color", type: "F_VECTOR", target: "heightfog", prop: "start_color" },
+  { key: "heightfog_start_dist", type: "F_FLOAT", target: "heightfog", prop: "start_dist" },
+  { key: "heightfog_end_color", type: "F_VECTOR", target: "heightfog", prop: "end_color" },
+  { key: "heightfog_end_dist", type: "F_FLOAT", target: "heightfog", prop: "end_dist" },
+  { key: "heightfog_falloff_off", type: "F_FLOAT", target: "heightfog", prop: "falloff_off" },
+  { key: "heightfog_density_off", type: "F_FLOAT", target: "heightfog", prop: "density_off" },
+  { key: "heightfog_start_color_off", type: "F_VECTOR", target: "heightfog", prop: "start_color_off" },
+  { key: "heightfog_start_dist_off", type: "F_FLOAT", target: "heightfog", prop: "start_dist_off" },
+  { key: "heightfog_end_color_off", type: "F_VECTOR", target: "heightfog", prop: "end_color_off" },
+  { key: "heightfog_end_dist_off", type: "F_FLOAT", target: "heightfog", prop: "end_dist_off" },
+
+  // --- brush-model animation. This one DOES present under protocol 34:
+  // it drives s.frame, which every protocol carries. ---
+  { key: "bmodel_anim_start", type: "F_INT", target: "bmodel_anim", prop: "start" },
+  { key: "bmodel_anim_end", type: "F_INT", target: "bmodel_anim", prop: "end" },
+  { key: "bmodel_anim_style", type: "F_INT", target: "bmodel_anim", prop: "style" },
+  { key: "bmodel_anim_speed", type: "F_INT", target: "bmodel_anim", prop: "speed" },
+  { key: "bmodel_anim_nowrap", type: "F_BOOL", target: "bmodel_anim", prop: "nowrap" },
+  { key: "bmodel_anim_alt_start", type: "F_INT", target: "bmodel_anim", prop: "alt_start" },
+  { key: "bmodel_anim_alt_end", type: "F_INT", target: "bmodel_anim", prop: "alt_end" },
+  { key: "bmodel_anim_alt_style", type: "F_INT", target: "bmodel_anim", prop: "alt_style" },
+  { key: "bmodel_anim_alt_speed", type: "F_INT", target: "bmodel_anim", prop: "alt_speed" },
+  { key: "bmodel_anim_alt_nowrap", type: "F_BOOL", target: "bmodel_anim", prop: "alt_nowrap" },
 ];
 
 // -------------------------------------------------------------------------
@@ -1169,6 +1321,11 @@ export interface GameJSON {
   maxclients: number;
   maxentities: number;
   serverflags: number;
+  // Optional so a savegame written before the rerelease content port (which
+  // has no such key) still type-checks and loads -- the reader defaults it
+  // to 0, the correct "no cross-unit trigger has fired yet" value. Always
+  // written by this build.
+  cross_unit_flags?: number;
   num_items: number;
   clients: ClientPersistantJSON[];
 }
@@ -1193,6 +1350,7 @@ export function serializeGame(autosave: boolean): GameJSON {
     maxclients: game.maxclients,
     maxentities: game.maxentities,
     serverflags: game.serverflags,
+    cross_unit_flags: game.cross_unit_flags,
     num_items: game.num_items,
     clients: game.clients.map((c) => serializeClientPersistant(c.pers)),
   };
@@ -1206,6 +1364,10 @@ export function deserializeGame(json: GameJSON): void {
   game.maxclients = json.maxclients;
   game.maxentities = json.maxentities;
   game.serverflags = json.serverflags;
+  // RERELEASE CONTENT PORT: tolerate a savegame written before
+  // cross_unit_flags existed -- an older file simply has no such key, and
+  // 0 is the correct "no cross-unit trigger has fired yet" value.
+  game.cross_unit_flags = json.cross_unit_flags ?? 0;
   game.num_items = json.num_items;
   game.autosaved = json.autosaved;
   game.clients = json.clients.map((clientJson) => {
@@ -1272,6 +1434,16 @@ export function InitGame(): void {
   // dm map list
   gameCvars.sv_maplist = gi.cvar("sv_maplist", "", 0);
 
+  // RERELEASE CONTENT PORT (rogue/g_save.c's InitGame): the alternate
+  // deathmatch ruleset selector the ported dm_tag content reads. CVAR_LATCH
+  // matches rogue -- the ruleset may only change between levels. Default 0
+  // is vanilla deathmatch, so nothing about classic play changes.
+  gameCvars.gamerules = gi.cvar("gamerules", "0", CVAR_LATCH);
+  gameCvars.g_showlogic = gi.cvar("g_showlogic", "0", 0);
+  gameCvars.huntercam = gi.cvar("huntercam", "1", CVAR_SERVERINFO | CVAR_LATCH);
+  gameCvars.strong_mines = gi.cvar("strong_mines", "0", 0);
+  gameCvars.randomrespawn = gi.cvar("randomrespawn", "0", 0);
+
   // items
   InitItems();
 
@@ -1291,6 +1463,18 @@ export function InitGame(): void {
   game.clients = Array.from({ length: numClients }, () => new GClientT());
 
   globals.num_edicts = numClients + 1;
+
+  // RERELEASE CONTENT PORT (rogue/g_save.c's InitGame: `if (gamerules)
+  // InitGameRules();`): select the alternate deathmatch ruleset now that
+  // the gamerules cvar is registered. Without this call the DMGame
+  // dispatch table stays empty and dm_tag's hooks never run, so
+  // dm_tag_token would spawn into a game that ignores it. gamerules is
+  // always non-null here (assigned above via gi.cvar), matching the C's
+  // pointer check; InitGameRules itself no-ops for the default value 0,
+  // so vanilla deathmatch and single player are unaffected.
+  if (gameCvars.gamerules !== null) {
+    InitGameRules();
+  }
 }
 
 // `gi.TagMalloc(maxentities * sizeof(g_edicts[0]), TAG_GAME)` -- a fresh,

@@ -5,7 +5,7 @@
 // actual tree shows every one of these functions is defined in p_client.c,
 // so that is where they are ported from.
 
-import { vec3, type Vec3, VectorClear, VectorCopy, VectorLength, VectorSubtract } from "../shared/math";
+import { vec3, type Vec3, vec3_origin, VectorClear, VectorCopy, VectorLength, VectorSubtract } from "../shared/math";
 import {
   ANGLE2SHORT,
   type CvarT,
@@ -61,6 +61,9 @@ import {
   FL_GODMODE,
   FL_NOTARGET,
   FL_NO_KNOCKBACK,
+  DMGame,
+  FL_NOGIB,
+  FL_SAM_RAIMI,
   FL_POWER_ARMOR,
   FRAMETIME,
   type GClientT,
@@ -78,7 +81,25 @@ import {
   MOD_EXIT,
   MOD_EXPLOSIVE,
   MOD_FALLING,
+  MOD_CHAINFIST,
+  MOD_DEFENDER_SPHERE,
+  MOD_DISINTEGRATOR,
+  MOD_DOPPLE_EXPLODE,
+  MOD_DOPPLE_HUNTER,
+  MOD_DOPPLE_VENGEANCE,
+  MOD_ETF_RIFLE,
   MOD_FRIENDLY_FIRE,
+  MOD_GRAPPLE,
+  MOD_HEATBEAM,
+  MOD_HUNTER_SPHERE,
+  MOD_NUKE,
+  MOD_PHALANX,
+  MOD_PROX,
+  MOD_RIPPER,
+  MOD_TESLA,
+  MOD_TRACKER,
+  MOD_TRAP,
+  MOD_VENGEANCE_SPHERE,
   MOD_G_SPLASH,
   MOD_GRENADE,
   MOD_HANDGRENADE,
@@ -113,6 +134,8 @@ import {
   world,
 } from "./g_local";
 import { G_Find, G_FreeEdict, G_InitEdict, G_Spawn, G_TouchTriggers, KillBox } from "./g_utils";
+// RERELEASE CONTENT PORT
+import { CTFDeadDropFlag } from "./g_ctf";
 import { SP_misc_teleporter_dest, ThrowClientHead, ThrowGib } from "./g_misc";
 import { Drop_Item, FindItem, FindItemByClassname, ITEM_INDEX, Touch_Item, itemlist } from "./g_items";
 import { visible } from "./g_ai";
@@ -183,6 +206,16 @@ function cloneClientPersistant(src: ClientPersistantT): ClientPersistantT {
   c.max_grenades = src.max_grenades;
   c.max_cells = src.max_cells;
   c.max_slugs = src.max_slugs;
+  // RERELEASE CONTENT PORT -- the mission-pack ammo caps travel with the
+  // rest of client_persistant_t across a level change / coop respawn, same
+  // as vanilla's six above (src/rogue/p_client.ts, src/xatrix/p_client.ts).
+  c.max_tesla = src.max_tesla;
+  c.max_prox = src.max_prox;
+  c.max_mines = src.max_mines;
+  c.max_flechettes = src.max_flechettes;
+  c.max_magslug = src.max_magslug;
+  c.max_trap = src.max_trap;
+  c.max_rounds = src.max_rounds;
   c.weapon = src.weapon;
   c.lastweapon = src.lastweapon;
   c.power_cubes = src.power_cubes;
@@ -531,6 +564,13 @@ export function ClientObituary(self: EdictT, inflictor: EdictT, attacker: EdictT
         case MOD_BFG_BLAST:
           message = "should have used a smaller gun";
           break;
+        // RERELEASE CONTENT PORT -- ROGUE (rogue/p_client.c)
+        case MOD_DOPPLE_EXPLODE:
+          if (IsNeutral(self)) message = "got caught in it's own trap";
+          else if (IsFemale(self)) message = "got caught in her own trap";
+          else message = "got caught in his own trap";
+          break;
+        // ROGUE
         default:
           if (IsNeutral(self)) message = "killed itself";
           else if (IsFemale(self)) message = "killed herself";
@@ -617,6 +657,92 @@ export function ClientObituary(self: EdictT, inflictor: EdictT, attacker: EdictT
           message = "tried to invade";
           message2 = "'s personal space";
           break;
+
+        // =================================================================
+        // RERELEASE CONTENT PORT -- the mission packs' obituaries, verbatim
+        // from src/rogue/p_client.ts, src/xatrix/p_client.ts and
+        // src/ctf/p_client.ts (typos and all -- "it's own trap",
+        // "lost his grip" without the gender chain, and the two xatrix
+        // lines that read as sentence fragments are in the C that way).
+        // =================================================================
+
+        // ROGUE
+        case MOD_CHAINFIST:
+          message = "was shredded by";
+          message2 = "'s ripsaw";
+          break;
+        case MOD_DISINTEGRATOR:
+          message = "lost his grip courtesy of";
+          message2 = "'s disintegrator";
+          break;
+        case MOD_ETF_RIFLE:
+          message = "was perforated by";
+          break;
+        case MOD_HEATBEAM:
+          message = "was scorched by";
+          message2 = "'s plasma beam";
+          break;
+        case MOD_TESLA:
+          message = "was enlightened by";
+          message2 = "'s tesla mine";
+          break;
+        case MOD_PROX:
+          message = "got too close to";
+          message2 = "'s proximity mine";
+          break;
+        case MOD_NUKE:
+          message = "was nuked by";
+          message2 = "'s antimatter bomb";
+          break;
+        case MOD_VENGEANCE_SPHERE:
+          message = "was purged by";
+          message2 = "'s vengeance sphere";
+          break;
+        case MOD_DEFENDER_SPHERE:
+          message = "had a blast with";
+          message2 = "'s defender sphere";
+          break;
+        case MOD_HUNTER_SPHERE:
+          message = "was killed like a dog by";
+          message2 = "'s hunter sphere";
+          break;
+        case MOD_TRACKER:
+          message = "was annihilated by";
+          message2 = "'s disruptor";
+          break;
+        case MOD_DOPPLE_EXPLODE:
+          message = "was blown up by";
+          message2 = "'s doppleganger";
+          break;
+        case MOD_DOPPLE_VENGEANCE:
+          message = "was purged by";
+          message2 = "'s doppleganger";
+          break;
+        case MOD_DOPPLE_HUNTER:
+          message = "was hunted down by";
+          message2 = "'s doppleganger";
+          break;
+        // ROGUE
+
+        // RAFAEL (xatrix)
+        case MOD_RIPPER:
+          message = "ripped to shreds by";
+          message2 = "'s ripper gun";
+          break;
+        case MOD_PHALANX:
+          message = "was evaporated by";
+          break;
+        case MOD_TRAP:
+          message = "caught in trap by";
+          break;
+        // RAFAEL
+
+        // ZOID (ctf)
+        case MOD_GRAPPLE:
+          message = "was caught by";
+          message2 = "'s grapple";
+          break;
+        // ZOID
       }
       if (message !== null) {
         gi.bprintf(
@@ -700,6 +826,21 @@ export function LookAtKiller(self: EdictT, inflictor: EdictT, attacker: EdictT):
   if (self.client.killer_yaw < 0) self.client.killer_yaw += 360;
 }
 
+// RERELEASE CONTENT PORT -- rogue/p_client.c's RemoveAttackingPainDaemons.
+// The disruptor/tracker spawns "pain daemon" edicts that keep damaging a
+// victim over time (g_newweap.ts's tracker_pain_daemon_*); they have to be
+// swept when the victim dies or disconnects, or they keep firing at a dead
+// or freed edict. g_local.h declares it as living in p_client.c.
+export function RemoveAttackingPainDaemons(self: EdictT): void {
+  let tracker: EdictT | null = G_Find(null, "classname", "pain daemon");
+  while (tracker !== null) {
+    if (tracker.enemy === self) G_FreeEdict(tracker);
+    tracker = G_Find(tracker, "classname", "pain daemon");
+  }
+
+  if (self.client !== null) self.client.tracker_pain_framenum = 0;
+}
+
 // C: `static int i;` local to player_die, incremented (and read) across
 // calls to round-robin the three normal-death animations.
 let playerDieAnimIndex = 0;
@@ -710,6 +851,10 @@ player_die
 ==================
 */
 export function player_die(self: EdictT, inflictor: EdictT, attacker: EdictT, damage: number, _point: Vec3): void {
+  // RERELEASE CONTENT PORT -- rogue/p_client.c renames the parameter's use
+  // to a local `dmg` because the tracker/nuke branches below rewrite it.
+  let dmg = damage;
+
   VectorClear(self.avelocity);
 
   self.takedamage = DamageT.DAMAGE_YES;
@@ -754,6 +899,15 @@ export function player_die(self: EdictT, inflictor: EdictT, attacker: EdictT, da
     }
   }
 
+  // RERELEASE CONTENT PORT -- ROGUE: if we're in a dm game, alert the game
+  if (gameCvars.gamerules !== null && gameCvars.gamerules.value !== 0) {
+    if (DMGame.PlayerDeath !== null) DMGame.PlayerDeath(self, inflictor, attacker);
+  }
+  // ROGUE
+
+  // RERELEASE CONTENT PORT -- ctf/p_client.c drops a carried flag on death.
+  CTFDeadDropFlag(self);
+
   // remove powerups
   if (self.client !== null) {
     self.client.quad_framenum = 0;
@@ -763,13 +917,60 @@ export function player_die(self: EdictT, inflictor: EdictT, attacker: EdictT, da
   }
   self.flags &= ~FL_POWER_ARMOR;
 
-  if (self.health < -40) {
-    // gib
-    gi.sound(self, CHAN_BODY, gi.soundindex("misc/udeath.wav"), 1, ATTN_NORM, 0);
-    for (let n = 0; n < 4; n++) {
-      ThrowGib(self, "models/objects/gibs/sm_meat/tris.md2", damage, GIB_ORGANIC);
+  // RERELEASE CONTENT PORT -- ROGUE stuff
+  if (self.client !== null) {
+    self.client.double_framenum = 0;
+    // RAFAEL (xatrix) -- the DualFire powerup expires on death like quad.
+    self.client.quadfire_framenum = 0;
+    // ROGUE
+    self.client.ir_framenum = 0;
+    // The rerelease cloak expires on death like every other powerup.
+    self.client.invisible_framenum = 0;
+
+    // if there's a sphere around, let it know the player died.
+    // vengeance and hunter will die if they're not attacking,
+    // defender should always die
+    if (self.client.owned_sphere !== null) {
+      const sphere = self.client.owned_sphere;
+      if (sphere.die !== null) sphere.die(sphere, self, self, 0, vec3_origin);
     }
-    ThrowClientHead(self, damage);
+  }
+
+  // if we've been killed by the tracker, GIB!
+  if ((meansOfDeathHolder.meansOfDeath & ~MOD_FRIENDLY_FIRE) === MOD_TRACKER) {
+    self.health = -100;
+    dmg = 400;
+  }
+
+  // make sure no trackers are still hurting us.
+  if (self.client !== null && self.client.tracker_pain_framenum !== 0) {
+    RemoveAttackingPainDaemons(self);
+  }
+
+  // if we got obliterated by the nuke, don't gib
+  if (self.health < -80 && meansOfDeathHolder.meansOfDeath === MOD_NUKE) self.flags |= FL_NOGIB;
+  // ROGUE
+
+  if (self.health < -40) {
+    // PMM -- don't toss gibs if we got vaped by the nuke
+    if ((self.flags & FL_NOGIB) === 0) {
+      // gib
+      gi.sound(self, CHAN_BODY, gi.soundindex("misc/udeath.wav"), 1, ATTN_NORM, 0);
+
+      // more meaty gibs for your dollar!
+      if (cvarNum(gameCvars.deathmatch) !== 0 && self.health < -80) {
+        for (let n = 0; n < 4; n++) {
+          ThrowGib(self, "models/objects/gibs/sm_meat/tris.md2", dmg, GIB_ORGANIC);
+        }
+      }
+
+      for (let n = 0; n < 4; n++) {
+        ThrowGib(self, "models/objects/gibs/sm_meat/tris.md2", dmg, GIB_ORGANIC);
+      }
+    }
+    self.flags &= ~FL_NOGIB;
+
+    ThrowClientHead(self, dmg);
 
     self.takedamage = DamageT.DAMAGE_NO;
   } else {
@@ -845,6 +1046,29 @@ export function InitClientPersistant(client: GClientT): void {
   client.pers.max_grenades = 50;
   client.pers.max_cells = 200;
   client.pers.max_slugs = 50;
+
+  // RERELEASE CONTENT PORT -- rogue/p_client.c's InitClientPersistant seeds
+  // prox/tesla/flechettes; xatrix/p_client.c's seeds magslug/trap. Both are
+  // taken verbatim from their own sources.
+  // ROGUE
+  client.pers.max_prox = 50;
+  client.pers.max_tesla = 50;
+  client.pers.max_flechettes = 200;
+  // ROGUE
+  // RAFAEL
+  client.pers.max_magslug = 50;
+  client.pers.max_trap = 5;
+  // RAFAEL
+  // The disruptor's cap. 12 is the value the rerelease's own
+  // InitClientPersistant uses (src/kexgame/p_client.ts:
+  // `max_ammo[AMMO_DISRUPTOR] = 12`). Seeded here rather than hardcoded at
+  // the Add_Ammo call site so a Bandolier/Ammo Pack can raise it like
+  // every other cap.
+  client.pers.max_rounds = 12;
+  // NOTE: `max_mines` is in ClientPersistantT but neither rogue nor xatrix
+  // seeds it or reads it -- rogue's mines (prox/tesla) use max_prox and
+  // max_tesla. Left at its ClientPersistantT default of 0 on purpose; no
+  // ported code reads it. Flagged in the port report.
 
   client.pers.connected = true;
 }
@@ -1315,6 +1539,12 @@ export function PutClientInServer(ent: EdictT): void {
   ent.flags &= ~FL_NO_KNOCKBACK;
   ent.svflags &= ~SVF_DEADMONSTER;
 
+  // RERELEASE CONTENT PORT -- PGM: turn off sam raimi flag. The hunter
+  // sphere detaches the owner's view onto itself (g_sphere.ts's hunter_pain)
+  // by setting FL_SAM_RAIMI; a respawn has to clear it or the player keeps
+  // the 8-unit camera viewheight forever.
+  ent.flags &= ~FL_SAM_RAIMI;
+
   VectorCopy(mins, ent.mins);
   VectorCopy(maxs, ent.maxs);
   VectorClear(ent.velocity);
@@ -1631,6 +1861,20 @@ export function ClientDisconnect(entIn: Edict): void {
 
   gi.bprintf(PRINT_HIGH, `${ent.client.pers.netname} disconnected\n`);
 
+  // RERELEASE CONTENT PORT -- ROGUE (rogue/p_client.c)
+  // make sure no trackers are still hurting us.
+  if (ent.client.tracker_pain_framenum !== 0) RemoveAttackingPainDaemons(ent);
+
+  if (ent.client.owned_sphere !== null) {
+    if (ent.client.owned_sphere.inuse) G_FreeEdict(ent.client.owned_sphere);
+    ent.client.owned_sphere = null;
+  }
+
+  if (gameCvars.gamerules !== null && gameCvars.gamerules.value !== 0) {
+    if (DMGame.PlayerDisconnect !== null) DMGame.PlayerDisconnect(ent);
+  }
+  // ROGUE
+
   // send effect
   gi.WriteByte(svc_muzzleflash);
   gi.WriteShort(EDICT_NUM(ent));
@@ -1754,7 +1998,10 @@ export function ClientThink(entIn: Edict, ucmd: UsercmdT): void {
       PlayerNoise(ent, ent.s.origin, PNOISE_SELF);
     }
 
-    ent.viewheight = pm.viewheight;
+    // RERELEASE CONTENT PORT -- ROGUE: sam raimi cam support
+    if ((ent.flags & FL_SAM_RAIMI) !== 0) ent.viewheight = 8;
+    else ent.viewheight = pm.viewheight;
+    // ROGUE
     ent.waterlevel = pm.waterlevel;
     ent.watertype = pm.watertype;
     ent.groundentity = newGround;

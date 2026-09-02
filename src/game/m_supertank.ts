@@ -34,6 +34,7 @@ import {
   MframeT,
   MmoveT,
   MovetypeT,
+  POWER_ARMOR_SHIELD,
   svc_temp_entity,
 } from "./g_local";
 import { SolidT, SVF_DEADMONSTER } from "./game";
@@ -400,7 +401,7 @@ function supertank_die(self: EdictT, _inflictor: EdictT, _attacker: EdictT, _dam
 // monster_supertank
 //
 
-/*QUAKED monster_supertank (1 .5 0) (-64 -64 0) (64 64 72) Ambush Trigger_Spawn Sight
+/*QUAKED monster_supertank (1 .5 0) (-64 -64 0) (64 64 72) Ambush Trigger_Spawn Sight Powershield
 */
 export function SP_monster_supertank(self: EdictT): void {
   if (cvarNum(gameCvars.deathmatch) !== 0) {
@@ -442,6 +443,12 @@ export function SP_monster_supertank(self: EdictT): void {
 
   self.monsterinfo.currentmove = supertank_move_stand;
   self.monsterinfo.scale = FRAME.MODEL_SCALE;
+
+  // xatrix/m_supertank.c: Powershield spawnflag (bit 8) grants power armor.
+  if (self.spawnflags & 8) {
+    self.monsterinfo.power_armor_type = POWER_ARMOR_SHIELD;
+    self.monsterinfo.power_armor_power = 400;
+  }
 
   walkmonster_start(self);
 }

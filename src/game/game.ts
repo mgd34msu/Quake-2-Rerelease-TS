@@ -31,6 +31,12 @@ export const GAME_API_VERSION = 3;
 export const SVF_NOCLIENT = 0x00000001; // don't send entity to clients, even if it has effects
 export const SVF_DEADMONSTER = 0x00000002; // treat as CONTENTS_DEADMONSTER for collision
 export const SVF_MONSTER = 0x00000004; // treat as CONTENTS_MONSTER for collision
+// RERELEASE CONTENT PORT (rogue/game.h: "added for things that are
+// damageable but not monsters"): tesla mines, the spheres and the
+// doppleganger set this so T_Damage and the monster-targeting code treat
+// them as valid targets without making them count as monsters. Vanilla
+// entities never set it, so the new bit is inert for classic content.
+export const SVF_DAMAGEABLE = 0x00000008;
 
 // edict->solid values
 export enum SolidT {

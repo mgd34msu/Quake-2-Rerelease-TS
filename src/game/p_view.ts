@@ -37,6 +37,7 @@ import {
   EF_PENT,
   EF_POWERSCREEN,
   EF_QUAD,
+  RF_TRANSLUCENT,
   EntityEventT,
   PITCH,
   PMF_DUCKED,
@@ -722,6 +723,21 @@ export function G_SetClientEffects(ent: EdictT): void {
     if (client.invincible_framenum > level.framenum) {
       const remaining = client.invincible_framenum - level.framenum;
       if (remaining > 30 || (remaining & 4) !== 0) ent.s.effects |= EF_PENT;
+    }
+
+    // RERELEASE CONTENT PORT -- item_invisibility (the cloak).
+    //
+    // The rerelease draws this with a dedicated fade shader driven by
+    // `invisibility_fade_time`, which protocol 34 has no representation
+    // for. RF_TRANSLUCENT is the closest thing the classic renderer and
+    // the classic protocol both already understand, so the cloak reads as
+    // translucency rather than the rerelease's ramped fade -- the player
+    // is visibly cloaked, just not with the rerelease's exact look. The
+    // same >30-or-blink tail every other powerup here uses gives the
+    // about-to-expire warning flicker.
+    if (client.invisible_framenum > level.framenum) {
+      const remaining = client.invisible_framenum - level.framenum;
+      if (remaining > 30 || (remaining & 4) !== 0) ent.s.renderfx |= RF_TRANSLUCENT;
     }
   }
 

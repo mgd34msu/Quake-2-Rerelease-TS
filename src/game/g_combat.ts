@@ -1,4 +1,29 @@
 // g_combat.c
+//
+// RERELEASE CONTENT PORT -- the mission-pack damage additions this module
+// needs so the ported rogue/xatrix items and weapons behave the way they do
+// in their own packs. Lifted from src/rogue/g_combat.ts (which is itself a
+// faithful port of rogue/g_combat.c):
+//   - `T_RadiusNukeDamage` / `T_RadiusClassDamage` (rogue's two extra
+//     radius-damage variants; the nuke and the prox mine call them).
+//   - `CheckPowerArmor`/`CheckArmor` honour DAMAGE_NO_POWER_ARMOR and
+//     DAMAGE_NO_REG_ARMOR (the ETF rifle's armour-piercing flechettes and
+//     the disruptor/tracker bolt).
+//   - `T_Damage` gains: MOD_NUKE's friendly-fire bypass, the defender
+//     sphere's half-damage aura, DAMAGE_DESTROY_ARMOR, FL_MECHANICAL /
+//     MOD_CHAINFIST blood-effect substitution, and the owned_sphere pain
+//     notification that tells a hunter/vengeance sphere who to chase.
+// NOT ported here (they belong to the monster slice, not the item/weapon
+// slice, and changing them would change M_ReactToDamage's signature for
+// every caller): rogue's AI_MEDIC / AI_SPAWNED_* bookkeeping in `Killed`,
+// the tesla-aggro `inflictor` parameter on `M_ReactToDamage`, the
+// AI_TARGET_ANGER / AI_IGNORE_SHOTS reworks, monsterinfo.invincible_framenum,
+// and the DMGame.ChangeDamage/ChangeKnockback deathmatch-rules hooks (there
+// is no `gamerules` cvar in this module's gameCvars).
+//
+// `realrange` (rogue/g_newai.c) is duplicated here as a module-local rather
+// than imported: g_newai.ts does not exist in this module and g_ai.ts is
+// owned by another agent. Reported to the coordinator.
 
 import {
   AngleVectors,
@@ -26,37 +51,55 @@ import {
 } from "../shared/q_shared";
 import { FoundTarget, visible } from "./g_ai";
 import { OnSameTeam } from "./g_cmds";
-import { SVF_MONSTER } from "./game";
+import { SVF_DAMAGEABLE, SVF_MONSTER } from "./game";
 import { findradius } from "./g_utils";
 import {
   AI_DUCKED,
   AI_GOOD_GUY,
+  AI_MEDIC,
   AI_SOUND_TARGET,
   DAMAGE_BULLET,
+  DAMAGE_DESTROY_ARMOR,
   DAMAGE_ENERGY,
   DAMAGE_NO_ARMOR,
   DAMAGE_NO_KNOCKBACK,
+  DAMAGE_NO_POWER_ARMOR,
   DAMAGE_NO_PROTECTION,
+  DAMAGE_NO_REG_ARMOR,
   DAMAGE_RADIUS,
   DEAD_DEAD,
   type EdictT,
   FL_FLY,
   FL_GODMODE,
+  FL_MECHANICAL,
+  FL_NOGIB,
   FL_NO_KNOCKBACK,
   FL_SWIM,
+  g_edicts,
   gameCvars,
   gi,
   GitemArmorT,
   level,
   meansOfDeathHolder,
+  MOD_CHAINFIST,
   MOD_FRIENDLY_FIRE,
+  MOD_NUKE,
   MovetypeT,
   POWER_ARMOR_NONE,
   POWER_ARMOR_SCREEN,
   svc_temp_entity,
 } from "./g_local";
 import { ArmorIndex, FindItem, GetItemByIndex, ITEM_INDEX, PowerArmorType } from "./g_items";
-import { monster_death_use } from "./g_monster";
+import { cleanupHealTarget, monster_death_use } from "./g_monster";
+
+// RERELEASE CONTENT PORT -- rogue/g_newai.c's `realrange`. g_newai.ts does
+// not exist in this module and g_ai.ts is owned by another agent, so the
+// four-line helper is duplicated here for T_RadiusNukeDamage's use.
+function realrange(self: EdictT, other: EdictT): number {
+  const dir = vec3();
+  VectorSubtract(self.s.origin, other.s.origin, dir);
+  return VectorLength(dir);
+}
 
 /*
 ============
@@ -126,6 +169,19 @@ Killed
 */
 export function Killed(targ: EdictT, inflictor: EdictT, attacker: EdictT, damage: number, point: Vec3): void {
   if (targ.health < -999) targ.health = -999;
+
+  // RERELEASE CONTENT PORT (rogue/g_combat.c's Killed): a medic that dies
+  // mid-heal has to release its patient, or the corpse it was reviving is
+  // left with `healer` still pointing at the dead medic and AI_RESURRECTING
+  // still set -- a permanently stuck monster, not a crash, which is why it
+  // would not have shown up as an error in a play test. cleanupHealTarget
+  // lives in g_monster.ts.
+  if (targ.monsterinfo.aiflags & AI_MEDIC) {
+    if (targ.enemy !== null) {
+      cleanupHealTarget(targ.enemy);
+    }
+    targ.monsterinfo.aiflags &= ~AI_MEDIC;
+  }
 
   targ.enemy = attacker;
 
@@ -205,7 +261,8 @@ export function CheckPowerArmor(ent: EdictT, point: Vec3, normal: Vec3, damage: 
 
   const client = ent.client;
 
-  if (dflags & DAMAGE_NO_ARMOR) return 0;
+  // PGM -- ROGUE adds DAMAGE_NO_POWER_ARMOR
+  if (dflags & (DAMAGE_NO_ARMOR | DAMAGE_NO_POWER_ARMOR)) return 0;
 
   let power_armor_type: number;
   let power: number;
@@ -252,14 +309,20 @@ export function CheckPowerArmor(ent: EdictT, point: Vec3, normal: Vec3, damage: 
     damage = ((2 * damage) / 3) | 0;
   }
 
-  let save = power * damagePerCell;
+  // etf rifle
+  let save: number;
+  if (dflags & DAMAGE_NO_REG_ARMOR) save = ((power * damagePerCell) / 2) | 0;
+  else save = power * damagePerCell;
+
   if (!save) return 0;
   if (save > damage) save = damage;
 
   SpawnDamage(pa_te_type, point, normal, save);
   ent.powerarmor_time = level.time + 0.2;
 
-  const power_used = (save / damagePerCell) | 0;
+  let power_used: number;
+  if (dflags & DAMAGE_NO_REG_ARMOR) power_used = ((save / damagePerCell) * 2) | 0;
+  else power_used = (save / damagePerCell) | 0;
 
   if (client !== null) {
     client.pers.inventory[index] -= power_used;
@@ -283,7 +346,8 @@ export function CheckArmor(
 
   if (client === null) return 0;
 
-  if (dflags & DAMAGE_NO_ARMOR) return 0;
+  // ROGUE - added DAMAGE_NO_REG_ARMOR for etf rifle
+  if (dflags & (DAMAGE_NO_ARMOR | DAMAGE_NO_REG_ARMOR)) return 0;
 
   const index = ArmorIndex(ent);
   if (!index) return 0;
@@ -331,6 +395,20 @@ export function M_ReactToDamage(targ: EdictT, attacker: EdictT): void {
   // or another good guy, do not get mad at them
   if (targ.monsterinfo.aiflags & AI_GOOD_GUY) {
     if (attacker.client !== null || attacker.monsterinfo.aiflags & AI_GOOD_GUY) return;
+  }
+
+  // RERELEASE CONTENT PORT (rogue/g_combat.c's M_ReactToDamage): a medic
+  // that is healing someone mostly ignores being shot so it stays with its
+  // patient -- but once it drops below a quarter health it gives up, and
+  // when it does it must release the patient the same way Killed does.
+  if (targ.enemy !== null && targ.monsterinfo.aiflags & AI_MEDIC) {
+    const percentHealth = targ.health / targ.max_health;
+    // ignore it some of the time
+    if (targ.enemy.inuse && percentHealth > 0.25) return;
+
+    // remove the medic flag
+    targ.monsterinfo.aiflags &= ~AI_MEDIC;
+    cleanupHealTarget(targ.enemy);
   }
 
   // we now know that we are not both good guys
@@ -406,12 +484,16 @@ export function T_Damage(
   const coop = gameCvars.coop === null ? 0 : gameCvars.coop.value;
   const skill = gameCvars.skill === null ? 0 : gameCvars.skill.value;
 
+  // PGM
+  let sphere_notified = false;
+
   // friendly fire avoidance
   // if enabled you can't hurt teammates (but you can hurt yourself)
   // knockback still occurs
   if (targ !== attacker && ((deathmatch && (dmflags | 0) & (DF_MODELTEAMS | DF_SKINTEAMS)) || coop)) {
     if (OnSameTeam(targ, attacker)) {
-      if ((dmflags | 0) & DF_NO_FRIENDLY_FIRE) {
+      // PMM - nukes kill everyone
+      if ((dmflags | 0) & DF_NO_FRIENDLY_FIRE && mod !== MOD_NUKE) {
         damage = 0;
       } else {
         mod |= MOD_FRIENDLY_FIRE;
@@ -427,6 +509,12 @@ export function T_Damage(
   }
 
   const client = targ.client;
+
+  // PMM - defender sphere takes half damage
+  if (client !== null && client.owned_sphere !== null && client.owned_sphere.spawnflags === 1) {
+    damage = (damage * 0.5) | 0;
+    if (!damage) damage = 1;
+  }
 
   const te_sparks = dflags & DAMAGE_BULLET ? TempEventT.TE_BULLET_SPARKS : TempEventT.TE_SPARKS;
 
@@ -499,15 +587,39 @@ export function T_Damage(
   // team damage avoidance
   if (!(dflags & DAMAGE_NO_PROTECTION) && CheckTeamDamage(targ, attacker)) return;
 
+  // ROGUE - this option will do damage both to the armor and person. originally for DPU rounds
+  if (dflags & DAMAGE_DESTROY_ARMOR) {
+    if (
+      !(targ.flags & FL_GODMODE) &&
+      !(dflags & DAMAGE_NO_PROTECTION) &&
+      !(client !== null && client.invincible_framenum > level.framenum)
+    ) {
+      take = damage;
+    }
+  }
+  // ROGUE
+
   // do the damage
   if (take) {
-    if (targ.svflags & SVF_MONSTER || client !== null) {
-      SpawnDamage(TempEventT.TE_BLOOD, point, normal, take);
+    //PGM		need more blood for chainfist.
+    if (targ.flags & FL_MECHANICAL) {
+      SpawnDamage(TempEventT.TE_ELECTRIC_SPARKS, point, normal, take);
+    } else if (targ.svflags & SVF_MONSTER || client !== null) {
+      if (mod === MOD_CHAINFIST) SpawnDamage(TempEventT.TE_MOREBLOOD, point, normal, 255);
+      else SpawnDamage(TempEventT.TE_BLOOD, point, normal, take);
     } else {
       SpawnDamage(te_sparks, point, normal, take);
     }
+    //PGM
 
     targ.health = targ.health - take;
+
+    //PGM - spheres need to know who to shoot at
+    if (client !== null && client.owned_sphere !== null) {
+      sphere_notified = true;
+      if (client.owned_sphere.pain) client.owned_sphere.pain(client.owned_sphere, attacker, 0, 0);
+    }
+    //PGM
 
     if (targ.health <= 0) {
       if (targ.svflags & SVF_MONSTER || client !== null) targ.flags |= FL_NO_KNOCKBACK;
@@ -515,6 +627,15 @@ export function T_Damage(
       return;
     }
   }
+
+  //PGM - spheres need to know who to shoot at
+  if (!sphere_notified) {
+    if (client !== null && client.owned_sphere !== null) {
+      sphere_notified = true;
+      if (client.owned_sphere.pain) client.owned_sphere.pain(client.owned_sphere, attacker, 0, 0);
+    }
+  }
+  //PGM
 
   if (targ.svflags & SVF_MONSTER) {
     M_ReactToDamage(targ, attacker);
@@ -590,3 +711,156 @@ export function T_RadiusDamage(
     }
   }
 }
+
+// **********************
+// ROGUE
+// RERELEASE CONTENT PORT -- rogue/g_combat.c's two extra radius-damage
+// variants, needed by the ported nuke (fire_nuke) and prox mine
+// (Prox_Explode) in g_newweap.ts.
+
+/*
+============
+T_RadiusNukeDamage
+
+Like T_RadiusDamage, but ignores walls (skips CanDamage check, among others)
+// up to KILLZONE radius, do 10,000 points
+// after that, do damage linearly out to KILLZONE2 radius
+============
+*/
+export function T_RadiusNukeDamage(
+  inflictor: EdictT,
+  attacker: EdictT,
+  damage: number,
+  ignore: EdictT | null,
+  radius: number,
+  mod: number,
+): void {
+  const v = vec3();
+  const dir = vec3();
+
+  const killzone = radius;
+  const killzone2 = radius * 2.0;
+
+  let ent: EdictT | null = null;
+  for (;;) {
+    ent = findradius(ent, inflictor.s.origin, killzone2);
+    if (ent === null) break;
+
+    // ignore nobody
+    if (ent === ignore) continue;
+    if (!ent.takedamage) continue;
+    if (!ent.inuse) continue;
+    if (!(ent.client !== null || ent.svflags & SVF_MONSTER || ent.svflags & SVF_DAMAGEABLE)) continue;
+
+    VectorAdd(ent.mins, ent.maxs, v);
+    VectorMA(ent.s.origin, 0.5, v, v);
+    VectorSubtract(inflictor.s.origin, v, v);
+    const len = VectorLength(v);
+    let points: number;
+    if (len <= killzone) {
+      if (ent.client !== null) ent.flags |= FL_NOGIB;
+      points = 10000;
+    } else if (len <= killzone2) {
+      points = (damage / killzone) * (killzone2 - len);
+    } else {
+      points = 0;
+    }
+
+    if (points > 0) {
+      if (ent.client !== null) ent.client.nuke_framenum = level.framenum + 20;
+      VectorSubtract(ent.s.origin, inflictor.s.origin, dir);
+      T_Damage(
+        ent,
+        inflictor,
+        attacker,
+        dir,
+        inflictor.s.origin,
+        vec3_origin,
+        points | 0,
+        points | 0,
+        DAMAGE_RADIUS,
+        mod,
+      );
+    }
+  }
+
+  // skip the worldspawn
+  // cycle through players
+  //
+  // C walks this with raw pointer arithmetic (`ent = g_edicts+1; ... ent++;`)
+  // and bails the ENTIRE loop the instant an entity fails the `client &&
+  // !nuked-this-frame && inuse` test, rather than skipping to the next
+  // entity -- preserved exactly as the C behaves (see PORTING.md's
+  // "Faithful port" rule): a non-client or freed edict at index i stops the
+  // scan for every player at index > i too.
+  for (let i = 1; ; i++) {
+    const e: EdictT | undefined = g_edicts[i];
+    if (e === undefined) break;
+    if (e.client !== null && e.client.nuke_framenum !== level.framenum + 20 && e.inuse) {
+      const tr = gi.trace(inflictor.s.origin, null, null, e.s.origin, inflictor, MASK_SOLID);
+      if (tr.fraction === 1.0) {
+        e.client.nuke_framenum = level.framenum + 20;
+      } else {
+        const dist = realrange(e, inflictor);
+        if (dist < 2048) e.client.nuke_framenum = Math.max(e.client.nuke_framenum, level.framenum + 15);
+        else e.client.nuke_framenum = Math.max(e.client.nuke_framenum, level.framenum + 10);
+      }
+    } else {
+      break;
+    }
+  }
+}
+
+/*
+============
+T_RadiusClassDamage
+
+Like T_RadiusDamage, but ignores anything with classname=ignoreClass
+============
+*/
+export function T_RadiusClassDamage(
+  inflictor: EdictT,
+  attacker: EdictT,
+  damage: number,
+  ignoreClass: string,
+  radius: number,
+  mod: number,
+): void {
+  const v = vec3();
+  const dir = vec3();
+
+  let ent: EdictT | null = null;
+  for (;;) {
+    ent = findradius(ent, inflictor.s.origin, radius);
+    if (ent === null) break;
+
+    if (ent.classname !== null && ent.classname === ignoreClass) continue;
+    if (!ent.takedamage) continue;
+
+    VectorAdd(ent.mins, ent.maxs, v);
+    VectorMA(ent.s.origin, 0.5, v, v);
+    VectorSubtract(inflictor.s.origin, v, v);
+    let points = damage - 0.5 * VectorLength(v);
+    if (ent === attacker) points = points * 0.5;
+    if (points > 0) {
+      if (CanDamage(ent, inflictor)) {
+        VectorSubtract(ent.s.origin, inflictor.s.origin, dir);
+        T_Damage(
+          ent,
+          inflictor,
+          attacker,
+          dir,
+          inflictor.s.origin,
+          vec3_origin,
+          points | 0,
+          points | 0,
+          DAMAGE_RADIUS,
+          mod,
+        );
+      }
+    }
+  }
+}
+
+// ROGUE
+// ********************

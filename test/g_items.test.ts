@@ -235,11 +235,11 @@ function withClient(ent: EdictT): GClientT {
 // ---------------------------------------------------------------------------
 
 describe("itemlist / InitItems", () => {
-  test("has exactly 43 entries (transcribed from the C array literal: index 0 placeholder + 41 real items + trailing {NULL} end marker)", () => {
+  test("has exactly 81 entries (baseq2's 43 -- index 0 placeholder + 41 real items + trailing {NULL} end marker -- plus the 38-row RERELEASE CONTENT PORT block appended before the trailing Health row)", () => {
     setupWorld();
-    expect(itemlist().length).toBe(43);
+    expect(itemlist().length).toBe(81);
     // C: `game.num_items = sizeof(itemlist)/sizeof(itemlist[0]) - 1;`
-    expect(game.num_items).toBe(42);
+    expect(game.num_items).toBe(80);
   });
 });
 

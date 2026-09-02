@@ -145,7 +145,17 @@ const flyer_move_walk = mmove(FRAME_stand01, FRAME_stand45, flyer_frames_walk, n
 const flyer_frames_run: MframeT[] = Array.from({ length: 45 }, () => mframe(ai_run, 10));
 const flyer_move_run = mmove(FRAME_stand01, FRAME_stand45, flyer_frames_run, null);
 
-function flyer_run(self: EdictT): void {
+// Exported (this round only -- see src/game/m_carrier.ts's porting note):
+// rogue/m_carrier.c's CarrierSpawn assigns a spawned monster_flyer escort's
+// monsterinfo.currentmove directly to a circle-strafe move table
+// (rogue/m_flyer.c's flyer_move_attack3) whose endfunc is flyer_run, so that
+// table needs a reference to this function to hand control back to normal
+// flyer AI afterward. m_carrier.ts builds that table locally (rather than
+// this file gaining rogue/m_flyer.c's own flyer_attack3/kamikaze additions,
+// which would touch flyer_attack -- shared by every classic flyer -- in an
+// unrestricted way); this `export` is the only change, and does not alter
+// flyer_run's behavior for any classic flyer.
+export function flyer_run(self: EdictT): void {
   if (self.monsterinfo.aiflags & AI_STAND_GROUND) self.monsterinfo.currentmove = flyer_move_stand;
   else self.monsterinfo.currentmove = flyer_move_run;
 }
@@ -243,11 +253,14 @@ function flyer_fire(self: EdictT, flash_number: number): void {
   monster_fire_blaster(self, start, dir, 1, 1000, flash_number, effect);
 }
 
-function flyer_fireleft(self: EdictT): void {
+// Exported (this round only -- see flyer_run's export note above, and
+// m_carrier.ts's porting note): reused as the gunfire thinkfuncs on
+// m_carrier.ts's locally-built circle-strafe move table.
+export function flyer_fireleft(self: EdictT): void {
   flyer_fire(self, MZ2_FLYER_BLASTER_1);
 }
 
-function flyer_fireright(self: EdictT): void {
+export function flyer_fireright(self: EdictT): void {
   flyer_fire(self, MZ2_FLYER_BLASTER_2);
 }
 

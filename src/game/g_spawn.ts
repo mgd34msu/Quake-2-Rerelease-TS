@@ -1,6 +1,6 @@
 // g_spawn.c
 
-import { COM_Parse, type ComParseState, vec3, type Vec3, VectorCopy } from "../shared/math";
+import { COM_Parse, type ComParseState, vec3, type Vec3, VectorCopy, VectorSet } from "../shared/math";
 import {
   Com_sprintf,
   CS_CDTRACK,
@@ -155,6 +155,40 @@ import { SP_monster_supertank } from "./m_supertank";
 import { SP_monster_boss2 } from "./m_boss2";
 import { SP_monster_boss3_stand } from "./m_boss3";
 import { SP_monster_jorg } from "./m_boss31";
+import { SP_monster_makron } from "./m_boss32";
+
+// >>> RERELEASE CONTENT PORT: spawn-function imports (generated) >>>
+// The rerelease content set this module now spawns. Every symbol below is a
+// real SP_ function in this same src/game/ tree, ported from our own
+// src/rogue/, src/xatrix/, src/ctf/ and src/kexgame/ modules. Grouped by
+// defining file and kept in one block so the vanilla 3.21 import list above
+// stays exactly as it was.
+import { SP_dm_tag_token } from "./dm_tag";
+import { SP_info_player_team1, SP_info_player_team2, SP_misc_ctf_banner, SP_misc_ctf_small_banner } from "./g_ctf";
+import { SP_dynamic_light, SP_func_animation, SP_info_landmark, SP_info_world_text, SP_misc_flare, SP_misc_hologram, SP_misc_lavaball, SP_misc_model, SP_misc_player_mannequin } from "./g_kexmisc";
+import { SP_target_achievement, SP_target_autosave, SP_target_camera, SP_target_crossunit_target, SP_target_crossunit_trigger, SP_target_gravity, SP_target_healthbar, SP_target_light, SP_target_music, SP_target_poi, SP_target_sky, SP_target_soundfx, SP_target_story } from "./g_kextarg";
+import { SP_func_eye, SP_info_nav_lock, SP_trigger_coop_relay, SP_trigger_flashlight, SP_trigger_fog, SP_trigger_health_relay } from "./g_kextrig";
+import { SP_func_plat2, SP_object_repair, SP_rotating_light } from "./g_newfnc";
+import { SP_hint_path, SP_info_player_coop_lava, SP_misc_amb4, SP_misc_nuke, SP_misc_nuke_core, SP_misc_transport, SP_misc_viper_missile } from "./g_newmisc";
+import { SP_target_anger, SP_target_blacklight, SP_target_killplayers, SP_target_mal_laser, SP_target_orb, SP_target_steam } from "./g_newtarg";
+import { SP_info_teleport_destination, SP_trigger_disguise, SP_trigger_teleport } from "./g_newtrig";
+import { SP_turret_invisible_brain } from "./g_turret";
+import { SP_monster_arachnid } from "./m_arachnid";
+import { SP_monster_boss5 } from "./m_boss5";
+import { SP_monster_carrier } from "./m_carrier";
+import { SP_monster_chick_heat } from "./m_chick";
+import { SP_monster_fixbot } from "./m_fixbot";
+import { SP_monster_gekk } from "./m_gekk";
+import { SP_monster_gladb } from "./m_gladb";
+import { SP_monster_guncmdr } from "./m_guncmdr";
+import { SP_monster_shambler } from "./m_shambler";
+import { SP_monster_soldier_hypergun, SP_monster_soldier_lasergun, SP_monster_soldier_ripper } from "./m_soldier";
+import { SP_monster_stalker } from "./m_stalker";
+import { SP_monster_tank_stand } from "./m_tank";
+import { SP_monster_turret } from "./m_turret";
+import { SP_monster_widow } from "./m_widow";
+import { SP_monster_widow2 } from "./m_widow2";
+// <<< RERELEASE CONTENT PORT: spawn-function imports <<<
 
 // gameCvars entries are `CvarT | null` until InitGame resolves them (see
 // g_main.ts's identical helper and comment). Mirrored locally here since
@@ -225,6 +259,38 @@ function parseVector3(value: string): Vec3 {
   return v;
 }
 
+// RERELEASE CONTENT PORT: `rgba` packs four colour components into
+// s.skinnum. Ported from src/kexgame/g_spawn.ts's ED_LoadColor: components
+// may be written either as 0..1 floats or as 0..255 bytes -- if every one
+// of the four is <= 1.0 the value is taken as float and scaled by 255 --
+// and the result is packed r,g,b,a most-significant-first as a SIGNED
+// int32 (an r of 255 makes the packed value negative), matching the C++
+// int32_t return exactly. A bare integer with no spaces is passed through.
+function ED_LoadColor(value: string): number {
+  if (value.includes(" ")) {
+    const state: ComParseState = { data: value, index: 0 };
+    const raw: [number, number, number, number] = [0, 0, 0, 1.0];
+    let isFloat = true;
+    for (let i = 0; i < 4; i++) {
+      const token = COM_Parse(state);
+      if (token !== "") {
+        const v = C_atof(token);
+        raw[i] = v;
+        if (v > 1.0) isFloat = false;
+      }
+    }
+    if (isFloat) {
+      for (let i = 0; i < 4; i++) raw[i] *= 255;
+    }
+    const r = Math.trunc(raw[0]) & 0xff;
+    const g = Math.trunc(raw[1]) & 0xff;
+    const b = Math.trunc(raw[2]) & 0xff;
+    const a = Math.trunc(raw[3]) & 0xff;
+    return (a | (b << 8) | (g << 16) | (r << 24)) | 0;
+  }
+  return C_atoi(value);
+}
+
 /*
 =============
 ED_NewString
@@ -259,6 +325,13 @@ export function ED_ParseField(key: string, value: string, ent: EdictT): void {
   for (const f of FIELDS) {
     if (Q_stricmp(f.key, key) !== 0) continue;
 
+    // RERELEASE CONTENT PORT: this switch used to assume every non-"edict"
+    // target was "spawntemp", because vanilla's fields[] only ever had
+    // those two (plus "edict_s" for origin/angles). The rerelease key set
+    // also writes onto monsterinfo, onto the fog/heightfog/bmodel_anim
+    // sub-structs, and onto numeric entity_state_t members, so each type
+    // case now dispatches on the target explicitly. Vanilla's own rows
+    // take exactly the same paths they always did.
     switch (f.type) {
       case "F_LSTRING": {
         const s = ED_NewString(value);
@@ -269,18 +342,43 @@ export function ED_ParseField(key: string, value: string, ent: EdictT): void {
       case "F_INT": {
         const n = C_atoi(value);
         if (f.target === "edict") ent[f.prop] = n;
-        else st[f.prop] = n;
+        else if (f.target === "spawntemp") st[f.prop] = n;
+        else if (f.target === "edict_s") ent.s[f.prop] = n;
+        else if (f.target === "monsterinfo") ent.monsterinfo[f.prop] = n;
+        else ent.bmodel_anim[f.prop] = n;
         break;
       }
       case "F_FLOAT": {
         const n = C_atof(value);
         if (f.target === "edict") ent[f.prop] = n;
-        else st[f.prop] = n;
+        else if (f.target === "spawntemp") st[f.prop] = n;
+        else if (f.target === "edict_s") ent.s[f.prop] = n;
+        else if (f.target === "monsterinfo") ent.monsterinfo[f.prop] = n;
+        else if (f.target === "fog") ent.fog[f.prop] = n;
+        else ent.heightfog[f.prop] = n;
+        break;
+      }
+      case "F_BOOL": {
+        // kexgame/g_spawn.ts parses these with `C_atoi(v) !== 0`.
+        ent.bmodel_anim[f.prop] = C_atoi(value) !== 0;
+        break;
+      }
+      case "F_COLOR": {
+        ent.s[f.prop] = ED_LoadColor(value);
         break;
       }
       case "F_VECTOR": {
         const vec = parseVector3(value);
-        const dest = f.target === "edict" ? ent[f.prop] : f.target === "spawntemp" ? st[f.prop] : ent.s[f.prop];
+        const dest =
+          f.target === "edict"
+            ? ent[f.prop]
+            : f.target === "spawntemp"
+              ? st[f.prop]
+              : f.target === "edict_s"
+                ? ent.s[f.prop]
+                : f.target === "fog"
+                  ? ent.fog[f.prop]
+                  : ent.heightfog[f.prop];
         VectorCopy(vec, dest);
         break;
       }
@@ -490,13 +588,183 @@ const spawns: SpawnT[] = [
   { name: "monster_boss2", spawn: SP_monster_boss2 },
   { name: "monster_boss3_stand", spawn: SP_monster_boss3_stand },
   { name: "monster_jorg", spawn: SP_monster_jorg },
+  // RERELEASE CONTENT PORT: vanilla 3.21's spawns[] table has no
+  // monster_makron row -- in the original game Makron is never placed by a
+  // mapper, he is spawned in code by MakronSpawn() when Jorg dies at the
+  // end of boss2. The rerelease campaigns DO place monster_makron directly
+  // in the .bsp, so the already-present SP_monster_makron (m_boss32.ts,
+  // ported long before this task) just needed registering here.
+  { name: "monster_makron", spawn: SP_monster_makron },
 
   { name: "monster_commander_body", spawn: SP_monster_commander_body },
 
   { name: "turret_breach", spawn: SP_turret_breach },
   { name: "turret_base", spawn: SP_turret_base },
   { name: "turret_driver", spawn: SP_turret_driver },
+
+  // >>> RERELEASE CONTENT PORT: spawn table rows (generated) >>>
+  // Rerelease content. ED_CallSpawn scans itemlist() BEFORE this table, so
+  // the ported ammo_*/weapon_*/item_*/key_* classnames resolve as itemlist
+  // rows in g_items.ts and deliberately do not appear here.
+
+  // --- dm_tag ---
+  { name: "dm_tag_token", spawn: SP_dm_tag_token },
+
+  // --- g_ctf ---
+  { name: "info_player_team1", spawn: SP_info_player_team1 },
+  { name: "info_player_team2", spawn: SP_info_player_team2 },
+  { name: "misc_ctf_banner", spawn: SP_misc_ctf_banner },
+  { name: "misc_ctf_small_banner", spawn: SP_misc_ctf_small_banner },
+
+  // --- g_kexmisc ---
+  { name: "dynamic_light", spawn: SP_dynamic_light },
+  { name: "func_animation", spawn: SP_func_animation },
+  { name: "info_landmark", spawn: SP_info_landmark },
+  { name: "info_world_text", spawn: SP_info_world_text },
+  { name: "misc_flare", spawn: SP_misc_flare },
+  { name: "misc_hologram", spawn: SP_misc_hologram },
+  { name: "misc_lavaball", spawn: SP_misc_lavaball },
+  { name: "misc_model", spawn: SP_misc_model },
+  { name: "misc_player_mannequin", spawn: SP_misc_player_mannequin },
+
+  // --- g_kextarg ---
+  { name: "target_achievement", spawn: SP_target_achievement },
+  { name: "target_autosave", spawn: SP_target_autosave },
+  { name: "target_camera", spawn: SP_target_camera },
+  { name: "target_crossunit_target", spawn: SP_target_crossunit_target },
+  { name: "target_crossunit_trigger", spawn: SP_target_crossunit_trigger },
+  { name: "target_gravity", spawn: SP_target_gravity },
+  { name: "target_healthbar", spawn: SP_target_healthbar },
+  { name: "target_light", spawn: SP_target_light },
+  { name: "target_music", spawn: SP_target_music },
+  { name: "target_poi", spawn: SP_target_poi },
+  { name: "target_sky", spawn: SP_target_sky },
+  { name: "target_soundfx", spawn: SP_target_soundfx },
+  { name: "target_story", spawn: SP_target_story },
+
+  // --- g_kextrig ---
+  { name: "func_eye", spawn: SP_func_eye },
+  { name: "info_nav_lock", spawn: SP_info_nav_lock },
+  { name: "trigger_coop_relay", spawn: SP_trigger_coop_relay },
+  { name: "trigger_flashlight", spawn: SP_trigger_flashlight },
+  { name: "trigger_fog", spawn: SP_trigger_fog },
+  { name: "trigger_health_relay", spawn: SP_trigger_health_relay },
+
+  // --- g_newfnc ---
+  { name: "func_object_repair", spawn: SP_object_repair },
+  { name: "func_plat2", spawn: SP_func_plat2 },
+  { name: "rotating_light", spawn: SP_rotating_light },
+
+  // --- g_newmisc ---
+  { name: "hint_path", spawn: SP_hint_path },
+  { name: "info_player_coop_lava", spawn: SP_info_player_coop_lava },
+  { name: "misc_amb4", spawn: SP_misc_amb4 },
+  { name: "misc_nuke", spawn: SP_misc_nuke },
+  { name: "misc_nuke_core", spawn: SP_misc_nuke_core },
+  { name: "misc_transport", spawn: SP_misc_transport },
+  { name: "misc_viper_missile", spawn: SP_misc_viper_missile },
+
+  // --- g_newtarg ---
+  { name: "target_anger", spawn: SP_target_anger },
+  { name: "target_blacklight", spawn: SP_target_blacklight },
+  { name: "target_killplayers", spawn: SP_target_killplayers },
+  { name: "target_mal_laser", spawn: SP_target_mal_laser },
+  { name: "target_orb", spawn: SP_target_orb },
+  { name: "target_steam", spawn: SP_target_steam },
+
+  // --- g_newtrig ---
+  { name: "info_teleport_destination", spawn: SP_info_teleport_destination },
+  { name: "trigger_disguise", spawn: SP_trigger_disguise },
+  { name: "trigger_teleport", spawn: SP_trigger_teleport },
+
+  // --- g_turret ---
+  { name: "turret_invisible_brain", spawn: SP_turret_invisible_brain },
+
+  // --- m_arachnid ---
+  { name: "monster_arachnid", spawn: SP_monster_arachnid },
+
+  // --- m_boss5 ---
+  { name: "monster_boss5", spawn: SP_monster_boss5 },
+
+  // --- m_carrier ---
+  { name: "monster_carrier", spawn: SP_monster_carrier },
+
+  // --- m_chick ---
+  { name: "monster_chick_heat", spawn: SP_monster_chick_heat },
+
+  // --- m_fixbot ---
+  { name: "monster_fixbot", spawn: SP_monster_fixbot },
+
+  // --- m_gekk ---
+  { name: "monster_gekk", spawn: SP_monster_gekk },
+
+  // --- m_gladb ---
+  { name: "monster_gladb", spawn: SP_monster_gladb },
+
+  // --- m_guncmdr ---
+  { name: "monster_guncmdr", spawn: SP_monster_guncmdr },
+
+  // --- m_hover ---
+  { name: "monster_daedalus", spawn: SP_monster_hover },
+
+  // --- m_medic ---
+  { name: "monster_medic_commander", spawn: SP_monster_medic },
+
+  // --- m_shambler ---
+  { name: "monster_shambler", spawn: SP_monster_shambler },
+
+  // --- m_soldier ---
+  { name: "monster_soldier_hypergun", spawn: SP_monster_soldier_hypergun },
+  { name: "monster_soldier_lasergun", spawn: SP_monster_soldier_lasergun },
+  { name: "monster_soldier_ripper", spawn: SP_monster_soldier_ripper },
+
+  // --- m_stalker ---
+  { name: "monster_stalker", spawn: SP_monster_stalker },
+
+  // --- m_tank ---
+  { name: "monster_tank_stand", spawn: SP_monster_tank_stand },
+
+  // --- m_turret ---
+  { name: "monster_turret", spawn: SP_monster_turret },
+
+  // --- m_widow ---
+  { name: "monster_widow", spawn: SP_monster_widow },
+
+  // --- m_widow2 ---
+  { name: "monster_widow2", spawn: SP_monster_widow2 },
+  // <<< RERELEASE CONTENT PORT: spawn table rows <<<
 ];
+
+/*
+===============
+G_SpawnableClassnames
+
+RERELEASE CONTENT PORT -- not a C function. Returns every classname
+ED_CallSpawn can resolve: the itemlist classnames it scans first, plus the
+spawns[] table it falls through to, in that same order.
+
+This exists so the rerelease-content coverage gate
+(test/g_spawn_rerelease_coverage.test.ts) can assert "the classic module
+resolves every classname the shipped rerelease maps place" without booting
+a server or reaching into module-private state. It reads the same two
+sources ED_CallSpawn does, so it cannot drift from actual spawn behavior.
+
+Note this reads itemlist() unguarded by game.num_items, unlike ED_CallSpawn:
+the item table is a static array literal, so its classnames are knowable
+before InitItems has run.
+===============
+*/
+export function G_SpawnableClassnames(): string[] {
+  // The three names ED_CallSpawn's "PMM classnames hack" remaps onto
+  // shipped items before consulting either lookup. They resolve just as
+  // surely as a table row, so the contract of this function includes them.
+  const out: string[] = ["weapon_nailgun", "ammo_nails", "weapon_heatbeam"];
+  for (const item of itemlist()) {
+    if (item.classname !== null) out.push(item.classname);
+  }
+  for (const s of spawns) out.push(s.name);
+  return out;
+}
 
 /*
 ===============
@@ -510,7 +778,37 @@ export function ED_CallSpawn(ent: EdictT): void {
     gi.dprintf("ED_CallSpawn: NULL classname\n");
     return;
   }
+  // RERELEASE CONTENT PORT -- the "PMM classnames hack", present in BOTH
+  // rogue/g_spawn.c and the rerelease's own ED_CallSpawn
+  // (src/kexgame/g_spawn.ts). Three classnames from pre-release rogue beta
+  // maps are remapped onto the shipped item names rather than dropped.
+  //
+  // This matters for real shipped content, not just betas: mgu3m2 (Call of
+  // the Machine) places a `weapon_heatbeam`, and without this remap it was
+  // the ONE remaining "unknown classname" across all 28 CotM maps. The
+  // rerelease does not drop it either -- it renames it to the Plasma Beam,
+  // which is why the map plays correctly there.
+  if (ent.classname === "weapon_nailgun") {
+    const item = FindItem("ETF Rifle");
+    if (item !== null && item.classname !== null) ent.classname = item.classname;
+  }
+  if (ent.classname === "ammo_nails") {
+    const item = FindItem("Flechettes");
+    if (item !== null && item.classname !== null) ent.classname = item.classname;
+  }
+  if (ent.classname === "weapon_heatbeam") {
+    const item = FindItem("Plasma Beam");
+    if (item !== null && item.classname !== null) ent.classname = item.classname;
+  }
+  // pmm
+
   const classname = ent.classname;
+
+  // RERELEASE CONTENT PORT (rogue/g_spawn.c's ROGUE_GRAVITY block): reset
+  // the gravity direction before the spawn function runs so the spawn
+  // function can override it. Also covers g_edicts[0] (worldspawn), which
+  // ED_LoadFromFile does not allocate through G_Spawn/G_InitEdict.
+  VectorSet(ent.gravityVector, 0, 0, -1);
 
   // check item spawn functions -- guarded on game.num_items (set by the
   // still-pending g_items.c:InitItems) so this never calls the pending

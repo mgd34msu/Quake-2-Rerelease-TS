@@ -52,7 +52,7 @@ import {
   type EdictT,
 } from "./g_local";
 import { type Edict, type GTraceT, SolidT, SVF_MONSTER } from "./game";
-import { G_TouchTriggers } from "./g_utils";
+import { G_TouchTriggers, vectoangles } from "./g_utils";
 import { M_CheckGround } from "./g_monster";
 import { M_CheckBottom } from "./m_move";
 import { MAX_EDICTS } from "../shared/q_shared";
@@ -666,7 +666,15 @@ export function SV_Physics_Toss(ent: EdictT): void {
   SV_CheckVelocity(ent);
 
   // add gravity
-  if (ent.movetype !== MovetypeT.MOVETYPE_FLY && ent.movetype !== MovetypeT.MOVETYPE_FLYMISSILE) SV_AddGravity(ent);
+  // RERELEASE CONTENT PORT (xatrix/g_phys.c's `// RAFAEL -- move type for
+  // rippergun projectile`): MOVETYPE_WALLBOUNCE is weightless like the two
+  // fly movetypes.
+  if (
+    ent.movetype !== MovetypeT.MOVETYPE_FLY &&
+    ent.movetype !== MovetypeT.MOVETYPE_FLYMISSILE &&
+    ent.movetype !== MovetypeT.MOVETYPE_WALLBOUNCE
+  )
+    SV_AddGravity(ent);
 
   // move angles
   VectorMA(ent.s.angles, FRAMETIME, ent.avelocity, ent.s.angles);
@@ -679,13 +687,21 @@ export function SV_Physics_Toss(ent: EdictT): void {
 
   if (trace.fraction < 1) {
     let backoff: number;
-    if (ent.movetype === MovetypeT.MOVETYPE_BOUNCE) backoff = 1.5;
+    // RERELEASE CONTENT PORT (xatrix/g_phys.c): the wallbounce projectile
+    // gets a stronger backoff than a normal bounce, and re-orients its
+    // model to face the new travel direction on every wall hit.
+    if (ent.movetype === MovetypeT.MOVETYPE_WALLBOUNCE) backoff = 2.0;
+    else if (ent.movetype === MovetypeT.MOVETYPE_BOUNCE) backoff = 1.5;
     else backoff = 1;
 
     ClipVelocity(ent.velocity, trace.plane.normal, ent.velocity, backoff);
 
+    if (ent.movetype === MovetypeT.MOVETYPE_WALLBOUNCE) vectoangles(ent.velocity, ent.s.angles);
+
     // stop if on ground
-    if (trace.plane.normal[2] > 0.7) {
+    // RERELEASE CONTENT PORT (xatrix/g_phys.c): the wallbounce projectile
+    // never settles on the ground the way a real bounce does.
+    if (trace.plane.normal[2] > 0.7 && ent.movetype !== MovetypeT.MOVETYPE_WALLBOUNCE) {
       if (ent.velocity[2] < 60 || ent.movetype !== MovetypeT.MOVETYPE_BOUNCE) {
         const groundEnt = traceEdict(trace.ent);
         ent.groundentity = groundEnt;
@@ -869,6 +885,9 @@ export function G_RunEntity(ent: EdictT): void {
     case MovetypeT.MOVETYPE_BOUNCE:
     case MovetypeT.MOVETYPE_FLY:
     case MovetypeT.MOVETYPE_FLYMISSILE:
+    // RERELEASE CONTENT PORT (xatrix/g_phys.c): MOVETYPE_WALLBOUNCE routes
+    // through the same toss/bounce physics as MOVETYPE_BOUNCE.
+    case MovetypeT.MOVETYPE_WALLBOUNCE:
       SV_Physics_Toss(ent);
       break;
     default:
