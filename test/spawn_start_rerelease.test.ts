@@ -303,6 +303,37 @@ function kexSelection(entities: readonly RawEntity[], spawnpoint: string, rules:
   return starts[0] ?? null;
 }
 
+/**
+ * src/kexgame/p_client.ts's `SelectCoopSpawnPoint` (p_client.cpp:1270-1372),
+ * over the entities G_InhibitEntity left alive, for the coop branch of
+ * p_client.cpp:1435-1514.
+ *
+ * G_UnsafeSpawnPosition is modelled as "every spot is usable", which is what
+ * both sides of the comparison actually see here: the fixture's gi.trace
+ * (buildFakeImports above) hands back a clear trace for every point, and in
+ * a real session that routine only ever reports a spot unusable when a live
+ * player is standing on it -- there is one client in all of these tests.
+ * The rmine2 arm (rogue's SelectLavaCoopSpawnPoint) is not modelled: neither
+ * module selects info_player_coop_lava under this port, and no synthetic map
+ * here is named rmine2.
+ */
+function kexCoopSelection(entities: readonly RawEntity[], spawnpoint: string, rules: Ruleset): RawEntity | null {
+  // step 2: the info_player_start chain first, for EVERY coop client
+  const single = kexSelection(entities, spawnpoint, rules);
+  if (single !== null) return single;
+
+  const spots = entities.filter((e, i) => e.classname === "info_player_coop" && (i === 0 || !kexInhibits(e.spawnflags, rules)));
+
+  // step 3: every spot whose targetname matches game.spawnpoint
+  for (const spot of spots) if (spawnpoint.toLowerCase() === (spot.targetname ?? "").toLowerCase()) return spot;
+
+  // step 4: nothing matched at all, so the untargeted ones
+  for (const spot of spots) if (spot.targetname === null) return spot;
+
+  // steps 5 and 6 have nothing left to draw from once 3 and 4 are empty.
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Self-contained retail readers (see the file header for why hand-rolled)
 // ---------------------------------------------------------------------------
@@ -587,6 +618,127 @@ describe("classic module: the rerelease keys, and only those, change the selecti
   });
 });
 
+/*
+RULE 3 -- the coop start-selection FALLBACK CHAIN.
+
+Vanilla's SelectCoopSpawnPoint (p_client.c) opens with "player 0 starts in
+normal player spawn point" and returns NULL for client 0, so in coop the
+first client only ever sees info_player_start; when that chain finds nothing
+the selection is over. p_client.cpp:1270-1372 rewrote the routine so every
+coop client falls through to the map's info_player_coop spots instead, and
+p_client.cpp:1435-1514's coop branch runs that whole chain twice.
+
+src/game/p_client.ts reproduces the rungs vanilla has no counterpart for --
+the info_player_coop passes -- on the same wide-session gate g_spawn.ts's
+SPAWNFLAG_NOT_COOP arm uses, and only where vanilla's own chain came up
+empty (which in 1997 was gi.error). Its own long comment carries the
+derivation and the two independent reasons it cannot touch 1997 content.
+These tests pin both outcomes: the rerelease's answer on a wide session,
+vanilla's on a narrow one.
+*/
+describe("classic module: the coop start-selection fallback chain", () => {
+  /** mgu6m1's shape in miniature: the only start is coop-inhibited, and the
+   *  real spawn points are info_player_coop. */
+  const INHIBITED_START =
+    WORLD +
+    ent("info_player_start", { origin: "500 0 0", spawnflags: String(SPAWNFLAG_NOT_COOP) }) +
+    ent("info_player_coop", { origin: "10 0 0", angle: "90" }) +
+    ent("info_player_coop", { origin: "20 0 0", angle: "91" }) +
+    ent("info_player_coop", { origin: "30 0 0", angle: "92" }) +
+    ent("info_player_coop", { origin: "40 0 0", angle: "93" });
+
+  /** No info_player_start at ALL -- the same gap reached without leaning on
+   *  the inhibition arm, so this half of the rule is tested on its own. */
+  const NO_START = WORLD + ent("info_player_coop", { origin: "10 0 0", angle: "90" }) + ent("info_player_coop", { origin: "20 0 0", angle: "91" });
+
+  test("wide coop, no start left: the FIRST info_player_coop, which is where the rerelease goes", () => {
+    const chosen = describeSelection(classicSelection("c_inhibited", INHIBITED_START, "", COOP_WIDE));
+    expect(chosen).toBe("10 0 9 @ 0 90 0");
+    expect(describeReference(kexCoopSelection(parseEntities(INHIBITED_START), "", COOP_WIDE))).toBe(chosen);
+  });
+
+  test("wide coop, no start in the map at all: same answer, without the inhibition arm involved", () => {
+    const chosen = describeSelection(classicSelection("c_nostart", NO_START, "", COOP_WIDE));
+    expect(chosen).toBe("10 0 9 @ 0 90 0");
+    expect(describeReference(kexCoopSelection(parseEntities(NO_START), "", COOP_WIDE))).toBe(chosen);
+  });
+
+  test("NARROW coop keeps vanilla's null for client 0, and with it vanilla's answer", () => {
+    // This is the whole point of the gate. Vanilla's chain on NO_START is
+    // SelectCoopSpawnPoint -> NULL (client 0), SelectSingleSpawnPoint ->
+    // NULL, and then p_client.c:906's gi.error -- which this module already
+    // replaced with the world origin (rule 2 above). The info_player_coop
+    // spots sitting right there are NOT considered, exactly as in 1997.
+    expect(describeSelection(classicSelection("c_nostart", NO_START, "", COOP_NARROW))).toBe("0 0 0 @ 0 0 0");
+
+    // And on INHIBITED_START the NOT_COOP start survives a narrow session,
+    // so vanilla simply takes it and the chain is never reached.
+    expect(describeSelection(classicSelection("c_inhibited", INHIBITED_START, "", COOP_NARROW))).toBe("500 0 9 @ 0 0 0");
+  });
+
+  test("SINGLE PLAYER never runs the chain, wide session or not", () => {
+    // The rerelease's fallback is inside its coop branch; the single-player
+    // branch keeps SelectSingleSpawnPoint and the world-origin recovery.
+    expect(describeSelection(classicSelection("c_nostart", NO_START, "", { ...SINGLE_PLAYER, wide: true }))).toBe("0 0 0 @ 0 0 0");
+  });
+
+  test("a usable start still wins: the chain runs only AFTER the vanilla one comes up empty", () => {
+    const map = WORLD + ent("info_player_start", { origin: "500 0 0", angle: "45" }) + ent("info_player_coop", { origin: "10 0 0", angle: "90" });
+    const chosen = describeSelection(classicSelection("c_startwins", map, "", COOP_WIDE));
+    expect(chosen).toBe("500 0 9 @ 0 45 0");
+    expect(describeReference(kexCoopSelection(parseEntities(map), "", COOP_WIDE))).toBe(chosen);
+  });
+
+  const TARGETED =
+    WORLD +
+    ent("info_player_coop", { origin: "10 0 0", targetname: "from_a", angle: "10" }) +
+    ent("info_player_coop", { origin: "20 0 0", targetname: "from_b", angle: "20" }) +
+    ent("info_player_coop", { origin: "30 0 0", angle: "30" });
+
+  test("a named spawnpoint takes the matching coop spot, case-insensitively", () => {
+    for (const spawnpoint of ["from_b", "FROM_B"]) {
+      const chosen = describeSelection(classicSelection("c_named", TARGETED, spawnpoint, COOP_WIDE));
+      expect(chosen).toBe("20 0 9 @ 0 20 0");
+      expect(describeReference(kexCoopSelection(parseEntities(TARGETED), spawnpoint, COOP_WIDE))).toBe(chosen);
+    }
+  });
+
+  test("an empty spawnpoint matches the UNTARGETED spot, not the first in map order", () => {
+    // p_client.cpp compares game.spawnpoint against `spot->targetname` with
+    // a null targetname read as "", so an empty spawnpoint matches only the
+    // untargeted spots -- the two named ones above are skipped.
+    const chosen = describeSelection(classicSelection("c_empty", TARGETED, "", COOP_WIDE));
+    expect(chosen).toBe("30 0 9 @ 0 30 0");
+    expect(describeReference(kexCoopSelection(parseEntities(TARGETED), "", COOP_WIDE))).toBe(chosen);
+  });
+
+  test("a spawnpoint that matches nothing falls to the untargeted pass", () => {
+    // p_client.cpp:1270-1372's "if we didn't find any spots, map is probably
+    // set up wrong. use empty targetname ones." rung.
+    const chosen = describeSelection(classicSelection("c_nomatch", TARGETED, "nowhere", COOP_WIDE));
+    expect(chosen).toBe("30 0 9 @ 0 30 0");
+    expect(describeReference(kexCoopSelection(parseEntities(TARGETED), "nowhere", COOP_WIDE))).toBe(chosen);
+  });
+
+  test("no info_player_coop anywhere: the chain changes nothing", () => {
+    // Both rungs come up empty, so the wide session lands on the same world
+    // origin a narrow one does. Guards against the chain inventing a spot.
+    expect(describeSelection(classicSelection("c_none", WORLD, "", COOP_WIDE))).toBe("0 0 0 @ 0 0 0");
+    expect(describeSelection(classicSelection("c_none", WORLD, "", COOP_NARROW))).toBe("0 0 0 @ 0 0 0");
+  });
+
+  test("SPAWNFLAG_NOT_COOP on a coop spot inhibits it on a wide session, so the chain skips it", () => {
+    // The spot is gone before selection runs, exactly as for a start.
+    const map =
+      WORLD +
+      ent("info_player_coop", { origin: "10 0 0", angle: "90", spawnflags: String(SPAWNFLAG_NOT_COOP) }) +
+      ent("info_player_coop", { origin: "20 0 0", angle: "91" });
+    const chosen = describeSelection(classicSelection("c_notcoop", map, "", COOP_WIDE));
+    expect(chosen).toBe("20 0 9 @ 0 91 0");
+    expect(describeReference(kexCoopSelection(parseEntities(map), "", COOP_WIDE))).toBe(chosen);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // 2. Shipped content -- retail-gated. The classic module's real selection
 //    must equal the rerelease's on every shipped map, for every spawnpoint
@@ -723,24 +875,26 @@ describe.skipIf(!haveRetail)("shipped maps: classic selects the rerelease's star
     expect(describeSelection(classicSelection("mgu1m1", map!.entityString, "", COOP_NARROW))).toBe("-496 2576 1361 @ 0 -180 0");
   });
 
-  test("COOP: mgu6m1's entity set now matches, and its remaining start difference is a DIFFERENT rule", () => {
-    // The second of the two cells. mgu6m1's only info_player_start carries
-    // SPAWNFLAG_NOT_COOP, so once the arm honors it BOTH modules'
-    // info_player_start chain comes up empty -- they agree, and that
-    // agreement is what this test pins.
+  test("COOP: mgu6m1 -- the one shipped map where the coop FALLBACK CHAIN is observable -- now matches too", () => {
+    // The second of the two cells the inhibition arm opened, and the one
+    // that needed a second rule to close.
     //
-    // Where they still differ is what happens NEXT, and it is not this
-    // rule: vanilla's SelectCoopSpawnPoint (p_client.c) returns NULL
-    // outright for client 0 ("player 0 starts in normal player spawn
-    // point"), so the classic module falls through to its no-start
-    // recovery and puts the player at the world origin. The rerelease
-    // rewrote that routine (p_client.cpp:1270-1372, transcribed at
-    // src/kexgame/p_client.ts's SelectCoopSpawnPoint): EVERY coop client,
-    // client 0 included, tries SelectSingleSpawnPoint and then falls back
-    // to the map's info_player_coop spots, of which mgu6m1 has four. That
-    // fallback lives in p_client.ts, not g_spawn.ts, and is the one map of
-    // all 222 where the difference is observable -- it is the only wide map
-    // whose every info_player_start is NOT_COOP.
+    // mgu6m1's only info_player_start carries SPAWNFLAG_NOT_COOP, so once
+    // g_spawn.ts's arm honors it BOTH modules' info_player_start chain comes
+    // up empty. What happens NEXT used to differ: vanilla's
+    // SelectCoopSpawnPoint (p_client.c) returns NULL outright for client 0
+    // ("player 0 starts in normal player spawn point"), so the classic
+    // module fell through to its no-start recovery and put the player at the
+    // world origin, while the rerelease's rewritten routine
+    // (p_client.cpp:1270-1372, transcribed at src/kexgame/p_client.ts's
+    // SelectCoopSpawnPoint) falls back to the map's info_player_coop spots,
+    // of which mgu6m1 has four. src/game/p_client.ts now carries that
+    // fallback chain, gated on the same wide session, and both modules take
+    // the first of the four.
+    //
+    // mgu6m1 is the only wide map whose every info_player_start is
+    // NOT_COOP, which is why it is the only one of the 222 where this is
+    // observable -- the rule itself is general.
     const map = shippedMaps().find((m) => m.name === "mgu6m1");
     expect(map).toBeDefined();
 
@@ -753,12 +907,18 @@ describe.skipIf(!haveRetail)("shipped maps: classic selects the rerelease's star
 
     // Same info_player_start chain result: nothing survives, on both sides.
     expect(kexSelection(map!.entities, "", COOP_WIDE)).toBeNull();
-    expect(describeSelection(classicSelection("mgu6m1", map!.entityString, "", COOP_WIDE))).toBe("0 0 0 @ 0 0 0");
 
-    // And the four info_player_coop spots the rerelease would fall back to
-    // really are there, so this stays a live follow-up rather than a
-    // hypothetical one.
+    // ...and the same coop spot after it. mgu6m1's four info_player_coop
+    // entities are untargeted and game.spawnpoint is empty, so the
+    // rerelease's step-3 loop matches all four and takes the first.
     expect(map!.entities.filter((e) => e.classname === "info_player_coop").length).toBe(4);
+    const chosen = describeSelection(classicSelection("mgu6m1", map!.entityString, "", COOP_WIDE));
+    expect(chosen).toBe("2128 -1392 65 @ 0 90 0");
+    expect(describeReference(kexCoopSelection(map!.entities, "", COOP_WIDE))).toBe(chosen);
+
+    // The other half of the gate: on a NARROW session the NOT_COOP start
+    // survives, vanilla takes it, and the fallback chain never runs.
+    expect(describeSelection(classicSelection("mgu6m1", map!.entityString, "", COOP_NARROW))).toBe("-496 2576 593 @ 0 -180 0");
   });
 
   test("no shipped 1997/Xatrix/Rogue map places SPAWNFLAG_COOP_ONLY on a start", () => {

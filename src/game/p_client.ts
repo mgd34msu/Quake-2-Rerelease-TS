@@ -1459,6 +1459,216 @@ export function TryLandmarkSpawn(ent: EdictT, origin: Vec3, angles: Vec3, spotOr
 }
 
 /*
+=============================================================================
+RERELEASE CONTENT PORT -- the coop start-selection fallback chain
+
+WHAT VANILLA DOES, AND WHERE IT STOPS. SelectCoopSpawnPoint above is
+p_client.c's, line for line, and its first statement is
+
+    // player 0 starts in normal player spawn point
+    if (index == 0) return NULL;
+
+so in coop the FIRST client never looks at info_player_coop at all: it takes
+whatever SelectSingleSpawnPoint finds, and when that finds nothing the chain
+is simply over. In 1997 that ending was gi.error; here it is the world
+origin (SelectSpawnPoint below).
+
+WHAT THE RERELEASE DOES. p_client.cpp:1270-1372 rewrote the routine into
+`edict_t *SelectCoopSpawnPoint(edict_t *ent, bool force_spawn, bool
+check_players)` -- transcribed in this port at src/kexgame/p_client.ts. It
+drops the client-0 shortcut entirely and runs, for every coop client:
+
+  1. (ROGUE) on rmine2 only, SelectLavaCoopSpawnPoint.
+  2. SelectSingleSpawnPoint, taken when the spot is not blocked.
+  3. every info_player_coop whose targetname matches game.spawnpoint; the
+     first unblocked one wins.
+  4. if step 3 matched nothing at all, every UNTARGETED info_player_coop.
+  5. if coop player collision is off, a random one of the spots step 3 or 4
+     counted.
+  6. SelectSingleSpawnPoint again.
+
+and p_client.cpp:1435-1514's coop branch runs the whole thing twice, once
+with check_players true and then with it false.
+
+WHAT IS PORTED HERE, AND WHY THAT SUBSET.
+  Steps 3, 4 and 5 are the rungs vanilla has nothing corresponding to, and
+  they are what this reproduces.
+
+  Step 2 is already where vanilla's chain goes -- SelectSpawnPoint below
+  calls SelectSingleSpawnPoint() before this runs, for exactly the clients
+  vanilla's index-0 shortcut sends there. Step 6 is that same call a second
+  time, so by the time this function is reached it has already answered
+  null. Both are therefore covered, not skipped.
+
+  Step 1 is NOT ported. SelectLavaCoopSpawnPoint is rogue's
+  (rogue/p_client.c) and this module is baseq2 3.21; src/game/g_newmisc.ts
+  spawns rmine2's info_player_coop_lava entities so the map loads, but
+  nothing selects them here under either ruleset. Stated, not silently
+  dropped.
+
+  For coop clients past the first, vanilla's SelectCoopSpawnPoint still runs
+  first and still takes the index-th matching info_player_coop. The
+  rerelease instead takes the first UNBLOCKED one, which is a different
+  answer only when a live player is standing on a spot -- and that is a
+  distinction this engine cannot draw the rerelease's way, because the
+  rerelease hangs it on CONTENTS_PLAYER, a content bit vanilla does not have
+  and this server's SV_ClipMoveToEntities (src/server/sv_world.ts) never
+  consults: it clips against every solid entity whatever the mask says. So
+  that half stays vanilla's, and what is added is only the rung vanilla has
+  none of.
+
+THE GATE -- two of them, either one sufficient on its own.
+  1. CONTENT. `gi.extended_layout()`: the session is carrying rerelease
+     presentation, settled by sv_init.ts's SV_ContentNeedsWideLayout before
+     ge.SpawnEntities ran. That is the same signal g_spawn.ts's
+     SPAWNFLAG_NOT_COOP arm is gated on, and that arm's comment carries the
+     measurement behind it -- all 656 readable entity lumps in this
+     machine's 1997 tree produce zero matches, so this branch is dead code
+     on 1997 content.
+  2. REACHABILITY. Even with gate 1 removed, the branch runs only where BOTH
+     vanilla routines returned null, which is precisely where vanilla
+     p_client.c:906 called gi.error and dropped the server. No 1997 map that
+     plays at all can reach it. This is the same argument that lets
+     SelectSingleSpawnPoint's own fallback chain carry no gate.
+
+WHAT IT FIXES, measured. mgu6m1 is the one shipped map of the 222 where the
+difference is observable, because it is the only one whose every
+info_player_start carries SPAWNFLAG_NOT_COOP: once g_spawn.ts honors that
+bit (f2c3958) the classic module has no start left in coop and put the
+player at 0 0 0, while the rerelease takes the first of that map's four
+info_player_coop spots, at 2128 -1392 56. Both modules now take that spot.
+The rule is general -- any map whose coop start set is info_player_coop-only
+hits it -- mgu6m1 is just where the shipped content exercises it.
+=============================================================================
+*/
+
+/** gi.trace hands back the engine's `Edict`; this module's own EdictT for it
+ *  is the g_edicts slot at the same s.number. The file-local copies in
+ *  g_ai.ts / g_monster.ts / g_weapon.ts fold null into the world edict;
+ *  this one keeps null as null, because G_UnsafeSpawnPosition below has to
+ *  tell "nothing blocked" from "the world blocked". */
+function traceEdictOrNull(ent: Edict | null): EdictT | null {
+  if (ent === null) return null;
+  return g_edicts[ent.s.number] ?? null;
+}
+
+/** Is this trace's blocking entity a live client? */
+function blockedByClient(tr: GTraceT): boolean {
+  const hit = traceEdictOrNull(tr.ent);
+  return hit !== null && hit.client !== null;
+}
+
+/**
+ * p_client.cpp:1231-1268, `static edict_t *G_UnsafeSpawnPosition(vec3_t
+ * spot, bool check_players)` / src/kexgame/p_client.ts's copy of it. Returns
+ * the entity that makes the spot unusable, or null when the spot is fine.
+ *
+ * ONE SUBSTITUTION. The rerelease expresses `check_players == false` as
+ * `mask &= ~CONTENTS_PLAYER`. Neither that bit nor any equivalent exists
+ * here (see the section header), so the same distinction is drawn on the
+ * trace RESULT instead: a client blocker is only ever reported when
+ * check_players asks for one.
+ *
+ * The origin is copied, never written back. The rerelease hands
+ * G_FixStuckObject_Generic the entity's own s.origin and would let it move
+ * the spawn point; every path that reaches the fix-stuck call has already
+ * rebound its local to a copy, so that never actually happens there either.
+ */
+function G_UnsafeSpawnPosition(spotOrigin: Vec3, check_players: boolean): EdictT | null {
+  const spot = vec3(spotOrigin[0], spotOrigin[1], spotOrigin[2]);
+
+  let tr = gi.trace(spot, PLAYER_MINS, PLAYER_MAXS, spot, null, MASK_PLAYERSOLID);
+
+  // sometimes the spot is too close to the ground, give it a bit of slack
+  if (tr.startsolid && !blockedByClient(tr)) {
+    spot[2] += 1;
+    tr = gi.trace(spot, PLAYER_MINS, PLAYER_MAXS, spot, null, MASK_PLAYERSOLID);
+  }
+
+  // no idea why this happens in some maps..
+  if (tr.startsolid && !blockedByClient(tr)) {
+    const stuck = G_FixStuckObject_Generic(spot, PLAYER_MINS, PLAYER_MAXS, (start, mins, maxs, end) =>
+      gi.trace(start, mins, maxs, end, null, MASK_PLAYERSOLID),
+    );
+    if (stuck === StuckResultT.NO_GOOD_POSITION) return traceEdictOrNull(tr.ent); // what do we do here...?
+
+    tr = gi.trace(spot, PLAYER_MINS, PLAYER_MAXS, spot, null, MASK_PLAYERSOLID);
+    if (tr.startsolid && !blockedByClient(tr)) return traceEdictOrNull(tr.ent);
+  }
+
+  if (tr.fraction === 1) return null;
+  if (check_players && blockedByClient(tr)) return traceEdictOrNull(tr.ent);
+
+  return null;
+}
+
+/**
+ * Steps 3-5 of p_client.cpp:1270-1372, over info_player_coop. Returns null
+ * when the rerelease's chain comes up empty too, which leaves
+ * SelectSpawnPoint holding exactly the answer it already had.
+ */
+function SelectRereleaseCoopSpawnPoint(check_players: boolean): EdictT | null {
+  let spot: EdictT | null = null;
+
+  // assume there are four coop spots at each spawnpoint
+  let num_valid_spots = 0;
+
+  for (;;) {
+    spot = G_Find(spot, "classname", "info_player_coop");
+    if (spot === null) break;
+
+    if (Q_stricmp(game.spawnpoint, spot.targetname ?? "") === 0) {
+      num_valid_spots++;
+      if (G_UnsafeSpawnPosition(spot.s.origin, check_players) === null) return spot;
+    }
+  }
+
+  let use_targetname = true;
+
+  // if we didn't find any spots, map is probably set up wrong. use empty
+  // targetname ones.
+  if (num_valid_spots === 0) {
+    use_targetname = false;
+
+    for (;;) {
+      spot = G_Find(spot, "classname", "info_player_coop");
+      if (spot === null) break;
+
+      if (spot.targetname === null) {
+        num_valid_spots++;
+        if (G_UnsafeSpawnPosition(spot.s.origin, check_players) === null) return spot;
+      }
+    }
+  }
+
+  // if player collision is disabled, just pick a random spot.
+  //
+  // `g_coop_player_collision` is a rerelease cvar this module does not have,
+  // and its shipped default is "0" -- so on a stock rerelease session this
+  // rung ALWAYS runs, which is why it is unconditional here rather than
+  // reading a cvar that could only ever answer the same way. The draw is
+  // q_std.h's `irandom(num_valid_spots)`, i.e. the same `rand() % count`
+  // idiom SelectRandomDeathmatchSpawnPoint above already uses.
+  spot = null;
+  let remaining = Math.floor(Math.random() * num_valid_spots);
+
+  for (;;) {
+    spot = G_Find(spot, "classname", "info_player_coop");
+    if (spot === null) break;
+
+    const matches = use_targetname ? Q_stricmp(game.spawnpoint, spot.targetname ?? "") === 0 : spot.targetname === null;
+    if (matches) {
+      if (remaining === 0) return spot;
+      remaining--;
+    }
+  }
+
+  // The rerelease's step 6 is SelectSingleSpawnPoint again; SelectSpawnPoint
+  // has already run it to null before calling this. Nothing left to try.
+  return null;
+}
+
+/*
 ===========
 SelectSpawnPoint
 
@@ -1467,15 +1677,27 @@ Chooses a player start, deathmatch start, coop start, etc
 */
 export function SelectSpawnPoint(ent: EdictT, origin: Vec3, angles: Vec3, landmarkOut?: [boolean]): void {
   let spot: EdictT | null = null;
+  const coop = cvarNum(gameCvars.coop) !== 0;
 
   if (cvarNum(gameCvars.deathmatch) !== 0) {
     spot = SelectDeathmatchSpawnPoint();
-  } else if (cvarNum(gameCvars.coop) !== 0) {
+  } else if (coop) {
     spot = SelectCoopSpawnPoint(ent);
   }
 
   // find a single player start spot
   if (spot === null) spot = SelectSingleSpawnPoint();
+
+  // RERELEASE CONTENT PORT: the coop fallback chain, on a session carrying
+  // rerelease content. Nothing above this line changed; this rung only ever
+  // runs where vanilla's coop chain came up empty, which in 1997 was
+  // gi.error. p_client.cpp:1435-1514's coop branch runs the chain twice,
+  // once with check_players and once without -- that retry is the `false`
+  // pass here. See the section above SelectRereleaseCoopSpawnPoint for both
+  // gates and for which rungs of p_client.cpp:1270-1372 are reproduced.
+  if (spot === null && coop && gi.extended_layout?.() === true) {
+    spot = SelectRereleaseCoopSpawnPoint(true) ?? SelectRereleaseCoopSpawnPoint(false);
+  }
 
   if (spot === null) {
     /*

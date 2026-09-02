@@ -123,17 +123,21 @@ guessed at:
     carries the measurement. That is what moved spawn_count 305 -> 168 and
     mover_presence 235 -> 26 across 20-odd maps.
 
-  - THE COOP SPAWN-POINT CHAIN, which is a separate rule and is what is
-    left on mgu6m1. Vanilla's SelectCoopSpawnPoint returns NULL outright
-    for client 0 ("player 0 starts in normal player spawn point"); the
-    re-release rewrote the routine (p_client.cpp:1270-1372) so every coop
-    client falls back to the map's info_player_coop spots when the
-    info_player_start chain comes up empty. mgu6m1 is the one shipped map
-    where that is observable -- it is the only map whose every
-    info_player_start carries SPAWNFLAG_NOT_COOP, so once the arm above
-    honors the bit the classic module has no start left and lands on the
-    world origin while the re-release takes one of mgu6m1's four
-    info_player_coop spots. Follow-up, and it lives in p_client.ts.
+  - THE COOP SPAWN-POINT CHAIN IS NO LONGER ONE OF THEM EITHER. Vanilla's
+    SelectCoopSpawnPoint returns NULL outright for client 0 ("player 0
+    starts in normal player spawn point"); the re-release rewrote the
+    routine (p_client.cpp:1270-1372) so every coop client falls back to the
+    map's info_player_coop spots when the info_player_start chain comes up
+    empty. src/game/p_client.ts now carries that fallback chain, on the same
+    wide-session gate and only where vanilla's own chain came up empty (in
+    1997, gi.error). mgu6m1 was the one shipped map where the difference was
+    observable -- the only map whose every info_player_start carries
+    SPAWNFLAG_NOT_COOP, so once the arm above honors the bit the classic
+    module had no start left and landed on the world origin while the
+    re-release took one of mgu6m1's four info_player_coop spots. Both now
+    take the first of the four, at 2128 -1392 56. That is what moved
+    player_origin 6 -> 5 and C3_spawn_z_plus9 216 -> 217: mgu6m1 stopped
+    being an unexplained divergence and became the ordinary 9-unit one.
 */
 
 import { describe, test, expect, beforeAll } from "bun:test";
@@ -267,7 +271,7 @@ const RESIDUAL_BASELINE: Readonly<Record<string, number>> = {
   mover_origin: 440,
   mover_presence: 26,
   mover_state: 38,
-  player_origin: 6,
+  player_origin: 5,
   spawn_count: 168,
   spawn_usetargets_classic_only: 216,
   spawn_usetargets_kex_only: 104,
@@ -279,7 +283,7 @@ const RESIDUAL_BASELINE: Readonly<Record<string, number>> = {
 const CLASSIFIED_BASELINE: Readonly<Record<string, number>> = {
   C1_player_trail: 222,
   C2_classname_rewrite: 112,
-  C3_spawn_z_plus9: 216,
+  C3_spawn_z_plus9: 217,
 };
 
 function moversByModel(movers: MoverT[]): Map<string, MoverT[]> {
@@ -371,6 +375,24 @@ describe.skipIf(!havePak)("cross-module map sweep -- all 222 shipped maps under 
       expect(c?.state).toBe(k?.state ?? -1);
       expect(c?.state).toBe(1); // STATE_BOTTOM
     }
+  });
+
+  test("(e) mgu6m1: the coop fallback chain lands both modules on the same info_player_coop spot", () => {
+    // The last cell the SPAWNFLAG_NOT_COOP arm left open, and the one shipped
+    // map where vanilla's "client 0 never looks at info_player_coop"
+    // shortcut is observable -- see this file's header. Its four coop spots
+    // are untargeted and this sweep boots with an empty spawnpoint, so the
+    // re-release's step-3 pass takes the first of them, at 2128 -1392 56;
+    // src/game/p_client.ts's ported chain now takes the same one. The
+    // 9-unit gap between the two rows below is vanilla's own `origin[2] += 9`
+    // (C3), on top of PutClientInServer's `+= 1` that both modules apply.
+    // Before the chain landed, the classic row read [0, 0, 1].
+    const c = rec("mgu6m1", "");
+    const k = rec("mgu6m1", "kex");
+    expect(c.player_spawned).toBe(true);
+    expect(k.player_spawned).toBe(true);
+    expect(k.player_origin).toEqual([2128, -1392, 57]);
+    expect(c.player_origin).toEqual([2128, -1392, 66]);
   });
 
   test("the three maps with no spawn point of any kind put the player at the world origin under both modules", () => {
