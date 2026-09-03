@@ -761,9 +761,13 @@ describe.if(RETAIL_PRESENT)("RETAIL-GATED -- the two real installs on this machi
     bootClassicBasedir();
     FS_SetDataRoot([CLASSIC_INSTALL]);
 
-    // Classic everything: the 1997 map AND the 1997 HUD pic.
+    // Classic everything: the 1997 map AND a classic-tree HUD pic. The pic's
+    // exact bytes depend on which of the tree's paks wins: every .pak in
+    // baseq2 mounts now (this install's buzzpak.pak carries its own
+    // pics/i_health.pcx above pak6's 1353-byte and pak0's 1477-byte ones),
+    // so the assertion is "present" rather than a single pak's size.
     expect(sizeOf("maps/base1.bsp")).toBe(1991536);
-    expect(sizeOf("pics/i_health.pcx")).toBe(1353);
+    expect(sizeOf("pics/i_health.pcx")).toBeGreaterThan(0);
 
     // Nothing from the rerelease tree is mounted at all.
     expect(FS_TestSearchPathList().some((p) => p.startsWith(RERELEASE_INSTALL))).toBe(false);

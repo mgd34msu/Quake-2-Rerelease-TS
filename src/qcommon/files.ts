@@ -1142,6 +1142,32 @@ export function FS_AddGameDirectory(dir: string): void {
     if (!pak) continue;
     fs_searchpaths = { kind: "pack", pack: pak, next: fs_searchpaths };
   }
+
+  // ...then every other .pak in the directory, in name order, each above the
+  // one before it (yquake2's FS_AddDirToSearchPath and q2pro's add_game_dir
+  // both mount all paks; vanilla stopped at pak9). Mike's lmctf tree carries
+  // its map packs as q2lmctfmaps2012.pak, seedmappak.pak, buzzpak.pak,
+  // quadtime.pak and _lmbasesounds.pak beside pak0..pak9, and every map in
+  // them was "Can't find maps/lmctf32.bsp" (play-test 2026-09-02).
+  for (const pakfile of extraPakFiles(dir)) {
+    const pak = FS_LoadPackFile(pakfile);
+    if (!pak) continue;
+    fs_searchpaths = { kind: "pack", pack: pak, next: fs_searchpaths };
+  }
+}
+
+// Every *.pak in `dir` other than pak0.pak..pak9.pak, sorted by name.
+function extraPakFiles(dir: string): string[] {
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return [];
+  }
+  return entries
+    .filter((name) => /\.pak$/i.test(name) && !/^pak[0-9]\.pak$/i.test(name))
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+    .map((name) => `${dir}/${name}`);
 }
 
 /*

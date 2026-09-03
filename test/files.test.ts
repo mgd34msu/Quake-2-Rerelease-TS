@@ -99,6 +99,16 @@ describe("files.ts -- FS_* virtual filesystem", () => {
     ]);
     writeFileSync(join(baseq2Dir, "pak0.pak"), pak);
 
+    // two NAMED paks beside the numbered one (vanilla never mounted these;
+    // yquake2/q2pro do, and Mike's lmctf map packs are named): mounted after
+    // pak0..pak9 in name order, so the later name wins a collision and a
+    // named pak wins over pak0.
+    writeFileSync(join(baseq2Dir, "amaps.pak"), buildPak([
+      { name: "named.txt", data: bytesOf("FROM-AMAPS") },
+      { name: "onlypak.txt", data: bytesOf("AMAPS-OVERRIDES-PAK0") },
+    ]));
+    writeFileSync(join(baseq2Dir, "zmaps.pak"), buildPak([{ name: "named.txt", data: bytesOf("FROM-ZMAPS") }]));
+
     // loose file shadowing a pak entry of the same name
     writeFileSync(join(baseq2Dir, "shadow.txt"), bytesOf("LOOSE-SHADOW-DATA"));
 
@@ -118,11 +128,15 @@ describe("files.ts -- FS_* virtual filesystem", () => {
     rmSync(tmpRoot, { recursive: true, force: true });
   });
 
-  test("FS_LoadFile returns exact bytes for a pak-only entry", () => {
+  test("FS_LoadFile returns exact bytes for a pak-only entry (a named pak mounted above pak0 wins)", () => {
     const buf = FS_LoadFile("onlypak.txt");
     expect(buf).not.toBeNull();
-    expect(textOf(buf as Uint8Array)).toBe("PAK-ONLY-DATA");
+    expect(textOf(buf as Uint8Array)).toBe("AMAPS-OVERRIDES-PAK0");
     FS_FreeFile(buf);
+  });
+
+  test("named paks mount after the numbered ones, in name order, the later name winning", () => {
+    expect(textOf(FS_LoadFile("named.txt") as Uint8Array)).toBe("FROM-ZMAPS");
   });
 
   // Search-path ordering, per files.c's FS_AddGameDirectory: within a single
@@ -147,7 +161,7 @@ describe("files.ts -- FS_* virtual filesystem", () => {
   test("FS_ListFiles matches a glob pattern against real directory entries", () => {
     const paks = FS_ListFiles(`${baseq2Dir}/*.pak`);
     expect(paks).not.toBeNull();
-    expect(paks).toEqual([`${baseq2Dir}/pak0.pak`]);
+    expect([...(paks ?? [])].sort()).toEqual([`${baseq2Dir}/amaps.pak`, `${baseq2Dir}/pak0.pak`, `${baseq2Dir}/zmaps.pak`]);
 
     // FS_ListFiles is a plain directory listing (Sys_FindFirst/Next in the
     // original), not pak-aware -- only the loose shadow.txt is a real

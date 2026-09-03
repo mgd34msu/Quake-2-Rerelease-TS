@@ -85,6 +85,9 @@ let vid_ypos: CvarT | null = null; // Y coordinate of window position
 let vid_fullscreen: CvarT | null = null;
 
 let reflib_active = false;
+// The canonical name ("gl"/"soft") of the refresh currently loaded, so an
+// alias that resolves to it is a no-op rather than a full reload.
+let active_ref_name = "";
 
 /*
 ==========================================================================
@@ -293,6 +296,7 @@ function finishLoadRefresh(exports: RefExports, name: string): boolean {
 
   Com_Printf("------------------------------------\n");
   reflib_active = true;
+  active_ref_name = name.startsWith("ref_") ? name.slice(4) : name;
   return true;
 }
 
@@ -350,6 +354,23 @@ export function VID_LoadRefresh(name: string): boolean {
 
 /*
 ============
+VID_CanonicalRefName
+
+This port has two renderers, "gl" and "soft". Any other vid_ref value -- an
+old config's "r1gl" (R1Q2), "glx"/"softx" (vanilla Linux), "kmgl", "gl1"
+(yquake2) -- is not a renderer here, and treating it as unknown used to fail
+the load and drop the session to software (Mike's lmctf autoexec, play-test
+2026-09-02). Anything that is not "soft" means gl.
+============
+*/
+export function VID_CanonicalRefName(name: string): string {
+  const lower = name.toLowerCase();
+  if (lower === "soft" || lower === "softx" || lower === "softsdl") return "soft";
+  return "gl";
+}
+
+/*
+============
 VID_CheckChanges
 
 This function gets called once just before drawing each frame, and it's
@@ -368,11 +389,27 @@ export function VID_CheckChanges(): void {
     // refresh has changed
     //
     vid_ref.modified = false;
+
+    // Two renderers exist; any other vid_ref value (an old config's "r1gl")
+    // means gl rather than a failed load and a fall back to software.
+    const canonical = VID_CanonicalRefName(vid_ref.string);
+    if (canonical !== vid_ref.string) {
+      Com_Printf('vid_ref "%s" is not a renderer here; using "%s"\n', vid_ref.string, canonical);
+      Cvar_Set("vid_ref", canonical);
+      vid_ref.modified = false;
+      // Vanilla's Cvar_Set is a no-op when the value is unchanged, so a
+      // config re-stating the running renderer never restarts video. An
+      // alias spelling of the running renderer gets the same treatment --
+      // the mod autoexec that named "r1gl" while gl was up must not tear
+      // the window down and rebuild it.
+      if (reflib_active && canonical === active_ref_name) continue;
+    }
+
     if (vid_fullscreen) vid_fullscreen.modified = true;
     cl.refresh_prepped = false;
     cls.disable_screen = 1;
 
-    const name = `ref_${vid_ref.string}`;
+    const name = `ref_${canonical}`;
     if (!VID_LoadRefresh(name)) {
       if (vid_ref.string === "soft") Com_Error(ERR_FATAL, "Couldn't fall back to software refresh!");
       Cvar_Set("vid_ref", "soft");
