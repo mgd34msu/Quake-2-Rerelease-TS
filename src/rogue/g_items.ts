@@ -121,6 +121,8 @@ import {
   DF_NO_MINES,
   DF_NO_NUKES,
   DF_NO_SPHERES,
+  EF_FLAG1,
+  EF_FLAG2,
   EF_GIB,
   EF_ROTATE,
   EF_TAGTRAIL,
@@ -137,6 +139,9 @@ import {
   YAW,
 } from "../shared/q_shared";
 import { ValidateSelectedItem } from "./g_cmds";
+// RE-RELEASE CONTENT PORT -- the CTF flag hooks the two item_flag_team*
+// rows below reference (g_ctf.ts owns the flag world logic).
+import { CTFDrop_Flag, CTFFlagSetup, CTFPickup_Flag } from "./g_ctf";
 import { SolidT, SVF_NOCLIENT } from "./game";
 import {
   AmmoT,
@@ -415,6 +420,58 @@ export function Drop_General(ent: EdictT, item: GItemT): void {
   const client = ent.client;
   if (client !== null) client.pers.inventory[ITEM_INDEX(item)]--;
   ValidateSelectedItem(ent);
+}
+
+// =====================================================================
+// RE-RELEASE CONTENT PORT -- the three item hooks the re-release item rows
+// appended at the tail of ITEMLIST need, copied from our sibling
+// src/game/g_items.ts. Nothing above calls any of them, so Ground Zero's
+// own items are unaffected.
+// =====================================================================
+
+// src/kexgame/g_items.ts's `Pickup_General`: a plain one-of-each carry item
+// (the flashlight). Re-release SetRespawn takes a gtime; this module's takes
+// seconds, which is what `item.quantity` already holds here.
+export function Pickup_General(ent: EdictT, other: EdictT): boolean {
+  const client = other.client;
+  const item = ent.item;
+  if (client === null || item === null) return false;
+
+  const index = ITEM_INDEX(item);
+  if (client.pers.inventory[index] !== 0) return false;
+
+  client.pers.inventory[index]++;
+
+  if (cvarNum(gameCvars.deathmatch) !== 0) {
+    if ((ent.spawnflags & DROPPED_ITEM) === 0) SetRespawn(ent, item.quantity);
+  }
+
+  return true;
+}
+
+// src/kexgame/g_items.ts's `Pickup_LegacyHead`, translated to this module's
+// gitem_t: +5 max health and +5 health, then a deathmatch respawn. Fully
+// functional here -- nothing in it depends on re-release-only state.
+export function Pickup_LegacyHead(ent: EdictT, other: EdictT): boolean {
+  other.max_health += 5;
+  other.health += 5;
+
+  if ((ent.spawnflags & DROPPED_ITEM) === 0 && cvarNum(gameCvars.deathmatch) !== 0) {
+    SetRespawn(ent, ent.item === null ? 0 : ent.item.quantity);
+  }
+
+  return true;
+}
+
+// *** DOCUMENTED DEGRADATION ***
+// src/kexgame/g_items.ts's Use_Flashlight calls `P_ToggleFlashlight(ent,
+// !(ent.flags & FL_FLASHLIGHT))`, which drives a dynamic light attached to
+// the player entity. Neither FL_FLASHLIGHT nor any dynamic-light channel
+// exists in this module or in protocol 34, so there is nothing server-side
+// to toggle and nothing client-side to draw. The item spawns and is carried;
+// using it does nothing.
+export function Use_Flashlight(_ent: EdictT, _item: GItemT): void {
+  // intentionally empty -- see the comment above.
 }
 
 //======================================================================
@@ -1545,6 +1602,13 @@ export function SpawnItem(ent: EdictT, item: GItemT): void {
   // ROGUE
   if ((ent.spawnflags & 1) !== 0) SetTriggeredSpawn(ent);
   // ROGUE
+
+  // RE-RELEASE CONTENT PORT -- ctf/g_items.c's flag special case: the two
+  // team flags replace droptofloor with CTFFlagSetup, which drops the flag
+  // to the floor AND records its home position for CTFResetFlag.
+  if (ent.classname === "item_flag_team1" || ent.classname === "item_flag_team2") {
+    ent.think = CTFFlagSetup;
+  }
 }
 
 //======================================================================
@@ -1556,8 +1620,9 @@ function mkItem(fields: Partial<GItemT>): GItemT {
 // `gitem_t itemlist[]` -- transcribed in the exact order of the C array,
 // including index 0 ("leave index 0 alone") and the trailing `{NULL}`
 // end-of-list marker. 63 entries from the C array (see this file's header
-// comment for the 63-vs-64 provenance note), plus ONE re-release addition at
-// the tail -- item_invisibility, which rdm14 places -- for 64 total.
+// comment for the 63-vs-64 provenance note), plus NINE re-release additions
+// at the tail -- item_invisibility (rdm14), then the eight rows the wider
+// re-release map set this module now hosts places -- for 72 total.
 // `InitItems` sets `game.num_items` to `ITEMLIST.length - 1` exactly as the C
 // `sizeof(itemlist)/sizeof(...)-1` does.
 //
@@ -1566,7 +1631,7 @@ function mkItem(fields: Partial<GItemT>): GItemT {
 // 256 (shared/q_shared.ts), so the inventory array and the CS_ITEMS
 // configstring block have ample room; nothing else in this module keys off
 // the item count.
-const ITEMLIST: GItemT[] = fixedLength("ITEMLIST", 64, [
+const ITEMLIST: GItemT[] = fixedLength("ITEMLIST", 72, [
   mkItem({}), // leave index 0 alone
 
   //
@@ -2817,6 +2882,182 @@ const ITEMLIST: GItemT[] = fixedLength("ITEMLIST", 64, [
     precaches: "items/protect.wav items/protect2.wav items/protect4.wav",
   }),
 
+  // ======================================
+  // RE-RELEASE CONTENT PORT -- eight more itemlist rows, for the wider
+  // re-release map set this module now hosts (the Reckoning, N64 and
+  // re-release CTF maps a Ground Zero session can be pointed at).
+  //
+  // ED_CallSpawn scans the itemlist BEFORE the spawns[] table, so an
+  // ITEMLIST row -- not a spawns[] entry -- is the correct registration for
+  // an item, exactly as in the C. Rows copied from our sibling
+  // src/game/g_items.ts in the same relative order it uses.
+  //
+  // Appended at the tail, never woven into the C's ordering: item order
+  // defines item indices and those are network-visible. Nothing indexes this
+  // table positionally (FindItem/FindItemByClassname search by name), and
+  // InitItems still derives game.num_items from the length minus the end
+  // marker below.
+  //
+  // *** ITEM COUNT CHANGE -- FLAGGED FOR THE COORDINATOR ***
+  // test/rogue_core.test.ts asserts `itemlist().length === 64`; with these
+  // eight rows it is 72.
+  // ======================================
+
+  /*QUAKED item_flashlight (.3 .3 1) (-16 -16 -16) (16 16 16)
+   */
+  // See Use_Flashlight above: carried, but this module's protocol has no
+  // player-attached dynamic light for it to switch on.
+  mkItem({
+    classname: "item_flashlight",
+    pickup: Pickup_General,
+    use: Use_Flashlight,
+    pickup_sound: "items/pkup.wav",
+    world_model: "models/items/flashlight/tris.md2",
+    world_model_flags: EF_ROTATE,
+    icon: "p_torch",
+    pickup_name: "Flashlight",
+    count_width: 2,
+    quantity: 60,
+    flags: IT_STAY_COOP,
+    precaches: "items/flashlight_on.wav items/flashlight_off.wav",
+  }),
+
+  /*QUAKED item_legacy_head (.3 .3 1) (-16 -16 -16) (16 16 16)
+   */
+  mkItem({
+    classname: "item_legacy_head",
+    pickup: Pickup_LegacyHead,
+    pickup_sound: "items/pkup.wav",
+    world_model: "models/items/legacyhead/tris.md2",
+    world_model_flags: EF_ROTATE,
+    icon: "i_fixme",
+    pickup_name: "Legacy Head",
+    count_width: 2,
+    quantity: 60,
+    flags: 0,
+    precaches: "",
+  }),
+
+  //
+  // XATRIX KEY (src/xatrix/g_items.ts)
+  //
+
+  /*QUAKED key_green_key (0 .5 .8) (-16 -16 -16) (16 16 16)
+  normal door key - green
+  */
+  mkItem({
+    classname: "key_green_key",
+    pickup: Pickup_Key,
+    drop: Drop_General,
+    pickup_sound: "items/pkup.wav",
+    world_model: "models/items/keys/green_key/tris.md2",
+    world_model_flags: EF_ROTATE,
+    icon: "k_green",
+    pickup_name: "Green Key",
+    count_width: 2,
+    flags: IT_STAY_COOP | IT_KEY,
+    precaches: "",
+  }),
+
+  //
+  // RE-RELEASE-ONLY KEYS (src/kexgame/g_items.ts). Straight Pickup_Key rows
+  // -- the only re-release-specific parts of the originals were the
+  // ItemIdT id, the IF_* flag spelling and the `$item_*` localization keys,
+  // all of which have direct equivalents here. Fully functional.
+  //
+
+  /*QUAKED key_explosive_charges (0 .5 .8) (-16 -16 -16) (16 16 16)
+   */
+  mkItem({
+    classname: "key_explosive_charges",
+    pickup: Pickup_Key,
+    drop: Drop_General,
+    pickup_sound: "items/pkup.wav",
+    world_model: "models/items/n64/charge/tris.md2",
+    world_model_flags: EF_ROTATE,
+    icon: "n64/i_charges",
+    pickup_name: "Explosive Charges",
+    count_width: 2,
+    flags: IT_STAY_COOP | IT_KEY,
+    precaches: "",
+  }),
+
+  /*QUAKED key_yellow_key (0 .5 .8) (-16 -16 -16) (16 16 16)
+   */
+  mkItem({
+    classname: "key_yellow_key",
+    pickup: Pickup_Key,
+    drop: Drop_General,
+    pickup_sound: "items/pkup.wav",
+    world_model: "models/items/n64/yellow_key/tris.md2",
+    world_model_flags: EF_ROTATE,
+    icon: "n64/i_yellow_key",
+    pickup_name: "Yellow Key",
+    count_width: 2,
+    flags: IT_STAY_COOP | IT_KEY,
+    precaches: "",
+  }),
+
+  /*QUAKED key_power_core (0 .5 .8) (-16 -16 -16) (16 16 16)
+   */
+  mkItem({
+    classname: "key_power_core",
+    pickup: Pickup_Key,
+    drop: Drop_General,
+    pickup_sound: "items/pkup.wav",
+    world_model: "models/items/n64/power_core/tris.md2",
+    world_model_flags: EF_ROTATE,
+    icon: "k_pyramid",
+    pickup_name: "Power Core",
+    count_width: 2,
+    flags: IT_STAY_COOP | IT_KEY,
+    precaches: "",
+  }),
+
+  //
+  // CTF FLAGS (src/ctf/g_items.ts). The pickup/drop hooks and the
+  // CTFFlagSetup think live in g_ctf.ts; this file owns only the two rows.
+  //
+  // ctf/g_items.c's CTFDrop_Flag returns qboolean; g_ctf.ts keeps that
+  // signature, but gitem_t.drop is `(ent, item) => void`, so the row wraps
+  // it. The return value is discarded in the C too (Cmd_Drop_f ignores it),
+  // so nothing is lost.
+  //
+
+  /*QUAKED item_flag_team1 (1 0.2 0) (-16 -16 -24) (16 16 32)
+   */
+  mkItem({
+    classname: "item_flag_team1",
+    pickup: CTFPickup_Flag,
+    drop: (ent: EdictT, item: GItemT): void => {
+      CTFDrop_Flag(ent, item);
+    },
+    pickup_sound: "ctf/flagtk.wav",
+    world_model: "players/male/flag1.md2",
+    world_model_flags: EF_FLAG1,
+    icon: "i_ctf1",
+    pickup_name: "Red Flag",
+    count_width: 2,
+    precaches: "ctf/flagcap.wav",
+  }),
+
+  /*QUAKED item_flag_team2 (1 0.2 0) (-16 -16 -24) (16 16 32)
+   */
+  mkItem({
+    classname: "item_flag_team2",
+    pickup: CTFPickup_Flag,
+    drop: (ent: EdictT, item: GItemT): void => {
+      CTFDrop_Flag(ent, item);
+    },
+    pickup_sound: "ctf/flagtk.wav",
+    world_model: "players/male/flag2.md2",
+    world_model_flags: EF_FLAG2,
+    icon: "i_ctf2",
+    pickup_name: "Blue Flag",
+    count_width: 2,
+    precaches: "ctf/flagcap.wav",
+  }),
+
   // end of list marker
   mkItem({}),
 ]);
@@ -2890,8 +3131,44 @@ SetItemNames
 Called by worldspawn
 ===============
 */
+/*
+The number of ITEMLIST rows this module shipped with BEFORE the re-release
+content port appended to it. Read only by SetItemNames, below.
+*/
+const ITEMS_BEFORE_RERELEASE_PORT = 63;
+
 export function SetItemNames(): void {
-  for (let i = 0; i < game.num_items; i++) {
+  /*
+  CS_ITEMS is written for every item in the table, exactly as vanilla's
+  SetItemNames does -- but "every item in the table" is now a bigger number
+  than it was in 1997, because the re-release content port appended rows to
+  ITEMLIST so this ruleset can spawn what re-release maps place.
+
+  Those extra names are re-release content, and a NARROW session is by
+  definition a 1997-content session (sv_init.ts's content-driven layout
+  choice), so it must not see them. This is the same gate, read through the
+  same hook, that SP_worldspawn uses for CS_SKYROTATE: wide sessions get the
+  re-release form, narrow sessions get the exact 1997 bytes.
+
+  It is not cosmetic. Measured on xswamp under this module: emitting the
+  extra names unconditionally added 24 configstrings, which pushed the
+  connection handshake into one more `cmd configstrings` batch and changed
+  the rendered frame -- 5468 pixels, on a map whose entities are otherwise
+  bit-identical. Capping the loop here restored the frame to the byte-
+  identical control hash, and that experiment is what proved the extra names
+  were the ONLY thing in this whole port that a 1997 session could observe.
+
+  The appended rows keep their ITEMLIST indices in both layouts, so
+  ITEM_INDEX, the inventory array and every pickup path are unaffected; only
+  the pickup-name configstring is withheld. A narrow session cannot place
+  these items anyway -- no 1997 map references them.
+  */
+  const count =
+    gi.extended_layout?.() === true
+      ? game.num_items
+      : Math.min(game.num_items, ITEMS_BEFORE_RERELEASE_PORT);
+
+  for (let i = 0; i < count; i++) {
     const it = ITEMLIST[i];
     gi.configstring(CS_ITEMS + i, it.pickup_name ?? "");
   }

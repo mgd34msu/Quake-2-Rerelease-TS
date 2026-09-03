@@ -86,6 +86,7 @@ import {
   type CsurfaceT,
   type CvarT,
   DF_INFINITE_AMMO,
+  DF_NO_STACK_DOUBLE,
   DF_WEAPONS_STAY,
   EF_BLASTER,
   EF_HYPERBLASTER,
@@ -96,12 +97,18 @@ import {
   MZ_CHAINGUN1,
   MZ_GRENADE,
   MZ_HYPERBLASTER,
+  MZ_ETF_RIFLE,
+  MZ_HEATBEAM,
+  MZ_IONRIPPER,
   MZ_MACHINEGUN,
+  MZ_PHALANX,
   MZ_RAILGUN,
   MZ_ROCKET,
   MZ_SHOTGUN,
   MZ_SILENCED,
   MZ_SSHOTGUN,
+  MZ_TRACKER,
+  EF_IONRIPPER,
   PITCH,
   PMF_DUCKED,
   PRINT_HIGH,
@@ -110,7 +117,7 @@ import {
   TempEventT,
   YAW,
 } from "../shared/q_shared";
-import { type Edict, SolidT, SVF_NOCLIENT } from "./game";
+import { type Edict, SolidT, SVF_DAMAGEABLE, SVF_MONSTER, SVF_NOCLIENT } from "./game";
 import { T_Damage } from "./g_combat";
 import { CTF_TEAM_ANYTEAM, ctf_hook_abort, ctf_SafePrint, ctf_validateplayer } from "./g_ctffunc";
 import { Add_Ammo, Drop_Item, FindItem, ITEM_INDEX, SetRespawn } from "./g_items";
@@ -147,11 +154,31 @@ import {
   svc_temp_entity,
   WeaponstateT,
   world,
+  AmmoT,
+  MOD_CHAINFIST,
 } from "./g_local";
 import { RuneWeaponThinkHook } from "./g_runes";
 import { MatchStatesT, matchstate } from "./g_tourney";
 import { G_ProjectSource, G_Spawn, vectoangles } from "./g_utils";
 import { fire_bfg, fire_blaster, fire_bullet, fire_grenade, fire_grenade2, fire_rail, fire_rocket, fire_shotgun } from "./g_weapon";
+// RERELEASE CONTENT PORT -- the mission-pack projectiles the appended weapon
+// think functions fire. Same module split src/game/p_weapon.ts uses: rogue's
+// and xatrix's projectiles both live in g_newweap.ts there. xatrix's
+// `fire_plasma` (the Phalanx's bolt) is ALIASED here because LM-CTF's own
+// plasma.ts already exports a `fire_plasma` -- its SKWiD plasma gun, a
+// different weapon that happens to share the C name.
+import {
+  fire_flechette,
+  fire_heat,
+  fire_ionripper,
+  fire_plasma as fire_plasma_phalanx,
+  fire_player_melee,
+  fire_prox,
+  fire_tesla,
+  fire_tracker,
+  fire_trap,
+} from "./g_newweap";
+import { G_ProjectSource2 } from "./g_newai";
 import { fire_plasma, PLASMA_SOUND_EMPTY, PLASMA_SOUND_FIRE1, PLASMA_SOUND_FIRE2, Weapon_PLASMA_Generic } from "./plasma";
 
 // ---------------------------------------------------------------------
@@ -187,6 +214,20 @@ const DEFAULT_SSHOTGUN_COUNT = 20;
 // globals in the C, so plain (unexported) module-locals here.
 let is_quad = false;
 let is_silenced = 0;
+
+// ROGUE -- `static byte damage_multiplier;`. RERELEASE CONTENT PORT: the
+// rerelease weapons in g_newweap.ts stack Quad Damage with rogue's Double
+// Damage powerup through P_DamageModifier below. LM-CTF's own weapons keep
+// reading `is_quad` exactly as they did (Think_Weapon still sets it from
+// quad_framenum every frame); nothing in LM-CTF's weapon set calls
+// P_DamageModifier, so this is inert for 1997 content.
+let damage_multiplier = 1;
+
+// xatrix/p_weapon.c: `// RAFAEL` -- `static qboolean is_quadfire;`. Set from
+// the DualFire Damage timer in Think_Weapon below and read by the weapon
+// think functions that double their shot while it runs. A 1997 map places no
+// item_quadfire, so quadfire_framenum stays 0 and this stays false.
+let is_quadfire = false;
 
 function cvarNum(c: CvarT | null): number {
   return c === null ? 0 : c.value;
@@ -517,6 +558,9 @@ export function Think_Weapon(ent: EdictT): void {
   if (client === null) return;
 
   is_quad = client.quad_framenum > level.framenum;
+  // xatrix/p_weapon.c: `// RAFAEL` -- the DualFire Damage flag, refreshed
+  // alongside LM-CTF's own `is_quad` above.
+  is_quadfire = client.quadfire_framenum > level.framenum;
 
   // if just died, put the weapon away
   if (ent.health < 1) {
@@ -2219,3 +2263,947 @@ export function Weapon_Plasma(ent: EdictT): void {
   Weapon_PLASMA_Generic(ent, 3, 11, 46, 51, pause_frames, fire_frames, weapon_plasma_fire);
 }
 // END
+
+// ROGUE
+//========
+// P_DamageModifier -- stacks Quad Damage and rogue's Double Damage powerup
+// into a single multiplier; sets the module-level `is_quad` flag (now
+// really "damage is boosted", read by every weapon fire function) and
+// returns the multiplier.
+//========
+// non-static in C (g_newweap.c calls it directly to get fire_nuke's
+// damage_modifier) -- exported to match.
+export function P_DamageModifier(ent: EdictT): number {
+  const client = ent.client;
+  if (client === null) return 1; // defensive; C assumes ent->client is set
+
+  is_quad = false;
+  damage_multiplier = 1;
+
+  if (client.quad_framenum > level.framenum) {
+    damage_multiplier *= 4;
+    is_quad = true;
+
+    // if we're quad and DF_NO_STACK_DOUBLE is on, return now.
+    if ((dmFlags() & DF_NO_STACK_DOUBLE) !== 0) return damage_multiplier;
+  }
+  if (client.double_framenum > level.framenum) {
+    if (cvarNum(gameCvars.deathmatch) !== 0 || damage_multiplier === 1) {
+      damage_multiplier *= 2;
+      is_quad = true;
+    }
+  }
+
+  return damage_multiplier;
+}
+// ROGUE
+
+// ROGUE -- P_ProjectSource with an extra `up` vector, used by the pack's
+// grenade-family and ETF rifle fire functions.
+function P_ProjectSource2(
+  client: GClientT,
+  point: Vec3,
+  distance: Vec3,
+  forward: Vec3,
+  right: Vec3,
+  up: Vec3,
+  result: Vec3,
+): void {
+  const _distance = vec3();
+  VectorCopy(distance, _distance);
+  if (client.pers.hand === LEFT_HANDED) _distance[1] *= -1;
+  else if (client.pers.hand === CENTER_HANDED) _distance[1] = 0;
+  G_ProjectSource2(point, _distance, forward, right, up, result);
+}
+
+//========
+// Throw_Generic -- Weapon_Generic's counterpart for hold-to-cook throwables.
+// baseq2's Weapon_Grenade above is left on its own hand-rolled state machine
+// (see this file's header note 1); this drives the two NEW throwables,
+// Weapon_Prox and Weapon_Tesla, exactly as rogue/p_weapon.c does.
+//
+// Bug-for-bug from rogue/p_weapon.c: `fire(ent, true)` is called with
+// held=true at BOTH the "detonate in hand" branch AND the normal release
+// (FRAME_THROW_FIRE) branch. Neither prox nor tesla reads `held`, so this
+// has no observable effect here -- preserved so the code matches the C.
+//========
+function Throw_Generic(
+  ent: EdictT,
+  FRAME_FIRE_LAST: number,
+  FRAME_IDLE_LAST: number,
+  FRAME_THROW_SOUND: number,
+  FRAME_THROW_HOLD: number,
+  FRAME_THROW_FIRE: number,
+  pause_frames: number[],
+  EXPLODE: number,
+  fire: (ent: EdictT, held: boolean) => void,
+): void {
+  const client = ent.client;
+  if (client === null) return;
+
+  const FRAME_IDLE_FIRST = FRAME_FIRE_LAST + 1;
+
+  if (client.newweapon !== null && client.weaponstate === WeaponstateT.WEAPON_READY) {
+    ChangeWeapon(ent);
+    return;
+  }
+
+  if (client.weaponstate === WeaponstateT.WEAPON_ACTIVATING) {
+    client.weaponstate = WeaponstateT.WEAPON_READY;
+    client.ps.gunframe = FRAME_IDLE_FIRST;
+    return;
+  }
+
+  if (client.weaponstate === WeaponstateT.WEAPON_READY) {
+    if (((client.latched_buttons | client.buttons) & BUTTON_ATTACK) !== 0) {
+      client.latched_buttons &= ~BUTTON_ATTACK;
+      if (client.pers.inventory[client.ammo_index] !== 0) {
+        client.ps.gunframe = 1;
+        client.weaponstate = WeaponstateT.WEAPON_FIRING;
+        client.grenade_time = 0;
+      } else {
+        if (level.time >= ent.pain_debounce_time) {
+          gi.sound(ent, CHAN_VOICE, gi.soundindex("weapons/noammo.wav"), 1, ATTN_NORM, 0);
+          ent.pain_debounce_time = level.time + 1;
+        }
+        NoAmmoWeaponChange(ent);
+      }
+      return;
+    }
+
+    if (client.ps.gunframe === FRAME_IDLE_LAST) {
+      client.ps.gunframe = FRAME_IDLE_FIRST;
+      return;
+    }
+
+    for (const pf of pause_frames) {
+      if (client.ps.gunframe === pf) {
+        // rand()&15, see Weapon_Generic's identical comment
+        if (Math.floor(Math.random() * 16) !== 0) return;
+      }
+    }
+
+    client.ps.gunframe++;
+    return;
+  }
+
+  if (client.weaponstate === WeaponstateT.WEAPON_FIRING) {
+    if (client.ps.gunframe === FRAME_THROW_SOUND) {
+      gi.sound(ent, CHAN_WEAPON, gi.soundindex("weapons/hgrena1b.wav"), 1, ATTN_NORM, 0);
+    }
+
+    if (client.ps.gunframe === FRAME_THROW_HOLD) {
+      if (client.grenade_time === 0) {
+        client.grenade_time = level.time + GRENADE_TIMER + 0.2;
+        const weapon = client.pers.weapon;
+        if (weapon !== null && weapon.tag === AmmoT.AMMO_GRENADES) {
+          client.weapon_sound = gi.soundindex("weapons/hgrenc1b.wav");
+        }
+      }
+
+      // they waited too long, detonate it in their hand
+      if (EXPLODE !== 0 && !client.grenade_blew_up && level.time >= client.grenade_time) {
+        client.weapon_sound = 0;
+        fire(ent, true);
+        client.grenade_blew_up = true;
+      }
+
+      if ((client.buttons & BUTTON_ATTACK) !== 0) return;
+
+      if (client.grenade_blew_up) {
+        if (level.time >= client.grenade_time) {
+          client.ps.gunframe = FRAME_FIRE_LAST;
+          client.grenade_blew_up = false;
+        } else {
+          return;
+        }
+      }
+    }
+
+    if (client.ps.gunframe === FRAME_THROW_FIRE) {
+      client.weapon_sound = 0;
+      fire(ent, true);
+    }
+
+    if (client.ps.gunframe === FRAME_FIRE_LAST && level.time < client.grenade_time) return;
+
+    client.ps.gunframe++;
+
+    if (client.ps.gunframe === FRAME_IDLE_FIRST) {
+      client.grenade_time = 0;
+      client.weaponstate = WeaponstateT.WEAPON_READY;
+    }
+  }
+}
+
+//======================================================================
+// RERELEASE CONTENT PORT -- the mission-pack player weapons the appended
+// itemlist rows point at (rogue/p_weapon.c and xatrix/p_weapon.c, ported
+// from src/game/p_weapon.ts). Nothing LM-CTF already ships calls any of
+// them: they are reachable only by picking up one of the new weapon items,
+// which only a re-release map places.
+//======================================================================
+
+export function Weapon_Tesla(ent: EdictT): void {
+  const client = ent.client;
+  const pause_frames = [21];
+
+  if (client !== null) {
+    if (client.ps.gunframe > 1 && client.ps.gunframe < 9) {
+      client.ps.gunindex = gi.modelindex("models/weapons/v_tesla2/tris.md2");
+    } else {
+      client.ps.gunindex = gi.modelindex("models/weapons/v_tesla/tris.md2");
+    }
+  }
+
+  Throw_Generic(ent, 8, 32, 99, 1, 2, pause_frames, 0, weapon_grenade_fire);
+}
+
+// ROGUE -- same frame numbers and fire function as the grenade launcher;
+// the prox launcher differs only in the item's `tag`, which the fire
+// function dispatches on.
+export function Weapon_ProxLauncher(ent: EdictT): void {
+  const pause_frames = [34, 51, 59];
+  const fire_frames = [6];
+
+  Weapon_Generic(ent, 5, 16, 59, 64, pause_frames, fire_frames, weapon_grenadelauncher_fire);
+}
+//======================================================================
+// RERELEASE CONTENT PORT -- ROGUE MODS BELOW (rogue/p_weapon.c)
+//======================================================================
+
+//
+// CHAINFIST
+//
+const CHAINFIST_REACH = 64;
+
+function weapon_chainfist_fire(ent: EdictT): void {
+  const client = ent.client;
+  if (client === null) return;
+  const weapon = client.pers.weapon;
+
+  let damage = 15;
+  if (cvarNum(gameCvars.deathmatch)) damage = 30;
+
+  if (is_quad) damage *= damage_multiplier;
+
+  const forward = vec3();
+  const right = vec3();
+  const up = vec3();
+  AngleVectors(client.v_angle, forward, right, up);
+
+  // kick back
+  VectorScale(forward, -2, client.kick_origin);
+  client.kick_angles[0] = -1;
+
+  // set start point
+  const offset = vec3(0, 8, ent.viewheight - 4);
+  const start = vec3();
+  P_ProjectSource(client, ent.s.origin, offset, forward, right, start);
+
+  fire_player_melee(ent, start, forward, CHAINFIST_REACH, damage, 100, 1, MOD_CHAINFIST);
+
+  PlayerNoise(ent, start, PNOISE_WEAPON);
+
+  client.ps.gunframe++;
+  if (weapon !== null) client.pers.inventory[client.ammo_index] -= weapon.quantity;
+}
+
+// this spits out some smoke from the motor. it's a two-stroke, you know.
+function chainfist_smoke(ent: EdictT): void {
+  const client = ent.client;
+  if (client === null) return;
+
+  const forward = vec3();
+  const right = vec3();
+  const up = vec3();
+  AngleVectors(client.v_angle, forward, right, up);
+  const offset = vec3(8, 8, ent.viewheight - 4);
+  const tempVec = vec3();
+  P_ProjectSource(client, ent.s.origin, offset, forward, right, tempVec);
+
+  gi.WriteByte(svc_temp_entity);
+  gi.WriteByte(TempEventT.TE_CHAINFIST_SMOKE);
+  gi.WritePosition(tempVec);
+  gi.unicast(ent, false);
+}
+
+export function Weapon_ChainFist(ent: EdictT): void {
+  const client = ent.client;
+  if (client === null) return;
+
+  const pause_frames = [0];
+  const fire_frames = [8, 9, 16, 17, 18, 30, 31];
+
+  let last_sequence = 0;
+
+  // `#define HOLD_FRAMES 0` -- the two `#if HOLD_FRAMES` branches that sit
+  // between the "go idle" and "idle smoke" branches below never compile in
+  // the shipped binary; dropped per PORTING.md's "#if 0 blocks".
+  if (client.ps.gunframe === 13 || client.ps.gunframe === 23) {
+    // end of attack, go idle
+    client.ps.gunframe = 32;
+  } else if (client.ps.gunframe === 42 && Math.floor(Math.random() * 8) !== 0) {
+    // holds for idle sequence
+    if (client.pers.hand !== CENTER_HANDED && random() < 0.4) chainfist_smoke(ent);
+  } else if (client.ps.gunframe === 51 && Math.floor(Math.random() * 8) !== 0) {
+    if (client.pers.hand !== CENTER_HANDED && random() < 0.4) chainfist_smoke(ent);
+  }
+
+  // set the appropriate weapon sound.
+  if (client.weaponstate === WeaponstateT.WEAPON_FIRING) {
+    client.weapon_sound = gi.soundindex("weapons/sawhit.wav");
+  } else if (client.weaponstate === WeaponstateT.WEAPON_DROPPING) {
+    client.weapon_sound = 0;
+  } else {
+    client.weapon_sound = gi.soundindex("weapons/sawidle.wav");
+  }
+
+  Weapon_Generic(ent, 4, 32, 57, 60, pause_frames, fire_frames, weapon_chainfist_fire);
+
+  if ((client.buttons & BUTTON_ATTACK) !== 0) {
+    if (client.ps.gunframe === 13 || client.ps.gunframe === 23 || client.ps.gunframe === 32) {
+      last_sequence = client.ps.gunframe;
+      client.ps.gunframe = 6;
+    }
+  }
+
+  if (client.ps.gunframe === 6) {
+    let chance = random();
+    if (last_sequence === 13) {
+      // if we just did sequence 1, do 2 or 3.
+      chance -= 0.34;
+    } else if (last_sequence === 23) {
+      // if we just did sequence 2, do 1 or 3
+      chance += 0.33;
+    } else if (last_sequence === 32) {
+      // if we just did sequence 3, do 1 or 2
+      if (chance >= 0.33) chance += 0.34;
+    }
+
+    if (chance < 0.33) client.ps.gunframe = 14;
+    else if (chance < 0.66) client.ps.gunframe = 24;
+  }
+}
+
+//
+// Disintegrator
+//
+
+function weapon_tracker_fire(self: EdictT): void {
+  const client = self.client;
+  if (client === null) return;
+  const weapon = client.pers.weapon;
+
+  // PMM - felt a little high at 25
+  const damage = cvarNum(gameCvars.deathmatch) ? 30 : 45;
+  const dmg = is_quad ? damage * damage_multiplier : damage; // pgm
+
+  const mins = vec3(-16, -16, -16);
+  const maxs = vec3(16, 16, 16);
+  const forward = vec3();
+  const right = vec3();
+  AngleVectors(client.v_angle, forward, right, null);
+  const offset = vec3(24, 8, self.viewheight - 8);
+  const start = vec3();
+  P_ProjectSource(client, self.s.origin, offset, forward, right, start);
+
+  // FIXME - can we shorten this? do we need to?
+  const end = vec3();
+  VectorMA(start, 8192, forward, end);
+  let enemy: EdictT | null = null;
+  // PMM - doing two traces .. one point and one box.
+  let tr = gi.trace(start, vec3_origin, vec3_origin, end, self, MASK_SHOT);
+  let hit = traceEdict(tr.ent);
+  if (hit !== world()) {
+    if (
+      ((hit.svflags & SVF_MONSTER) !== 0 || hit.client !== null || (hit.svflags & SVF_DAMAGEABLE) !== 0) &&
+      hit.health > 0
+    ) {
+      enemy = hit;
+    }
+  } else {
+    tr = gi.trace(start, mins, maxs, end, self, MASK_SHOT);
+    hit = traceEdict(tr.ent);
+    if (hit !== world()) {
+      if (
+        ((hit.svflags & SVF_MONSTER) !== 0 || hit.client !== null || (hit.svflags & SVF_DAMAGEABLE) !== 0) &&
+        hit.health > 0
+      ) {
+        enemy = hit;
+      }
+    }
+  }
+
+  VectorScale(forward, -2, client.kick_origin);
+  client.kick_angles[0] = -1;
+
+  fire_tracker(self, start, forward, dmg, 1000, enemy);
+
+  // send muzzle flash
+  gi.WriteByte(svc_muzzleflash);
+  gi.WriteShort(self.s.number);
+  gi.WriteByte(MZ_TRACKER);
+  gi.multicast(self.s.origin, MulticastT.MULTICAST_PVS);
+
+  PlayerNoise(self, start, PNOISE_WEAPON);
+
+  client.ps.gunframe++;
+  if (weapon !== null) client.pers.inventory[client.ammo_index] -= weapon.quantity;
+}
+
+export function Weapon_Disintegrator(ent: EdictT): void {
+  const pause_frames = [14, 19, 23];
+  const fire_frames = [5];
+
+  Weapon_Generic(ent, 4, 9, 29, 34, pause_frames, fire_frames, weapon_tracker_fire);
+}
+
+/*
+======================================================================
+
+ETF RIFLE
+
+======================================================================
+*/
+
+function weapon_etf_rifle_fire(ent: EdictT): void {
+  const client = ent.client;
+  if (client === null) return;
+  const weapon = client.pers.weapon;
+  if (weapon === null) return; // defensive; Think_Weapon only calls weaponthink when pers.weapon is set
+
+  let damage: number;
+  if (cvarNum(gameCvars.deathmatch)) damage = 10;
+  else damage = 10;
+  let kick = 3;
+
+  // PGM - adjusted to use the quantity entry in the weapon structure.
+  if (client.pers.inventory[client.ammo_index] < weapon.quantity) {
+    VectorClear(client.kick_origin);
+    VectorClear(client.kick_angles);
+    client.ps.gunframe = 8;
+
+    if (level.time >= ent.pain_debounce_time) {
+      gi.sound(ent, CHAN_VOICE, gi.soundindex("weapons/noammo.wav"), 1, ATTN_NORM, 0);
+      ent.pain_debounce_time = level.time + 1;
+    }
+    NoAmmoWeaponChange(ent);
+    return;
+  }
+
+  if (is_quad) {
+    damage *= damage_multiplier;
+    kick *= damage_multiplier;
+  }
+
+  for (let i = 0; i < 3; i++) {
+    client.kick_origin[i] = crandom() * 0.85;
+    client.kick_angles[i] = crandom() * 0.85;
+  }
+
+  // get start / end positions
+  // C computes `angles` here (v_angle + kick_angles) but never actually
+  // uses it -- AngleVectors is called with client.v_angle directly two
+  // lines later. Preserved as dead computation, exactly as written.
+  const angles = vec3();
+  VectorAdd(client.v_angle, client.kick_angles, angles);
+  const forward = vec3();
+  const right = vec3();
+  const up = vec3();
+  AngleVectors(client.v_angle, forward, right, up);
+
+  // FIXME - set correct frames for different offsets.
+  const offset = vec3();
+  if (client.ps.gunframe === 6) {
+    // right barrel
+    VectorSet(offset, 15, 8, -8);
+  } else {
+    // left barrel
+    VectorSet(offset, 15, 6, -8);
+  }
+
+  const tempPt = vec3();
+  VectorCopy(ent.s.origin, tempPt);
+  tempPt[2] += ent.viewheight;
+  const start = vec3();
+  P_ProjectSource2(client, tempPt, offset, forward, right, up, start);
+  fire_flechette(ent, start, forward, damage, 750, kick);
+
+  // send muzzle flash
+  gi.WriteByte(svc_muzzleflash);
+  gi.WriteShort(ent.s.number);
+  gi.WriteByte(MZ_ETF_RIFLE);
+  gi.multicast(ent.s.origin, MulticastT.MULTICAST_PVS);
+
+  PlayerNoise(ent, start, PNOISE_WEAPON);
+
+  client.ps.gunframe++;
+  client.pers.inventory[client.ammo_index] -= weapon.quantity;
+
+  client.anim_priority = ANIM_ATTACK;
+  if ((client.ps.pmove.pm_flags & PMF_DUCKED) !== 0) {
+    ent.s.frame = FRAME_crattak1 - 1;
+    client.anim_end = FRAME_crattak9;
+  } else {
+    ent.s.frame = FRAME_attack1 - 1;
+    client.anim_end = FRAME_attack8;
+  }
+}
+
+export function Weapon_ETF_Rifle(ent: EdictT): void {
+  const client = ent.client;
+  const pause_frames = [18, 28];
+  const fire_frames = [6, 7];
+
+  // note - if you change the fire frame number, fix the offset in weapon_etf_rifle_fire.
+  if (client !== null && client.weaponstate === WeaponstateT.WEAPON_FIRING) {
+    if (client.pers.inventory[client.ammo_index] <= 0) client.ps.gunframe = 8;
+  }
+
+  Weapon_Generic(ent, 4, 7, 37, 41, pause_frames, fire_frames, weapon_etf_rifle_fire);
+
+  if (client !== null && client.ps.gunframe === 8 && (client.buttons & BUTTON_ATTACK) !== 0) {
+    client.ps.gunframe = 6;
+  }
+}
+
+// pgm - this now uses ent->client->pers.weapon->quantity like all the other weapons
+const HEATBEAM_DM_DMG = 15;
+const HEATBEAM_SP_DMG = 15;
+
+function Heatbeam_Fire(ent: EdictT): void {
+  const client = ent.client;
+  if (client === null) return;
+
+  // for comparison, the hyperblaster is 15/20
+  // jim requested more damage, so try 15/15 --- PGM 07/23/98
+  let damage = cvarNum(gameCvars.deathmatch) ? HEATBEAM_DM_DMG : HEATBEAM_SP_DMG;
+  let kick = cvarNum(gameCvars.deathmatch) ? 75 : 30; // really knock 'em around in deathmatch
+
+  client.ps.gunframe++;
+  client.ps.gunindex = gi.modelindex("models/weapons/v_beamer2/tris.md2");
+
+  if (is_quad) {
+    damage *= damage_multiplier;
+    kick *= damage_multiplier;
+  }
+
+  VectorClear(client.kick_origin);
+  VectorClear(client.kick_angles);
+
+  // get start / end positions
+  const forward = vec3();
+  const right = vec3();
+  const up = vec3();
+  AngleVectors(client.v_angle, forward, right, up);
+
+  // This offset is the "view" offset for the beam start (used by trace)
+  const startOffset = vec3(7, 2, ent.viewheight - 3);
+  const start = vec3();
+  P_ProjectSource(client, ent.s.origin, startOffset, forward, right, start);
+
+  // This offset is the entity offset
+  const entOffset = vec3(2, 7, -3);
+
+  fire_heat(ent, start, forward, entOffset, damage, kick, false);
+
+  // send muzzle flash
+  gi.WriteByte(svc_muzzleflash);
+  gi.WriteShort(ent.s.number);
+  gi.WriteByte(MZ_HEATBEAM | is_silenced);
+  gi.multicast(ent.s.origin, MulticastT.MULTICAST_PVS);
+
+  PlayerNoise(ent, start, PNOISE_WEAPON);
+
+  if (!(dmFlags() & DF_INFINITE_AMMO)) {
+    const weapon = client.pers.weapon;
+    if (weapon !== null) client.pers.inventory[client.ammo_index] -= weapon.quantity;
+  }
+
+  client.anim_priority = ANIM_ATTACK;
+  if ((client.ps.pmove.pm_flags & PMF_DUCKED) !== 0) {
+    ent.s.frame = FRAME_crattak1 - 1;
+    client.anim_end = FRAME_crattak9;
+  } else {
+    ent.s.frame = FRAME_attack1 - 1;
+    client.anim_end = FRAME_attack8;
+  }
+}
+
+export function Weapon_Heatbeam(ent: EdictT): void {
+  const client = ent.client;
+  const pause_frames = [35];
+  const fire_frames = [9, 10, 11, 12];
+
+  if (client !== null) {
+    if (client.weaponstate === WeaponstateT.WEAPON_FIRING) {
+      client.weapon_sound = gi.soundindex("weapons/bfg__l1a.wav");
+      if (client.pers.inventory[client.ammo_index] >= 2 && (client.buttons & BUTTON_ATTACK) !== 0) {
+        if (client.ps.gunframe >= 13) {
+          client.ps.gunframe = 9;
+          client.ps.gunindex = gi.modelindex("models/weapons/v_beamer2/tris.md2");
+        } else {
+          client.ps.gunindex = gi.modelindex("models/weapons/v_beamer2/tris.md2");
+        }
+      } else {
+        client.ps.gunframe = 13;
+        client.ps.gunindex = gi.modelindex("models/weapons/v_beamer/tris.md2");
+      }
+    } else {
+      client.ps.gunindex = gi.modelindex("models/weapons/v_beamer/tris.md2");
+      client.weapon_sound = 0;
+    }
+  }
+
+  Weapon_Generic(ent, 8, 12, 39, 44, pause_frames, fire_frames, Heatbeam_Fire);
+}
+
+//======================================================================
+// RERELEASE CONTENT PORT -- XATRIX MODS BELOW (xatrix/p_weapon.c)
+//======================================================================
+
+// xatrix/p_weapon.c: `// RAFAEL 14-APR-98` -- HyperBlaster/Railgun's `use`
+// function is swapped for Use_Weapon2, which redirects to the matching
+// xatrix upgrade weapon (Ionripper/Phalanx) when the player already has it
+// and its ammo, exactly like base Quake 2's own weapon-swap items.
+export function Use_Weapon2(ent: EdictT, item: GItemT): void {
+  const client = ent.client;
+  if (client === null) return;
+
+  if (item.pickup_name === "HyperBlaster") {
+    if (item === client.pers.weapon) {
+      let candidate = requireItem(FindItem("Ionripper"));
+      const index = ITEM_INDEX(candidate);
+      if (!client.pers.inventory[index]) candidate = requireItem(FindItem("HyperBlaster"));
+      item = candidate;
+    }
+  } else if (item.pickup_name === "Railgun") {
+    // C dereferences item->ammo/nextitem->ammo unconditionally here; every
+    // real caller passes the Railgun or Phalanx item, both of which always
+    // have a non-null ammo string in the item table.
+    let ammo_item = requireItem(FindItem(item.ammo ?? ""));
+    let ammo_index = ITEM_INDEX(ammo_item);
+    if (!client.pers.inventory[ammo_index]) {
+      const nextitem = requireItem(FindItem("Phalanx"));
+      ammo_item = requireItem(FindItem(nextitem.ammo ?? ""));
+      ammo_index = ITEM_INDEX(ammo_item);
+      if (client.pers.inventory[ammo_index]) {
+        let candidate = requireItem(FindItem("Phalanx"));
+        const index = ITEM_INDEX(candidate);
+        if (!client.pers.inventory[index]) candidate = requireItem(FindItem("Railgun"));
+        item = candidate;
+      }
+    } else if (item === client.pers.weapon) {
+      let candidate = requireItem(FindItem("Phalanx"));
+      const index = ITEM_INDEX(candidate);
+      if (!client.pers.inventory[index]) candidate = requireItem(FindItem("Railgun"));
+      item = candidate;
+    }
+  }
+
+  // see if we're already using it
+  if (item === client.pers.weapon) return;
+
+  if (item.ammo !== null && item.ammo.length > 0) {
+    const ammo_item = requireItem(FindItem(item.ammo));
+    const ammo_index = ITEM_INDEX(ammo_item);
+    if (!client.pers.inventory[ammo_index] && !cvarNum(gameCvars.g_select_empty)) {
+      gi.cprintf(ent, PRINT_HIGH, `No ${ammo_item.pickup_name} for ${item.pickup_name}.\n`);
+      return;
+    }
+  }
+
+  // change to this weapon when down
+  client.newweapon = item;
+}
+
+/*
+======================================================================
+
+RIPPERGUN (Ionripper)
+
+======================================================================
+*/
+
+function weapon_ionripper_fire(ent: EdictT): void {
+  const client = ent.client;
+  if (client === null) return;
+
+  let damage: number;
+  let kick: number;
+  if (cvarNum(gameCvars.deathmatch)) {
+    // tone down for deathmatch
+    damage = 30;
+    kick = 40;
+  } else {
+    damage = 50;
+    kick = 60;
+  }
+
+  // MERGE NOTE: xatrix says `*= 4` here; `damage_multiplier` is used so
+  // rogue's Double Damage stacks the same way it does on every other
+  // weapon in the merged module (see this file's header note 3).
+  if (is_quad) {
+    damage *= damage_multiplier;
+    kick *= damage_multiplier;
+  }
+
+  const tempang = vec3();
+  VectorCopy(client.v_angle, tempang);
+  tempang[YAW] += crandom();
+
+  const forward = vec3();
+  const right = vec3();
+  AngleVectors(tempang, forward, right, null);
+
+  VectorScale(forward, -3, client.kick_origin);
+  client.kick_angles[0] = -3;
+
+  const offset = vec3(16, 7, ent.viewheight - 8);
+  const start = vec3();
+  P_ProjectSource(client, ent.s.origin, offset, forward, right, start);
+
+  fire_ionripper(ent, start, forward, damage, 500, EF_IONRIPPER);
+
+  // send muzzle flash
+  gi.WriteByte(svc_muzzleflash);
+  gi.WriteShort(ent.s.number);
+  gi.WriteByte(MZ_IONRIPPER | is_silenced);
+  gi.multicast(ent.s.origin, MulticastT.MULTICAST_PVS);
+
+  client.ps.gunframe++;
+  PlayerNoise(ent, start, PNOISE_WEAPON);
+
+  if (!(dmFlags() & DF_INFINITE_AMMO)) {
+    const weaponQuantity = client.pers.weapon === null ? 0 : client.pers.weapon.quantity;
+    client.pers.inventory[client.ammo_index] -= weaponQuantity;
+  }
+
+  if (client.pers.inventory[client.ammo_index] < 0) client.pers.inventory[client.ammo_index] = 0;
+}
+
+export function Weapon_Ionripper(ent: EdictT): void {
+  const pause_frames = [36];
+  const fire_frames = [5];
+
+  Weapon_Generic(ent, 4, 6, 36, 39, pause_frames, fire_frames, weapon_ionripper_fire);
+
+  if (is_quadfire) Weapon_Generic(ent, 4, 6, 36, 39, pause_frames, fire_frames, weapon_ionripper_fire);
+}
+
+/*
+======================================================================
+
+PHALANX
+
+======================================================================
+*/
+
+function weapon_phalanx_fire(ent: EdictT): void {
+  const client = ent.client;
+  if (client === null) return;
+
+  let damage = (70 + random() * 10.0) | 0;
+  let radius_damage = 120;
+  const damage_radius = 120;
+
+  // MERGE NOTE: see weapon_ionripper_fire above.
+  if (is_quad) {
+    damage *= damage_multiplier;
+    radius_damage *= damage_multiplier;
+  }
+
+  const forward = vec3();
+  const right = vec3();
+  AngleVectors(client.v_angle, forward, right, null);
+
+  VectorScale(forward, -2, client.kick_origin);
+  client.kick_angles[0] = -2;
+
+  const offset = vec3(0, 8, ent.viewheight - 8);
+  const start = vec3();
+  P_ProjectSource(client, ent.s.origin, offset, forward, right, start);
+
+  if (client.ps.gunframe === 8) {
+    const v = vec3();
+    v[PITCH] = client.v_angle[PITCH];
+    v[YAW] = client.v_angle[YAW] - 1.5;
+    v[ROLL] = client.v_angle[ROLL];
+    const up = vec3();
+    AngleVectors(v, forward, right, up);
+
+    fire_plasma_phalanx(ent, start, forward, damage, 725, damage_radius, 30);
+
+    if (!(dmFlags() & DF_INFINITE_AMMO)) client.pers.inventory[client.ammo_index]--;
+  } else {
+    const v = vec3();
+    v[PITCH] = client.v_angle[PITCH];
+    v[YAW] = client.v_angle[YAW] + 1.5;
+    v[ROLL] = client.v_angle[ROLL];
+    const up = vec3();
+    AngleVectors(v, forward, right, up);
+    fire_plasma_phalanx(ent, start, forward, damage, 725, damage_radius, radius_damage);
+
+    // send muzzle flash
+    gi.WriteByte(svc_muzzleflash);
+    gi.WriteShort(ent.s.number);
+    gi.WriteByte(MZ_PHALANX | is_silenced);
+    gi.multicast(ent.s.origin, MulticastT.MULTICAST_PVS);
+
+    PlayerNoise(ent, start, PNOISE_WEAPON);
+  }
+
+  client.ps.gunframe++;
+}
+
+export function Weapon_Phalanx(ent: EdictT): void {
+  const pause_frames = [29, 42, 55];
+  const fire_frames = [7, 8];
+
+  Weapon_Generic(ent, 5, 20, 58, 63, pause_frames, fire_frames, weapon_phalanx_fire);
+
+  if (is_quadfire) Weapon_Generic(ent, 5, 20, 58, 63, pause_frames, fire_frames, weapon_phalanx_fire);
+}
+
+/*
+======================================================================
+
+TRAP
+
+======================================================================
+*/
+
+// xatrix/p_weapon.c defines `TRAP_TIMER 5.0` / `TRAP_MINSPEED 300` /
+// `TRAP_MAXSPEED 700` alongside weapon_trap_fire, but every actual use in
+// both weapon_trap_fire (the speed calc) and Weapon_Trap (the gunframe-11
+// re-arm timer) references the pre-existing GRENADE_TIMER/GRENADE_MINSPEED/
+// GRENADE_MAXSPEED constants instead -- the TRAP_* trio is dead code.
+// Preserved as a documented no-op rather than defined-and-unused consts.
+
+function weapon_trap_fire(ent: EdictT, held: boolean): void {
+  const client = ent.client;
+  if (client === null) return;
+
+  let damage = 125;
+  const radius = damage + 40;
+  // MERGE NOTE: see weapon_ionripper_fire above.
+  if (is_quad) damage *= damage_multiplier;
+
+  const offset = vec3(8, 8, ent.viewheight - 8);
+  const forward = vec3();
+  const right = vec3();
+  AngleVectors(client.v_angle, forward, right, null);
+  const start = vec3();
+  P_ProjectSource(client, ent.s.origin, offset, forward, right, start);
+
+  const timer = client.grenade_time - level.time;
+  const speed =
+    (GRENADE_MINSPEED + (GRENADE_TIMER - timer) * ((GRENADE_MAXSPEED - GRENADE_MINSPEED) / GRENADE_TIMER)) | 0;
+  fire_trap(ent, start, forward, damage, speed, timer, radius, held);
+
+  // xatrix/p_weapon.c: "you don't get infinite traps! ZOID" -- the
+  // DF_INFINITE_AMMO guard other grenade-style weapons use is commented out
+  // in the C for this one; every fire always consumes a trap.
+  client.pers.inventory[client.ammo_index]--;
+
+  client.grenade_time = level.time + 1.0;
+}
+
+export function Weapon_Trap(ent: EdictT): void {
+  const client = ent.client;
+  if (client === null) return;
+
+  if (client.newweapon !== null && client.weaponstate === WeaponstateT.WEAPON_READY) {
+    ChangeWeapon(ent);
+    return;
+  }
+
+  if (client.weaponstate === WeaponstateT.WEAPON_ACTIVATING) {
+    client.weaponstate = WeaponstateT.WEAPON_READY;
+    client.ps.gunframe = 16;
+    return;
+  }
+
+  if (client.weaponstate === WeaponstateT.WEAPON_READY) {
+    if ((client.latched_buttons | client.buttons) & BUTTON_ATTACK) {
+      client.latched_buttons &= ~BUTTON_ATTACK;
+      if (client.pers.inventory[client.ammo_index]) {
+        client.ps.gunframe = 1;
+        client.weaponstate = WeaponstateT.WEAPON_FIRING;
+        client.grenade_time = 0;
+      } else {
+        if (level.time >= ent.pain_debounce_time) {
+          gi.sound(ent, CHAN_VOICE, gi.soundindex("weapons/noammo.wav"), 1, ATTN_NORM, 0);
+          ent.pain_debounce_time = level.time + 1;
+        }
+        NoAmmoWeaponChange(ent);
+      }
+      return;
+    }
+
+    if (
+      client.ps.gunframe === 29 ||
+      client.ps.gunframe === 34 ||
+      client.ps.gunframe === 39 ||
+      client.ps.gunframe === 48
+    ) {
+      // rand()&15, see the comment in Weapon_Generic
+      if (Math.floor(Math.random() * 16) !== 0) return;
+    }
+
+    if (++client.ps.gunframe > 48) client.ps.gunframe = 16;
+    return;
+  }
+
+  if (client.weaponstate === WeaponstateT.WEAPON_FIRING) {
+    if (client.ps.gunframe === 5) {
+      // xatrix/p_weapon.c: `// RAFAEL 16-APR-98` swaps the borrowed grenade
+      // cock sound for the trap's own.
+      gi.sound(ent, CHAN_WEAPON, gi.soundindex("weapons/trapcock.wav"), 1, ATTN_NORM, 0);
+    }
+
+    if (client.ps.gunframe === 11) {
+      if (!client.grenade_time) {
+        // xatrix/p_weapon.c: reuses GRENADE_TIMER here, not the dead
+        // TRAP_TIMER constant (see the comment above weapon_trap_fire).
+        client.grenade_time = level.time + GRENADE_TIMER + 0.2;
+        // xatrix/p_weapon.c: `// RAFAEL 16-APR-98`
+        client.weapon_sound = gi.soundindex("weapons/traploop.wav");
+      }
+
+      // they waited too long, detonate it in their hand
+      if (!client.grenade_blew_up && level.time >= client.grenade_time) {
+        client.weapon_sound = 0;
+        weapon_trap_fire(ent, true);
+        client.grenade_blew_up = true;
+      }
+
+      if (client.buttons & BUTTON_ATTACK) return;
+
+      if (client.grenade_blew_up) {
+        if (level.time >= client.grenade_time) {
+          client.ps.gunframe = 15;
+          client.grenade_blew_up = false;
+        } else {
+          return;
+        }
+      }
+    }
+
+    if (client.ps.gunframe === 12) {
+      client.weapon_sound = 0;
+      weapon_trap_fire(ent, false);
+      if (client.pers.inventory[client.ammo_index] === 0) NoAmmoWeaponChange(ent);
+    }
+
+    if (client.ps.gunframe === 15 && level.time < client.grenade_time) return;
+
+    client.ps.gunframe++;
+
+    if (client.ps.gunframe === 16) {
+      client.grenade_time = 0;
+      client.weaponstate = WeaponstateT.WEAPON_READY;
+    }
+  }
+}

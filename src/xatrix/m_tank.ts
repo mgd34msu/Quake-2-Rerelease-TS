@@ -10,7 +10,7 @@ TANK
 ==============================================================================
 */
 
-import { AngleVectors, random, VectorCopy, VectorLength, VectorNormalize, VectorSet, VectorSubtract, vec3, type Vec3 } from "../shared/math";
+import { AngleVectors, random, VectorCopy, VectorLength, VectorNormalize, VectorSet, VectorSubtract, vec3, type Vec3, VectorScale } from "../shared/math";
 import {
   ATTN_IDLE,
   ATTN_NORM,
@@ -25,6 +25,8 @@ import {
   MZ2_TANK_ROCKET_1,
   MZ2_TANK_ROCKET_2,
   MZ2_TANK_ROCKET_3,
+  TempEventT,
+  MulticastT,
 } from "../shared/q_shared";
 import {
   AI_BRUTAL,
@@ -40,6 +42,8 @@ import {
   MframeT,
   MmoveT,
   MovetypeT,
+  svc_temp_entity,
+  FRAMETIME,
 } from "./g_local";
 import { SolidT, SVF_DEADMONSTER } from "./game";
 import { ai_charge, ai_move, ai_run, ai_stand, ai_walk, visible } from "./g_ai";
@@ -803,3 +807,98 @@ registerSaveMmove("m_tank:tank_move_attack_post_rocket", tank_move_attack_post_r
 registerSaveMmove("m_tank:tank_move_attack_chain", tank_move_attack_chain);
 registerSaveMmove("m_tank:tank_move_death", tank_move_death);
 registerSaveMmove("m_tank:tank_move_stand", tank_move_stand);
+
+// =========================================================================
+// RERELEASE CONTENT PORT -- monster_tank_stand (m_tank.cpp:1119-1164)
+//
+// PURELY ADDITIVE. Nothing above this line is touched: every vanilla 3.21
+// tank / tank_commander behavior is byte-identical to what it was before.
+//
+// An N64-edition decorative easter egg: a scaled-up tank that just stands
+// and cycles its stand animation in place until it is targeted, then
+// teleports away. Translated from src/kexgame/m_tank.ts's own
+// SP_monster_tank_stand / Think_TankStand (itself the port of the 2023
+// re-release's m_tank.cpp:1119-1164).
+//
+// TRANSLATION NOTES (kexgame -> classic)
+// - Gtime_add(level.time, Gtime_from_hz(10)) -> level.time + FRAMETIME (0.1s
+//   is one server frame, i.e. exactly 10 Hz).
+// - Use_Boss3 (m_boss3.cpp) is assigned as this entity's `use` in the C++.
+//   The classic m_boss3.ts has that function but does NOT export it (it is
+//   module-private there and already registered under "m_boss3:Use_Boss3"),
+//   and m_boss3.ts is not owned by this unit, so the identical body is
+//   duplicated here as `Use_TankStand` -- the established
+//   "duplicated per-file, not imported" convention for un-exported helpers.
+//   Registered under a distinct save name so it cannot collide with
+//   m_boss3.ts's own registration.
+//
+// DOCUMENTED DEGRADATION (protocol 34): the re-release authors this entity
+// at `self.s.scale = 1.5`. Protocol 34 -- the protocol the classic ruleset
+// speaks -- has no per-entity scale field, so nothing about s.scale reaches
+// the client and the model DRAWS at its native size. The value is still set
+// faithfully and is still what sizes the bounding box below (mins/maxs are
+// multiplied by it exactly as in the C++), so all server-side collision,
+// blocking and trace behavior is correct; only the rendered size differs.
+// The re-release's `if (!self.s.scale)` guard is preserved, so a map that
+// sets its own scale key still wins.
+// =========================================================================
+
+/**
+ * m_boss3.cpp `Use_Boss3` -- duplicated locally, see the block comment above.
+ */
+function Use_TankStand(ent: EdictT, _other: EdictT | null, _activator: EdictT | null): void {
+  gi.WriteByte(svc_temp_entity);
+  gi.WriteByte(TempEventT.TE_BOSSTPORT);
+  gi.WritePosition(ent.s.origin);
+  gi.multicast(ent.s.origin, MulticastT.MULTICAST_PVS);
+  G_FreeEdict(ent);
+}
+
+function Think_TankStand(ent: EdictT): void {
+  if (ent.s.frame === FRAME.FRAME_stand30) ent.s.frame = FRAME.FRAME_stand01;
+  else ent.s.frame++;
+  ent.nextthink = level.time + FRAMETIME;
+}
+
+/*QUAKED monster_tank_stand (1 .5 0) (-32 -32 0) (32 32 90)
+
+Just stands and cycles in one place until targeted, then teleports away.
+N64 edition!
+*/
+export function SP_monster_tank_stand(self: EdictT): void {
+  // kexgame's M_AllowSpawn: refuse in deathmatch unless ai_allow_dm_spawn is
+  // set. (m_boss3.ts's SP_monster_boss3_stand -- this entity's vanilla
+  // sibling -- uses the bare `deathmatch` check; the re-release routes every
+  // monster spawn through M_AllowSpawn instead, so that is what is ported.)
+  const ai_allow_dm_spawn = gi.cvar("ai_allow_dm_spawn", "0", 0);
+  if (cvarNum(gameCvars.deathmatch) !== 0 && cvarNum(ai_allow_dm_spawn) === 0) {
+    G_FreeEdict(self);
+    return;
+  }
+
+  self.movetype = MovetypeT.MOVETYPE_STEP;
+  self.solid = SolidT.SOLID_BBOX;
+  self.model = "models/monsters/tank/tris.md2";
+  self.s.modelindex = gi.modelindex(self.model);
+  self.s.frame = FRAME.FRAME_stand01;
+  self.s.skinnum = 2;
+
+  gi.soundindex("misc/bigtele.wav");
+
+  VectorSet(self.mins, -32, -32, -16);
+  VectorSet(self.maxs, 32, 32, 64);
+
+  // s.scale is stored and drives the bbox below; protocol 34 cannot carry it
+  // to the client, so the model renders unscaled. See the block comment.
+  if (!self.s.scale) self.s.scale = 1.5;
+
+  VectorScale(self.mins, self.s.scale, self.mins);
+  VectorScale(self.maxs, self.s.scale, self.maxs);
+
+  self.use = Use_TankStand;
+  self.think = Think_TankStand;
+  self.nextthink = level.time + FRAMETIME;
+  gi.linkentity(self);
+}
+registerSaveFunction("m_tank:Use_TankStand", Use_TankStand);
+registerSaveFunction("m_tank:Think_TankStand", Think_TankStand);

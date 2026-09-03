@@ -255,6 +255,24 @@ export const FIELDS: FieldSpawn[] = [
   { key: "bmodel_anim_alt_style", type: "F_INT", target: "bmodel_anim", prop: "alt_style" },
   { key: "bmodel_anim_alt_speed", type: "F_INT", target: "bmodel_anim", prop: "alt_speed" },
   { key: "bmodel_anim_alt_nowrap", type: "F_BOOL", target: "bmodel_anim", prop: "alt_nowrap" },
+
+  // --- Keys the wider re-release entity set this module now hosts reads.
+  // Same rule as the block above: without a row here ED_ParseField logs
+  // "<key> is not a field" and the entity spawns with a default. Rows copied
+  // from our sibling src/game/g_save.ts with its exact type and target. ---
+  // worldspawn's second CS_SKYROTATE token (see SP_worldspawn in g_spawn.ts).
+  { key: "skyautorotate", type: "F_INT", target: "spawntemp", prop: "skyautorotate" },
+  // target_camera / target_healthbar / misc_flare / target_poi.
+  { key: "radius", type: "F_FLOAT", target: "spawntemp", prop: "radius" },
+  { key: "achievement", type: "F_LSTRING", target: "spawntemp", prop: "achievement" },
+  { key: "goals", type: "F_LSTRING", target: "spawntemp", prop: "goals" },
+  // misc_flare's distance fade (defaults 96/384, not 0 -- see SpawnTempT).
+  { key: "fade_start_dist", type: "F_INT", target: "spawntemp", prop: "fade_start_dist" },
+  { key: "fade_end_dist", type: "F_INT", target: "spawntemp", prop: "fade_end_dist" },
+  // Per-monster health scale (default 1.0 -- see SpawnTempT).
+  { key: "health_multiplier", type: "F_FLOAT", target: "spawntemp", prop: "health_multiplier" },
+  // target_light's HACKFLAG_* bits.
+  { key: "hackflags", type: "F_INT", target: "edict", prop: "hackflags" },
 ];
 
 // -------------------------------------------------------------------------
@@ -1445,6 +1463,11 @@ export interface GameJSON {
   maxclients: number;
   maxentities: number;
   serverflags: number;
+  // Optional so a savegame written before this port (which has no such key)
+  // still type-checks and loads -- the reader defaults it to 0, the correct
+  // "no cross-unit trigger has fired yet" value. Always written by this
+  // build.
+  cross_unit_flags?: number;
   num_items: number;
   clients: ClientPersistantJSON[];
 }
@@ -1469,6 +1492,7 @@ export function serializeGame(autosave: boolean): GameJSON {
     maxclients: game.maxclients,
     maxentities: game.maxentities,
     serverflags: game.serverflags,
+    cross_unit_flags: game.cross_unit_flags,
     num_items: game.num_items,
     clients: game.clients.map((c) => serializeClientPersistant(c.pers)),
   };
@@ -1482,6 +1506,10 @@ export function deserializeGame(json: GameJSON): void {
   game.maxclients = json.maxclients;
   game.maxentities = json.maxentities;
   game.serverflags = json.serverflags;
+  // RE-RELEASE CONTENT PORT: tolerate a savegame written before
+  // cross_unit_flags existed -- an older file simply has no such key, and
+  // 0 is the correct "no cross-unit trigger has fired yet" value.
+  game.cross_unit_flags = json.cross_unit_flags ?? 0;
   game.num_items = json.num_items;
   game.autosaved = json.autosaved;
   game.clients = json.clients.map((clientJson) => {

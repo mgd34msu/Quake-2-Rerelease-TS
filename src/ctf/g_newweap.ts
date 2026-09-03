@@ -125,15 +125,15 @@ function traceEdict(ent: Edict | null): EdictT {
 }
 
 // RERELEASE CONTENT PORT -- g_weapon.c's `check_dodge` is `static` there, so
-// this file carries its own copy.
+// this file carries its own copy (identical to g_weapon.ts's, including the
+// widened 4-argument monsterinfo.dodge).
 //
-// DEVIATION FROM src/rogue/g_newweap.ts: rogue widens monsterinfo.dodge to
-// four arguments (it passes the trace through so rogue's M_MonsterDodge can
-// decide duck vs sidestep). This module keeps vanilla 3.21's three-argument
-// dodge -- CTF ships no monsters and no rogue monster AI, so there is
-// nothing here that could read the fourth argument, and widening the field
-// would ripple through every m_*.ts dodge handler for no gain. The trace is
-// still computed; it is simply not passed on.
+// The earlier note here said this module kept vanilla 3.21's three-argument
+// dodge because CTF shipped no monsters and no rogue monster AI. That is no
+// longer true: this module now hosts the full base+expansion monster set and
+// rogue's M_MonsterDodge (g_newai.ts), which reads the trace to choose
+// between ducking and sidestepping, so the trace is passed on the same way
+// src/game and src/rogue pass it.
 function check_dodge(self: EdictT, start: Vec3, dir: Vec3, speed: number): void {
   // easy mode only ducks one quarter the time
   const skill = gameCvars.skill === null ? 0 : gameCvars.skill.value;
@@ -150,7 +150,7 @@ function check_dodge(self: EdictT, start: Vec3, dir: Vec3, speed: number): void 
       const v = vec3();
       VectorSubtract(tr.endpos, start, v);
       const eta = (VectorLength(v) - hit.maxs[0]) / speed;
-      hit.monsterinfo.dodge(hit, self, eta);
+      hit.monsterinfo.dodge(hit, self, eta, tr);
     }
   }
 }

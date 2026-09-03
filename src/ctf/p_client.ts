@@ -939,6 +939,12 @@ export function player_die(self: EdictT, inflictor: EdictT, attacker: EdictT, da
   // attacking, defender always dies.
   if (self.client !== null) {
     self.client.double_framenum = 0;
+    // RAFAEL (xatrix) -- the DualFire powerup expires on death like quad.
+    self.client.quadfire_framenum = 0;
+    // ROGUE
+    self.client.ir_framenum = 0;
+    // The rerelease cloak expires on death like every other powerup.
+    self.client.invisible_framenum = 0;
 
     // if there's a sphere around, let it know the player died.
     // vengeance and hunter will die if they're not attacking,

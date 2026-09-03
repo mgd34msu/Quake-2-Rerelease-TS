@@ -15,6 +15,7 @@ import {
   VectorMA,
   VectorNormalize,
   VectorScale,
+  VectorSet,
   VectorSubtract,
 } from "../shared/math";
 import {
@@ -32,10 +33,15 @@ import {
   EF_ANIM_ALLFAST,
   EF_BFG,
   EF_GRENADE,
+  EF_PLASMA,
   EF_ROCKET,
   MASK_SHOT,
   MASK_WATER,
   MulticastT,
+  MZ_BLUEHYPERBLASTER,
+  RF_BEAM,
+  RF_FULLBRIGHT,
+  RF_TRANSLUCENT,
   SPLASH_BLUE_WATER,
   SPLASH_BROWN_WATER,
   SPLASH_LAVA,
@@ -49,11 +55,12 @@ import {
   CVAR_SERVERINFO,
   TempEventT,
 } from "../shared/q_shared";
-import { infront } from "./g_ai";
+import { infront, visible } from "./g_ai";
 import { CanDamage, T_Damage, T_RadiusDamage } from "./g_combat";
-import { type Edict, SolidT, SVF_MONSTER, SVF_PROJECTILE } from "./game";
-import { findradius, G_FreeEdict, G_Spawn, vectoangles } from "./g_utils";
+import { type Edict, type GTraceT, SolidT, SVF_MONSTER, SVF_NOCLIENT, SVF_PROJECTILE } from "./game";
+import { findradius, G_FreeEdict, G_SetMovedir, G_Spawn, vectoangles } from "./g_utils";
 import {
+  AI_MEDIC,
   DAMAGE_BULLET,
   DAMAGE_ENERGY,
   DAMAGE_NO_KNOCKBACK,
@@ -74,13 +81,17 @@ import {
   MOD_HANDGRENADE,
   MOD_HELD_GRENADE,
   MOD_HG_SPLASH,
+  MOD_PHALANX,
+  MOD_RIPPER,
   MOD_HIT,
   MOD_HYPERBLASTER,
   MOD_R_SPLASH,
   MOD_RAILGUN,
   MOD_ROCKET,
+  MOD_TARGET_LASER,
   MovetypeT,
   PNOISE_IMPACT,
+  svc_muzzleflash2,
   svc_temp_entity,
 } from "./g_local";
 import { PlayerNoise } from "./p_weapon";
@@ -116,6 +127,10 @@ function ctfCvarValue(): number {
   return c === null ? 0 : c.value;
 }
 
+function cvarNum(c: { value: number } | null): number {
+  return c === null ? 0 : c.value;
+}
+
 /*
 =================
 check_dodge
@@ -146,7 +161,11 @@ function check_dodge(self: EdictT, start: Vec3, dir: Vec3, speed: number): void 
       const v = vec3();
       VectorSubtract(tr.endpos, start, v);
       const eta = (VectorLength(v) - hit.maxs[0]) / speed;
-      hit.monsterinfo.dodge(hit, self, eta);
+      // RERELEASE CONTENT PORT: dodge now takes the trace that triggered
+      // it (see MonsterInfoT.dodge in g_local.ts). Vanilla's own dodge
+      // handlers ignore the extra argument; the ported rerelease
+      // M_MonsterDodge reads it to choose between ducking and sidestepping.
+      hit.monsterinfo.dodge(hit, self, eta, tr);
     }
   }
 }
@@ -971,4 +990,437 @@ export function fire_bfg(
   if (self.client !== null) check_dodge(self, bfg.s.origin, dir, speed);
 
   gi.linkentity(bfg);
+}
+
+// xatrix/g_weapon.c: `// RAFAEL` -- fire_blueblaster is a copy of
+// fire_blaster wired to blaster_touch, minus the hyper/spawnflags dance
+// (never used with hyper=true at any xatrix call site).
+export function fire_blueblaster(self: EdictT, start: Vec3, dir: Vec3, damage: number, speed: number, effect: number): void {
+  VectorNormalize(dir);
+
+  const bolt = G_Spawn();
+  VectorCopy(start, bolt.s.origin);
+  VectorCopy(start, bolt.s.old_origin);
+  vectoangles(dir, bolt.s.angles);
+  VectorScale(dir, speed, bolt.velocity);
+  bolt.movetype = MovetypeT.MOVETYPE_FLYMISSILE;
+  bolt.clipmask = MASK_SHOT;
+  bolt.solid = SolidT.SOLID_BBOX;
+  bolt.s.effects |= effect;
+  VectorClear(bolt.mins);
+  VectorClear(bolt.maxs);
+
+  bolt.s.modelindex = gi.modelindex("models/objects/blaser/tris.md2");
+  bolt.s.sound = gi.soundindex("misc/lasfly.wav");
+  bolt.owner = self;
+  bolt.touch = blaster_touch;
+  bolt.nextthink = level.time + 2;
+  bolt.think = G_FreeEdict;
+  bolt.dmg = damage;
+  bolt.classname = "bolt";
+  gi.linkentity(bolt);
+
+  if (self.client !== null) check_dodge(self, bolt.s.origin, dir, speed);
+
+  const tr = gi.trace(self.s.origin, null, null, bolt.s.origin, bolt, MASK_SHOT);
+  if (tr.fraction < 1.0) {
+    VectorMA(bolt.s.origin, -10, dir, bolt.s.origin);
+    if (bolt.touch) bolt.touch(bolt, traceEdict(tr.ent), null, null);
+  }
+}
+
+// xatrix/g_weapon.c: `// RAFAEL` -- fire_ionripper (RipperGun)
+
+export function ionripper_sparks(self: EdictT): void {
+  gi.WriteByte(svc_temp_entity);
+  gi.WriteByte(TempEventT.TE_WELDING_SPARKS);
+  gi.WriteByte(0);
+  gi.WritePosition(self.s.origin);
+  gi.WriteDir(vec3_origin);
+  gi.WriteByte(0xe4 + (Math.floor(Math.random() * 4) & 3));
+  gi.multicast(self.s.origin, MulticastT.MULTICAST_PVS);
+
+  G_FreeEdict(self);
+}
+
+export function ionripper_touch(self: EdictT, other: EdictT, plane: CplaneT | null, surf: CsurfaceT | null): void {
+  if (other === self.owner) return;
+
+  if (surf !== null && surf.flags & SURF_SKY) {
+    G_FreeEdict(self);
+    return;
+  }
+
+  const owner = requireOwner(self);
+  if (owner.client !== null) PlayerNoise(owner, self.s.origin, PNOISE_IMPACT);
+
+  if (!other.takedamage) {
+    return;
+  }
+
+  // C dereferences plane->normal unconditionally here; ionripper_touch is
+  // only ever reached via SV_Impact (plane always non-NULL in practice) or
+  // fire_ionripper's own immediate self-trace, which passes NULL -- same
+  // null-deref idiom as blaster_touch/rocket_touch above.
+  const normal = plane === null ? vec3_origin : plane.normal;
+  T_Damage(other, self, owner, self.velocity, self.s.origin, normal, self.dmg, 1, DAMAGE_ENERGY, MOD_RIPPER);
+
+  G_FreeEdict(self);
+}
+
+export function fire_ionripper(self: EdictT, start: Vec3, dir: Vec3, damage: number, speed: number, effect: number): void {
+  VectorNormalize(dir);
+
+  const ion = G_Spawn();
+  VectorCopy(start, ion.s.origin);
+  VectorCopy(start, ion.s.old_origin);
+  vectoangles(dir, ion.s.angles);
+  VectorScale(dir, speed, ion.velocity);
+
+  // DEVIATION: xatrix/g_local.h's MovetypeT has a MOVETYPE_WALLBOUNCE value
+  // (ionripper bounces off walls with backoff 2.0 and re-orients to its
+  // velocity -- xatrix/g_phys.c's Xatrix delta in ClipVelocity/SV_Physics).
+  // src/game/g_local.ts (owned by another agent, do-not-edit) has no such
+  // enum member and src/game/g_phys.ts has no matching physics case, so
+  // this substitutes the closest existing movetype, MOVETYPE_BOUNCE, until
+  // MOVETYPE_WALLBOUNCE is added upstream -- see this agent's final report
+  // for the exact g_local.ts/g_phys.ts declarations needed. Net effect:
+  // the ripper blade settles on impact instead of bouncing off walls.
+  ion.movetype = MovetypeT.MOVETYPE_BOUNCE;
+  ion.clipmask = MASK_SHOT;
+  ion.solid = SolidT.SOLID_BBOX;
+  ion.s.effects |= effect;
+
+  ion.s.renderfx |= RF_FULLBRIGHT;
+
+  VectorClear(ion.mins);
+  VectorClear(ion.maxs);
+  ion.s.modelindex = gi.modelindex("models/objects/boomrang/tris.md2");
+  ion.s.sound = gi.soundindex("misc/lasfly.wav");
+  ion.owner = self;
+  ion.touch = ionripper_touch;
+  ion.nextthink = level.time + 3;
+  ion.think = ionripper_sparks;
+  ion.dmg = damage;
+  ion.dmg_radius = 100;
+  gi.linkentity(ion);
+
+  if (self.client !== null) check_dodge(self, ion.s.origin, dir, speed);
+
+  const tr = gi.trace(self.s.origin, null, null, ion.s.origin, ion, MASK_SHOT);
+  if (tr.fraction < 1.0) {
+    VectorMA(ion.s.origin, -10, dir, ion.s.origin);
+    if (ion.touch) ion.touch(ion, traceEdict(tr.ent), null, null);
+  }
+}
+
+// xatrix/g_weapon.c: `// RAFAEL` -- fire_heat (heat-seeking rocket)
+
+export function heat_think(self: EdictT): void {
+  let aquire: EdictT | null = null;
+  let oldlen = 0;
+  const vec = vec3();
+
+  // acquire new target
+  let target: EdictT | null = null;
+  for (;;) {
+    target = findradius(target, self.s.origin, 1024);
+    if (target === null) break;
+
+    if (self.owner === target) continue;
+    // xatrix/g_weapon.c: `if (!target->svflags & SVF_MONSTER) continue;` --
+    // operator-precedence bug in the C: `!` binds tighter than `&`, so this
+    // is `(!target->svflags) & SVF_MONSTER` (0 or 1, ANDed against
+    // SVF_MONSTER's 0x4 bit), which is always 0 -- the check never fires.
+    // Preserved as a no-op per PORTING.md's bug-for-bug fidelity rule
+    // rather than "fixing" it to `!(target.svflags & SVF_MONSTER)`.
+    if (!target.client) continue;
+    if (target.health <= 0) continue;
+    if (!visible(self, target)) continue;
+    if (!infront(self, target)) continue;
+
+    VectorSubtract(self.s.origin, target.s.origin, vec);
+    const len = VectorLength(vec);
+
+    if (aquire === null || len < oldlen) {
+      aquire = target;
+      self.target_ent = aquire;
+      oldlen = len;
+    }
+  }
+
+  if (aquire !== null) {
+    VectorSubtract(aquire.s.origin, self.s.origin, vec);
+    vectoangles(vec, self.s.angles);
+
+    VectorNormalize(vec);
+    VectorCopy(vec, self.movedir);
+    VectorScale(vec, 500, self.velocity);
+  }
+
+  self.nextthink = level.time + 0.1;
+}
+
+export function fire_heat(
+  self: EdictT,
+  start: Vec3,
+  dir: Vec3,
+  damage: number,
+  speed: number,
+  damage_radius: number,
+  radius_damage: number,
+): void {
+  const heat = G_Spawn();
+  VectorCopy(start, heat.s.origin);
+  VectorCopy(dir, heat.movedir);
+  vectoangles(dir, heat.s.angles);
+  VectorScale(dir, speed, heat.velocity);
+  heat.movetype = MovetypeT.MOVETYPE_FLYMISSILE;
+  heat.clipmask = MASK_SHOT;
+  heat.solid = SolidT.SOLID_BBOX;
+  heat.s.effects |= EF_ROCKET;
+  VectorClear(heat.mins);
+  VectorClear(heat.maxs);
+  heat.s.modelindex = gi.modelindex("models/objects/rocket/tris.md2");
+  heat.owner = self;
+  heat.touch = rocket_touch;
+
+  heat.nextthink = level.time + 0.1;
+  heat.think = heat_think;
+
+  heat.dmg = damage;
+  heat.radius_dmg = radius_damage;
+  heat.dmg_radius = damage_radius;
+  heat.s.sound = gi.soundindex("weapons/rockfly.wav");
+
+  if (self.client !== null) check_dodge(self, heat.s.origin, dir, speed);
+
+  gi.linkentity(heat);
+}
+
+// xatrix/g_weapon.c: `// RAFAEL` -- fire_plasma (Phalanx). Needed here by
+// m_gladb.ts's beta-gladiator ranged attack. Also the underlying
+// projectile for the player-held Phalanx weapon (WEAP_PHALANX/MOD_PHALANX,
+// item side owned by another agent in p_weapon.ts/g_items.ts) -- if that
+// weapon needs firing, it can call this rather than duplicating it.
+
+export function plasma_touch(ent: EdictT, other: EdictT, plane: CplaneT | null, surf: CsurfaceT | null): void {
+  if (other === ent.owner) return;
+
+  if (surf !== null && surf.flags & SURF_SKY) {
+    G_FreeEdict(ent);
+    return;
+  }
+
+  const owner = requireOwner(ent);
+  if (owner.client !== null) PlayerNoise(owner, ent.s.origin, PNOISE_IMPACT);
+
+  // calculate position for the explosion entity
+  const origin = vec3();
+  VectorMA(ent.s.origin, -0.02, ent.velocity, origin);
+
+  const normal = plane === null ? vec3_origin : plane.normal;
+  if (other.takedamage) {
+    T_Damage(other, ent, owner, ent.velocity, ent.s.origin, normal, ent.dmg, 0, 0, MOD_PHALANX);
+  }
+
+  T_RadiusDamage(ent, owner, ent.radius_dmg, other, ent.dmg_radius, MOD_PHALANX);
+
+  gi.WriteByte(svc_temp_entity);
+  gi.WriteByte(TempEventT.TE_PLASMA_EXPLOSION);
+  gi.WritePosition(origin);
+  gi.multicast(ent.s.origin, MulticastT.MULTICAST_PVS);
+
+  G_FreeEdict(ent);
+}
+
+export function fire_plasma(
+  self: EdictT,
+  start: Vec3,
+  dir: Vec3,
+  damage: number,
+  speed: number,
+  damage_radius: number,
+  radius_damage: number,
+): void {
+  const plasma = G_Spawn();
+  VectorCopy(start, plasma.s.origin);
+  VectorCopy(dir, plasma.movedir);
+  vectoangles(dir, plasma.s.angles);
+  VectorScale(dir, speed, plasma.velocity);
+  plasma.movetype = MovetypeT.MOVETYPE_FLYMISSILE;
+  plasma.clipmask = MASK_SHOT;
+  plasma.solid = SolidT.SOLID_BBOX;
+
+  VectorClear(plasma.mins);
+  VectorClear(plasma.maxs);
+
+  plasma.owner = self;
+  plasma.touch = plasma_touch;
+  plasma.nextthink = level.time + 8000 / speed;
+  plasma.think = G_FreeEdict;
+  plasma.dmg = damage;
+  plasma.radius_dmg = radius_damage;
+  plasma.dmg_radius = damage_radius;
+  plasma.s.sound = gi.soundindex("weapons/rockfly.wav");
+
+  plasma.s.modelindex = gi.modelindex("sprites/s_photon.sp2");
+  plasma.s.effects |= EF_PLASMA | EF_ANIM_ALLFAST;
+
+  if (self.client !== null) check_dodge(self, plasma.s.origin, dir, speed);
+
+  gi.linkentity(plasma);
+}
+
+// xatrix/g_monster.c: `// RAFAEL` block -- monster_fire_* wrappers for the
+// three fire_* helpers above (muzzleflash2 network message on top of the
+// projectile spawn), matching g_monster.ts's monster_fire_blaster idiom.
+
+export function monster_fire_blueblaster(
+  self: EdictT,
+  start: Vec3,
+  dir: Vec3,
+  damage: number,
+  speed: number,
+  flashtype: number,
+  effect: number,
+): void {
+  fire_blueblaster(self, start, dir, damage, speed, effect);
+
+  gi.WriteByte(svc_muzzleflash2);
+  gi.WriteShort(g_edicts.indexOf(self));
+  gi.WriteByte(MZ_BLUEHYPERBLASTER);
+  gi.multicast(start, MulticastT.MULTICAST_PVS);
+}
+
+export function monster_fire_ionripper(
+  self: EdictT,
+  start: Vec3,
+  dir: Vec3,
+  damage: number,
+  speed: number,
+  flashtype: number,
+  effect: number,
+): void {
+  fire_ionripper(self, start, dir, damage, speed, effect);
+
+  gi.WriteByte(svc_muzzleflash2);
+  gi.WriteShort(g_edicts.indexOf(self));
+  gi.WriteByte(flashtype);
+  gi.multicast(start, MulticastT.MULTICAST_PVS);
+}
+
+export function monster_fire_heat(
+  self: EdictT,
+  start: Vec3,
+  dir: Vec3,
+  damage: number,
+  speed: number,
+  flashtype: number,
+): void {
+  fire_heat(self, start, dir, damage, speed, damage, damage);
+
+  gi.WriteByte(svc_muzzleflash2);
+  gi.WriteShort(g_edicts.indexOf(self));
+  gi.WriteByte(flashtype);
+  gi.multicast(start, MulticastT.MULTICAST_PVS);
+}
+
+// xatrix/g_monster.c: `// RAFAEL` -- m_brain.c's tentacle-lunge beam and
+// (via the healer-ray negative-damage branch) m_medic.c's healer laser both
+// route through this shared beam entity. Needed here by m_soldierh.ts's
+// lasergun variant (soldierh_laserbeam) and m_fixbot.ts's welding laser.
+function dabeam_hit(self: EdictT): void {
+  const start = vec3();
+
+  // C computes `count` (8 or 4, from spawnflags) here and declares unused
+  // `static vec3_t lmins/lmaxs` locals, but the TE_LASER_SPARKS write below
+  // hardcodes a literal 10 instead of using `count` -- dead code, preserved
+  // by omission rather than porting an unused local.
+
+  let ignore: Edict = self;
+  VectorCopy(self.s.origin, start);
+  const end = vec3();
+  VectorMA(start, 2048, self.movedir, end);
+
+  let tr: GTraceT;
+  for (;;) {
+    tr = gi.trace(start, null, null, end, ignore, CONTENTS_SOLID | CONTENTS_MONSTER | CONTENTS_DEADMONSTER);
+    if (tr.ent === null) break;
+
+    const hit = traceEdict(tr.ent);
+
+    // hurt it if we can
+    if (hit.takedamage && !(hit.flags & FL_IMMUNE_LASER) && hit !== self.owner) {
+      const skill = cvarNum(gameCvars.skill);
+      // C dereferences self->owner unconditionally here; every dabeam
+      // entity is spawned by monster_dabeam's caller with an owner set.
+      const owner = self.owner;
+      if (owner === null) throw new Error("dabeam_hit: self.owner is null (C dereferences it unconditionally)");
+      T_Damage(hit, self, owner, self.movedir, tr.endpos, vec3_origin, self.dmg, skill, DAMAGE_ENERGY, MOD_TARGET_LASER);
+    }
+
+    if (self.dmg < 0) {
+      // healer ray: when player is at 100 health just undo health fix,
+      // keeping fx
+      if (hit.client !== null && hit.health > 100) hit.health += self.dmg;
+    }
+
+    // if we hit something that's not a monster or player, or it's immune
+    // to lasers, we're done
+    if (!(hit.svflags & SVF_MONSTER) && hit.client === null) {
+      if (self.spawnflags & 0x80000000) {
+        self.spawnflags &= ~0x80000000;
+        gi.WriteByte(svc_temp_entity);
+        gi.WriteByte(TempEventT.TE_LASER_SPARKS);
+        gi.WriteByte(10);
+        gi.WritePosition(tr.endpos);
+        gi.WriteDir(tr.plane.normal);
+        gi.WriteByte(self.s.skinnum);
+        gi.multicast(tr.endpos, MulticastT.MULTICAST_PVS);
+      }
+      break;
+    }
+
+    ignore = hit;
+    VectorCopy(tr.endpos, start);
+  }
+
+  VectorCopy(tr.endpos, self.s.old_origin);
+  self.nextthink = level.time + 0.1;
+  self.think = G_FreeEdict;
+}
+
+export function monster_dabeam(self: EdictT): void {
+  self.movetype = MovetypeT.MOVETYPE_NONE;
+  self.solid = SolidT.SOLID_NOT;
+  self.s.renderfx |= RF_BEAM | RF_TRANSLUCENT;
+  self.s.modelindex = 1;
+
+  self.s.frame = 2;
+
+  if (self.owner !== null && self.owner.monsterinfo.aiflags & AI_MEDIC) self.s.skinnum = 0xf3f3f1f1;
+  else self.s.skinnum = 0xf2f2f0f0;
+
+  if (self.enemy !== null) {
+    const last_movedir = vec3();
+    VectorCopy(self.movedir, last_movedir);
+    const point = vec3();
+    VectorMA(self.enemy.absmin, 0.5, self.enemy.size, point);
+    if (self.owner !== null && self.owner.monsterinfo.aiflags & AI_MEDIC) point[0] += Math.sin(level.time) * 8;
+    VectorSubtract(point, self.s.origin, self.movedir);
+    VectorNormalize(self.movedir);
+    if (!VectorCompare(self.movedir, last_movedir)) self.spawnflags |= 0x80000000;
+  } else {
+    G_SetMovedir(self.s.angles, self.movedir);
+  }
+
+  self.think = dabeam_hit;
+  self.nextthink = level.time + 0.1;
+  VectorSet(self.mins, -8, -8, -8);
+  VectorSet(self.maxs, 8, 8, 8);
+  gi.linkentity(self);
+
+  self.spawnflags |= 0x80000001;
+  self.svflags &= ~SVF_NOCLIENT;
 }

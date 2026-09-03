@@ -224,7 +224,16 @@ describe("xatrix itemlist delta -- 43 baseq2 entries + 6 xatrix entries + 2 rere
     // in commit 288484f. Before they were added, xswamp dropped 12
     // entities. See test/g_spawn_module_coverage.test.ts for the
     // shipped-map gate that requires them.
-    expect(game.num_items).toBe(50);
+    //
+    // The remaining 24 rows answer the WIDER gate in
+    // test/g_spawn_rerelease_all_modules.test.ts: a player may load ANY
+    // shipped re-release map under The Reckoning, so the table also carries
+    // the Ground Zero pickups those maps place (the six ammo_* rows, the
+    // three item_sphere_*, item_doppleganger, item_double, item_ir_goggles,
+    // the seven weapon_* rows), the two CTF flags, item_legacy_head and the
+    // four keys. All 24 are APPENDED after xatrix's own last row, so every
+    // pre-existing item index is unmoved -- index 49 is still Health.
+    expect(game.num_items).toBe(74);
   });
 
   test("ammo_trap is wired to Weapon_Trap and tagged AMMO_TRAP", () => {

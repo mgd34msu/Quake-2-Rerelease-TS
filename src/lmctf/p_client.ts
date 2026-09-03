@@ -239,6 +239,16 @@ function cloneClientPersistent(src: ClientPersistentT): ClientPersistentT {
   c.max_grenades = src.max_grenades;
   c.max_cells = src.max_cells;
   c.max_slugs = src.max_slugs;
+  // RERELEASE CONTENT PORT -- the mission-pack ammo caps travel with the
+  // rest of client_persistant_t across a level change / coop respawn, same
+  // as vanilla's six above (src/rogue/p_client.ts, src/xatrix/p_client.ts).
+  c.max_tesla = src.max_tesla;
+  c.max_prox = src.max_prox;
+  c.max_mines = src.max_mines;
+  c.max_flechettes = src.max_flechettes;
+  c.max_magslug = src.max_magslug;
+  c.max_trap = src.max_trap;
+  c.max_rounds = src.max_rounds;
   c.weapon = src.weapon;
   c.lastweapon = src.lastweapon;
   c.power_cubes = src.power_cubes;
@@ -790,6 +800,29 @@ export function InitClientPersistent(client: GClientT): void {
   client.pers.max_grenades = 50;
   client.pers.max_cells = 200;
   client.pers.max_slugs = 50;
+
+  // RERELEASE CONTENT PORT -- rogue/p_client.c's InitClientPersistant seeds
+  // prox/tesla/flechettes; xatrix/p_client.c's seeds magslug/trap. Both are
+  // taken verbatim from their own sources.
+  // ROGUE
+  client.pers.max_prox = 50;
+  client.pers.max_tesla = 50;
+  client.pers.max_flechettes = 200;
+  // ROGUE
+  // RAFAEL
+  client.pers.max_magslug = 50;
+  client.pers.max_trap = 5;
+  // RAFAEL
+  // The disruptor's cap. 12 is the value the rerelease's own
+  // InitClientPersistant uses (src/kexgame/p_client.ts:
+  // `max_ammo[AMMO_DISRUPTOR] = 12`). Seeded here rather than hardcoded at
+  // the Add_Ammo call site so a Bandolier/Ammo Pack can raise it like
+  // every other cap.
+  client.pers.max_rounds = 12;
+  // NOTE: `max_mines` is in ClientPersistantT but neither rogue nor xatrix
+  // seeds it or reads it -- rogue's mines (prox/tesla) use max_prox and
+  // max_tesla. Left at its ClientPersistantT default of 0 on purpose; no
+  // ported code reads it. Flagged in the port report.
 
   client.pers.connected = true;
 }

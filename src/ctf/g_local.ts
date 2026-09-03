@@ -16,7 +16,15 @@ import {
   PlayerStateT,
   PmoveStateT,
 } from "../shared/q_shared";
-import { type Edict, type GameExports, type GameImports, LinkT, MAX_ENT_CLUSTERS, SolidT } from "./game";
+import {
+  type Edict,
+  type GameExports,
+  type GameImports,
+  type GTraceT,
+  LinkT,
+  MAX_ENT_CLUSTERS,
+  SolidT,
+} from "./game";
 // `pmenuhnd_t` is declared by ctf/p_menu.h and only referenced here as a
 // pointer field on gclient_s (`#include "p_menu.h"` at the top of ctf's
 // g_local.h). Importing it as a type only (erased at compile time) keeps
@@ -320,6 +328,17 @@ export class GameLocalsT {
   // cross level triggers
   serverflags = 0;
 
+  // RERELEASE CONTENT PORT: game_locals_t::cross_unit_flags from
+  // src/kexgame/. Distinct from `serverflags` above, which is the classic
+  // CROSS_LEVEL flag word: cross_unit_flags is the rerelease's separate
+  // CROSS_UNIT word, set by target_crossunit_trigger and tested by
+  // target_crossunit_target. It lives on GameLocalsT rather than
+  // LevelLocalsT precisely because it must survive a level change -- that
+  // cross-unit lifetime is the entity pair's whole purpose -- and it is
+  // serialized alongside serverflags in g_save.ts so it also survives a
+  // save/load.
+  cross_unit_flags = 0;
+
   // items
   num_items = 0;
 
@@ -383,6 +402,68 @@ export class LevelLocalsT {
   }
 }
 
+// =========================================================================
+// RERELEASE CONTENT PORT -- the three sub-structs the rerelease entity set
+// hangs off an edict, ported from src/kexgame/g_local_types.ts.
+//
+// PROTOCOL NOTE (the degradations are real and deliberate): the fog and
+// heightfog blocks are set by the ported trigger_fog and by worldspawn, and
+// the rerelease client receives them through a dedicated fog message that
+// protocol 34 does not have. Under the classic ruleset the values are
+// parsed, stored, and updated on the server exactly as the rerelease does
+// -- so trigger_fog fires, targets, and holds correct state -- but nothing
+// transmits them, so the view is unfogged. The entity is never dropped.
+// BmodelAnimT by contrast DOES present under protocol 34: it animates
+// s.frame on a brush model, and s.frame is part of the baseline entity
+// state every protocol carries.
+// =========================================================================
+export class FogT {
+  color: Vec3 = vec3();
+  density = 0;
+  sky_factor = 0;
+  color_off: Vec3 = vec3();
+  density_off = 0;
+  sky_factor_off = 0;
+}
+
+export class HeightFogT {
+  falloff = 0;
+  density = 0;
+  start_color: Vec3 = vec3();
+  start_dist = 0;
+  end_color: Vec3 = vec3();
+  end_dist = 0;
+  falloff_off = 0;
+  density_off = 0;
+  start_color_off: Vec3 = vec3();
+  start_dist_off = 0;
+  end_color_off: Vec3 = vec3();
+  end_dist_off = 0;
+}
+
+export class BmodelAnimT {
+  // range, inclusive
+  start = 0;
+  end = 0;
+  style = 0;
+  speed = 0; // in milliseconds
+  nowrap = false;
+
+  alt_start = 0;
+  alt_end = 0;
+  alt_style = 0;
+  alt_speed = 0; // in milliseconds
+  alt_nowrap = false;
+
+  // game-only
+  enabled = false;
+  alternate = false;
+  currently_alternate = false;
+  // gtime_t in the rerelease; the classic module keeps level.time in plain
+  // seconds, so this is a seconds float on the same clock.
+  next_tick = 0;
+}
+
 // spawn_temp_t is only used to hold entity field values that
 // can be set from the editor, but aren't actualy present
 // in edict_t during gameplay
@@ -405,6 +486,79 @@ export class SpawnTempT {
   maxyaw = 0;
   minpitch = 0;
   maxpitch = 0;
+
+  // =====================================================================
+  // RERELEASE CONTENT PORT -- spawn_temp_t keys the rerelease maps carry.
+  //
+  // Ported from src/kexgame/g_local_types.ts's SpawnTempT (the rerelease
+  // game DLL's own spawn_temp_t). These are parse-time-only scratch keys:
+  // ED_ParseField writes them into the single shared `st` and the spawn
+  // function reads them before `st` is cleared for the next entity, so
+  // adding them costs nothing at runtime and changes no vanilla behavior
+  // (no vanilla 3.21 entity names any of these keys).
+  //
+  // Without them every rerelease map logs each one as "<key> is not a
+  // field", and -- worse -- the entity that needed the value silently
+  // spawns wrong. shadowlight* in particular is read by the rerelease
+  // dynamic/shadow light entities this port now spawns.
+  // =====================================================================
+  // g_local.h:1274 declares `int32_t skyautorotate = 1;` (default 1, not 0)
+  // -- see src/kexgame/g_spawn.ts's header comment (the canonical
+  // defaultSpawnTemp() for the OTHER game module) for the same latent
+  // default-value bug independently repeated in four other files before
+  // that one existed. This field was still wrong here; a worldspawn that
+  // never explicitly sets skyautorotate (the overwhelmingly common case)
+  // must default to "spin continuously", matching the rerelease game DLL.
+  skyautorotate = 1;
+  music: string | null = null;
+  instantitems = 0;
+  radius = 0;
+  hub_map = 0;
+  achievement: string | null = null;
+  goals: string | null = null;
+  image: string | null = null;
+  // misc_flare's distance fade, and NOT 0: the re-release declares these with
+  // real defaults (src/kexgame/g_local_types.ts:319-320, itself g_local.h's
+  // `int32_t fade_start_dist = 96; int32_t fade_end_dist = 384;`), and every
+  // shipped misc_flare relies on them -- none of the 53 in mgu2m3 spells
+  // either key. They ride the wire in s.modelindex2/s.modelindex3 and the
+  // client's RF_FLARE branch (cl_ents.ts) computes the flare's alpha from
+  // them: with both at 0 the ramp collapses to "always fully opaque", so the
+  // flare that should fade in with distance is drawn at full strength from
+  // any range. Harmless while nothing rendered flares at all; wrong now that
+  // a widened classic session does. No effect on any vanilla entity -- these
+  // are re-release-only spawn keys read only by SP_misc_flare.
+  fade_start_dist = 96;
+  fade_end_dist = 384;
+  start_items: string | null = null;
+  no_grapple = 0;
+  // Default 1.0, NOT 0 -- kexgame/g_spawn.ts:707 (`health_multiplier: 1.0`,
+  // itself g_local.h:1306's `float health_multiplier = 1.0f`). Every ported
+  // rerelease monster sets its health as
+  // `Math.trunc(<base> * st.health_multiplier)`, so a 0 default would give
+  // every one of them 0 health on any map that does not explicitly write
+  // the key -- i.e. almost all of them. SpawnTempT.clear() restores this
+  // default per entity via `new SpawnTempT()`, matching the C's
+  // memset-then-initialize of the aggregate.
+  health_multiplier = 1.0;
+  reinforcements: string | null = null;
+  noise_start: string | null = null;
+  noise_middle: string | null = null;
+  noise_end: string | null = null;
+  loop_count = 0;
+  // Shadow-light keys. The classic renderer has no shadow-light pass and
+  // protocol 34 has no message that could carry one, so these are parsed
+  // and stored (so the entity spawns complete and a future renderer can
+  // read them) but have no visual effect under the classic ruleset -- see
+  // the dynamic_light / target_light notes in the port report.
+  shadowlightradius = 0;
+  shadowlightresolution = 0;
+  shadowlightintensity = 0;
+  shadowlightstartfadedistance = 0;
+  shadowlightendfadedistance = 0;
+  shadowlightstyle = 0;
+  shadowlightconeangle = 0;
+  shadowlightstyletarget: string | null = null;
 
   clear(): void {
     Object.assign(this, new SpawnTempT());
@@ -507,7 +661,16 @@ export class MonsterInfoT {
   search: ((self: EdictT) => void) | null = null;
   walk: ((self: EdictT) => void) | null = null;
   run: ((self: EdictT) => void) | null = null;
-  dodge: ((self: EdictT, other: EdictT, eta: number) => void) | null = null;
+  // RERELEASE CONTENT PORT: widened from the 3-argument vanilla 3.21
+  // signature to rogue/g_local.h's 4-argument one, which passes the trace
+  // from the shot that triggered the dodge through to the handler
+  // (M_MonsterDodge, ported into g_newai.ts, needs it to decide duck vs
+  // sidestep). Vanilla's own 3-argument dodge handlers (soldier_dodge,
+  // chick_dodge, gunner_dodge, infantry_dodge, brain_dodge, medic_dodge)
+  // stay assignable to this type unchanged -- a function accepting FEWER
+  // parameters is assignable to a type declaring more -- so only the one
+  // call site in g_weapon.ts had to start passing the trace.
+  dodge: ((self: EdictT, other: EdictT, eta: number, tr: GTraceT) => void) | null = null;
   attack: ((self: EdictT) => void) | null = null;
   melee: ((self: EdictT) => void) | null = null;
   sight: ((self: EdictT, other: EdictT) => void) | null = null;
@@ -527,6 +690,61 @@ export class MonsterInfoT {
 
   power_armor_type = 0;
   power_armor_power = 0;
+
+  // ===================================================================
+  // RERELEASE CONTENT PORT -- fields the rerelease content set needs.
+  //
+  // Ported verbatim from src/rogue/g_local.ts's own MonsterInfoT (the
+  // "// ROGUE" block), which is itself the faithful port of rogue's
+  // g_local.h. The rerelease game DLL folded the mission-pack monster AI
+  // (hint paths, ducking/sidestep dodging, blindfire, medic-commander
+  // healing bookkeeping, monster-slot budgets for the spawners, and the
+  // widow's powerup timers) into the one base monster struct, so the
+  // classic module needs the same fields to host that content. Vanilla
+  // 3.21 monsters never read or write any of them, so their presence is
+  // inert for classic maps: every one defaults to the same zero/null the
+  // C aggregate initializer produced.
+  // ===================================================================
+  blocked: ((self: EdictT, dist: number) => boolean) | null = null;
+  last_hint_time = 0; // last time the monster checked for hintpaths.
+  goal_hint: EdictT | null = null; // which hint_path we're trying to get to
+  medicTries = 0;
+  badMedic1: EdictT | null = null; // these medics have declared this monster "unhealable"
+  badMedic2: EdictT | null = null;
+  healer: EdictT | null = null; // this is who is healing this monster
+  duck: ((self: EdictT, eta: number) => void) | null = null;
+  unduck: ((self: EdictT) => void) | null = null;
+  sidestep: ((self: EdictT) => void) | null = null;
+  base_height = 0;
+  next_duck_time = 0;
+  duck_wait_time = 0;
+  last_player_enemy: EdictT | null = null;
+  // blindfire: the boolean says whether the monster will do it,
+  // blind_fire_delay is the timing (set in the monster) of the next shot
+  blindfire = false;
+  blind_fire_delay = 0;
+  blind_fire_target: Vec3 = vec3();
+  // used by the spawners to not spawn too much and keep track of #s of
+  // monsters spawned
+  monster_slots = 0;
+  monster_used = 0;
+  commander: EdictT | null = null;
+  // powerup timers, used by the widow
+  quad_framenum = 0;
+  invincible_framenum = 0;
+  double_framenum = 0;
+
+  // --- rerelease (kex) monsterinfo fields, from src/kexgame/ ---
+  // Needed by the rerelease monsters this module now hosts: the arachnid
+  // and gun commander throttle their melee with melee_debounce_time, the
+  // shambler and gun commander swap to a damaged skin through setskin, and
+  // the gun commander's jump/drop decisions read can_jump/jump_height/
+  // drop_height. Vanilla monsters set none of them.
+  melee_debounce_time = 0;
+  setskin: ((self: EdictT) => void) | null = null;
+  can_jump = false;
+  drop_height = 0;
+  jump_height = 0;
 }
 
 // means of death
@@ -854,15 +1072,23 @@ export class GClientT {
   // Damage timer, the A-M Bomb countdown, the disruptor's lingering pain
   // effect, the owned sphere, and the trap's held-too-long bookkeeping.
   //
-  // DELIBERATELY NOT PORTED: rogue's ir_framenum and xatrix's
-  // quadfire_framenum. No entity class in this module's target list
-  // spawns item_ir_goggles or item_quadfire, and an unread timer would
-  // just be dead state.
+  // ir_framenum, quadfire_framenum and invisible_framenum WERE previously
+  // left out here, on the reasoning that no entity class this module
+  // spawned placed item_ir_goggles, item_quadfire or item_invisibility.
+  // That reasoning no longer holds: the rerelease maps this module now
+  // hosts place all three (item_ir_goggles in 11 maps, item_quadfire in
+  // 24, item_invisibility in 12), so the timers are live state again and
+  // are declared with the same 0 default src/game gives them.
   // ===================================================================
   double_framenum = 0;
+  ir_framenum = 0;
   nuke_framenum = 0;
   tracker_pain_framenum = 0;
   owned_sphere: EdictT | null = null; // this points to the player's sphere
+  quadfire_framenum = 0;
+  // The rerelease cloak (item_invisibility) timer, from src/kexgame/.
+  // Ticked alongside the other powerup timers in p_client.ts.
+  invisible_framenum = 0;
   trap_blew_up = false;
   trap_time = 0;
 
@@ -1044,6 +1270,67 @@ export class EdictT implements Edict {
   // port in g_func.ts. Nothing else in this module touches it.
   plat2flags = 0;
 
+  // ===================================================================
+  // RERELEASE CONTENT PORT -- edict fields the rerelease content set
+  // needs, ported verbatim from src/rogue/g_local.ts's "// ROGUE" block
+  // and src/xatrix/g_local.ts (`orders`). Same reasoning as the
+  // MonsterInfoT block above: the rerelease game DLL carries one edict
+  // struct covering all of the content, so hosting that content in the
+  // classic module means carrying the same fields. Vanilla 3.21 entities
+  // never touch them.
+  // ===================================================================
+  offset: Vec3 = vec3();
+  // Gravity DIRECTION, defaulting to straight down.
+  //
+  // rogue's C memsets the edict array to zero and then has G_InitEdict()
+  // and ED_CallSpawn() VectorSet this to (0,0,-1) before any spawn
+  // function runs, so in the C the all-zero state is never observable.
+  // This port initializes it to (0,0,-1) directly instead of to vec3(),
+  // because in TypeScript an EdictT can be constructed without going
+  // through either of those (a test fixture, or any future direct
+  // `new EdictT()`), and an all-zero gravity vector is not a harmless
+  // zero -- it is a THIRD state the C never has. M_CheckGround
+  // (g_monster.ts) branches on `gravityVector[2] < 0` to pick the normal
+  // vs inverted-gravity steepness test, so a zero Z silently takes the
+  // INVERTED branch and the entity never finds ground. That is exactly
+  // the regression this default fixes: it makes M_CheckGround's own
+  // "every edict's gravityVector defaults to (0,0,-1)" comment true by
+  // construction rather than only along the G_InitEdict path.
+  //
+  // G_InitEdict/ED_CallSpawn still assign the same value, so behavior on
+  // the normal path is unchanged; target_gravity and the reverse-gravity
+  // areas still overwrite it per entity.
+  gravityVector: Vec3 = vec3(0, 0, -1);
+  bad_area: EdictT | null = null;
+  hint_chain: EdictT | null = null;
+  monster_hint_chain: EdictT | null = null;
+  target_hint_chain: EdictT | null = null;
+  hint_chain_id = 0;
+  lastMoveTime = 0;
+  // xatrix/g_local.h: the ONE field xatrix adds -- misc_transport /
+  // monster orders bookkeeping.
+  orders = 0;
+
+  // --- rerelease (kex) edict fields, from src/kexgame/g_local_types.ts ---
+  // Targets and flags the rerelease entity set reads. All default to the
+  // same null/0 a vanilla entity would leave them at, so vanilla content
+  // is unaffected.
+  healthtarget: string | null = null;
+  itemtarget: string | null = null;
+  style_on: string | null = null;
+  style_off: string | null = null;
+  crosslevel_flags = 0;
+  hackflags = 0;
+  fog: FogT = new FogT();
+  heightfog: HeightFogT = new HeightFogT();
+  bmodel_anim: BmodelAnimT = new BmodelAnimT();
+  // The shambler's sustained lightning bolt entities (src/kexgame/
+  // m_shambler.ts). `beam2` exists because the rerelease's shambler_die
+  // clears it even though nothing ever assigns it -- preserved rather than
+  // "fixed", same as the rest of that monster's quirks.
+  beam: EdictT | null = null;
+  beam2: EdictT | null = null;
+
   clear(): void {
     Object.assign(this, new EdictT());
   }
@@ -1158,6 +1445,14 @@ export const gameCvars: {
   // InitGame alongside the rest.
   huntercam: CvarT | null;
   strong_mines: CvarT | null;
+  // RERELEASE CONTENT PORT: rogue's `gamerules` cvar (rogue/g_local.h),
+  // which selects the alternate deathmatch rulesets (RDM_TAG /
+  // RDM_DEATHBALL) the ported dm_tag content is the entry point of. 0 (the
+  // default) is vanilla deathmatch, so classic play is unchanged.
+  gamerules: CvarT | null;
+  // RERELEASE CONTENT PORT: rogue's own debug spew cvar, read by the ported
+  // monster-movement code (m_move2.ts). Defaults to 0, i.e. silent.
+  g_showlogic: CvarT | null;
 } = {
   maxentities: null,
   deathmatch: null,
@@ -1194,6 +1489,8 @@ export const gameCvars: {
   instantweap: null,
   huntercam: null,
   strong_mines: null,
+  gamerules: null,
+  g_showlogic: null,
 };
 
 
@@ -1240,8 +1537,31 @@ export const gameCvars: {
 
 // ------------------- from src/rogue/g_local.ts -------------------
 // ROGUE
+export const AI_WALK_WALLS = 0x00008000;
+export const AI_MANUAL_STEERING = 0x00010000;
+export const AI_TARGET_ANGER = 0x00020000;
+export const AI_DODGING = 0x00040000;
+export const AI_CHARGING = 0x00080000;
+export const AI_HINT_PATH = 0x00100000;
+export const AI_IGNORE_SHOTS = 0x00200000;
+// PMM - FIXME - last second added for E3 .. there's probably a better way to do this, but
+// this works
+export const AI_DO_NOT_COUNT = 0x00400000; // set for healed monsters
+export const AI_SPAWNED_CARRIER = 0x00800000; // both do_not_count and spawned are set for spawned monsters
+export const AI_SPAWNED_MEDIC_C = 0x01000000; // both do_not_count and spawned are set for spawned monsters
+export const AI_SPAWNED_WIDOW = 0x02000000; // both do_not_count and spawned are set for spawned monsters
+export const AI_SPAWNED_MASK = 0x03800000; // mask to catch all three flavors of spawned
+export const AI_BLOCKED = 0x04000000; // used by blocked_checkattack: set to say I'm attacking while blocked
+export const AS_BLIND = 5; // PMM - used by boss code to do nasty things even if it can't see you
+// ROGUE
+// this determines how long to wait after a duck to duck again.  this needs
+// to be longer than the time after the monster_duck_up in all of the
+// animation sequences
+export const DUCK_INTERVAL = 0.5;
+// ROGUE
 export const FL_MECHANICAL = 0x00002000; // entity is mechanical, use sparks not blood
 export const FL_SAM_RAIMI = 0x00004000; // entity is in sam raimi cam mode
+export const FL_DISGUISED = 0x00008000; // entity is in disguise, monsters will not recognize.
 export const FL_NOGIB = 0x00010000; // player has been vaporized by a nuke, drop no gibs
 // ROGUE
 export const DAMAGE_DESTROY_ARMOR = 0x00000040; // damage is done to armor and health.
@@ -1288,6 +1608,8 @@ export const WEAP_CHAINFIST = 19;
 // xatrix/g_local.h: `// RAFAEL 14-APR-98` block
 export const MOD_RIPPER = 34;
 export const MOD_PHALANX = 35;
+export const MOD_BLASTOFF = 37;
+export const MOD_GEKK = 38;
 export const MOD_TRAP = 39;
 // xatrix/g_local.h: `#define WEAP_PHALANX 12` / `#define WEAP_BOOMER 13`,
 // renumbered 12/13 -> 13/14 (see the block comment above).

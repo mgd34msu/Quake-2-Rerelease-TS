@@ -184,19 +184,39 @@ describe("itemlist[] (g_items.c)", () => {
     // under any ruleset" rule the way src/game did in commit 288484f.
     // See test/g_spawn_module_coverage.test.ts for the shipped-map gate
     // that requires it.
-    expect(itemlist().length).toBe(64);
+    //
+    // The remaining 8 rows are the re-release pickups the WIDER gate needs:
+    // test/g_spawn_rerelease_all_modules.test.ts requires every module to
+    // spawn every classname ANY shipped re-release map places, not just the
+    // Ground Zero ones, so Ground Zero now also carries item_flag_team1 /
+    // item_flag_team2 (the CTF maps), item_flashlight, item_legacy_head and
+    // the four keys key_explosive_charges / key_green_key / key_power_core /
+    // key_yellow_key. All 8 are APPENDED after rogue's own last row, so
+    // every pre-existing item index is unmoved.
+    expect(itemlist().length).toBe(72);
   });
 });
 
 describe("spawns[] registry (g_spawn.c)", () => {
-  test("has 149 entries: rogue/g_spawn.c's 143, plus 6 re-release classnames", () => {
+  test("has 194 entries: rogue/g_spawn.c's 143, plus 51 re-release classnames", () => {
     // 143 real `{"name", SP_fn}` entries in rogue/g_spawn.c, not counting
-    // the `{NULL, NULL}` terminator. The extra 6 are the re-release-era
-    // classnames the re-release build of the Ground Zero campaign maps
-    // places and the classic table never knew: dynamic_light,
+    // the `{NULL, NULL}` terminator. The first 6 additions were the
+    // re-release-era classnames the re-release build of the Ground Zero
+    // campaign maps places and the classic table never knew: dynamic_light,
     // info_landmark, func_animation, target_poi, info_nav_lock and
     // trigger_fog. Before they were added, rmine1 dropped 14 entities.
-    expect(spawnRegistry().length).toBe(149);
+    //
+    // The other 45 come from the wider gate in
+    // test/g_spawn_rerelease_all_modules.test.ts: a player may load ANY
+    // shipped re-release map under the Ground Zero ruleset, so the table now
+    // also carries the full g_kex* target/trigger/misc set (target_camera,
+    // target_healthbar, target_story, func_eye, trigger_coop_relay, ...),
+    // the CTF placement entities, and the cross-expansion monsters those
+    // maps place (monster_gekk, monster_fixbot, monster_shambler,
+    // monster_guncmdr, monster_arachnid, monster_boss5, monster_gladb, the
+    // soldier variants, monster_makron and monster_tank_stand). mguhub
+    // under Ground Zero dropped 63 entities before this.
+    expect(spawnRegistry().length).toBe(194);
   });
 
   test("includes entries for both sibling units' spawn functions (RG-monsters, RG-systems)", () => {

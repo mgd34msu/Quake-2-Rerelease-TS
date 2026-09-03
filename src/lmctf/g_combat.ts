@@ -17,7 +17,7 @@
 import { type Vec3, vec3, vec3_origin, VectorAdd, VectorCopy, VectorLength, VectorMA, VectorNormalize, VectorScale, VectorSubtract } from "../shared/math";
 import { ATTN_NORM, CHAN_ITEM, DF_NO_FRIENDLY_FIRE, MASK_SOLID, MulticastT, Q_stricmp, TempEventT } from "../shared/q_shared";
 import { OnSameTeam } from "./g_cmds";
-import { SVF_MONSTER } from "./game";
+import { SVF_DAMAGEABLE, SVF_MONSTER } from "./game";
 import { ArmorIndex, GetItemByIndex, PowerArmorType } from "./g_items";
 import {
   type EdictT,
@@ -30,6 +30,7 @@ import {
   DAMAGE_NO_PROTECTION,
   DAMAGE_RADIUS,
   FL_GODMODE,
+  FL_NOGIB,
   FL_NO_KNOCKBACK,
   GitemArmorT,
   MOD_FRIENDLY_FIRE,
@@ -38,6 +39,7 @@ import {
   POWER_ARMOR_NONE,
   POWER_ARMOR_SCREEN,
   blueflag,
+  g_edicts,
   gameCvars,
   gi,
   level,
@@ -549,6 +551,116 @@ export function T_RadiusDamage(
           mod,
         );
       }
+    }
+  }
+}
+
+// RERELEASE CONTENT PORT -- rogue/g_newai.c's `realrange`. g_newai.ts in this
+// module exports the same four lines, but g_combat.ts is imported by nearly
+// every file here and g_newai.ts imports g_ai/g_monster/m_move in turn, so
+// the helper is duplicated locally (exactly as src/game/g_combat.ts does)
+// rather than adding that import edge.
+function realrange(self: EdictT, other: EdictT): number {
+  const dir = vec3();
+  VectorSubtract(self.s.origin, other.s.origin, dir);
+  return VectorLength(dir);
+}
+
+// **********************
+// ROGUE
+// RERELEASE CONTENT PORT -- rogue/g_combat.c's two extra radius-damage
+// variants, needed by the ported nuke (fire_nuke) and prox mine
+// (Prox_Explode) in g_newweap.ts.
+
+/*
+============
+T_RadiusNukeDamage
+
+Like T_RadiusDamage, but ignores walls (skips CanDamage check, among others)
+// up to KILLZONE radius, do 10,000 points
+// after that, do damage linearly out to KILLZONE2 radius
+============
+*/
+export function T_RadiusNukeDamage(
+  inflictor: EdictT,
+  attacker: EdictT,
+  damage: number,
+  ignore: EdictT | null,
+  radius: number,
+  mod: number,
+): void {
+  const v = vec3();
+  const dir = vec3();
+
+  const killzone = radius;
+  const killzone2 = radius * 2.0;
+
+  let ent: EdictT | null = null;
+  for (;;) {
+    ent = findradius(ent, inflictor.s.origin, killzone2);
+    if (ent === null) break;
+
+    // ignore nobody
+    if (ent === ignore) continue;
+    if (!ent.takedamage) continue;
+    if (!ent.inuse) continue;
+    if (!(ent.client !== null || ent.svflags & SVF_MONSTER || ent.svflags & SVF_DAMAGEABLE)) continue;
+
+    VectorAdd(ent.mins, ent.maxs, v);
+    VectorMA(ent.s.origin, 0.5, v, v);
+    VectorSubtract(inflictor.s.origin, v, v);
+    const len = VectorLength(v);
+    let points: number;
+    if (len <= killzone) {
+      if (ent.client !== null) ent.flags |= FL_NOGIB;
+      points = 10000;
+    } else if (len <= killzone2) {
+      points = (damage / killzone) * (killzone2 - len);
+    } else {
+      points = 0;
+    }
+
+    if (points > 0) {
+      if (ent.client !== null) ent.client.nuke_framenum = level.framenum + 20;
+      VectorSubtract(ent.s.origin, inflictor.s.origin, dir);
+      T_Damage(
+        ent,
+        inflictor,
+        attacker,
+        dir,
+        inflictor.s.origin,
+        vec3_origin,
+        points | 0,
+        points | 0,
+        DAMAGE_RADIUS,
+        mod,
+      );
+    }
+  }
+
+  // skip the worldspawn
+  // cycle through players
+  //
+  // C walks this with raw pointer arithmetic (`ent = g_edicts+1; ... ent++;`)
+  // and bails the ENTIRE loop the instant an entity fails the `client &&
+  // !nuked-this-frame && inuse` test, rather than skipping to the next
+  // entity -- preserved exactly as the C behaves (see PORTING.md's
+  // "Faithful port" rule): a non-client or freed edict at index i stops the
+  // scan for every player at index > i too.
+  for (let i = 1; ; i++) {
+    const e: EdictT | undefined = g_edicts[i];
+    if (e === undefined) break;
+    if (e.client !== null && e.client.nuke_framenum !== level.framenum + 20 && e.inuse) {
+      const tr = gi.trace(inflictor.s.origin, null, null, e.s.origin, inflictor, MASK_SOLID);
+      if (tr.fraction === 1.0) {
+        e.client.nuke_framenum = level.framenum + 20;
+      } else {
+        const dist = realrange(e, inflictor);
+        if (dist < 2048) e.client.nuke_framenum = Math.max(e.client.nuke_framenum, level.framenum + 15);
+        else e.client.nuke_framenum = Math.max(e.client.nuke_framenum, level.framenum + 10);
+      }
+    } else {
+      break;
     }
   }
 }

@@ -4,20 +4,33 @@ Ported from game/g_monster.c (GNU GPL v2 or later).
 */
 // g_monster.c
 
-import { type Vec3, vec3, vec3_origin, VectorCopy, VectorSubtract } from "../shared/math";
+import {
+  type Vec3,
+  vec3,
+  vec3_origin,
+  VectorAdd,
+  VectorCompare,
+  VectorCopy,
+  VectorSet,
+  VectorSubtract,
+} from "../shared/math";
 import {
   ATTN_NORM,
   CHAN_BODY,
   CONTENTS_LAVA,
+  CONTENTS_PLAYERCLIP,
   CONTENTS_SLIME,
+  CONTENTS_SOLID,
   CONTENTS_WATER,
   EF_COLOR_SHELL,
   EF_FLIES,
   EF_POWERSCREEN,
+  EF_SPHERETRANS,
   MASK_MONSTERSOLID,
   MASK_WATER,
   MulticastT,
   RF_FRAMELERP,
+  RF_IR_VISIBLE,
   RF_SHELL_BLUE,
   RF_SHELL_GREEN,
   RF_SHELL_RED,
@@ -26,6 +39,8 @@ import {
 import { T_Damage } from "./g_combat";
 import { FoundTarget, M_CheckAttack } from "./g_ai";
 import {
+  AI_DODGING,
+  AI_DO_NOT_COUNT,
   AI_GOOD_GUY,
   AI_HOLD_FRAME,
   AI_RESURRECTING,
@@ -33,6 +48,7 @@ import {
   DAMAGE_NO_ARMOR,
   DEAD_NO,
   type EdictT,
+  FL_DISGUISED,
   FL_FLY,
   FL_IMMUNE_LAVA,
   FL_IMMUNE_SLIME,
@@ -57,9 +73,21 @@ import {
 } from "./g_local";
 import { type Edict, SolidT, SVF_DEADMONSTER, SVF_MONSTER, SVF_NOCLIENT } from "./game";
 import { fire_bfg, fire_blaster, fire_bullet, fire_grenade, fire_rail, fire_rocket, fire_shotgun } from "./g_weapon";
+import { fire_blaster2, fire_heat, fire_tracker } from "./g_newweap";
 import { FindItemByClassname } from "./g_items";
 import { Drop_Item } from "./g_items";
-import { G_Find, G_FreeEdict, G_PickTarget, G_UseTargets, KillBox, vectoyaw, vtos, type EdictStringKey } from "./g_utils";
+import {
+  G_Find,
+  G_FreeEdict,
+  G_PickTarget,
+  G_Spawn,
+  G_UseTargets,
+  KillBox,
+  vectoyaw,
+  vtos,
+  type EdictStringKey,
+} from "./g_utils";
+import { ED_CallSpawn, ED_NewString } from "./g_spawn";
 import { M_walkmove } from "./m_move";
 
 // trace_t.ent recovery idiom (see g_phys.ts's traceEdict): sv_world.c
@@ -139,6 +167,62 @@ export function monster_fire_blaster(
   gi.multicast(start, MulticastT.MULTICAST_PVS);
 }
 
+// ROGUE
+export function monster_fire_blaster2(
+  self: EdictT,
+  start: Vec3,
+  dir: Vec3,
+  damage: number,
+  speed: number,
+  flashtype: number,
+  effect: number,
+): void {
+  fire_blaster2(self, start, dir, damage, speed, effect, false);
+
+  gi.WriteByte(svc_muzzleflash2);
+  gi.WriteShort(g_edicts.indexOf(self));
+  gi.WriteByte(flashtype);
+  gi.multicast(start, MulticastT.MULTICAST_PVS);
+}
+
+// FIXME -- add muzzle flash
+export function monster_fire_tracker(
+  self: EdictT,
+  start: Vec3,
+  dir: Vec3,
+  damage: number,
+  speed: number,
+  // rogue/m_widow2.c passes NULL here for its long-range disruptor shot
+  // (m_widow2.c's WidowDisruptorTrack else-branch), so this stays nullable
+  // to match fire_tracker's (g_newweap.c) own `edict_t *enemy` parameter.
+  enemy: EdictT | null,
+  flashtype: number,
+): void {
+  fire_tracker(self, start, dir, damage, speed, enemy);
+
+  gi.WriteByte(svc_muzzleflash2);
+  gi.WriteShort(g_edicts.indexOf(self));
+  gi.WriteByte(flashtype);
+  gi.multicast(start, MulticastT.MULTICAST_PVS);
+}
+
+export function monster_fire_heat(
+  self: EdictT,
+  start: Vec3,
+  dir: Vec3,
+  offset: Vec3,
+  damage: number,
+  kick: number,
+  flashtype: number,
+): void {
+  fire_heat(self, start, dir, offset, damage, kick, true);
+
+  gi.WriteByte(svc_muzzleflash2);
+  gi.WriteShort(g_edicts.indexOf(self));
+  gi.WriteByte(flashtype);
+  gi.multicast(start, MulticastT.MULTICAST_PVS);
+}
+
 export function monster_fire_grenade(
   self: EdictT,
   start: Vec3,
@@ -209,12 +293,12 @@ export function monster_fire_bfg(
 // Monster utility functions
 //
 
-function M_FliesOff(self: EdictT): void {
+export function M_FliesOff(self: EdictT): void {
   self.s.effects &= ~EF_FLIES;
   self.s.sound = 0;
 }
 
-function M_FliesOn(self: EdictT): void {
+export function M_FliesOn(self: EdictT): void {
   if (self.waterlevel) return;
   self.s.effects |= EF_FLIES;
   self.s.sound = gi.soundindex("infantry/inflies1.wav");
@@ -706,3 +790,402 @@ export function swimmonster_start(self: EdictT): void {
   monster_start(self);
 }
 
+export function stationarymonster_start_go(self: EdictT): void {
+  // PGM - only turrets use this, so remove the error message. They're supposed to be in solid.
+
+  //	if (!M_walkmove (self, 0, 0))
+  //		gi.dprintf ("%s in solid at %s\n", self->classname, vtos(self->s.origin));
+
+  if (!self.yaw_speed) self.yaw_speed = 20;
+  //	self.viewheight = 25;
+
+  monster_start_go(self);
+
+  if (self.spawnflags & 2) stationarymonster_triggered_start(self);
+}
+
+export function stationarymonster_triggered_spawn(self: EdictT): void {
+  KillBox(self);
+
+  self.solid = SolidT.SOLID_BBOX;
+  self.movetype = MovetypeT.MOVETYPE_NONE;
+  self.svflags &= ~SVF_NOCLIENT;
+  self.air_finished = level.time + 12;
+  gi.linkentity(self);
+
+  // FIXME - why doesn't this happen with real monsters?
+  self.spawnflags &= ~2;
+
+  stationarymonster_start_go(self);
+
+  if (self.enemy && !(self.spawnflags & 1) && !(self.enemy.flags & FL_NOTARGET)) {
+    if (!(self.enemy.flags & FL_DISGUISED)) {
+      // PGM
+      FoundTarget(self);
+    } else {
+      // PMM - just in case, make sure to clear the enemy so FindTarget doesn't get confused
+      self.enemy = null;
+    }
+  } else {
+    self.enemy = null;
+  }
+}
+
+export function stationarymonster_triggered_spawn_use(
+  self: EdictT,
+  _other: EdictT | null,
+  activator: EdictT | null,
+): void {
+  // we have a one frame delay here so we don't telefrag the guy who activated us
+  self.think = stationarymonster_triggered_spawn;
+  self.nextthink = level.time + FRAMETIME;
+  if (activator !== null && activator.client) self.enemy = activator;
+  self.use = monster_use;
+}
+
+export function stationarymonster_triggered_start(self: EdictT): void {
+  self.solid = SolidT.SOLID_NOT;
+  self.movetype = MovetypeT.MOVETYPE_NONE;
+  self.svflags |= SVF_NOCLIENT;
+  self.nextthink = 0;
+  self.use = stationarymonster_triggered_spawn_use;
+}
+
+export function stationarymonster_start(self: EdictT): void {
+  self.think = stationarymonster_start_go;
+  monster_start(self);
+}
+
+export function monster_done_dodge(self: EdictT): void {
+  self.monsterinfo.aiflags &= ~AI_DODGING;
+}
+// ROGUE
+
+// ROGUE
+// cleanupHealTarget -- clean up heal targets for the medic/medic commander.
+// Ported from rogue/g_combat.c (outside this round's edit ownership -- see
+// the file-top note). Not yet wired into g_combat.ts's Killed(); see this
+// file's final port report.
+export function cleanupHealTarget(ent: EdictT): void {
+  // This function's contract is "ent is no longer anyone's heal target",
+  // and all three call sites pass a medic's current patient. Vanilla 3.21
+  // claims a patient with `patient.owner = medic` and rogue's medic
+  // overhaul claims it with `monsterinfo.healer`; this module hosts
+  // monsters that use each, so releasing the patient has to clear both.
+  // Clearing owner is not just bookkeeping -- traces skip an entity's
+  // owner, so a corpse left owned by a dead medic keeps colliding wrong
+  // and no other medic can claim it.
+  ent.owner = null;
+  ent.monsterinfo.healer = null;
+  ent.takedamage = DamageT.DAMAGE_YES;
+  ent.monsterinfo.aiflags &= ~AI_RESURRECTING;
+  M_SetEffects(ent);
+}
+// ROGUE
+
+//===================================================================
+// ROGUE -- monster-spawning helpers, used by the carrier/medic_commander/
+// black widow (this round's monster SCOPE). Ported from rogue/g_spawn.c
+// (outside this round's edit ownership -- see the file-top note). See the
+// C's own block comment: the sequence to create a flying monster is
+// FindSpawnPoint then CreateFlyMonster; for a ground monster, FindSpawnPoint
+// then CreateGroundMonster.
+//===================================================================
+
+/*
+CreateMonster
+*/
+export function CreateMonster(origin: Vec3, angles: Vec3, classname: string): EdictT {
+  const newEnt = G_Spawn();
+
+  VectorCopy(origin, newEnt.s.origin);
+  VectorCopy(angles, newEnt.s.angles);
+  newEnt.classname = ED_NewString(classname);
+  newEnt.monsterinfo.aiflags |= AI_DO_NOT_COUNT;
+
+  VectorSet(newEnt.gravityVector, 0, 0, -1);
+  ED_CallSpawn(newEnt);
+  newEnt.s.renderfx |= RF_IR_VISIBLE;
+
+  return newEnt;
+}
+
+export function CreateFlyMonster(origin: Vec3, angles: Vec3, mins: Vec3, maxs: Vec3, classname: string): EdictT | null {
+  if (VectorCompare(mins, vec3_origin) !== 0 || VectorCompare(maxs, vec3_origin) !== 0) {
+    DetermineBBox(classname, mins, maxs);
+  }
+
+  if (!CheckSpawnPoint(origin, mins, maxs)) return null;
+
+  return CreateMonster(origin, angles, classname);
+}
+
+// This is just a wrapper for CreateMonster that looks down height # of CMUs
+// and sees if there are bad things down there or not
+//
+// this is from m_move.c
+const STEPSIZE_SPAWN = 18;
+
+export function CreateGroundMonster(
+  origin: Vec3,
+  angles: Vec3,
+  entMins: Vec3,
+  entMaxs: Vec3,
+  classname: string,
+  height: number,
+): EdictT | null {
+  let mins = entMins;
+  let maxs = entMaxs;
+
+  // if they don't provide us a bounding box, figure it out
+  if (VectorCompare(entMins, vec3_origin) !== 0 || VectorCompare(entMaxs, vec3_origin) !== 0) {
+    mins = vec3();
+    maxs = vec3();
+    DetermineBBox(classname, mins, maxs);
+  }
+
+  // check the ground to make sure it's there, it's relatively flat, and it's not toxic
+  if (!CheckGroundSpawnPoint(origin, mins, maxs, height, -1)) return null;
+
+  return CreateMonster(origin, angles, classname);
+}
+
+// FindSpawnPoint
+// PMM - this is used by the medic commander (possibly by the carrier) to
+// find a good spawn point if the startpoint is bad, try above the
+// startpoint for a bit
+export function FindSpawnPoint(startpoint: Vec3, mins: Vec3, maxs: Vec3, spawnpoint: Vec3, maxMoveUp: number): boolean {
+  const tr = gi.trace(startpoint, mins, maxs, startpoint, null, MASK_MONSTERSOLID | CONTENTS_PLAYERCLIP);
+  if (tr.startsolid || tr.allsolid || traceEdict(tr.ent) !== world()) {
+    const top = vec3();
+    VectorCopy(startpoint, top);
+    top[2] += maxMoveUp;
+
+    const tr2 = gi.trace(top, mins, maxs, startpoint, null, MASK_MONSTERSOLID);
+    if (tr2.startsolid || tr2.allsolid) {
+      return false;
+    }
+    VectorCopy(tr2.endpos, spawnpoint);
+    return true;
+  }
+  VectorCopy(startpoint, spawnpoint);
+  return true;
+}
+
+// FIXME - all of this needs to be tweaked to handle the new gravity rules
+// if we ever want to spawn stuff on the roof
+
+// CheckSpawnPoint
+// PMM - checks volume to make sure we can spawn a monster there (is it
+// solid?) This is all fliers should need
+export function CheckSpawnPoint(origin: Vec3, mins: Vec3, maxs: Vec3): boolean {
+  if (VectorCompare(mins, vec3_origin) !== 0 || VectorCompare(maxs, vec3_origin) !== 0) {
+    return false;
+  }
+
+  const tr = gi.trace(origin, mins, maxs, origin, null, MASK_MONSTERSOLID);
+  if (tr.startsolid || tr.allsolid) {
+    return false;
+  }
+  if (traceEdict(tr.ent) !== world()) {
+    return false;
+  }
+  return true;
+}
+
+// CheckGroundSpawnPoint
+// PMM - used for walking monsters: is there a ground within the specified
+// height of the origin, is the ground non-water, and is the ground flat
+// enough to walk on?
+export function CheckGroundSpawnPoint(origin: Vec3, entMins: Vec3, entMaxs: Vec3, height: number, gravity: number): boolean {
+  if (!CheckSpawnPoint(origin, entMins, entMaxs)) return false;
+
+  // FIXME - this is too conservative about angled surfaces
+  const stop = vec3();
+  VectorCopy(origin, stop);
+  // FIXME - gravity vector
+  stop[2] = origin[2] + entMins[2] - height;
+
+  let tr = gi.trace(origin, entMins, entMaxs, stop, null, MASK_MONSTERSOLID | MASK_WATER);
+  // it's not going to be all solid or start solid, since that's checked above
+
+  if (tr.fraction < 1 && (tr.contents & MASK_MONSTERSOLID) !== 0) {
+    // we found a non-water surface down there somewhere. now we need to
+    // check to make sure it's not too sloped -- algorithm straight out of
+    // m_move.c:M_CheckBottom()
+
+    // first, do the midpoint trace
+    const mins = vec3();
+    const maxs = vec3();
+    VectorAdd(tr.endpos, entMins, mins);
+    VectorAdd(tr.endpos, entMaxs, maxs);
+
+    // first, do the easy flat check
+    const start = vec3();
+    // FIXME - this will only handle 0,0,1 and 0,0,-1 gravity vectors
+    if (gravity > 0) {
+      start[2] = maxs[2] + 1;
+    } else {
+      start[2] = mins[2] - 1;
+    }
+
+    let allSolid = true;
+    for (let x = 0; x <= 1 && allSolid; x++) {
+      for (let y = 0; y <= 1 && allSolid; y++) {
+        start[0] = x !== 0 ? maxs[0] : mins[0];
+        start[1] = y !== 0 ? maxs[1] : mins[1];
+        if (gi.pointcontents(start) !== CONTENTS_SOLID) allSolid = false;
+      }
+    }
+    if (allSolid) {
+      // if it passed all four above checks, we're done
+      return true;
+    }
+
+    // check it for real
+    const start2 = vec3();
+    const stop2 = vec3();
+    start2[0] = stop2[0] = (mins[0] + maxs[0]) * 0.5;
+    start2[1] = stop2[1] = (mins[1] + maxs[1]) * 0.5;
+    start2[2] = mins[2];
+
+    tr = gi.trace(start2, vec3_origin, vec3_origin, stop2, null, MASK_MONSTERSOLID);
+
+    if (tr.fraction === 1) return false;
+    let mid: number;
+    let bottom: number;
+
+    if (gravity < 0) {
+      start2[2] = mins[2];
+      stop2[2] = start2[2] - STEPSIZE_SPAWN - STEPSIZE_SPAWN;
+      mid = bottom = tr.endpos[2] + entMins[2];
+    } else {
+      start2[2] = maxs[2];
+      stop2[2] = start2[2] + STEPSIZE_SPAWN + STEPSIZE_SPAWN;
+      mid = bottom = tr.endpos[2] - entMaxs[2];
+    }
+
+    for (let x = 0; x <= 1; x++) {
+      for (let y = 0; y <= 1; y++) {
+        start2[0] = stop2[0] = x !== 0 ? maxs[0] : mins[0];
+        start2[1] = stop2[1] = y !== 0 ? maxs[1] : mins[1];
+
+        tr = gi.trace(start2, vec3_origin, vec3_origin, stop2, null, MASK_MONSTERSOLID);
+
+        // PGM
+        // FIXME - this will only handle 0,0,1 and 0,0,-1 gravity vectors
+        if (gravity > 0) {
+          if (tr.fraction !== 1 && tr.endpos[2] < bottom) bottom = tr.endpos[2];
+          if (tr.fraction === 1 || tr.endpos[2] - mid > STEPSIZE_SPAWN) {
+            return false;
+          }
+        } else {
+          if (tr.fraction !== 1 && tr.endpos[2] > bottom) bottom = tr.endpos[2];
+          if (tr.fraction === 1 || mid - tr.endpos[2] > STEPSIZE_SPAWN) {
+            return false;
+          }
+        }
+      }
+    }
+
+    return true; // we can land on it, it's ok
+  }
+
+  // otherwise, it's either water (bad) or not there (too far)
+  return false;
+}
+
+export function DetermineBBox(classname: string, mins: Vec3, maxs: Vec3): void {
+  // FIXME - cache this stuff
+  const newEnt = G_Spawn();
+
+  VectorCopy(vec3_origin, newEnt.s.origin);
+  VectorCopy(vec3_origin, newEnt.s.angles);
+  newEnt.classname = ED_NewString(classname);
+  newEnt.monsterinfo.aiflags |= AI_DO_NOT_COUNT;
+
+  ED_CallSpawn(newEnt);
+
+  VectorCopy(newEnt.mins, mins);
+  VectorCopy(newEnt.maxs, maxs);
+
+  G_FreeEdict(newEnt);
+}
+
+// ****************************
+// SPAWNGROW stuff
+// ****************************
+
+const SPAWNGROW_LIFESPAN = 0.3;
+
+function spawngrow_think(self: EdictT): void {
+  for (let i = 0; i < 2; i++) {
+    self.s.angles[0] = Math.floor(Math.random() * 360);
+    self.s.angles[1] = Math.floor(Math.random() * 360);
+    self.s.angles[2] = Math.floor(Math.random() * 360);
+  }
+  if (level.time < self.wait && self.s.frame < 2) self.s.frame++;
+  if (level.time >= self.wait) {
+    if (self.s.effects & EF_SPHERETRANS) {
+      G_FreeEdict(self);
+      return;
+    } else if (self.s.frame > 0) {
+      self.s.frame--;
+    } else {
+      G_FreeEdict(self);
+      return;
+    }
+  }
+  self.nextthink += FRAMETIME;
+}
+
+export function SpawnGrow_Spawn(startpos: Vec3, size: number): void {
+  const ent = G_Spawn();
+  VectorCopy(startpos, ent.s.origin);
+  for (let i = 0; i < 2; i++) {
+    ent.s.angles[0] = Math.floor(Math.random() * 360);
+    ent.s.angles[1] = Math.floor(Math.random() * 360);
+    ent.s.angles[2] = Math.floor(Math.random() * 360);
+  }
+  ent.solid = SolidT.SOLID_NOT;
+  ent.s.renderfx = RF_IR_VISIBLE;
+  ent.movetype = MovetypeT.MOVETYPE_NONE;
+  ent.classname = "spawngro";
+
+  let lifespan: number;
+  if (size <= 1) {
+    lifespan = SPAWNGROW_LIFESPAN;
+    ent.s.modelindex = gi.modelindex("models/items/spawngro2/tris.md2");
+  } else if (size === 2) {
+    ent.s.modelindex = gi.modelindex("models/items/spawngro3/tris.md2");
+    lifespan = 2;
+  } else {
+    ent.s.modelindex = gi.modelindex("models/items/spawngro/tris.md2");
+    lifespan = SPAWNGROW_LIFESPAN;
+  }
+
+  ent.think = spawngrow_think;
+
+  ent.wait = level.time + lifespan;
+  ent.nextthink = level.time + FRAMETIME;
+  if (size !== 2) ent.s.effects |= EF_SPHERETRANS;
+  gi.linkentity(ent);
+}
+
+// -------------------------------------------------------------------------
+// Savegame function/mmove registry -- so a save containing an entity that
+// references one of these callbacks or move tables restores a real
+// think/touch/use/pain/die/blocked function or monsterinfo.currentmove
+// object instead of null (see g_save.ts's registerSaveFunction/
+// registerSaveMmove name registry).
+// -------------------------------------------------------------------------
+
+import { registerSaveFunction, registerSaveMmove } from "./g_save";
+
+registerSaveFunction("g_monster:M_FliesOff", M_FliesOff);
+registerSaveFunction("g_monster:M_FliesOn", M_FliesOn);
+registerSaveFunction("g_monster:M_CheckAttack", M_CheckAttack);
+registerSaveFunction("g_monster:stationarymonster_start_go", stationarymonster_start_go);
+registerSaveFunction("g_monster:stationarymonster_triggered_spawn", stationarymonster_triggered_spawn);
+registerSaveFunction("g_monster:stationarymonster_triggered_spawn_use", stationarymonster_triggered_spawn_use);
+registerSaveFunction("g_monster:spawngrow_think", spawngrow_think);

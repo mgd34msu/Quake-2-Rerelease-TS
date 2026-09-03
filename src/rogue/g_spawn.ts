@@ -189,20 +189,70 @@ import {
 import { SP_turret_base, SP_turret_breach, SP_turret_driver, SP_turret_invisible_brain } from "./g_turret";
 // RE-RELEASE CONTENT PORT -- the six 2023-era classnames Ground Zero's own
 // shipped maps place. See the block at the tail of spawns[] below.
-import { SP_dynamic_light, SP_func_animation, SP_info_landmark } from "./g_kexmisc";
-import { SP_target_poi } from "./g_kextarg";
-import { SP_info_nav_lock, SP_trigger_fog } from "./g_kextrig";
+import {
+  SP_dynamic_light,
+  SP_func_animation,
+  SP_info_landmark,
+  SP_info_world_text,
+  SP_misc_flare,
+  SP_misc_hologram,
+  SP_misc_lavaball,
+  SP_misc_model,
+  SP_misc_player_mannequin,
+} from "./g_kexmisc";
+import {
+  SP_target_autosave,
+  SP_target_camera,
+  SP_target_crossunit_target,
+  SP_target_crossunit_trigger,
+  SP_target_gravity,
+  SP_target_healthbar,
+  SP_target_light,
+  SP_target_music,
+  SP_target_poi,
+  SP_target_sky,
+  SP_target_soundfx,
+  SP_target_story,
+} from "./g_kextarg";
+import {
+  SP_func_eye,
+  SP_info_nav_lock,
+  SP_trigger_coop_relay,
+  SP_trigger_flashlight,
+  SP_trigger_fog,
+  SP_trigger_health_relay,
+} from "./g_kextrig";
+// RE-RELEASE CONTENT PORT -- the flag/team-spawn slice of ThreeWave CTF and
+// the xatrix misc_* props, both copied in from our sibling src/game/.
+import { SP_info_player_team1, SP_info_player_team2, SP_misc_ctf_banner, SP_misc_ctf_small_banner } from "./g_ctf";
+import { SP_misc_amb4, SP_misc_nuke, SP_misc_transport, SP_misc_viper_missile } from "./g_newmisc";
+// RE-RELEASE CONTENT PORT -- monsters the re-release maps this module hosts
+// place, in files copied in from our sibling src/game/.
+import { SP_monster_arachnid } from "./m_arachnid";
+import { SP_monster_boss5 } from "./m_boss5";
+import { SP_monster_fixbot } from "./m_fixbot";
+import { SP_monster_gekk } from "./m_gekk";
+import { SP_monster_gladb } from "./m_gladb";
+import { SP_monster_guncmdr } from "./m_guncmdr";
+import { SP_monster_shambler } from "./m_shambler";
 import { SP_misc_actor, SP_target_actor } from "./m_actor";
 import { SP_misc_insane } from "./m_insane";
 import { SP_monster_berserk } from "./m_berserk";
 import { SP_monster_gladiator } from "./m_gladiator";
 import { SP_monster_gunner } from "./m_gunner";
 import { SP_monster_infantry } from "./m_infantry";
-import { SP_monster_soldier, SP_monster_soldier_light, SP_monster_soldier_ss } from "./m_soldier";
-import { SP_monster_tank } from "./m_tank";
+import {
+  SP_monster_soldier,
+  SP_monster_soldier_hypergun,
+  SP_monster_soldier_lasergun,
+  SP_monster_soldier_light,
+  SP_monster_soldier_ripper,
+  SP_monster_soldier_ss,
+} from "./m_soldier";
+import { SP_monster_tank, SP_monster_tank_stand } from "./m_tank";
 import { SP_monster_medic } from "./m_medic";
 import { SP_monster_flipper } from "./m_flipper";
-import { SP_monster_chick } from "./m_chick";
+import { SP_monster_chick, SP_monster_chick_heat } from "./m_chick";
 import { SP_monster_parasite } from "./m_parasite";
 import { SP_monster_flyer, SP_monster_kamikaze } from "./m_flyer";
 import { SP_monster_brain } from "./m_brain";
@@ -213,6 +263,7 @@ import { SP_monster_supertank } from "./m_supertank";
 import { SP_monster_boss2 } from "./m_boss2";
 import { SP_monster_boss3_stand } from "./m_boss3";
 import { SP_monster_jorg } from "./m_boss31";
+import { SP_monster_makron } from "./m_boss32";
 
 // RG-monsters' SCOPE (pack-only monster files) -- imported as if present
 // per this pack's cross-unit convention.
@@ -227,6 +278,8 @@ import { SP_monster_widow2, ThrowSmallStuff, ThrowWidowGibSized } from "./m_wido
 import {
   SP_func_door_secret2,
   SP_func_force_wall,
+  SP_object_repair,
+  SP_rotating_light,
 } from "./g_newfnc";
 import {
   SP_info_teleport_destination,
@@ -237,6 +290,7 @@ import {
   SP_target_anger,
   SP_target_blacklight,
   SP_target_killplayers,
+  SP_target_mal_laser,
   SP_target_orb,
   SP_target_steam,
 } from "./g_newtarg";
@@ -703,6 +757,69 @@ const spawns: SpawnT[] = [
   { name: "target_poi", spawn: SP_target_poi },
   { name: "trigger_fog", spawn: SP_trigger_fog },
   { name: "info_nav_lock", spawn: SP_info_nav_lock },
+
+  // ======================================================================
+  // RE-RELEASE CONTENT PORT (second pass) -- the remaining 45 classnames the
+  // 2023 re-release ships maps for that this table could not spawn.
+  //
+  // Same rule as the block above: a row here is INERT until a map places the
+  // classname, so no 1998-era Ground Zero map sees any change. Ground Zero's
+  // own entities, items and monsters are untouched -- every row below points
+  // at either a file copied in verbatim from our sibling src/game/ or a
+  // variant appended to one of this tree's own files, never at a rewrite of
+  // one. Rows are in src/game/g_spawn.ts's own order so the two tables read
+  // the same way.
+  //
+  // The eight remaining classnames (item_flag_team1/2, item_flashlight,
+  // item_legacy_head and the four key_* rows) are ITEMS: ED_CallSpawn scans
+  // the itemlist BEFORE this table, so their registration is the ITEMLIST
+  // rows in g_items.ts, not entries here.
+  // ======================================================================
+  { name: "monster_makron", spawn: SP_monster_makron },
+  { name: "info_player_team1", spawn: SP_info_player_team1 },
+  { name: "info_player_team2", spawn: SP_info_player_team2 },
+  { name: "misc_ctf_banner", spawn: SP_misc_ctf_banner },
+  { name: "misc_ctf_small_banner", spawn: SP_misc_ctf_small_banner },
+  { name: "info_world_text", spawn: SP_info_world_text },
+  { name: "misc_flare", spawn: SP_misc_flare },
+  { name: "misc_hologram", spawn: SP_misc_hologram },
+  { name: "misc_lavaball", spawn: SP_misc_lavaball },
+  { name: "misc_model", spawn: SP_misc_model },
+  { name: "misc_player_mannequin", spawn: SP_misc_player_mannequin },
+  { name: "target_autosave", spawn: SP_target_autosave },
+  { name: "target_camera", spawn: SP_target_camera },
+  { name: "target_crossunit_target", spawn: SP_target_crossunit_target },
+  { name: "target_crossunit_trigger", spawn: SP_target_crossunit_trigger },
+  { name: "target_gravity", spawn: SP_target_gravity },
+  { name: "target_healthbar", spawn: SP_target_healthbar },
+  { name: "target_light", spawn: SP_target_light },
+  { name: "target_music", spawn: SP_target_music },
+  { name: "target_sky", spawn: SP_target_sky },
+  { name: "target_soundfx", spawn: SP_target_soundfx },
+  { name: "target_story", spawn: SP_target_story },
+  { name: "func_eye", spawn: SP_func_eye },
+  { name: "trigger_coop_relay", spawn: SP_trigger_coop_relay },
+  { name: "trigger_flashlight", spawn: SP_trigger_flashlight },
+  { name: "trigger_health_relay", spawn: SP_trigger_health_relay },
+  { name: "func_object_repair", spawn: SP_object_repair },
+  { name: "rotating_light", spawn: SP_rotating_light },
+  { name: "misc_amb4", spawn: SP_misc_amb4 },
+  { name: "misc_nuke", spawn: SP_misc_nuke },
+  { name: "misc_transport", spawn: SP_misc_transport },
+  { name: "misc_viper_missile", spawn: SP_misc_viper_missile },
+  { name: "target_mal_laser", spawn: SP_target_mal_laser },
+  { name: "monster_arachnid", spawn: SP_monster_arachnid },
+  { name: "monster_boss5", spawn: SP_monster_boss5 },
+  { name: "monster_chick_heat", spawn: SP_monster_chick_heat },
+  { name: "monster_fixbot", spawn: SP_monster_fixbot },
+  { name: "monster_gekk", spawn: SP_monster_gekk },
+  { name: "monster_gladb", spawn: SP_monster_gladb },
+  { name: "monster_guncmdr", spawn: SP_monster_guncmdr },
+  { name: "monster_shambler", spawn: SP_monster_shambler },
+  { name: "monster_soldier_hypergun", spawn: SP_monster_soldier_hypergun },
+  { name: "monster_soldier_lasergun", spawn: SP_monster_soldier_lasergun },
+  { name: "monster_soldier_ripper", spawn: SP_monster_soldier_ripper },
+  { name: "monster_tank_stand", spawn: SP_monster_tank_stand },
 ];
 
 // Exposed the same way g_items.ts's `itemlist()` exposes its private
@@ -1284,7 +1401,24 @@ export function SP_worldspawn(ent: EdictT): void {
     gi.configstring(CS_SKY, "unit1_");
   }
 
-  gi.configstring(CS_SKYROTATE, Com_sprintf("%f", st.skyrotate));
+  // Client-side gate (cl_view.ts's CL_SetSky / cl_parse.ts's
+  // CL_ParseConfigString): `cls.csr.extended` decides whether CS_SKYROTATE
+  // is parsed as "<rotate>" or "<rotate> <autorotate>" (q2repro
+  // precache.c:380-383). `gi.extended_layout()` is this module's mirror of
+  // that same session-wide layout decision (sv_init.ts's "CONTENT-DRIVEN
+  // LAYOUT CHOICE"), so it has to be the gate here too: a classic-module
+  // session running 1998-era map data always runs on the narrow layout, and
+  // MUST keep emitting exactly the bare `%f` string it always has -- that
+  // byte-for-byte content is what keeps a narrow session's traffic (and
+  // rendered frame) identical to the pre-existing build. Only a WIDE
+  // session (re-release content through this module) gets the
+  // two-token form, matching src/kexgame/g_spawn.ts:1877's own
+  // `${st.skyrotate} ${st.skyautorotate}` write for the kex module.
+  if (gi.extended_layout?.() === true) {
+    gi.configstring(CS_SKYROTATE, `${st.skyrotate} ${st.skyautorotate}`);
+  } else {
+    gi.configstring(CS_SKYROTATE, Com_sprintf("%f", st.skyrotate));
+  }
 
   gi.configstring(CS_SKYAXIS, Com_sprintf("%f %f %f", st.skyaxis[0], st.skyaxis[1], st.skyaxis[2]));
 

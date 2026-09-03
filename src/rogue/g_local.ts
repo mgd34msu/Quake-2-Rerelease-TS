@@ -300,6 +300,14 @@ export const IT_MELEE = 0x00000040;
 export const IT_NOT_GIVEABLE = 0x00000080; // item can not be given
 // ROGUE
 
+// ctf/g_local.h: `#define IT_TECH 64` (gitem_t->flags).
+// RENUMBERED 0x40 -> 0x100 for this module, exactly as our sibling
+// src/game/g_local.ts renumbers it: rogue's IT_MELEE already claims 0x40 (and
+// IT_NOT_GIVEABLE 0x80) in the same gitem_t->flags word. gitem_t.flags is a
+// compile-time property of the static itemlist[] -- not parsed from map files,
+// not sent over the wire -- so the bit choice is free.
+export const IT_TECH = 0x00000100;
+
 // gitem_t->weapmodel for weapons indicates model index
 export const WEAP_BLASTER = 1;
 export const WEAP_SHOTGUN = 2;
@@ -372,6 +380,17 @@ export class GameLocalsT {
 
   // cross level triggers
   serverflags = 0;
+
+  // RE-RELEASE CONTENT PORT: game_locals_t::cross_unit_flags from
+  // src/kexgame/. Distinct from `serverflags` above, which is the classic
+  // CROSS_LEVEL flag word: cross_unit_flags is the re-release's separate
+  // CROSS_UNIT word, set by target_crossunit_trigger and tested by
+  // target_crossunit_target. It lives on GameLocalsT rather than
+  // LevelLocalsT precisely because it must survive a level change -- that
+  // cross-unit lifetime is the entity pair's whole purpose -- and it is
+  // serialized alongside serverflags in g_save.ts so it also survives a
+  // save/load.
+  cross_unit_flags = 0;
 
   // items
   num_items = 0;
@@ -550,6 +569,37 @@ export class SpawnTempT {
   // not silently dropped.
   // =====================================================================
   image: string | null = null;
+  // g_local.h:1274 declares `int32_t skyautorotate = 1;` (default 1, not 0).
+  // A worldspawn that never explicitly sets skyautorotate (the overwhelmingly
+  // common case) must default to "spin continuously", matching the re-release
+  // game DLL; see SP_worldspawn's CS_SKYROTATE write in g_spawn.ts.
+  skyautorotate = 1;
+  // target_camera / target_healthbar / misc_flare / SP_target_poi radius, and
+  // the re-release's achievement + POI goal keys.
+  radius = 0;
+  achievement: string | null = null;
+  goals: string | null = null;
+  // misc_flare's distance fade, and NOT 0: the re-release declares these with
+  // real defaults (src/kexgame/g_local_types.ts:319-320, itself g_local.h's
+  // `int32_t fade_start_dist = 96; int32_t fade_end_dist = 384;`), and every
+  // shipped misc_flare relies on them -- none of the flares in mgu2m3 spells
+  // either key. They ride the wire in s.modelindex2/s.modelindex3 and the
+  // client's RF_FLARE branch (cl_ents.ts) computes the flare's alpha from
+  // them: with both at 0 the ramp collapses to "always fully opaque", so the
+  // flare that should fade in with distance is drawn at full strength from
+  // any range. No effect on any 1998-era entity -- these are re-release-only
+  // spawn keys read only by SP_misc_flare.
+  fade_start_dist = 96;
+  fade_end_dist = 384;
+  // Default 1.0, NOT 0 -- kexgame/g_spawn.ts:707 (`health_multiplier: 1.0`,
+  // itself g_local.h:1306's `float health_multiplier = 1.0f`). Every ported
+  // re-release monster sets its health as
+  // `Math.trunc(<base> * st.health_multiplier)`, so a 0 default would give
+  // every one of them 0 health on any map that does not explicitly write the
+  // key -- i.e. almost all of them. SpawnTempT.clear() restores this default
+  // per entity via `new SpawnTempT()`, matching the C's memset-then-initialize
+  // of the aggregate.
+  health_multiplier = 1.0;
   // Shadow-light keys. This module's renderer path has no shadow-light pass
   // and protocol 34 has no message that could carry one, so these are
   // parsed and stored (so the entity spawns complete and a future renderer
@@ -773,6 +823,22 @@ export const MOD_TARGET_LASER = 30;
 export const MOD_TRIGGER_HURT = 31;
 export const MOD_HIT = 32;
 export const MOD_TARGET_BLASTER = 33;
+
+// RE-RELEASE CONTENT PORT -- means-of-death values the re-release entity and
+// monster set this module now hosts needs, taken with the SAME numbers our
+// sibling src/game/g_local.ts uses (xatrix/g_local.h's `// RAFAEL 14-APR-98`
+// block). 34-39 were the range xatrix claimed and rogue's own additions start
+// at 40, so these slot in without renumbering anything Ground Zero owns.
+// MOD_RIPPER is the gunner commander's ionripper, MOD_PHALANX the beta
+// gladiator's plasma, MOD_BLASTOFF the fixbot's blastoff, MOD_GEKK the gekk's
+// bite/claw and MOD_TRAP the trap. MOD_* values are internal to the game
+// module (they pick an obituary string in ClientObituary) -- never written to
+// the wire, never stored in a .bsp.
+export const MOD_RIPPER = 34;
+export const MOD_PHALANX = 35;
+export const MOD_BLASTOFF = 37;
+export const MOD_GEKK = 38;
+export const MOD_TRAP = 39;
 // ROGUE
 export const MOD_CHAINFIST = 40;
 export const MOD_DISINTEGRATOR = 41;
@@ -907,6 +973,27 @@ export class ClientRespawnT {
   cmd_angles: Vec3 = vec3(); // angles sent over in the last command
 
   spectator = false; // client is a spectator
+
+  // RE-RELEASE CONTENT PORT -- CTF per-client respawn state, from
+  // src/ctf/g_local.ts via our sibling src/game/g_local.ts. Backs the flag
+  // entities (item_flag_team1/2) and the team spawn points this module now
+  // hosts for the shipped CTF maps. `ctf_team` holds a ctfteam_t value
+  // (CTF_NOTEAM/CTF_TEAM1/CTF_TEAM2) as a plain number, matching
+  // src/ctf/g_local.ts's own note, so this file needs no value-import of the
+  // ported g_ctf.ts. Every field defaults to what a non-CTF client already
+  // leaves it at, so Ground Zero's own rules are untouched.
+  ctf_team = 0;
+  ctf_state = 0;
+  ctf_lasthurtcarrier = 0;
+  ctf_lastreturnedflag = 0;
+  ctf_flagsince = 0;
+  ctf_lastfraggedcarrier = 0;
+  id_state = false;
+  lastidtime = 0;
+  voted = false; // for elections
+  ready = false;
+  admin = false;
+  ghost: GhostT | null = null; // for ghost codes
 }
 
 // this structure is cleared on each PutClientInServer(),
@@ -1012,6 +1099,14 @@ export class GClientT {
 
   owned_sphere: EdictT | null = null; // this points to the player's sphere
   // ROGUE
+
+  // RE-RELEASE CONTENT PORT -- CTF tech bookkeeping, from src/ctf/g_local.ts
+  // via our sibling src/game/g_local.ts. Read and written only by the ported
+  // g_ctf.ts tech code; zero for every client that never touches a tech, so
+  // Ground Zero play is unchanged.
+  ctf_regentime = 0; // regen tech
+  ctf_techsndtime = 0;
+  ctf_lasttechmsg = 0;
 
   // this structure is cleared on each PutClientInServer(), except for 'pers'
   clear(): void {
@@ -1213,10 +1308,38 @@ export class EdictT implements Edict {
   fog: FogT = new FogT();
   heightfog: HeightFogT = new HeightFogT();
   bmodel_anim: BmodelAnimT = new BmodelAnimT();
+  // `hackflags` carries the re-release's per-entity HACKFLAG_* bits; the ones
+  // this module reaches are target_light's (g_kextarg.ts), which use it to
+  // remember the good/bad lightstyle a target_light toggles between.
+  hackflags = 0;
 
   clear(): void {
     Object.assign(this, new EdictT());
   }
+}
+
+// ------------------- from src/ctf/g_local.ts -------------------
+// ctf/g_ctf.h's `ghost_t` (`struct ghost_s`). g_local.h's `client_respawn_t`
+// forward-references it (`struct ghost_s *ghost;`) via ctf/g_local.h's
+// trailing `#include "g_ctf.h"`; declared here rather than in the ported
+// g_ctf.ts so ClientRespawnT.ghost above does not need a reverse type-only
+// import (the same "helper's true source file differs from the mapping table"
+// case PORTING.md calls out for random()/crandom()).
+export class GhostT {
+  netname = ""; // char[16]
+  number = 0;
+
+  // stats
+  deaths = 0;
+  kills = 0;
+  caps = 0;
+  basedef = 0;
+  carrierdef = 0;
+
+  code = 0; // ghost code
+  team = 0; // team
+  score = 0; // frags at time of disconnect
+  ent: EdictT | null = null;
 }
 
 //===============================================================

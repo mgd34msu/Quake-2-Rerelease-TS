@@ -31,6 +31,12 @@ export const GAME_API_VERSION = 3;
 export const SVF_NOCLIENT = 0x00000001; // don't send entity to clients, even if it has effects
 export const SVF_DEADMONSTER = 0x00000002; // treat as CONTENTS_DEADMONSTER for collision
 export const SVF_MONSTER = 0x00000004; // treat as CONTENTS_MONSTER for collision
+// RERELEASE CONTENT PORT (rogue/game.h: "added for things that are
+// damageable but not monsters"): tesla mines, the spheres and the
+// doppleganger set this so T_Damage and the monster-targeting code treat
+// them as valid targets without making them count as monsters. Vanilla
+// entities never set it, so the new bit is inert for classic content.
+export const SVF_DAMAGEABLE = 0x00000008;
 
 // edict->solid values
 export enum SolidT {
@@ -96,6 +102,27 @@ export interface GTraceT extends Omit<TraceT, "ent"> {
 //
 // functions provided by the main engine
 //
+/**
+ * One player's fog state as p_client.cpp's P_ForceFogTransition carries it.
+ * Colour channels and `sky_factor` are 0..1 (the engine scales them to the
+ * bytes svc_fog puts on the wire); `hf_start`/`hf_end` are
+ * [r, g, b, distance] with the colour 0..1 and the distance in world units.
+ */
+export interface FogStateT {
+  density: number;
+  r: number;
+  g: number;
+  b: number;
+  sky_factor: number;
+  hf_falloff: number;
+  hf_density: number;
+  hf_start: readonly [number, number, number, number];
+  hf_end: readonly [number, number, number, number];
+}
+
+/** RGBA 0..1, the colour argument info_world_text's draw calls take. */
+export type FogRgbaT = readonly [number, number, number, number];
+
 /**
  * One nav-mesh path query, this module's spelling of the re-release
  * `PathRequest`. IDENTICAL to src/game/game.ts's PathQueryT and copied in for
@@ -178,6 +205,84 @@ export interface GameImports {
   // All of the current configstrings are sent to clients when
   // they connect, and changes are sent to all connected clients.
   configstring(num: number, str: string): void;
+
+  // ---------------------------------------------------------------------
+  // ADDITIONS TO THE FROZEN v3 IMPORT SET (not in the 1997 game.h).
+  //
+  // The configstring space is a property of the SESSION, not of the game
+  // module (src/server/sv_init.ts's SV_WidenConfigstringSpace). A classic
+  // module hosted on the WIDE layout can deliver presentation the classic
+  // layout has no room for, and these two are how it asks and how it
+  // publishes.
+  //
+  // Both are OPTIONAL (`?`) on purpose: the engine always supplies them
+  // (src/server/bindings/legacy.ts), but declaring them optional means the
+  // other frozen legacy trees -- src/ctf, src/rogue, src/xatrix, src/lmctf,
+  // each with its own copy of this interface -- need no edit at all to keep
+  // compiling and keep behaving identically. Call sites use `?.()` and treat
+  // "absent" as "classic layout", which is the correct answer for any engine
+  // that does not provide them.
+  // ---------------------------------------------------------------------
+
+  // True when this session runs on the wide (re-release) configstring
+  // layout, i.e. when the client will have cls.csr.extended set and the
+  // delta can carry s.alpha / s.scale and the extended renderfx bits.
+  extended_layout?(): boolean;
+
+  // Publish one CS_SHADOWLIGHTS slot. The block exists only in the wide
+  // layout (cs_remap.ts gives CS_REMAP_OLD shadowlights -1 /
+  // max_shadowlights 0), and its index cannot be spelled in the frozen v3
+  // CS_* constants at all, so it cannot go through configstring() and its
+  // legacy-index translation. `slot` is 0-based within the block; the engine
+  // adds the live layout's base and bounds-checks.
+  shadowlight?(slot: number, value: string): void;
+
+  // One player's fog state, exactly the set p_client.cpp's
+  // P_ForceFogTransition carries: global fog (density; r/g/b and sky factor
+  // all 0..1) plus the height-fog gradient (falloff, density, and a
+  // start/end pair whose first three slots are colour 0..1 and whose fourth
+  // is a world-unit distance).
+  //
+  // Publish one player's fog transition. The engine writes the re-release
+  // svc_fog message -- a bitmask packet carrying only the fields that differ
+  // between `current` and `wanted` -- and unicasts it reliably to `ent`.
+  // `transitionMs` is the lerp duration the client should take to get there,
+  // or null for "no BIT_TIME field" (an instant change, or a trigger_fog
+  // with no delay).
+  //
+  // Silently does nothing on a narrow session: protocol 34 has no svc_fog
+  // and a vanilla client would desync on the unknown opcode. Callers may
+  // therefore call unconditionally, exactly as with shadowlight() above.
+  fog?(ent: Edict, current: FogStateT, wanted: FogStateT, transitionMs: number | null): void;
+
+  // The re-release compass/objective marker (svc_poi) and its breadcrumb
+  // trail (svc_help_path), unicast to one player. Same reason PF_Fog exists:
+  // both opcodes and their field layouts are re-release wire vocabulary that
+  // the frozen v3 GameImports cannot name, and neither exists in protocol 34.
+  //
+  // `key` is the POI slot the client keys the marker on (the re-release
+  // reserves MAX_EDICTS for the level objective and MAX_EDICTS+3+n for player
+  // pings); `timeMs` is how long the client keeps it (0xffff means "delete the
+  // POI with this key"); `image` is a CS_IMAGES index; `color` is a palette
+  // index; `flags` is the svc_poi flag byte (1 = hide when aimed at).
+  //
+  // Silently does nothing on a narrow session, exactly like fog() and
+  // shadowlight(), so callers may call unconditionally.
+  poi?(ent: Edict, key: number, timeMs: number, pos: Vec3, image: number, color: number, flags: number): void;
+
+  // One breadcrumb marker of the compass path. `first` marks the start of a
+  // fresh trail (the client clears the old one); `pos` is the marker's world
+  // position and `dir` the direction to the following marker. Unreliable,
+  // matching the re-release's own `gi.unicast(ent, false, 0)`.
+  help_path?(ent: Edict, first: boolean, pos: Vec3, dir: Vec3): void;
+
+  // info_world_text's two draw calls (g_misc.cpp:2276-2325). The re-release
+  // routes these straight into the client renderer's debug-primitive list;
+  // this engine's server-side equivalent is src/server/sv_debugdraw.ts, the
+  // same buffer bindings/kex.ts hands the kex module. `size` is the text
+  // height, `lifeTime` is in seconds.
+  draw_oriented_world_text?(origin: Vec3, text: string, color: FogRgbaT, size: number, lifeTime: number, depthTest: boolean): void;
+  draw_static_world_text?(origin: Vec3, angles: Vec3, text: string, color: FogRgbaT, size: number, lifeTime: number, depthTest: boolean): void;
 
   // Com_Error(ERR_DROP, ...) never returns to the caller (see PORTING.md
   // idiom map: ComError is thrown and caught in Qcommon_Frame).

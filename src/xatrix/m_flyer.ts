@@ -145,7 +145,7 @@ const flyer_move_walk = mmove(FRAME_stand01, FRAME_stand45, flyer_frames_walk, n
 const flyer_frames_run: MframeT[] = Array.from({ length: 45 }, () => mframe(ai_run, 10));
 const flyer_move_run = mmove(FRAME_stand01, FRAME_stand45, flyer_frames_run, null);
 
-function flyer_run(self: EdictT): void {
+export function flyer_run(self: EdictT): void {
   if (self.monsterinfo.aiflags & AI_STAND_GROUND) self.monsterinfo.currentmove = flyer_move_stand;
   else self.monsterinfo.currentmove = flyer_move_run;
 }
@@ -243,11 +243,11 @@ function flyer_fire(self: EdictT, flash_number: number): void {
   monster_fire_blaster(self, start, dir, 1, 1000, flash_number, effect);
 }
 
-function flyer_fireleft(self: EdictT): void {
+export function flyer_fireleft(self: EdictT): void {
   flyer_fire(self, MZ2_FLYER_BLASTER_1);
 }
 
-function flyer_fireright(self: EdictT): void {
+export function flyer_fireright(self: EdictT): void {
   flyer_fire(self, MZ2_FLYER_BLASTER_2);
 }
 

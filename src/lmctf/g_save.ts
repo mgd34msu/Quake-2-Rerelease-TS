@@ -54,6 +54,9 @@ import {
   MoveinfoT,
   type SpawnTempT,
   SetGEdicts,
+  type BmodelAnimT,
+  type FogT,
+  type HeightFogT,
 } from "./g_local";
 import { FindItemByClassname } from "./g_items";
 
@@ -74,6 +77,17 @@ type SpawnTempStringKey = {
 }[keyof SpawnTempT];
 type SpawnTempNumberKey = { [K in keyof SpawnTempT]: SpawnTempT[K] extends number ? K : never }[keyof SpawnTempT];
 type SpawnTempVectorKey = { [K in keyof SpawnTempT]: SpawnTempT[K] extends Vec3 ? K : never }[keyof SpawnTempT];
+// RERELEASE CONTENT PORT -- the extra targets the rerelease key set writes
+// to: entity_state_t numerics, monsterinfo, and the fog/heightfog/
+// bmodel_anim sub-structs on the edict.
+type EntityStateNumberKey = { [K in keyof EntityStateT]: EntityStateT[K] extends number ? K : never }[keyof EntityStateT];
+type MonsterInfoNumberKey = { [K in keyof MonsterInfoT]: MonsterInfoT[K] extends number ? K : never }[keyof MonsterInfoT];
+type FogVectorKey = { [K in keyof FogT]: FogT[K] extends Vec3 ? K : never }[keyof FogT];
+type FogNumberKey = { [K in keyof FogT]: FogT[K] extends number ? K : never }[keyof FogT];
+type HeightFogVectorKey = { [K in keyof HeightFogT]: HeightFogT[K] extends Vec3 ? K : never }[keyof HeightFogT];
+type HeightFogNumberKey = { [K in keyof HeightFogT]: HeightFogT[K] extends number ? K : never }[keyof HeightFogT];
+type BmodelAnimNumberKey = { [K in keyof BmodelAnimT]: BmodelAnimT[K] extends number ? K : never }[keyof BmodelAnimT];
+type BmodelAnimBoolKey = { [K in keyof BmodelAnimT]: BmodelAnimT[K] extends boolean ? K : never }[keyof BmodelAnimT];
 
 export type FieldSpawn =
   | { key: string; type: "F_LSTRING"; target: "edict"; prop: EdictStringKey }
@@ -85,6 +99,23 @@ export type FieldSpawn =
   | { key: string; type: "F_VECTOR"; target: "edict"; prop: EdictVectorKey }
   | { key: string; type: "F_VECTOR"; target: "spawntemp"; prop: SpawnTempVectorKey }
   | { key: string; type: "F_VECTOR"; target: "edict_s"; prop: EntityStateVectorKey }
+  // RERELEASE CONTENT PORT: the rerelease field table writes several keys
+  // straight onto the entity_state_t (alpha/scale/effects/renderfx/frame)
+  // and onto monsterinfo (power armor, monster_slots). Vanilla's fields[]
+  // never needed either target, so both are new here.
+  | { key: string; type: "F_INT"; target: "edict_s"; prop: EntityStateNumberKey }
+  | { key: string; type: "F_FLOAT"; target: "edict_s"; prop: EntityStateNumberKey }
+  | { key: string; type: "F_INT"; target: "monsterinfo"; prop: MonsterInfoNumberKey }
+  | { key: string; type: "F_FLOAT"; target: "monsterinfo"; prop: MonsterInfoNumberKey }
+  | { key: string; type: "F_VECTOR"; target: "fog"; prop: FogVectorKey }
+  | { key: string; type: "F_FLOAT"; target: "fog"; prop: FogNumberKey }
+  | { key: string; type: "F_VECTOR"; target: "heightfog"; prop: HeightFogVectorKey }
+  | { key: string; type: "F_FLOAT"; target: "heightfog"; prop: HeightFogNumberKey }
+  | { key: string; type: "F_INT"; target: "bmodel_anim"; prop: BmodelAnimNumberKey }
+  | { key: string; type: "F_BOOL"; target: "bmodel_anim"; prop: BmodelAnimBoolKey }
+  // rgba: "r g b a" bytes packed into s.skinnum, the way the rerelease
+  // ED_LoadColor does it.
+  | { key: string; type: "F_COLOR"; target: "edict_s"; prop: EntityStateNumberKey }
   | { key: string; type: "F_ANGLEHACK"; target: "edict"; prop: EdictVectorKey }
   | { key: string; type: "F_ANGLEHACK"; target: "spawntemp"; prop: SpawnTempVectorKey }
   | { key: string; type: "F_ANGLEHACK"; target: "edict_s"; prop: EntityStateVectorKey }
@@ -141,6 +172,88 @@ export const FIELDS: FieldSpawn[] = [
   { key: "minpitch", type: "F_FLOAT", target: "spawntemp", prop: "minpitch" },
   { key: "maxpitch", type: "F_FLOAT", target: "spawntemp", prop: "maxpitch" },
   { key: "nextmap", type: "F_LSTRING", target: "spawntemp", prop: "nextmap" },
+
+  // =====================================================================
+  // RERELEASE CONTENT PORT -- the spawn keys the shipped re-release maps
+  // write, ported from src/game/g_save.ts's own table with the same type
+  // and target. Without a row here the key/value pair is silently dropped
+  // and the entity that needed it spawns wrong. No 1997 map names any of
+  // these keys, so the additions are inert for existing content.
+  // =====================================================================
+  { key: "skyautorotate", type: "F_INT", target: "spawntemp", prop: "skyautorotate" },
+  { key: "music", type: "F_LSTRING", target: "spawntemp", prop: "music" },
+  { key: "instantitems", type: "F_INT", target: "spawntemp", prop: "instantitems" },
+  { key: "radius", type: "F_FLOAT", target: "spawntemp", prop: "radius" },
+  { key: "hub_map", type: "F_INT", target: "spawntemp", prop: "hub_map" },
+  { key: "achievement", type: "F_LSTRING", target: "spawntemp", prop: "achievement" },
+  { key: "goals", type: "F_LSTRING", target: "spawntemp", prop: "goals" },
+  { key: "image", type: "F_LSTRING", target: "spawntemp", prop: "image" },
+  { key: "fade_start_dist", type: "F_INT", target: "spawntemp", prop: "fade_start_dist" },
+  { key: "fade_end_dist", type: "F_INT", target: "spawntemp", prop: "fade_end_dist" },
+  { key: "start_items", type: "F_LSTRING", target: "spawntemp", prop: "start_items" },
+  { key: "no_grapple", type: "F_INT", target: "spawntemp", prop: "no_grapple" },
+  { key: "health_multiplier", type: "F_FLOAT", target: "spawntemp", prop: "health_multiplier" },
+  { key: "reinforcements", type: "F_LSTRING", target: "spawntemp", prop: "reinforcements" },
+  { key: "noise_start", type: "F_LSTRING", target: "spawntemp", prop: "noise_start" },
+  { key: "noise_middle", type: "F_LSTRING", target: "spawntemp", prop: "noise_middle" },
+  { key: "noise_end", type: "F_LSTRING", target: "spawntemp", prop: "noise_end" },
+  { key: "loop_count", type: "F_INT", target: "spawntemp", prop: "loop_count" },
+  { key: "shadowlightradius", type: "F_FLOAT", target: "spawntemp", prop: "shadowlightradius" },
+  { key: "shadowlightresolution", type: "F_INT", target: "spawntemp", prop: "shadowlightresolution" },
+  { key: "shadowlightintensity", type: "F_FLOAT", target: "spawntemp", prop: "shadowlightintensity" },
+  { key: "shadowlightstartfadedistance", type: "F_FLOAT", target: "spawntemp", prop: "shadowlightstartfadedistance" },
+  { key: "shadowlightendfadedistance", type: "F_FLOAT", target: "spawntemp", prop: "shadowlightendfadedistance" },
+  { key: "shadowlightstyle", type: "F_INT", target: "spawntemp", prop: "shadowlightstyle" },
+  { key: "shadowlightconeangle", type: "F_FLOAT", target: "spawntemp", prop: "shadowlightconeangle" },
+  { key: "shadowlightstyletarget", type: "F_LSTRING", target: "spawntemp", prop: "shadowlightstyletarget" },
+  { key: "healthtarget", type: "F_LSTRING", target: "edict", prop: "healthtarget" },
+  { key: "itemtarget", type: "F_LSTRING", target: "edict", prop: "itemtarget" },
+  { key: "style_on", type: "F_LSTRING", target: "edict", prop: "style_on" },
+  { key: "style_off", type: "F_LSTRING", target: "edict", prop: "style_off" },
+  { key: "crosslevel_flags", type: "F_INT", target: "edict", prop: "crosslevel_flags" },
+  { key: "hackflags", type: "F_INT", target: "edict", prop: "hackflags" },
+  { key: "mins", type: "F_VECTOR", target: "edict", prop: "mins" },
+  { key: "maxs", type: "F_VECTOR", target: "edict", prop: "maxs" },
+  { key: "eye_position", type: "F_VECTOR", target: "edict", prop: "move_origin" },
+  { key: "message2", type: "F_LSTRING", target: "edict", prop: "map" },
+  { key: "vision_cone", type: "F_FLOAT", target: "edict", prop: "yaw_speed" },
+  { key: "frame", type: "F_INT", target: "edict_s", prop: "frame" },
+  { key: "effects", type: "F_INT", target: "edict_s", prop: "effects" },
+  { key: "renderfx", type: "F_INT", target: "edict_s", prop: "renderfx" },
+  { key: "alpha", type: "F_FLOAT", target: "edict_s", prop: "alpha" },
+  { key: "scale", type: "F_FLOAT", target: "edict_s", prop: "scale" },
+  { key: "rgba", type: "F_COLOR", target: "edict_s", prop: "skinnum" },
+  { key: "monster_slots", type: "F_INT", target: "monsterinfo", prop: "monster_slots" },
+  { key: "power_armor_power", type: "F_INT", target: "monsterinfo", prop: "power_armor_power" },
+  { key: "power_armor_type", type: "F_INT", target: "monsterinfo", prop: "power_armor_type" },
+  { key: "fog_color", type: "F_VECTOR", target: "fog", prop: "color" },
+  { key: "fog_color_off", type: "F_VECTOR", target: "fog", prop: "color_off" },
+  { key: "fog_density", type: "F_FLOAT", target: "fog", prop: "density" },
+  { key: "fog_density_off", type: "F_FLOAT", target: "fog", prop: "density_off" },
+  { key: "fog_sky_factor", type: "F_FLOAT", target: "fog", prop: "sky_factor" },
+  { key: "fog_sky_factor_off", type: "F_FLOAT", target: "fog", prop: "sky_factor_off" },
+  { key: "heightfog_falloff", type: "F_FLOAT", target: "heightfog", prop: "falloff" },
+  { key: "heightfog_density", type: "F_FLOAT", target: "heightfog", prop: "density" },
+  { key: "heightfog_start_color", type: "F_VECTOR", target: "heightfog", prop: "start_color" },
+  { key: "heightfog_start_dist", type: "F_FLOAT", target: "heightfog", prop: "start_dist" },
+  { key: "heightfog_end_color", type: "F_VECTOR", target: "heightfog", prop: "end_color" },
+  { key: "heightfog_end_dist", type: "F_FLOAT", target: "heightfog", prop: "end_dist" },
+  { key: "heightfog_falloff_off", type: "F_FLOAT", target: "heightfog", prop: "falloff_off" },
+  { key: "heightfog_density_off", type: "F_FLOAT", target: "heightfog", prop: "density_off" },
+  { key: "heightfog_start_color_off", type: "F_VECTOR", target: "heightfog", prop: "start_color_off" },
+  { key: "heightfog_start_dist_off", type: "F_FLOAT", target: "heightfog", prop: "start_dist_off" },
+  { key: "heightfog_end_color_off", type: "F_VECTOR", target: "heightfog", prop: "end_color_off" },
+  { key: "heightfog_end_dist_off", type: "F_FLOAT", target: "heightfog", prop: "end_dist_off" },
+  { key: "bmodel_anim_start", type: "F_INT", target: "bmodel_anim", prop: "start" },
+  { key: "bmodel_anim_end", type: "F_INT", target: "bmodel_anim", prop: "end" },
+  { key: "bmodel_anim_style", type: "F_INT", target: "bmodel_anim", prop: "style" },
+  { key: "bmodel_anim_speed", type: "F_INT", target: "bmodel_anim", prop: "speed" },
+  { key: "bmodel_anim_nowrap", type: "F_BOOL", target: "bmodel_anim", prop: "nowrap" },
+  { key: "bmodel_anim_alt_start", type: "F_INT", target: "bmodel_anim", prop: "alt_start" },
+  { key: "bmodel_anim_alt_end", type: "F_INT", target: "bmodel_anim", prop: "alt_end" },
+  { key: "bmodel_anim_alt_style", type: "F_INT", target: "bmodel_anim", prop: "alt_style" },
+  { key: "bmodel_anim_alt_speed", type: "F_INT", target: "bmodel_anim", prop: "alt_speed" },
+  { key: "bmodel_anim_alt_nowrap", type: "F_BOOL", target: "bmodel_anim", prop: "alt_nowrap" },
 ];
 
 // -------------------------------------------------------------------------
@@ -215,6 +328,14 @@ function wrapBlocked(fn: Function): (self: EdictT, other: EdictT) => void {
   return (self: EdictT, other: EdictT) => {
     Reflect.apply(fn, null, [self, other]);
   };
+}
+function wrapDodge(fn: Function): (self: EdictT, other: EdictT, eta: number) => void {
+  return (self: EdictT, other: EdictT, eta: number) => {
+    Reflect.apply(fn, null, [self, other, eta]);
+  };
+}
+function wrapCheckattack(fn: Function): (self: EdictT) => boolean {
+  return (self: EdictT) => Boolean(Reflect.apply(fn, null, [self]));
 }
 
 // -------------------------------------------------------------------------
@@ -458,21 +579,30 @@ function deserializeMoveinfo(json: MoveinfoJSON): MoveinfoT {
   return m;
 }
 
-// MonsterInfoT is dead state in this port (no monster subsystem exists in
-// the LM_CTF family -- MONSTERS_OK is never defined, see g_local.ts's own
-// AI_* comment), but EdictT.monsterinfo is still a real, always-present
-// field (every EdictT has one, zero-initialized) that a full-fidelity save
-// must still round-trip byte-for-byte the same way it round-trips any other
-// always-zero field. Persisted as its numeric/vector state only --
-// currentmove/stand/idle/etc are never non-null in this port since nothing
-// ever assigns them, so the function-name registry indirection ctf's own
-// g_save.ts needs for its (populated, monster-driven) MonsterInfoT is
-// unnecessary here; if a future unit ports monster AI into this family,
-// this serializer will need the same registry-backed treatment ctf's has.
+// MonsterInfoT was dead state in this module before the re-release content
+// port (LM-CTF's own C never defines MONSTERS_OK), so this serializer used to
+// persist the numeric/vector half only and skip the callback pointers, which
+// nothing ever assigned. The ported re-release maps DO spawn monsters here,
+// so it now carries `currentmove` and the ten AI callbacks through the same
+// function/mmove name registry src/game/g_save.ts uses -- otherwise a save
+// taken with a monster alive would reload it with a null currentmove and no
+// think handlers. The numeric half below is unchanged, so a save written by
+// a monster-free LM-CTF level round-trips exactly as it did.
 interface MonsterInfoJSON {
+  currentmove: string | null;
   aiflags: number;
   nextframe: number;
   scale: number;
+  stand: string | null;
+  idle: string | null;
+  search: string | null;
+  walk: string | null;
+  run: string | null;
+  dodge: string | null;
+  attack: string | null;
+  melee: string | null;
+  sight: string | null;
+  checkattack: string | null;
   pausetime: number;
   attack_finished: number;
   saved_goal: number[];
@@ -489,9 +619,20 @@ interface MonsterInfoJSON {
 
 function serializeMonsterinfo(mi: MonsterInfoT): MonsterInfoJSON {
   return {
+    currentmove: nameOfMmove(mi.currentmove),
     aiflags: mi.aiflags,
     nextframe: mi.nextframe,
     scale: mi.scale,
+    stand: nameOfFunction(mi.stand),
+    idle: nameOfFunction(mi.idle),
+    search: nameOfFunction(mi.search),
+    walk: nameOfFunction(mi.walk),
+    run: nameOfFunction(mi.run),
+    dodge: nameOfFunction(mi.dodge),
+    attack: nameOfFunction(mi.attack),
+    melee: nameOfFunction(mi.melee),
+    sight: nameOfFunction(mi.sight),
+    checkattack: nameOfFunction(mi.checkattack),
     pausetime: mi.pausetime,
     attack_finished: mi.attack_finished,
     saved_goal: Array.from(mi.saved_goal),
@@ -509,9 +650,30 @@ function serializeMonsterinfo(mi: MonsterInfoT): MonsterInfoJSON {
 
 function deserializeMonsterinfo(json: MonsterInfoJSON): MonsterInfoT {
   const mi = new MonsterInfoT();
+  mi.currentmove = json.currentmove === null ? null : lookupSaveMmove(json.currentmove);
   mi.aiflags = json.aiflags;
   mi.nextframe = json.nextframe;
   mi.scale = json.scale;
+  const stand = json.stand === null ? null : lookupSaveFunctionRaw(json.stand);
+  mi.stand = stand === null ? null : wrapVoidSelf(stand);
+  const idle = json.idle === null ? null : lookupSaveFunctionRaw(json.idle);
+  mi.idle = idle === null ? null : wrapVoidSelf(idle);
+  const search = json.search === null ? null : lookupSaveFunctionRaw(json.search);
+  mi.search = search === null ? null : wrapVoidSelf(search);
+  const walk = json.walk === null ? null : lookupSaveFunctionRaw(json.walk);
+  mi.walk = walk === null ? null : wrapVoidSelf(walk);
+  const run = json.run === null ? null : lookupSaveFunctionRaw(json.run);
+  mi.run = run === null ? null : wrapVoidSelf(run);
+  const dodge = json.dodge === null ? null : lookupSaveFunctionRaw(json.dodge);
+  mi.dodge = dodge === null ? null : wrapDodge(dodge);
+  const attack = json.attack === null ? null : lookupSaveFunctionRaw(json.attack);
+  mi.attack = attack === null ? null : wrapVoidSelf(attack);
+  const melee = json.melee === null ? null : lookupSaveFunctionRaw(json.melee);
+  mi.melee = melee === null ? null : wrapVoidSelf(melee);
+  const sight = json.sight === null ? null : lookupSaveFunctionRaw(json.sight);
+  mi.sight = sight === null ? null : wrapBlocked(sight);
+  const checkattack = json.checkattack === null ? null : lookupSaveFunctionRaw(json.checkattack);
+  mi.checkattack = checkattack === null ? null : wrapCheckattack(checkattack);
   mi.pausetime = json.pausetime;
   mi.attack_finished = json.attack_finished;
   setVec3(mi.saved_goal, json.saved_goal);

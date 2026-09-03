@@ -64,7 +64,9 @@ import {
 } from "./g_local";
 import { type Edict, SolidT, SVF_DEADMONSTER } from "./game";
 import { ai_charge, ai_move, ai_run, ai_stand, ai_walk, range, visible } from "./g_ai";
-import { fire_hit } from "./g_weapon";
+// RE-RELEASE CONTENT PORT -- monster_fire_heat backs monster_chick_heat
+// (see ChickFireRocket below).
+import { fire_hit, monster_fire_heat } from "./g_weapon";
 import { monster_done_dodge, monster_fire_rocket, walkmonster_start } from "./g_monster";
 import { G_FreeEdict, G_ProjectSource } from "./g_utils";
 import { ThrowGib, ThrowHead } from "./g_misc";
@@ -431,6 +433,20 @@ function ChickSlash(self: EdictT): void {
   fire_hit(self, aim, 10 + (Math.floor(Math.random() * 6) % 6), 100);
 }
 
+// RE-RELEASE CONTENT PORT -- monster_chick_heat's weapon select, the same
+// `skinnum > 1` test our sibling src/game/m_chick.ts uses at its single
+// ChickRocket fire site: SP_monster_chick_heat sets skinnum = 3 and fires a
+// heat-seeking round, everything else fires a dumb rocket. Ground Zero's own
+// chick only ever reaches skinnum 0 (fresh) or 1 (below half health), so
+// every 1998-era chick keeps taking the monster_fire_rocket branch and its
+// four blindfire fire sites below are unchanged in behavior. The helper
+// exists because rogue's ChickRocket fires from four places (the blindfire
+// trace-then-shift retry ladder), not the one src/game's does.
+function ChickFireRocket(self: EdictT, start: Vec3, dir: Vec3, damage: number, speed: number, flashtype: number): void {
+  if (self.s.skinnum > 1) monster_fire_heat(self, start, dir, damage, speed, flashtype);
+  else monster_fire_rocket(self, start, dir, damage, speed, flashtype);
+}
+
 // ROGUE -- rewritten with blindfire targeting/leading and a trace-then-shift
 // retry ladder (see file header comment).
 function ChickRocket(self: EdictT): void {
@@ -489,7 +505,7 @@ function ChickRocket(self: EdictT): void {
   if (blindfire) {
     // blindfire has different fail criteria for the trace
     if (!(trace.startsolid || trace.allsolid || trace.fraction < 0.5)) {
-      monster_fire_rocket(self, start, dir, 50, rocketSpeed, MZ2_CHICK_ROCKET_1);
+      ChickFireRocket(self, start, dir, 50, rocketSpeed, MZ2_CHICK_ROCKET_1);
     } else {
       // geez, this is bad.  she's avoiding about 80% of her blindfires due to hitting things.
       // hunt around for a good shot
@@ -500,7 +516,7 @@ function ChickRocket(self: EdictT): void {
       VectorNormalize(dir);
       trace = gi.trace(start, vec3_origin, vec3_origin, vec, self, MASK_SHOT);
       if (!(trace.startsolid || trace.allsolid || trace.fraction < 0.5)) {
-        monster_fire_rocket(self, start, dir, 50, rocketSpeed, MZ2_CHICK_ROCKET_1);
+        ChickFireRocket(self, start, dir, 50, rocketSpeed, MZ2_CHICK_ROCKET_1);
       } else {
         // ok, that failed.  try to the right
         VectorCopy(target, vec);
@@ -509,7 +525,7 @@ function ChickRocket(self: EdictT): void {
         VectorNormalize(dir);
         trace = gi.trace(start, vec3_origin, vec3_origin, vec, self, MASK_SHOT);
         if (!(trace.startsolid || trace.allsolid || trace.fraction < 0.5)) {
-          monster_fire_rocket(self, start, dir, 50, rocketSpeed, MZ2_CHICK_ROCKET_1);
+          ChickFireRocket(self, start, dir, 50, rocketSpeed, MZ2_CHICK_ROCKET_1);
         }
       }
     }
@@ -518,7 +534,7 @@ function ChickRocket(self: EdictT): void {
     const hitEnt = traceEdict(trace.ent);
     if (hitEnt === self.enemy || hitEnt === world()) {
       if (trace.fraction > 0.5 || hitEnt.client !== null) {
-        monster_fire_rocket(self, start, dir, 50, rocketSpeed, MZ2_CHICK_ROCKET_1);
+        ChickFireRocket(self, start, dir, 50, rocketSpeed, MZ2_CHICK_ROCKET_1);
       }
     }
   }
@@ -795,6 +811,17 @@ export function SP_monster_chick(self: EdictT): void {
   // ROGUE
 
   walkmonster_start(self);
+}
+
+/*QUAKED monster_chick_heat (1 .5 0) (-16 -16 -24) (16 16 32) Ambush Trigger_Spawn Sight
+*/
+// RE-RELEASE CONTENT PORT -- the heat-seeking chick reskin (refinery),
+// copied from our sibling src/game/m_chick.ts. Ground Zero's own chick is
+// untouched: this is the same monster with skinnum 3, which is what selects
+// the heat-seeking round in ChickFireRocket above.
+export function SP_monster_chick_heat(self: EdictT): void {
+  SP_monster_chick(self);
+  self.s.skinnum = 3;
 }
 
 // -------------------------------------------------------------------------

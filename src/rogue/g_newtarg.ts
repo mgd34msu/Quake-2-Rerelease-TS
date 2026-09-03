@@ -4,9 +4,17 @@
 // func_timer), target_anger (makes one monster hostile to another),
 // target_killplayers, and the decorative target_blacklight / target_orb.
 
-import { VectorClear, VectorMA, VectorNormalize, VectorSubtract, vec3, vec3_origin } from "../shared/math";
-import { EF_SPHERETRANS, EF_TRACKER, EF_TRACKERTRAIL, MulticastT, TempEventT } from "../shared/q_shared";
-import { SVF_MONSTER, SVF_NOCLIENT } from "./game";
+import { vec3, vec3_origin, VectorClear, VectorMA, VectorNormalize, VectorSet, VectorSubtract } from "../shared/math";
+import {
+  EF_SPHERETRANS,
+  EF_TRACKER,
+  EF_TRACKERTRAIL,
+  MulticastT,
+  RF_BEAM,
+  RF_TRANSLUCENT,
+  TempEventT,
+} from "../shared/q_shared";
+import { SolidT, SVF_MONSTER, SVF_NOCLIENT } from "./game";
 import {
   AI_GOOD_GUY,
   AI_TARGET_ANGER,
@@ -19,11 +27,14 @@ import {
   globals,
   level,
   MOD_TELEFRAG,
+  MovetypeT,
   svc_temp_entity,
 } from "./g_local";
 import { FoundTarget, visible } from "./g_ai";
 import { T_Damage } from "./g_combat";
 import { G_Find, G_FreeEdict, G_SetMovedir, vtos } from "./g_utils";
+import { target_laser_think } from "./g_target";
+import { registerSaveFunction } from "./g_save";
 
 //==========================================================
 
@@ -299,3 +310,95 @@ export function SP_target_orb(ent: EdictT): void {
   ent.s.effects |= EF_SPHERETRANS;
   gi.linkentity(ent);
 }
+
+
+// =====================================================================
+// RE-RELEASE CONTENT PORT -- xatrix's target_mal_laser, copied verbatim
+// (comments included) from our sibling src/game/g_newtarg.ts. Placed by
+// xship, one of the maps this module now hosts; no 1998-era Ground Zero map
+// names the classname, so it is inert for existing content.
+// =====================================================================
+
+//==========================================================
+// target_mal_laser -- src/xatrix/g_target.ts's "RAFAEL 15-APR-98" delta.
+// Reuses vanilla's own target_laser_think (src/game/g_target.ts) instead
+// of duplicating it -- the xatrix source does the same (mal_laser_think
+// calls the file-local target_laser_think directly).
+//==========================================================
+
+/*QUAKED target_mal_laser (1 0 0) (-4 -4 -4) (4 4 4) START_ON RED GREEN BLUE YELLOW ORANGE FAT
+Mal's laser
+*/
+export function target_mal_laser_on(self: EdictT): void {
+  if (self.activator === null) self.activator = self;
+  self.spawnflags |= 0x80000001;
+  self.svflags &= ~SVF_NOCLIENT;
+  // target_laser_think (self);
+  self.nextthink = level.time + self.wait + self.delay;
+}
+
+export function target_mal_laser_off(self: EdictT): void {
+  self.spawnflags &= ~1;
+  self.svflags |= SVF_NOCLIENT;
+  self.nextthink = 0;
+}
+
+export function target_mal_laser_use(self: EdictT, _other: EdictT | null, activator: EdictT | null): void {
+  self.activator = activator;
+  if (self.spawnflags & 1) target_mal_laser_off(self);
+  else target_mal_laser_on(self);
+}
+
+export function mal_laser_think(self: EdictT): void {
+  target_laser_think(self);
+  self.nextthink = level.time + self.wait + 0.1;
+  self.spawnflags |= 0x80000000;
+}
+
+export function SP_target_mal_laser(self: EdictT): void {
+  self.movetype = MovetypeT.MOVETYPE_NONE;
+  self.solid = SolidT.SOLID_NOT;
+  self.s.renderfx |= RF_BEAM | RF_TRANSLUCENT;
+  self.s.modelindex = 1; // must be non-zero
+
+  // set the beam diameter
+  if (self.spawnflags & 64) self.s.frame = 16;
+  else self.s.frame = 4;
+
+  // set the color
+  if (self.spawnflags & 2) self.s.skinnum = 0xf2f2f0f0;
+  else if (self.spawnflags & 4) self.s.skinnum = 0xd0d1d2d3;
+  else if (self.spawnflags & 8) self.s.skinnum = 0xf3f3f1f1;
+  else if (self.spawnflags & 16) self.s.skinnum = 0xdcdddedf;
+  else if (self.spawnflags & 32) self.s.skinnum = 0xe0e1e2e3;
+
+  G_SetMovedir(self.s.angles, self.movedir);
+
+  if (!self.delay) self.delay = 0.1;
+
+  if (!self.wait) self.wait = 0.1;
+
+  if (!self.dmg) self.dmg = 5;
+
+  VectorSet(self.mins, -8, -8, -8);
+  VectorSet(self.maxs, 8, 8, 8);
+
+  self.nextthink = level.time + self.delay;
+  self.think = mal_laser_think;
+
+  self.use = target_mal_laser_use;
+
+  gi.linkentity(self);
+
+  if (self.spawnflags & 1) target_mal_laser_on(self);
+  else target_mal_laser_off(self);
+}
+
+
+// -------------------------------------------------------------------------
+// Savegame function registry -- see g_save.ts's registerSaveFunction.
+// -------------------------------------------------------------------------
+registerSaveFunction("g_newtarg:target_mal_laser_on", target_mal_laser_on);
+registerSaveFunction("g_newtarg:target_mal_laser_off", target_mal_laser_off);
+registerSaveFunction("g_newtarg:target_mal_laser_use", target_mal_laser_use);
+registerSaveFunction("g_newtarg:mal_laser_think", mal_laser_think);

@@ -193,6 +193,14 @@ function cloneClientPersistant(src: ClientPersistantT): ClientPersistantT {
   c.max_grenades = src.max_grenades;
   c.max_cells = src.max_cells;
   c.max_slugs = src.max_slugs;
+  // RERELEASE CONTENT PORT -- the rogue ammo caps travel with the rest of
+  // client_persistant_t across a level change / coop respawn, same as
+  // vanilla's and xatrix's do.
+  c.max_tesla = src.max_tesla;
+  c.max_prox = src.max_prox;
+  c.max_mines = src.max_mines;
+  c.max_flechettes = src.max_flechettes;
+  c.max_rounds = src.max_rounds;
   c.weapon = src.weapon;
   c.lastweapon = src.lastweapon;
   c.power_cubes = src.power_cubes;
@@ -910,6 +918,16 @@ export function InitClientPersistant(client: GClientT): void {
   // RAFAEL
   client.pers.max_magslug = 50;
   client.pers.max_trap = 5;
+  // RERELEASE CONTENT PORT -- rogue/p_client.c's InitClientPersistant seeds
+  // prox/tesla/flechettes; max_rounds (the disruptor's cap) is 12, the value
+  // the rerelease's own InitClientPersistant uses. Seeded here rather than
+  // hardcoded at the Add_Ammo call site so a Bandolier/Ammo Pack can raise
+  // it like every other cap. `max_mines` is left at 0: neither rogue nor
+  // xatrix seeds or reads it -- rogue's mines use max_prox/max_tesla.
+  client.pers.max_prox = 50;
+  client.pers.max_tesla = 50;
+  client.pers.max_flechettes = 200;
+  client.pers.max_rounds = 12;
 
   client.pers.connected = true;
 }

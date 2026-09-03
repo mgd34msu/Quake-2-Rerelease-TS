@@ -81,6 +81,11 @@ type FogVectorKey = { [K in keyof FogT]: FogT[K] extends Vec3 ? K : never }[keyo
 type FogNumberKey = { [K in keyof FogT]: FogT[K] extends number ? K : never }[keyof FogT];
 type HeightFogVectorKey = { [K in keyof HeightFogT]: HeightFogT[K] extends Vec3 ? K : never }[keyof HeightFogT];
 type HeightFogNumberKey = { [K in keyof HeightFogT]: HeightFogT[K] extends number ? K : never }[keyof HeightFogT];
+// RERELEASE CONTENT PORT: the rerelease field table writes two monster
+// keys (monster_slots and the power-armor pair) straight onto
+// monsterinfo. Vanilla's and Xatrix's own fields[] never needed that
+// target, so it is new here -- same arrangement as src/game/g_save.ts.
+type MonsterInfoNumberKey = { [K in keyof MonsterInfoT]: MonsterInfoT[K] extends number ? K : never }[keyof MonsterInfoT];
 type BmodelAnimNumberKey = { [K in keyof BmodelAnimT]: BmodelAnimT[K] extends number ? K : never }[keyof BmodelAnimT];
 type BmodelAnimBoolKey = { [K in keyof BmodelAnimT]: BmodelAnimT[K] extends boolean ? K : never }[keyof BmodelAnimT];
 
@@ -98,6 +103,8 @@ export type FieldSpawn =
   | { key: string; type: "F_FLOAT"; target: "fog"; prop: FogNumberKey }
   | { key: string; type: "F_VECTOR"; target: "heightfog"; prop: HeightFogVectorKey }
   | { key: string; type: "F_FLOAT"; target: "heightfog"; prop: HeightFogNumberKey }
+  | { key: string; type: "F_INT"; target: "monsterinfo"; prop: MonsterInfoNumberKey }
+  | { key: string; type: "F_FLOAT"; target: "monsterinfo"; prop: MonsterInfoNumberKey }
   | { key: string; type: "F_INT"; target: "bmodel_anim"; prop: BmodelAnimNumberKey }
   | { key: string; type: "F_BOOL"; target: "bmodel_anim"; prop: BmodelAnimBoolKey }
   | { key: string; type: "F_ANGLEHACK"; target: "edict"; prop: EdictVectorKey }
@@ -219,6 +226,30 @@ export const FIELDS: FieldSpawn[] = [
   { key: "bmodel_anim_alt_style", type: "F_INT", target: "bmodel_anim", prop: "alt_style" },
   { key: "bmodel_anim_alt_speed", type: "F_INT", target: "bmodel_anim", prop: "alt_speed" },
   { key: "bmodel_anim_alt_nowrap", type: "F_BOOL", target: "bmodel_anim", prop: "alt_nowrap" },
+  // ---------------------------------------------------------------------
+  // RERELEASE CONTENT PORT: field rows for the spawn keys the rerelease
+  // maps author, copied from src/game/g_save.ts with the same `type` and
+  // `target`. Each one names a field this module now carries; no 1997 map
+  // authors any of these keys, so parsing is unchanged for classic content.
+  // ---------------------------------------------------------------------
+  { key: "skyautorotate", type: "F_INT", target: "spawntemp", prop: "skyautorotate" },
+  { key: "radius", type: "F_FLOAT", target: "spawntemp", prop: "radius" },
+  { key: "goals", type: "F_LSTRING", target: "spawntemp", prop: "goals" },
+  { key: "fade_start_dist", type: "F_INT", target: "spawntemp", prop: "fade_start_dist" },
+  { key: "fade_end_dist", type: "F_INT", target: "spawntemp", prop: "fade_end_dist" },
+  { key: "health_multiplier", type: "F_FLOAT", target: "spawntemp", prop: "health_multiplier" },
+  { key: "itemtarget", type: "F_LSTRING", target: "edict", prop: "itemtarget" },
+  { key: "hackflags", type: "F_INT", target: "edict", prop: "hackflags" },
+  { key: "mins", type: "F_VECTOR", target: "edict", prop: "mins" },
+  { key: "maxs", type: "F_VECTOR", target: "edict", prop: "maxs" },
+  { key: "eye_position", type: "F_VECTOR", target: "edict", prop: "move_origin" },
+  { key: "message2", type: "F_LSTRING", target: "edict", prop: "map" },
+  { key: "vision_cone", type: "F_FLOAT", target: "edict", prop: "yaw_speed" },
+  { key: "mangle", type: "F_IGNORE" },
+  { key: "mapversion", type: "F_IGNORE" },
+  { key: "monster_slots", type: "F_INT", target: "monsterinfo", prop: "monster_slots" },
+  { key: "power_armor_power", type: "F_INT", target: "monsterinfo", prop: "power_armor_power" },
+  { key: "power_armor_type", type: "F_INT", target: "monsterinfo", prop: "power_armor_type" },
 ];
 
 // -------------------------------------------------------------------------
@@ -1312,6 +1343,30 @@ export function InitGame(): void {
   // FIXME: sv_ prefix is wrong for these
   gameCvars.sv_rollspeed = gi.cvar("sv_rollspeed", "200", 0);
   gameCvars.sv_rollangle = gi.cvar("sv_rollangle", "2", 0);
+/*
+  RERELEASE CONTENT PORT -- the four cvars the ported Ground Zero content in
+  this tree READS but that The Reckoning never registered. Before this, all
+  four sat at null, and the null-guards around them silently picked the
+  wrong branch: SP_dm_tag_token's `gamerules !== null && value !== 2` guard
+  is FALSE when the cvar is null, so a dm_tag_token placed by a re-release
+  map stayed alive under a ruleset that has no Tag game to run it, and
+  g_sphere.ts's hunter chase camera never engaged.
+
+  All four are registered with NO flags, unlike rogue's own registrations
+  (rogue latches gamerules and marks huntercam CVAR_SERVERINFO|CVAR_LATCH).
+  That is deliberate: the engine writes the latched-cvar list into the server
+  save file and the serverinfo string onto the wire, so either flag would be
+  visible to a 1997-content session under this ruleset, which must stay
+  byte-identical. Neither flag is load-bearing here -- this module has no
+  InitGameRules sampling gamerules once at level load, and all four readers
+  read live. Verified on xswamp: the developer log and the rendered frame are
+  unchanged from the pre-port build with these four registered.
+  */
+  gameCvars.gamerules = gi.cvar("gamerules", "0", 0);
+  gameCvars.g_showlogic = gi.cvar("g_showlogic", "0", 0);
+  gameCvars.huntercam = gi.cvar("huntercam", "1", 0);
+  gameCvars.strong_mines = gi.cvar("strong_mines", "0", 0);
+
   gameCvars.sv_maxvelocity = gi.cvar("sv_maxvelocity", "2000", 0);
   gameCvars.sv_gravity = gi.cvar("sv_gravity", "800", 0);
 

@@ -5,8 +5,27 @@
 // arbitrary quadrant instead of hardcoded directions) and func_force_wall
 // (a telefragging particle-wall barrier).
 
-import { AngleVectors, vec3, vec3_origin, VectorAdd, VectorCopy, VectorScale, type Vec3 } from "../shared/math";
-import { type CplaneT, type CsurfaceT, MulticastT, TempEventT } from "../shared/q_shared";
+import {
+  AngleVectors,
+  random,
+  vec3,
+  vec3_origin,
+  type Vec3,
+  VectorAdd,
+  VectorCopy,
+  VectorScale,
+  VectorSet,
+} from "../shared/math";
+import {
+  ATTN_STATIC,
+  CHAN_NO_PHS_ADD,
+  CHAN_VOICE,
+  type CplaneT,
+  type CsurfaceT,
+  EF_SPINNINGLIGHTS,
+  MulticastT,
+  TempEventT,
+} from "../shared/q_shared";
 import { SolidT, SVF_NOCLIENT } from "./game";
 import {
   DamageT,
@@ -19,8 +38,9 @@ import {
   svc_temp_entity,
 } from "./g_local";
 import { Move_Calc } from "./g_func";
-import { G_SetMovedir, KillBox } from "./g_utils";
+import { G_FreeEdict, G_SetMovedir, G_UseTargets, KillBox } from "./g_utils";
 import { T_Damage } from "./g_combat";
+import { registerSaveFunction } from "./g_save";
 
 /*
 =============================================================================
@@ -312,3 +332,185 @@ export function SP_func_force_wall(ent: EdictT): void {
 
   gi.linkentity(ent);
 }
+
+
+// =====================================================================
+// RE-RELEASE CONTENT PORT -- two xatrix (The Reckoning) func_* entities the
+// re-release build of the maps this module hosts places, copied verbatim
+// (comments included) from our sibling src/game/g_newfnc.ts, which in turn
+// ported them from src/xatrix/g_func.ts.
+//
+// rotating_light is placed by refinery/xhangar2/xship; func_object_repair
+// is the prop monster_fixbot welds (xcompnd1). Neither classname exists in
+// any 1998-era Ground Zero map, so both are inert for existing content.
+// =====================================================================
+
+//==========================================================
+// rotating_light -- src/xatrix/g_func.ts
+//==========================================================
+
+/*QUAKED rotating_light (0 .5 .8) (-8 -8 -8) (8 8 8) START_OFF ALARM
+"health"	if set, the light may be killed.
+*/
+
+// RAFAEL
+// note to self
+// the lights will take damage from explosions
+// this could leave a player in total darkness very bad
+
+const ROTATING_LIGHT_START_OFF = 1;
+
+function rotating_light_alarm(self: EdictT): void {
+  if ((self.spawnflags & ROTATING_LIGHT_START_OFF) !== 0) {
+    self.think = null;
+    self.nextthink = 0;
+  } else {
+    gi.sound(self, CHAN_NO_PHS_ADD + CHAN_VOICE, self.moveinfo.sound_start, 1, ATTN_STATIC, 0);
+    self.nextthink = level.time + 1;
+  }
+}
+
+function rotating_light_killed(self: EdictT, _inflictor: EdictT, _attacker: EdictT, _damage: number, _point: Vec3): void {
+  gi.WriteByte(svc_temp_entity);
+  gi.WriteByte(TempEventT.TE_WELDING_SPARKS);
+  gi.WriteByte(30);
+  gi.WritePosition(self.s.origin);
+  gi.WriteDir(vec3_origin);
+  // `rand()&7` -> a uniform 0-7 byte; determinism across runs is not a goal
+  // (PORTING.md), so this uses the shared random() helper instead of a
+  // ported C rand().
+  gi.WriteByte(0xe0 + (Math.floor(random() * 8) | 0));
+  gi.multicast(self.s.origin, MulticastT.MULTICAST_PVS);
+
+  self.s.effects &= ~EF_SPINNINGLIGHTS;
+  self.use = null;
+
+  self.think = G_FreeEdict;
+  self.nextthink = level.time + 0.1;
+}
+
+function rotating_light_use(self: EdictT, _other: EdictT | null, _activator: EdictT | null): void {
+  if ((self.spawnflags & ROTATING_LIGHT_START_OFF) !== 0) {
+    self.spawnflags &= ~ROTATING_LIGHT_START_OFF;
+    self.s.effects |= EF_SPINNINGLIGHTS;
+
+    if ((self.spawnflags & 2) !== 0) {
+      self.think = rotating_light_alarm;
+      self.nextthink = level.time + 0.1;
+    }
+  } else {
+    self.spawnflags |= ROTATING_LIGHT_START_OFF;
+    self.s.effects &= ~EF_SPINNINGLIGHTS;
+  }
+}
+
+export function SP_rotating_light(self: EdictT): void {
+  self.movetype = MovetypeT.MOVETYPE_STOP;
+  self.solid = SolidT.SOLID_BBOX;
+
+  self.s.modelindex = gi.modelindex("models/objects/light/tris.md2");
+
+  self.s.frame = 0;
+
+  self.use = rotating_light_use;
+
+  if ((self.spawnflags & ROTATING_LIGHT_START_OFF) !== 0) self.s.effects &= ~EF_SPINNINGLIGHTS;
+  else self.s.effects |= EF_SPINNINGLIGHTS;
+
+  if (!self.speed) self.speed = 32;
+  // this is a real cheap way
+  // to set the radius of the light
+  // self.s.frame = self.speed;
+
+  if (!self.health) {
+    self.health = 10;
+    self.max_health = self.health;
+    self.die = rotating_light_killed;
+    self.takedamage = DamageT.DAMAGE_YES;
+  } else {
+    self.max_health = self.health;
+    self.die = rotating_light_killed;
+    self.takedamage = DamageT.DAMAGE_YES;
+  }
+
+  if ((self.spawnflags & 2) !== 0) {
+    self.moveinfo.sound_start = gi.soundindex("misc/alarm.wav");
+  }
+
+  gi.linkentity(self);
+}
+
+/*QUAKED func_object_repair (1 .5 0) (-8 -8 -8) (8 8 8)
+object to be repaired.
+The default delay is 1 second
+"delay" the delay in seconds for spark to occur
+*/
+// RERELEASE CONTENT PORT -- xatrix/g_func.c's object-repair prop, ported
+// from src/xatrix/g_func.ts. This is the thing monster_fixbot flies to and
+// welds: m_fixbot.ts looks for entities whose classname is the bare
+// "object_repair" (NOT the map's "func_object_repair"), which is why
+// SP_object_repair rewrites ent.classname below -- that rename is the
+// contract between the two files, not an accident.
+
+function object_repair_fx(ent: EdictT): void {
+  ent.nextthink = level.time + ent.delay;
+
+  if (ent.health <= 100) {
+    ent.health++;
+  } else {
+    gi.WriteByte(svc_temp_entity);
+    gi.WriteByte(TempEventT.TE_WELDING_SPARKS);
+    gi.WriteByte(10);
+    gi.WritePosition(ent.s.origin);
+    gi.WriteDir(vec3_origin);
+    gi.WriteByte(0xe0 + (Math.floor(random() * 8) | 0));
+    gi.multicast(ent.s.origin, MulticastT.MULTICAST_PVS);
+  }
+}
+
+function object_repair_dead(ent: EdictT): void {
+  G_UseTargets(ent, ent);
+  ent.nextthink = level.time + 0.1;
+  ent.think = object_repair_fx;
+}
+
+function object_repair_sparks(ent: EdictT): void {
+  if (ent.health < 0) {
+    ent.nextthink = level.time + 0.1;
+    ent.think = object_repair_dead;
+    return;
+  }
+
+  ent.nextthink = level.time + ent.delay;
+
+  gi.WriteByte(svc_temp_entity);
+  gi.WriteByte(TempEventT.TE_WELDING_SPARKS);
+  gi.WriteByte(10);
+  gi.WritePosition(ent.s.origin);
+  gi.WriteDir(vec3_origin);
+  gi.WriteByte(0xe0 + (Math.floor(random() * 8) | 0));
+  gi.multicast(ent.s.origin, MulticastT.MULTICAST_PVS);
+}
+
+export function SP_object_repair(ent: EdictT): void {
+  ent.movetype = MovetypeT.MOVETYPE_NONE;
+  ent.solid = SolidT.SOLID_BBOX;
+  ent.classname = "object_repair";
+  // C source literally: VectorSet(ent->mins, -8, -8, 8) -- mins.z is +8,
+  // not -8, giving mins.z === maxs.z (zero-height bbox on that axis).
+  // Preserved exactly (xatrix/g_func.c: SP_object_repair).
+  VectorSet(ent.mins, -8, -8, 8);
+  VectorSet(ent.maxs, 8, 8, 8);
+  ent.think = object_repair_sparks;
+  ent.nextthink = level.time + 1.0;
+  ent.health = 100;
+  if (!ent.delay) ent.delay = 1.0;
+}
+
+
+registerSaveFunction("g_newfnc:rotating_light_alarm", rotating_light_alarm);
+registerSaveFunction("g_newfnc:rotating_light_killed", rotating_light_killed);
+registerSaveFunction("g_newfnc:rotating_light_use", rotating_light_use);
+registerSaveFunction("g_newfnc:object_repair_fx", object_repair_fx);
+registerSaveFunction("g_newfnc:object_repair_dead", object_repair_dead);
+registerSaveFunction("g_newfnc:object_repair_sparks", object_repair_sparks);

@@ -111,9 +111,9 @@ import {
 // one Ground Zero class (func_plat2, in the re-release xcompnd2). All six are
 // ported into this module in the files below -- see each file's header for
 // provenance and the protocol-34 degradations.
-import { SP_dynamic_light, SP_info_landmark } from "./g_kexmisc";
-import { SP_target_poi } from "./g_kextarg";
-import { SP_info_nav_lock, SP_trigger_fog } from "./g_kextrig";
+import { SP_dynamic_light, SP_info_landmark, SP_func_animation, SP_info_world_text, SP_misc_flare, SP_misc_hologram, SP_misc_lavaball, SP_misc_model, SP_misc_player_mannequin } from "./g_kexmisc";
+import { SP_target_poi, SP_target_autosave, SP_target_camera, SP_target_crossunit_target, SP_target_crossunit_trigger, SP_target_gravity, SP_target_healthbar, SP_target_light, SP_target_music, SP_target_sky, SP_target_soundfx, SP_target_story } from "./g_kextarg";
+import { SP_info_nav_lock, SP_trigger_fog, SP_func_eye, SP_trigger_coop_relay, SP_trigger_flashlight, SP_trigger_health_relay } from "./g_kextrig";
 import { SP_func_plat2 } from "./g_newfnc";
 import {
   SP_trigger_always,
@@ -144,7 +144,7 @@ import {
   SP_target_splash,
   SP_target_temp_entity,
 } from "./g_target";
-import { SP_turret_base, SP_turret_breach, SP_turret_driver } from "./g_turret";
+import { SP_turret_base, SP_turret_breach, SP_turret_driver, SP_turret_invisible_brain } from "./g_turret";
 import { SP_misc_actor, SP_target_actor } from "./m_actor";
 import { SP_misc_insane } from "./m_insane";
 import { SP_monster_berserk } from "./m_berserk";
@@ -152,7 +152,7 @@ import { SP_monster_gladiator } from "./m_gladiator";
 import { SP_monster_gunner } from "./m_gunner";
 import { SP_monster_infantry } from "./m_infantry";
 import { SP_monster_soldier, SP_monster_soldier_light, SP_monster_soldier_ss } from "./m_soldier";
-import { SP_monster_tank } from "./m_tank";
+import { SP_monster_tank, SP_monster_tank_stand } from "./m_tank";
 import { SP_monster_medic } from "./m_medic";
 import { SP_monster_flipper } from "./m_flipper";
 import { SP_monster_chick } from "./m_chick";
@@ -319,6 +319,7 @@ export function ED_ParseField(key: string, value: string, ent: EdictT): void {
         const n = C_atoi(value);
         if (f.target === "edict") ent[f.prop] = n;
         else if (f.target === "spawntemp") st[f.prop] = n;
+        else if (f.target === "monsterinfo") ent.monsterinfo[f.prop] = n;
         else ent.bmodel_anim[f.prop] = n;
         break;
       }
@@ -331,6 +332,7 @@ export function ED_ParseField(key: string, value: string, ent: EdictT): void {
         const n = C_atof(value);
         if (f.target === "edict") ent[f.prop] = n;
         else if (f.target === "spawntemp") st[f.prop] = n;
+        else if (f.target === "monsterinfo") ent.monsterinfo[f.prop] = n;
         else if (f.target === "fog") ent.fog[f.prop] = n;
         else ent.heightfog[f.prop] = n;
         break;
@@ -442,6 +444,25 @@ interface SpawnT {
   name: string;
   spawn: (ent: EdictT) => void;
 }
+
+// RERELEASE CONTENT PORT: the spawn functions for the rerelease
+// classnames added to spawns[] below.
+import { SP_dm_tag_token } from "./dm_tag";
+import { SP_info_player_team1, SP_info_player_team2, SP_misc_ctf_banner, SP_misc_ctf_small_banner } from "./g_ctf";
+import { SP_hint_path, SP_info_player_coop_lava, SP_misc_nuke_core } from "./g_newmisc";
+import { SP_target_anger, SP_target_blacklight, SP_target_killplayers, SP_target_orb, SP_target_steam } from "./g_newtarg";
+import { SP_info_teleport_destination, SP_trigger_disguise, SP_trigger_teleport } from "./g_newtrig";
+import { SP_monster_arachnid } from "./m_arachnid";
+import { SP_monster_makron } from "./m_boss32";
+import { SP_monster_carrier } from "./m_carrier";
+import { SP_monster_daedalus } from "./m_daedalus";
+import { SP_monster_guncmdr } from "./m_guncmdr";
+import { SP_monster_medic_commander } from "./m_medic_commander";
+import { SP_monster_shambler } from "./m_shambler";
+import { SP_monster_stalker } from "./m_stalker";
+import { SP_monster_turret } from "./m_turret";
+import { SP_monster_widow } from "./m_widow";
+import { SP_monster_widow2 } from "./m_widow2";
 
 const spawns: SpawnT[] = [
   { name: "item_health", spawn: SP_item_health },
@@ -607,6 +628,66 @@ const spawns: SpawnT[] = [
   // --- g_newfnc ---
   { name: "func_plat2", spawn: SP_func_plat2 },
   // <<< RERELEASE CONTENT PORT <<<
+
+  // =====================================================================
+  // RERELEASE CONTENT PORT -- the classnames the shipped rerelease maps
+  // place that this module could not spawn. Listed in src/game/
+  // g_spawn.ts's own order so the two tables read the same way.
+  //
+  // Inert for 1997 content: nothing dispatches a row unless a map file
+  // names that classname, and no 1997 map does.
+  // =====================================================================
+  { name: "monster_makron", spawn: SP_monster_makron },
+  { name: "dm_tag_token", spawn: SP_dm_tag_token },
+  { name: "info_player_team1", spawn: SP_info_player_team1 },
+  { name: "info_player_team2", spawn: SP_info_player_team2 },
+  { name: "misc_ctf_banner", spawn: SP_misc_ctf_banner },
+  { name: "misc_ctf_small_banner", spawn: SP_misc_ctf_small_banner },
+  { name: "func_animation", spawn: SP_func_animation },
+  { name: "info_world_text", spawn: SP_info_world_text },
+  { name: "misc_flare", spawn: SP_misc_flare },
+  { name: "misc_hologram", spawn: SP_misc_hologram },
+  { name: "misc_lavaball", spawn: SP_misc_lavaball },
+  { name: "misc_model", spawn: SP_misc_model },
+  { name: "misc_player_mannequin", spawn: SP_misc_player_mannequin },
+  { name: "target_autosave", spawn: SP_target_autosave },
+  { name: "target_camera", spawn: SP_target_camera },
+  { name: "target_crossunit_target", spawn: SP_target_crossunit_target },
+  { name: "target_crossunit_trigger", spawn: SP_target_crossunit_trigger },
+  { name: "target_gravity", spawn: SP_target_gravity },
+  { name: "target_healthbar", spawn: SP_target_healthbar },
+  { name: "target_light", spawn: SP_target_light },
+  { name: "target_music", spawn: SP_target_music },
+  { name: "target_sky", spawn: SP_target_sky },
+  { name: "target_soundfx", spawn: SP_target_soundfx },
+  { name: "target_story", spawn: SP_target_story },
+  { name: "func_eye", spawn: SP_func_eye },
+  { name: "trigger_coop_relay", spawn: SP_trigger_coop_relay },
+  { name: "trigger_flashlight", spawn: SP_trigger_flashlight },
+  { name: "trigger_health_relay", spawn: SP_trigger_health_relay },
+  { name: "hint_path", spawn: SP_hint_path },
+  { name: "info_player_coop_lava", spawn: SP_info_player_coop_lava },
+  { name: "misc_nuke_core", spawn: SP_misc_nuke_core },
+  { name: "target_anger", spawn: SP_target_anger },
+  { name: "target_blacklight", spawn: SP_target_blacklight },
+  { name: "target_killplayers", spawn: SP_target_killplayers },
+  { name: "target_orb", spawn: SP_target_orb },
+  { name: "target_steam", spawn: SP_target_steam },
+  { name: "info_teleport_destination", spawn: SP_info_teleport_destination },
+  { name: "trigger_disguise", spawn: SP_trigger_disguise },
+  { name: "trigger_teleport", spawn: SP_trigger_teleport },
+  { name: "turret_invisible_brain", spawn: SP_turret_invisible_brain },
+  { name: "monster_arachnid", spawn: SP_monster_arachnid },
+  { name: "monster_carrier", spawn: SP_monster_carrier },
+  { name: "monster_guncmdr", spawn: SP_monster_guncmdr },
+  { name: "monster_daedalus", spawn: SP_monster_daedalus },
+  { name: "monster_medic_commander", spawn: SP_monster_medic_commander },
+  { name: "monster_shambler", spawn: SP_monster_shambler },
+  { name: "monster_stalker", spawn: SP_monster_stalker },
+  { name: "monster_tank_stand", spawn: SP_monster_tank_stand },
+  { name: "monster_turret", spawn: SP_monster_turret },
+  { name: "monster_widow", spawn: SP_monster_widow },
+  { name: "monster_widow2", spawn: SP_monster_widow2 },
 ];
 
 /*
@@ -630,7 +711,10 @@ before InitItems has run.
 ===============
 */
 export function G_SpawnableClassnames(): string[] {
-  const out: string[] = [];
+  // The three names ED_CallSpawn's "PMM classnames hack" remaps onto
+  // shipped items before consulting either lookup. They resolve just as
+  // surely as a table row, so the contract of this function includes them.
+  const out: string[] = ["weapon_nailgun", "ammo_nails", "weapon_heatbeam"];
   for (const item of itemlist()) {
     if (item.classname !== null) out.push(item.classname);
   }
@@ -650,6 +734,30 @@ export function ED_CallSpawn(ent: EdictT): void {
     gi.dprintf("ED_CallSpawn: NULL classname\n");
     return;
   }
+  // RERELEASE CONTENT PORT -- the "PMM classnames hack", present in BOTH
+  // rogue/g_spawn.c and the rerelease's own ED_CallSpawn
+  // (src/kexgame/g_spawn.ts). Three classnames from pre-release rogue beta
+  // maps are remapped onto the shipped item names rather than dropped.
+  //
+  // This matters for real shipped content, not just betas: mgu3m2 (Call of
+  // the Machine) places a `weapon_heatbeam`, and without this remap it was
+  // the ONE remaining "unknown classname" across all 28 CotM maps. The
+  // rerelease does not drop it either -- it renames it to the Plasma Beam,
+  // which is why the map plays correctly there.
+  if (ent.classname === "weapon_nailgun") {
+    const item = FindItem("ETF Rifle");
+    if (item !== null && item.classname !== null) ent.classname = item.classname;
+  }
+  if (ent.classname === "ammo_nails") {
+    const item = FindItem("Flechettes");
+    if (item !== null && item.classname !== null) ent.classname = item.classname;
+  }
+  if (ent.classname === "weapon_heatbeam") {
+    const item = FindItem("Plasma Beam");
+    if (item !== null && item.classname !== null) ent.classname = item.classname;
+  }
+  // pmm
+
   const classname = ent.classname;
 
   // check item spawn functions -- guarded on game.num_items (set by the
@@ -1015,7 +1123,24 @@ export function SP_worldspawn(ent: EdictT): void {
     gi.configstring(CS_SKY, "unit1_");
   }
 
-  gi.configstring(CS_SKYROTATE, Com_sprintf("%f", st.skyrotate));
+  // Client-side gate (cl_view.ts's CL_SetSky / cl_parse.ts's
+  // CL_ParseConfigString): `cls.csr.extended` decides whether CS_SKYROTATE
+  // is parsed as "<rotate>" or "<rotate> <autorotate>" (q2repro
+  // precache.c:380-383). `gi.extended_layout()` is this module's mirror of
+  // that same session-wide layout decision (sv_init.ts's "CONTENT-DRIVEN
+  // LAYOUT CHOICE"), so it has to be the gate here too: a classic-module
+  // session running 1997 map data always runs on the narrow layout, and
+  // MUST keep emitting exactly the bare `%f` string it always has -- that
+  // byte-for-byte content is what keeps a narrow session's traffic (and
+  // rendered frame) identical to the pre-existing build. Only a WIDE
+  // session (rerelease content through the classic module) gets the
+  // two-token form, matching src/kexgame/g_spawn.ts:1877's own
+  // `${st.skyrotate} ${st.skyautorotate}` write for the kex module.
+  if (gi.extended_layout?.() === true) {
+    gi.configstring(CS_SKYROTATE, `${st.skyrotate} ${st.skyautorotate}`);
+  } else {
+    gi.configstring(CS_SKYROTATE, Com_sprintf("%f", st.skyrotate));
+  }
 
   gi.configstring(CS_SKYAXIS, Com_sprintf("%f %f %f", st.skyaxis[0], st.skyaxis[1], st.skyaxis[2]));
 

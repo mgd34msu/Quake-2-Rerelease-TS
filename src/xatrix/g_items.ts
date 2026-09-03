@@ -1,6 +1,6 @@
 // g_items.c
 
-import { AngleVectors, vec3, VectorAdd, VectorCopy, VectorScale, VectorSet } from "../shared/math";
+import { AngleVectors, vec3, VectorAdd, VectorCopy, VectorScale, VectorSet, VectorClear, VectorMA } from "../shared/math";
 import { fixedLength } from "../shared/fixed";
 import {
   ATTN_NORM,
@@ -27,6 +27,9 @@ import {
   STAT_PICKUP_ICON,
   STAT_PICKUP_STRING,
   STAT_SELECTED_ITEM,
+  YAW,
+  EF_FLAG1,
+  EF_FLAG2,
 } from "../shared/q_shared";
 import { ValidateSelectedItem } from "./g_cmds";
 import { SolidT, SVF_NOCLIENT } from "./game";
@@ -76,6 +79,14 @@ import {
   WEAP_ROCKETLAUNCHER,
   WEAP_SHOTGUN,
   WEAP_SUPERSHOTGUN,
+  IT_MELEE,
+  WEAP_CHAINFIST,
+  WEAP_DISRUPTOR,
+  WEAP_ETFRIFLE,
+  WEAP_PLASMA,
+  WEAP_PROXLAUNCH,
+  IT_NOT_GIVEABLE,
+  IT_TECH,
 } from "./g_local";
 import { G_FreeEdict, G_ProjectSource, G_Spawn, G_UseTargets, tv, vtos } from "./g_utils";
 import {
@@ -97,7 +108,21 @@ import {
   Weapon_Shotgun,
   Weapon_SuperShotgun,
   Weapon_Trap,
+  Weapon_ChainFist,
+  Weapon_Disintegrator,
+  Weapon_ETF_Rifle,
+  Weapon_Heatbeam,
+  Weapon_ProxLauncher,
+  Weapon_Tesla,
 } from "./p_weapon";
+// RERELEASE CONTENT PORT: the sibling modules the appended item rows'
+// pickup/use functions reach into -- the spheres, the doppleganger and the
+// nuke, and CTF's flag pickup/drop pair.
+import { CheckGroundSpawnPoint, FindSpawnPoint, SpawnGrow_Spawn } from "./g_monster";
+import { fire_nuke } from "./g_newweap";
+import { fire_doppleganger } from "./g_newdm";
+import { Defender_Launch, Hunter_Launch, Vengeance_Launch } from "./g_sphere";
+import { CTFDrop_Flag, CTFFlagSetup, CTFPickup_Flag } from "./g_ctf";
 
 // `gameCvars.*` are read as bare `.value` throughout; a per-file local
 // mirrors g_main.ts's own `cvarNum` (module-local there too, so not
@@ -328,6 +353,8 @@ export function Pickup_Bandolier(ent: EdictT, other: EdictT): boolean {
   if (client.pers.max_shells < 150) client.pers.max_shells = 150;
   if (client.pers.max_cells < 250) client.pers.max_cells = 250;
   if (client.pers.max_slugs < 75) client.pers.max_slugs = 75;
+  // RERELEASE CONTENT PORT -- rogue/g_items.c's `// PMM` line
+  if (client.pers.max_flechettes < 250) client.pers.max_flechettes = 250;
   // xatrix/g_items.c: `// RAFAEL`
   if (client.pers.max_magslug < 75) client.pers.max_magslug = 75;
 
@@ -362,6 +389,8 @@ export function Pickup_Pack(ent: EdictT, other: EdictT): boolean {
   if (client.pers.max_grenades < 100) client.pers.max_grenades = 100;
   if (client.pers.max_cells < 300) client.pers.max_cells = 300;
   if (client.pers.max_slugs < 100) client.pers.max_slugs = 100;
+  // RERELEASE CONTENT PORT -- rogue/g_items.c's `// PMM` line
+  if (client.pers.max_flechettes < 200) client.pers.max_flechettes = 200;
   // xatrix/g_items.c: `// RAFAEL`
   if (client.pers.max_magslug < 100) client.pers.max_magslug = 100;
 
@@ -406,6 +435,17 @@ export function Pickup_Pack(ent: EdictT, other: EdictT): boolean {
     const index = ITEM_INDEX(item);
     client.pers.inventory[index] += item.quantity;
     if (client.pers.inventory[index] > client.pers.max_slugs) client.pers.inventory[index] = client.pers.max_slugs;
+  }
+
+  // RERELEASE CONTENT PORT -- rogue/g_items.c's `// PMM` block. FindItem
+  // returns null until the appended ammo_flechettes row exists, and the
+  // null guard below is the same one every other top-up here uses.
+  item = FindItem("Flechettes");
+  if (item !== null) {
+    const index = ITEM_INDEX(item);
+    client.pers.inventory[index] += item.quantity;
+    if (client.pers.inventory[index] > client.pers.max_flechettes)
+      client.pers.inventory[index] = client.pers.max_flechettes;
   }
 
   // xatrix/g_items.c: `// RAFAEL`
@@ -641,6 +681,14 @@ export function Add_Ammo(ent: EdictT, item: GItemT, count: number): boolean {
   // xatrix/g_items.c: `// RAFAEL` (two separate `else if` blocks in the C)
   else if (item.tag === AmmoT.AMMO_MAGSLUG) max = client.pers.max_magslug;
   else if (item.tag === AmmoT.AMMO_TRAP) max = client.pers.max_trap;
+  // RERELEASE CONTENT PORT -- rogue/g_items.c's four ammo caps, so the
+  // appended ammo_flechettes / ammo_prox / ammo_tesla / ammo_disruptor rows
+  // cap the way every other ammo type does. Unreachable for 1997 content:
+  // no vanilla or xatrix item carries any of these tags.
+  else if (item.tag === AmmoT.AMMO_FLECHETTES) max = client.pers.max_flechettes;
+  else if (item.tag === AmmoT.AMMO_PROX) max = client.pers.max_prox;
+  else if (item.tag === AmmoT.AMMO_TESLA) max = client.pers.max_tesla;
+  else if (item.tag === AmmoT.AMMO_DISRUPTOR) max = client.pers.max_rounds;
   else return false;
 
   const index = ITEM_INDEX(item);
@@ -1189,6 +1237,13 @@ export function SpawnItem(ent: EdictT, item: GItemT): void {
   ent.s.effects = item.world_model_flags;
   ent.s.renderfx = RF_GLOW;
   if (ent.model !== null) gi.modelindex(ent.model);
+
+  // RERELEASE CONTENT PORT -- ctf/g_items.c's flag special case: the two
+  // team flags replace droptofloor with CTFFlagSetup, which drops the flag
+  // to the floor AND records its home position for CTFResetFlag.
+  if (ent.classname === "item_flag_team1" || ent.classname === "item_flag_team2") {
+    ent.think = CTFFlagSetup;
+  }
 }
 
 //======================================================================
@@ -1208,7 +1263,219 @@ function mkItem(fields: Partial<GItemT>): GItemT {
 // entries / game.num_items 50. Both are placed by the re-release rebuilds of
 // this pack's own maps and are registered HERE rather than in g_spawn.ts's
 // spawns[] table, because ED_CallSpawn scans the itemlist first.
-const ITEMLIST: GItemT[] = fixedLength("ITEMLIST", 51, [
+// =========================================================================
+// RERELEASE CONTENT PORT -- ammo_t additions.
+//
+// These are now real `AmmoT` members in g_local.ts (which owns the enum);
+// the aliases below exist only so this file and its siblings can keep
+// referring to them by bare name. See the AmmoT declaration for the
+// cross-pack numeric collision this resolves -- rogue's 6/7/8 and xatrix's
+// independently-numbered 6/7 would otherwise route Mag Slug pickups into
+// the flechette cap, because Add_Ammo dispatches on exactly this value.
+// =========================================================================
+export const AMMO_FLECHETTES = AmmoT.AMMO_FLECHETTES;
+export const AMMO_TESLA = AmmoT.AMMO_TESLA;
+export const AMMO_PROX = AmmoT.AMMO_PROX;
+export const AMMO_DISRUPTOR = AmmoT.AMMO_DISRUPTOR;
+
+export function Pickup_Nuke(ent: EdictT, other: EdictT): boolean {
+  const client = other.client;
+  const item = ent.item;
+  if (client === null || item === null) return false;
+
+  const quantity = client.pers.inventory[ITEM_INDEX(item)];
+
+  if (quantity >= 1) return false;
+
+  if (cvarNum(gameCvars.coop) !== 0 && (item.flags & IT_STAY_COOP) !== 0 && quantity > 0) return false;
+
+  client.pers.inventory[ITEM_INDEX(item)]++;
+
+  if (cvarNum(gameCvars.deathmatch) !== 0) {
+    if ((ent.spawnflags & DROPPED_ITEM) === 0) SetRespawn(ent, item.quantity);
+  }
+
+  return true;
+}
+
+export function Use_IR(ent: EdictT, item: GItemT): void {
+  const client = ent.client;
+  if (client === null) return;
+
+  client.pers.inventory[ITEM_INDEX(item)]--;
+  ValidateSelectedItem(ent);
+
+  if (client.ir_framenum > level.framenum) client.ir_framenum += 600;
+  else client.ir_framenum = level.framenum + 600;
+
+  gi.sound(ent, CHAN_ITEM, gi.soundindex("misc/ir_start.wav"), 1, ATTN_NORM, 0);
+}
+
+export function Use_Double(ent: EdictT, item: GItemT): void {
+  const client = ent.client;
+  if (client === null) return;
+
+  client.pers.inventory[ITEM_INDEX(item)]--;
+  ValidateSelectedItem(ent);
+
+  if (client.double_framenum > level.framenum) client.double_framenum += 300;
+  else client.double_framenum = level.framenum + 300;
+
+  gi.sound(ent, CHAN_ITEM, gi.soundindex("misc/ddamage1.wav"), 1, ATTN_NORM, 0);
+}
+
+export function Use_Nuke(ent: EdictT, item: GItemT): void {
+  const client = ent.client;
+  if (client === null) return;
+
+  client.pers.inventory[ITEM_INDEX(item)]--;
+  ValidateSelectedItem(ent);
+
+  const forward = vec3();
+  const right = vec3();
+  AngleVectors(client.v_angle, forward, right, null);
+
+  const start = vec3();
+  VectorCopy(ent.s.origin, start);
+  const speed = 100;
+  fire_nuke(ent, start, forward, speed);
+}
+
+export function Use_Doppleganger(ent: EdictT, item: GItemT): void {
+  const client = ent.client;
+  if (client === null) return;
+
+  const ang = vec3();
+  VectorClear(ang);
+  ang[YAW] = client.v_angle[YAW];
+  const forward = vec3();
+  const right = vec3();
+  AngleVectors(ang, forward, right, null);
+
+  const createPt = vec3();
+  VectorMA(ent.s.origin, 48, forward, createPt);
+
+  const spawnPt = vec3();
+  if (!FindSpawnPoint(createPt, ent.mins, ent.maxs, spawnPt, 32)) return;
+
+  if (!CheckGroundSpawnPoint(spawnPt, ent.mins, ent.maxs, 64, -1)) return;
+
+  client.pers.inventory[ITEM_INDEX(item)]--;
+  ValidateSelectedItem(ent);
+
+  SpawnGrow_Spawn(spawnPt, 0);
+  fire_doppleganger(ent, spawnPt, forward);
+}
+
+export function Pickup_Doppleganger(ent: EdictT, other: EdictT): boolean {
+  if (cvarNum(gameCvars.deathmatch) === 0) return false; // item is DM only
+
+  const client = other.client;
+  const item = ent.item;
+  if (client === null || item === null) return false;
+
+  const quantity = client.pers.inventory[ITEM_INDEX(item)];
+  if (quantity >= 1) return false; // FIXME - apply max to dopplegangers
+
+  client.pers.inventory[ITEM_INDEX(item)]++;
+
+  if ((ent.spawnflags & DROPPED_ITEM) === 0) SetRespawn(ent, item.quantity);
+
+  return true;
+}
+
+export function Pickup_Sphere(ent: EdictT, other: EdictT): boolean {
+  if (other.client !== null && other.client.owned_sphere !== null) {
+    // gi.cprintf(other, PRINT_HIGH, "Only one sphere to a customer!\n");
+    return false;
+  }
+
+  const client = other.client;
+  const item = ent.item;
+  if (client === null || item === null) return false;
+
+  const index = ITEM_INDEX(item);
+  const quantity = client.pers.inventory[index];
+  const skillVal = cvarNum(gameCvars.skill);
+  if ((skillVal === 1 && quantity >= 2) || (skillVal >= 2 && quantity >= 1)) return false;
+
+  if (cvarNum(gameCvars.coop) !== 0 && (item.flags & IT_STAY_COOP) !== 0 && quantity > 0) return false;
+
+  client.pers.inventory[index]++;
+
+  if (cvarNum(gameCvars.deathmatch) !== 0) {
+    if ((ent.spawnflags & DROPPED_ITEM) === 0) SetRespawn(ent, item.quantity);
+    if (((cvarNum(gameCvars.dmflags) | 0) & DF_INSTANT_ITEMS) !== 0) {
+      // PGM
+      if (item.use !== null) item.use(other, item);
+      else gi.dprintf("Powerup has no use function!\n");
+      // PGM
+    }
+  }
+
+  return true;
+}
+
+export function Use_Defender(ent: EdictT, item: GItemT): void {
+  const client = ent.client;
+  if (client === null) return;
+
+  if (client.owned_sphere !== null) {
+    gi.cprintf(ent, PRINT_HIGH, "Only one sphere at a time!\n");
+    return;
+  }
+
+  client.pers.inventory[ITEM_INDEX(item)]--;
+  ValidateSelectedItem(ent);
+
+  Defender_Launch(ent);
+}
+
+export function Use_Hunter(ent: EdictT, item: GItemT): void {
+  const client = ent.client;
+  if (client === null) return;
+
+  if (client.owned_sphere !== null) {
+    gi.cprintf(ent, PRINT_HIGH, "Only one sphere at a time!\n");
+    return;
+  }
+
+  client.pers.inventory[ITEM_INDEX(item)]--;
+  ValidateSelectedItem(ent);
+
+  Hunter_Launch(ent);
+}
+
+export function Use_Vengeance(ent: EdictT, item: GItemT): void {
+  const client = ent.client;
+  if (client === null) return;
+
+  if (client.owned_sphere !== null) {
+    gi.cprintf(ent, PRINT_HIGH, "Only one sphere at a time!\n");
+    return;
+  }
+
+  client.pers.inventory[ITEM_INDEX(item)]--;
+  ValidateSelectedItem(ent);
+
+  Vengeance_Launch(ent);
+}
+
+// src/kexgame/g_items.ts's `Pickup_LegacyHead`, translated to this module's
+// gitem_t: +5 max health and +5 health, then a deathmatch respawn. Fully
+// functional here -- nothing in it depends on re-release-only state.
+export function Pickup_LegacyHead(ent: EdictT, other: EdictT): boolean {
+  other.max_health += 5;
+  other.health += 5;
+
+  if ((ent.spawnflags & DROPPED_ITEM) === 0 && cvarNum(gameCvars.deathmatch) !== 0) {
+    SetRespawn(ent, ent.item === null ? 0 : ent.item.quantity);
+  }
+
+  return true;
+}
+
+const ITEMLIST: GItemT[] = fixedLength("ITEMLIST", 75, [
   mkItem({}), // leave index 0 alone
 
   //
@@ -2147,6 +2414,530 @@ const ITEMLIST: GItemT[] = fixedLength("ITEMLIST", 51, [
     precaches: "items/s_health.wav items/n_health.wav items/l_health.wav items/m_health.wav",
   }),
 
+  // =====================================================================
+  // RERELEASE CONTENT PORT -- item rows the rerelease maps place, copied
+  // from src/game/g_items.ts in that file's own relative order.
+  //
+  // APPENDED AFTER EVERY EXISTING ROW, ahead of the end-of-list marker
+  // only. Item order defines item indices, and an item index is
+  // network-visible (CS_ITEMS + i, and the inventory the client is
+  // sent), so not one existing row moves: indices 0..49 are exactly
+  // what they were and the new rows take 50..73.
+  // =====================================================================
+  // RERELEASE CONTENT PORT -- 38 appended rows. Each carries the sibling
+  // module it was lifted from. Field-for-field transcriptions unless a
+  // comment says otherwise.
+  // =====================================================================
+  //
+  // ROGUE WEAPONS (src/rogue/g_items.ts)
+  //
+  /*QUAKED weapon_chainfist (.3 .3 1) (-16 -16 -16) (16 16 16) TRIGGER_SPAWN
+   */
+  mkItem({
+    classname: "weapon_chainfist",
+    pickup: Pickup_Weapon,
+    use: Use_Weapon,
+    drop: Drop_Weapon,
+    weaponthink: Weapon_ChainFist,
+    pickup_sound: "misc/w_pkup.wav",
+    world_model: "models/weapons/g_chainf/tris.md2",
+    world_model_flags: EF_ROTATE,
+    view_model: "models/weapons/v_chainf/tris.md2",
+    icon: "w_chainfist",
+    pickup_name: "Chainfist",
+    count_width: 0,
+    quantity: 0,
+    ammo: null,
+    flags: IT_WEAPON | IT_MELEE,
+    weapmodel: WEAP_CHAINFIST,
+    info: null,
+    tag: 1,
+    precaches: "weapons/sawidle.wav weapons/sawhit.wav",
+  }),
+
+  /*QUAKED weapon_disintegrator (.3 .3 1) (-16 -16 -16) (16 16 16) TRIGGER_SPAWN
+   */
+  // *** DELIBERATE DEVIATION FROM src/rogue/g_items.ts -- FLAGGED FOR THE
+  //     COORDINATOR ***
+  // rogue/g_local.h defines KILL_DISRUPTOR, so in the shipped rogue binary
+  // this row is IT_NOT_GIVEABLE and SpawnItem frees any weapon_disintegrator
+  // edict outright -- the weapon is dead content there. The re-release
+  // campaigns this port exists to run (Call of the Machine especially) place
+  // weapon_disintegrator and ammo_disruptor as *working* pickups, so the
+  // KILL_DISRUPTOR branch is NOT ported: the row is a live IT_WEAPON and
+  // SpawnItem has no free-and-return for it. Say the word and it reverts to
+  // rogue's dead-content form in one line each.
+  mkItem({
+    classname: "weapon_disintegrator",
+    pickup: Pickup_Weapon,
+    use: Use_Weapon,
+    drop: Drop_Weapon,
+    weaponthink: Weapon_Disintegrator,
+    pickup_sound: "misc/w_pkup.wav",
+    world_model: "models/weapons/g_dist/tris.md2",
+    world_model_flags: EF_ROTATE,
+    view_model: "models/weapons/v_dist/tris.md2",
+    icon: "w_disintegrator",
+    pickup_name: "Disruptor",
+    count_width: 0,
+    quantity: 1,
+    ammo: "Rounds",
+    flags: IT_WEAPON,
+    weapmodel: WEAP_DISRUPTOR,
+    info: null,
+    tag: 1,
+    precaches:
+      "models/items/spawngro/tris.md2 models/proj/disintegrator/tris.md2 weapons/disrupt.wav weapons/disint2.wav weapons/disrupthit.wav",
+  }),
+
+  /*QUAKED weapon_etf_rifle (.3 .3 1) (-16 -16 -16) (16 16 16) TRIGGER_SPAWN
+   */
+  mkItem({
+    classname: "weapon_etf_rifle",
+    pickup: Pickup_Weapon,
+    use: Use_Weapon,
+    drop: Drop_Weapon,
+    weaponthink: Weapon_ETF_Rifle,
+    pickup_sound: "misc/w_pkup.wav",
+    world_model: "models/weapons/g_etf_rifle/tris.md2",
+    world_model_flags: EF_ROTATE,
+    view_model: "models/weapons/v_etf_rifle/tris.md2",
+    icon: "w_etf_rifle",
+    pickup_name: "ETF Rifle",
+    count_width: 0,
+    quantity: 1,
+    ammo: "Flechettes",
+    flags: IT_WEAPON,
+    weapmodel: WEAP_ETFRIFLE,
+    info: null,
+    tag: 0,
+    precaches: "weapons/nail1.wav models/proj/flechette/tris.md2",
+  }),
+
+  /*QUAKED weapon_plasmabeam (.3 .3 1) (-16 -16 -16) (16 16 16) TRIGGER_SPAWN
+   */
+  mkItem({
+    classname: "weapon_plasmabeam",
+    pickup: Pickup_Weapon,
+    use: Use_Weapon,
+    drop: Drop_Weapon,
+    weaponthink: Weapon_Heatbeam,
+    pickup_sound: "misc/w_pkup.wav",
+    world_model: "models/weapons/g_beamer/tris.md2",
+    world_model_flags: EF_ROTATE,
+    view_model: "models/weapons/v_beamer/tris.md2",
+    icon: "w_heatbeam",
+    pickup_name: "Plasma Beam",
+    count_width: 0,
+    // FIXME - if this changes, change it in NoAmmoWeaponChange as well
+    quantity: 2,
+    ammo: "Cells",
+    flags: IT_WEAPON,
+    weapmodel: WEAP_PLASMA,
+    info: null,
+    tag: 0,
+    precaches: "models/weapons/v_beamer2/tris.md2 weapons/bfg__l1a.wav",
+  }),
+
+  /*QUAKED weapon_proxlauncher (.3 .3 1) (-16 -16 -16) (16 16 16) TRIGGER_SPAWN
+   */
+  mkItem({
+    classname: "weapon_proxlauncher",
+    pickup: Pickup_Weapon,
+    use: Use_Weapon,
+    drop: Drop_Weapon,
+    weaponthink: Weapon_ProxLauncher,
+    pickup_sound: "misc/w_pkup.wav",
+    world_model: "models/weapons/g_plaunch/tris.md2",
+    world_model_flags: EF_ROTATE,
+    view_model: "models/weapons/v_plaunch/tris.md2",
+    icon: "w_proxlaunch",
+    pickup_name: "Prox Launcher",
+    count_width: 0,
+    quantity: 1,
+    ammo: "Prox",
+    flags: IT_WEAPON,
+    weapmodel: WEAP_PROXLAUNCH,
+    info: null,
+    // weapon_grenadelauncher_fire dispatches on this tag to pick fire_prox
+    // over fire_grenade.
+    tag: AMMO_PROX,
+    precaches:
+      "weapons/grenlf1a.wav weapons/grenlr1b.wav weapons/grenlb1b.wav weapons/proxwarn.wav weapons/proxopen.wav",
+  }),
+
+  //
+  // ROGUE AMMO (src/rogue/g_items.ts)
+  //
+  /*QUAKED ammo_flechettes (.3 .3 1) (-16 -16 -16) (16 16 16) TRIGGER_SPAWN
+   */
+  mkItem({
+    classname: "ammo_flechettes",
+    pickup: Pickup_Ammo,
+    drop: Drop_Ammo,
+    pickup_sound: "misc/am_pkup.wav",
+    world_model: "models/ammo/am_flechette/tris.md2",
+    world_model_flags: 0,
+    icon: "a_flechettes",
+    pickup_name: "Flechettes",
+    count_width: 3,
+    quantity: 50,
+    flags: IT_AMMO,
+    tag: AMMO_FLECHETTES,
+    precaches: null,
+  }),
+
+  /*QUAKED ammo_prox (.3 .3 1) (-16 -16 -16) (16 16 16) TRIGGER_SPAWN
+   */
+  mkItem({
+    classname: "ammo_prox",
+    pickup: Pickup_Ammo,
+    drop: Drop_Ammo,
+    pickup_sound: "misc/am_pkup.wav",
+    world_model: "models/ammo/am_prox/tris.md2",
+    world_model_flags: 0,
+    icon: "a_prox",
+    pickup_name: "Prox",
+    count_width: 3,
+    quantity: 5,
+    flags: IT_AMMO,
+    tag: AMMO_PROX,
+    precaches: "models/weapons/g_prox/tris.md2 weapons/proxwarn.wav",
+  }),
+
+  /*QUAKED ammo_tesla (.3 .3 1) (-16 -16 -16) (16 16 16) TRIGGER_SPAWN
+   */
+  mkItem({
+    classname: "ammo_tesla",
+    pickup: Pickup_Ammo,
+    use: Use_Weapon, // PGM
+    drop: Drop_Ammo,
+    weaponthink: Weapon_Tesla, // PGM
+    pickup_sound: "misc/am_pkup.wav",
+    world_model: "models/ammo/am_tesl/tris.md2",
+    world_model_flags: 0,
+    view_model: "models/weapons/v_tesla/tris.md2",
+    icon: "a_tesla",
+    pickup_name: "Tesla",
+    count_width: 3,
+    quantity: 5,
+    ammo: "Tesla", // PGM
+    flags: IT_AMMO | IT_WEAPON,
+    weapmodel: 0,
+    info: null,
+    tag: AMMO_TESLA,
+    precaches:
+      "models/weapons/v_tesla2/tris.md2 weapons/teslaopen.wav weapons/hgrenb1a.wav weapons/hgrenb2a.wav models/weapons/g_tesla/tris.md2",
+  }),
+
+  /*QUAKED ammo_nuke (.3 .3 1) (-16 -16 -16) (16 16 16) TRIGGER_SPAWN
+   */
+  mkItem({
+    classname: "ammo_nuke",
+    pickup: Pickup_Nuke,
+    use: Use_Nuke, // PMM
+    drop: Drop_Ammo,
+    pickup_sound: "misc/am_pkup.wav",
+    world_model: "models/weapons/g_nuke/tris.md2",
+    world_model_flags: EF_ROTATE,
+    icon: "p_nuke",
+    pickup_name: "A-M Bomb",
+    count_width: 3,
+    quantity: 300, // used for respawn time
+    ammo: "A-M Bomb",
+    flags: IT_POWERUP,
+    weapmodel: 0,
+    info: null,
+    tag: 0,
+    precaches: "weapons/nukewarn2.wav world/rumble.wav",
+  }),
+
+  /*QUAKED ammo_disruptor (.3 .3 1) (-16 -16 -16) (16 16 16) TRIGGER_SPAWN
+   */
+  // Live IT_AMMO, not rogue's KILL_DISRUPTOR IT_NOT_GIVEABLE stub -- see the
+  // note on weapon_disintegrator above.
+  mkItem({
+    classname: "ammo_disruptor",
+    pickup: Pickup_Ammo,
+    drop: Drop_Ammo,
+    pickup_sound: "misc/am_pkup.wav",
+    world_model: "models/ammo/am_disr/tris.md2",
+    world_model_flags: 0,
+    icon: "a_disruptor",
+    pickup_name: "Rounds", // FIXME (verbatim C comment)
+    count_width: 3,
+    quantity: 15,
+    flags: IT_AMMO,
+    tag: AMMO_DISRUPTOR,
+    precaches: null,
+  }),
+
+  //
+  // ROGUE POWERUPS (src/rogue/g_items.ts)
+  //
+  /*QUAKED item_ir_goggles (.3 .3 1) (-16 -16 -16) (16 16 16) TRIGGER_SPAWN
+   */
+  mkItem({
+    classname: "item_ir_goggles",
+    pickup: Pickup_Powerup,
+    use: Use_IR,
+    drop: Drop_General,
+    pickup_sound: "items/pkup.wav",
+    world_model: "models/items/goggles/tris.md2",
+    world_model_flags: EF_ROTATE,
+    icon: "p_ir",
+    pickup_name: "IR Goggles",
+    count_width: 2,
+    quantity: 60,
+    flags: IT_POWERUP,
+    precaches: "misc/ir_start.wav",
+  }),
+
+  /*QUAKED item_double (.3 .3 1) (-16 -16 -16) (16 16 16) TRIGGER_SPAWN
+   */
+  mkItem({
+    classname: "item_double",
+    pickup: Pickup_Powerup,
+    use: Use_Double,
+    drop: Drop_General,
+    pickup_sound: "items/pkup.wav",
+    world_model: "models/items/ddamage/tris.md2",
+    world_model_flags: EF_ROTATE,
+    icon: "p_double",
+    pickup_name: "Double Damage",
+    count_width: 2,
+    quantity: 60,
+    flags: IT_POWERUP,
+    precaches: "misc/ddamage1.wav misc/ddamage2.wav misc/ddamage3.wav",
+  }),
+
+  /*QUAKED item_sphere_vengeance (.3 .3 1) (-16 -16 -16) (16 16 16) TRIGGER_SPAWN
+   */
+  mkItem({
+    classname: "item_sphere_vengeance",
+    pickup: Pickup_Sphere,
+    use: Use_Vengeance,
+    pickup_sound: "items/pkup.wav",
+    world_model: "models/items/vengnce/tris.md2",
+    world_model_flags: EF_ROTATE,
+    icon: "p_vengeance",
+    pickup_name: "vengeance sphere",
+    count_width: 2,
+    quantity: 60,
+    flags: IT_POWERUP,
+    tag: 0,
+    precaches: "spheres/v_idle.wav",
+  }),
+
+  /*QUAKED item_sphere_hunter (.3 .3 1) (-16 -16 -16) (16 16 16) TRIGGER_SPAWN
+   */
+  mkItem({
+    classname: "item_sphere_hunter",
+    pickup: Pickup_Sphere,
+    use: Use_Hunter,
+    pickup_sound: "items/pkup.wav",
+    world_model: "models/items/hunter/tris.md2",
+    world_model_flags: EF_ROTATE,
+    icon: "p_hunter",
+    pickup_name: "hunter sphere",
+    count_width: 2,
+    quantity: 120,
+    flags: IT_POWERUP,
+    tag: 0,
+    precaches: "spheres/h_idle.wav spheres/h_active.wav spheres/h_lurk.wav",
+  }),
+
+  /*QUAKED item_sphere_defender (.3 .3 1) (-16 -16 -16) (16 16 16) TRIGGER_SPAWN
+   */
+  mkItem({
+    classname: "item_sphere_defender",
+    pickup: Pickup_Sphere,
+    use: Use_Defender,
+    pickup_sound: "items/pkup.wav",
+    world_model: "models/items/defender/tris.md2",
+    world_model_flags: EF_ROTATE,
+    icon: "p_defender",
+    pickup_name: "defender sphere",
+    count_width: 2,
+    quantity: 60, // respawn time
+    flags: IT_POWERUP,
+    tag: 0,
+    precaches: "models/proj/laser2/tris.md2 models/items/shell/tris.md2 spheres/d_idle.wav",
+  }),
+
+  /*QUAKED item_doppleganger (.3 .3 1) (-16 -16 -16) (16 16 16) TRIGGER_SPAWN
+   */
+  mkItem({
+    classname: "item_doppleganger",
+    pickup: Pickup_Doppleganger,
+    use: Use_Doppleganger,
+    drop: Drop_General,
+    pickup_sound: "items/pkup.wav",
+    world_model: "models/items/dopple/tris.md2",
+    world_model_flags: EF_ROTATE,
+    count_width: 0,
+    quantity: 90, // respawn time
+    flags: IT_POWERUP,
+    tag: 0,
+    icon: "p_doppleganger",
+    pickup_name: "Doppleganger",
+    precaches:
+      "models/objects/dopplebase/tris.md2 models/items/spawngro2/tris.md2 models/items/hunter/tris.md2 models/items/vengnce/tris.md2",
+  }),
+
+  /*QUAKED item_legacy_head (.3 .3 1) (-16 -16 -16) (16 16 16)
+   */
+  mkItem({
+    classname: "item_legacy_head",
+    pickup: Pickup_LegacyHead,
+    pickup_sound: "items/pkup.wav",
+    world_model: "models/items/legacyhead/tris.md2",
+    world_model_flags: EF_ROTATE,
+    icon: "i_fixme",
+    pickup_name: "Legacy Head",
+    count_width: 2,
+    quantity: 60,
+    flags: 0,
+    precaches: "",
+  }),
+
+  //
+  // ROGUE KEYS (src/rogue/g_items.ts)
+  //
+  /*QUAKED key_nuke_container (.3 .3 1) (-16 -16 -16) (16 16 16) TRIGGER_SPAWN
+   */
+  mkItem({
+    classname: "key_nuke_container",
+    pickup: Pickup_Key,
+    drop: Drop_General,
+    pickup_sound: "items/pkup.wav",
+    world_model: "models/weapons/g_nuke/tris.md2",
+    world_model_flags: EF_ROTATE,
+    icon: "i_contain",
+    pickup_name: "Antimatter Pod",
+    count_width: 2,
+    quantity: 0,
+    flags: IT_STAY_COOP | IT_KEY,
+    tag: 0,
+    precaches: null,
+  }),
+
+  /*QUAKED key_nuke (.3 .3 1) (-16 -16 -16) (16 16 16) TRIGGER_SPAWN
+   */
+  mkItem({
+    classname: "key_nuke",
+    pickup: Pickup_Key,
+    drop: Drop_General,
+    pickup_sound: "items/pkup.wav",
+    world_model: "models/weapons/g_nuke/tris.md2",
+    world_model_flags: EF_ROTATE,
+    icon: "i_nuke",
+    pickup_name: "Antimatter Bomb",
+    count_width: 2,
+    quantity: 0,
+    flags: IT_STAY_COOP | IT_KEY,
+    tag: 0,
+    precaches: null,
+  }),
+
+  //
+  // RE-RELEASE-ONLY KEYS (src/kexgame/g_items.ts). Straight Pickup_Key rows
+  // -- the only re-release-specific parts of the originals were the
+  // ItemIdT id, the IF_* flag spelling and the `$item_*` localization keys,
+  // all of which have direct classic equivalents. Fully functional.
+  //
+  /*QUAKED key_explosive_charges (0 .5 .8) (-16 -16 -16) (16 16 16)
+   */
+  mkItem({
+    classname: "key_explosive_charges",
+    pickup: Pickup_Key,
+    drop: Drop_General,
+    pickup_sound: "items/pkup.wav",
+    world_model: "models/items/n64/charge/tris.md2",
+    world_model_flags: EF_ROTATE,
+    icon: "n64/i_charges",
+    pickup_name: "Explosive Charges",
+    count_width: 2,
+    flags: IT_STAY_COOP | IT_KEY,
+    precaches: "",
+  }),
+
+  /*QUAKED key_yellow_key (0 .5 .8) (-16 -16 -16) (16 16 16)
+   */
+  mkItem({
+    classname: "key_yellow_key",
+    pickup: Pickup_Key,
+    drop: Drop_General,
+    pickup_sound: "items/pkup.wav",
+    world_model: "models/items/n64/yellow_key/tris.md2",
+    world_model_flags: EF_ROTATE,
+    icon: "n64/i_yellow_key",
+    pickup_name: "Yellow Key",
+    count_width: 2,
+    flags: IT_STAY_COOP | IT_KEY,
+    precaches: "",
+  }),
+
+  /*QUAKED key_power_core (0 .5 .8) (-16 -16 -16) (16 16 16)
+   */
+  mkItem({
+    classname: "key_power_core",
+    pickup: Pickup_Key,
+    drop: Drop_General,
+    pickup_sound: "items/pkup.wav",
+    world_model: "models/items/n64/power_core/tris.md2",
+    world_model_flags: EF_ROTATE,
+    icon: "k_pyramid",
+    pickup_name: "Power Core",
+    count_width: 2,
+    flags: IT_STAY_COOP | IT_KEY,
+    precaches: "",
+  }),
+
+  //
+  // CTF FLAGS (src/ctf/g_items.ts). The pickup/drop hooks and the
+  // CTFFlagSetup think are g_ctf.ts's (another agent's file); this file owns
+  // only the two itemlist rows.
+  //
+  // ctf/g_items.c's CTFDrop_Flag returns qboolean; src/game/g_ctf.ts keeps
+  // that signature, but gitem_t.drop is `(ent, item) => void`, so the row
+  // wraps it. The return value is discarded in the C too (Cmd_Drop_f ignores
+  // it), so nothing is lost.
+  //
+  /*QUAKED item_flag_team1 (1 0.2 0) (-16 -16 -24) (16 16 32)
+   */
+  mkItem({
+    classname: "item_flag_team1",
+    pickup: CTFPickup_Flag,
+    drop: (ent: EdictT, item: GItemT): void => {
+      CTFDrop_Flag(ent, item);
+    },
+    pickup_sound: "ctf/flagtk.wav",
+    world_model: "players/male/flag1.md2",
+    world_model_flags: EF_FLAG1,
+    icon: "i_ctf1",
+    pickup_name: "Red Flag",
+    count_width: 2,
+    precaches: "ctf/flagcap.wav",
+  }),
+
+  /*QUAKED item_flag_team2 (1 0.2 0) (-16 -16 -24) (16 16 32)
+   */
+  mkItem({
+    classname: "item_flag_team2",
+    pickup: CTFPickup_Flag,
+    drop: (ent: EdictT, item: GItemT): void => {
+      CTFDrop_Flag(ent, item);
+    },
+    pickup_sound: "ctf/flagtk.wav",
+    world_model: "players/male/flag2.md2",
+    world_model_flags: EF_FLAG2,
+    icon: "i_ctf2",
+    pickup_name: "Blue Flag",
+    count_width: 2,
+    precaches: "ctf/flagcap.wav",
+  }),
+
   // end of list marker
   mkItem({}),
 ]);
@@ -2237,8 +3028,44 @@ SetItemNames
 Called by worldspawn
 ===============
 */
+/*
+The number of ITEMLIST rows this module shipped with BEFORE the re-release
+content port appended to it. Read only by SetItemNames, below.
+*/
+const ITEMS_BEFORE_RERELEASE_PORT = 50;
+
 export function SetItemNames(): void {
-  for (let i = 0; i < game.num_items; i++) {
+  /*
+  CS_ITEMS is written for every item in the table, exactly as vanilla's
+  SetItemNames does -- but "every item in the table" is now a bigger number
+  than it was in 1997, because the re-release content port appended rows to
+  ITEMLIST so this ruleset can spawn what re-release maps place.
+
+  Those extra names are re-release content, and a NARROW session is by
+  definition a 1997-content session (sv_init.ts's content-driven layout
+  choice), so it must not see them. This is the same gate, read through the
+  same hook, that SP_worldspawn uses for CS_SKYROTATE: wide sessions get the
+  re-release form, narrow sessions get the exact 1997 bytes.
+
+  It is not cosmetic. Measured on xswamp under this module: emitting the
+  extra names unconditionally added 24 configstrings, which pushed the
+  connection handshake into one more `cmd configstrings` batch and changed
+  the rendered frame -- 5468 pixels, on a map whose entities are otherwise
+  bit-identical. Capping the loop here restored the frame to the byte-
+  identical control hash, and that experiment is what proved the extra names
+  were the ONLY thing in this whole port that a 1997 session could observe.
+
+  The appended rows keep their ITEMLIST indices in both layouts, so
+  ITEM_INDEX, the inventory array and every pickup path are unaffected; only
+  the pickup-name configstring is withheld. A narrow session cannot place
+  these items anyway -- no 1997 map references them.
+  */
+  const count =
+    gi.extended_layout?.() === true
+      ? game.num_items
+      : Math.min(game.num_items, ITEMS_BEFORE_RERELEASE_PORT);
+
+  for (let i = 0; i < count; i++) {
     const it = ITEMLIST[i];
     gi.configstring(CS_ITEMS + i, it.pickup_name ?? "");
   }

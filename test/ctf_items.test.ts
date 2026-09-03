@@ -239,7 +239,16 @@ describe("itemlist ctf delta -- weapon_grapple/item_flag_team1/2/item_tech1-4", 
     // commit 288484f. Before they were added, q2kctf1 alone dropped 14
     // entities. See test/g_spawn_module_coverage.test.ts for the
     // shipped-map gate that requires them.
-    expect(game.num_items).toBe(66);
+    //
+    // The remaining 14 rows answer the WIDER gate in
+    // test/g_spawn_rerelease_all_modules.test.ts: a player may load ANY
+    // shipped re-release map under CTF, so the table also carries
+    // item_flashlight, item_invisibility, item_ir_goggles, item_quadfire,
+    // item_legacy_head, item_sphere_defender, item_sphere_vengeance and the
+    // six keys those campaign maps place. All 14 are APPENDED after the
+    // last existing row (ahead of the end-of-list marker only), so every
+    // pre-existing item index is unmoved -- weapon_grapple is still at 7.
+    expect(game.num_items).toBe(80);
   });
 });
 

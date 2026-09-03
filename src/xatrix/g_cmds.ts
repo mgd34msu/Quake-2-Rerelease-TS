@@ -34,6 +34,7 @@ import {
   svc_inventory,
 } from "./g_local";
 import type { Edict } from "./game";
+import { Cmd_Compass_f } from "./g_kextarg";
 import { ChaseNext, ChasePrev } from "./g_chase";
 import { Add_Ammo, FindItem, ITEM_INDEX, itemlist, SpawnItem, Touch_Item } from "./g_items";
 import { G_FreeEdict, G_Spawn } from "./g_utils";
@@ -863,5 +864,13 @@ export function ClientCommand(edict: Edict): void {
   else if (Q_stricmp(cmd, "putaway") === 0) Cmd_PutAway_f(ent);
   else if (Q_stricmp(cmd, "wave") === 0) Cmd_Wave_f(ent);
   else if (Q_stricmp(cmd, "playerlist") === 0) Cmd_PlayerList_f(ent);
+  // RERELEASE CONTENT: the compass/objective marker. The rerelease reaches
+  // Use_Compass through the IT_COMPASS inventory item; the classic itemlist
+  // is a frozen, index-stable table the save format depends on, so it is
+  // reached through this command instead (see g_kextarg.ts's Cmd_Compass_f,
+  // which is deliberately NOT called Use_Compass -- g_items.ts already has
+  // one of those, the rogue compass ITEM).
+  // Emits nothing on a narrow session -- gi.poi() is a no-op there.
+  else if (Q_stricmp(cmd, "compass") === 0) Cmd_Compass_f(ent);
   else Cmd_Say_f(ent, false, true); // anything that doesn't match a command will be a chat
 }

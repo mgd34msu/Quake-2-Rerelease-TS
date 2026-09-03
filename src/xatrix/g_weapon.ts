@@ -151,7 +151,11 @@ function check_dodge(self: EdictT, start: Vec3, dir: Vec3, speed: number): void 
       const v = vec3();
       VectorSubtract(tr.endpos, start, v);
       const eta = (VectorLength(v) - hit.maxs[0]) / speed;
-      hit.monsterinfo.dodge(hit, self, eta);
+      // RERELEASE CONTENT PORT: dodge now takes the trace that triggered
+      // it (see MonsterInfoT.dodge in g_local.ts). Vanilla's own dodge
+      // handlers ignore the extra argument; the ported rerelease
+      // M_MonsterDodge reads it to choose between ducking and sidestepping.
+      hit.monsterinfo.dodge(hit, self, eta, tr);
     }
   }
 }

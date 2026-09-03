@@ -415,6 +415,17 @@ export function G_InitEdict(e: EdictT): void {
   // a plain array (see game.ts's GameExports.edicts comment), so the offset
   // is recovered by identity lookup instead of address arithmetic.
   e.s.number = g_edicts.indexOf(e);
+
+  // RERELEASE CONTENT PORT (rogue/g_utils.c's ROGUE_GRAVITY block, which
+  // is unconditionally compiled in the shipped binary): set the gravity
+  // direction BEFORE the spawn function runs, so a spawn function can
+  // override it. The ported rerelease content that flips gravity
+  // (target_gravity, the reverse-gravity areas the rerelease campaigns
+  // use) depends on every edict starting with a real downward vector
+  // rather than the all-zero one the field declaration leaves.
+  e.gravityVector[0] = 0.0;
+  e.gravityVector[1] = 0.0;
+  e.gravityVector[2] = -1.0;
 }
 
 /*

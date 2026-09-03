@@ -159,6 +159,48 @@ export function InitGame(): void {
 
   gameCvars.sv_maplist = gi.cvar("sv_maplist", "", 0);
 
+  // RERELEASE CONTENT PORT (rogue/g_save.c's InitGame): the alternate
+  // deathmatch ruleset selector the ported dm_tag content reads. CVAR_LATCH
+  // matches rogue -- the ruleset may only change between levels. Default 0
+  // is vanilla deathmatch, so nothing about classic LM-CTF play changes.
+  /*
+  RERELEASE CONTENT PORT -- registered WITHOUT CVAR_LATCH, deliberately, and
+  this is the one place this module's registration differs from rogue's
+  (rogue/g_save.ts registers the same cvar with CVAR_LATCH).
+
+  WHY IT MUST EXIST AT ALL: SP_dm_tag_token and Tag_PickupToken both guard on
+  `gamerules !== 2`, and a null cvar makes that guard FALSE -- which would
+  leave a Tag token alive in a module that has no Tag ruleset to run it.
+  Registered at its "0" default, the guard reads 0 !== 2 and frees the token,
+  which is the correct behavior here.
+
+  WHY IT MUST NOT BE LATCHED: the engine writes the latched-cvar list into
+  the server save file (sv_init.ts's SV_WriteServerFile, which prints its own
+  count). Latching this one takes that count from 31 to 32 on EVERY session,
+  including a 1997-content one, which is a change a 1997 session can observe.
+  Measured directly on q2ctf1: the developer log went from "31 latched
+  cvar(s)" to "32 latched cvar(s)" and nothing else. The latch flag buys
+  nothing here -- rogue needs it because rogue's InitGameRules samples
+  gamerules once at level load to pick a DMGame, and this module has no
+  InitGameRules; its only readers are the two Tag guards above, which read it
+  live. So the flag is dropped and the 1997 serverfile stays byte-identical.
+  */
+  gameCvars.gamerules = gi.cvar("gamerules", "0", 0);
+  gameCvars.g_showlogic = gi.cvar("g_showlogic", "0", 0);
+  /*
+  RERELEASE CONTENT PORT -- registered with NO flags, where rogue and the
+  classic module use CVAR_SERVERINFO | CVAR_LATCH. Same reasoning as the
+  `gamerules` registration above: the latched-cvar list goes into the server
+  save file and CVAR_SERVERINFO goes onto the wire, so either flag would be
+  observable to a 1997-content session under this ruleset. Measured on
+  lmctf09: latching it took the developer log's count from 29 to 30 latched
+  cvars. Its only reader is g_sphere.ts's hunter chase camera, which reads it
+  live, so neither flag is load-bearing here.
+  */
+  gameCvars.huntercam = gi.cvar("huntercam", "1", 0);
+  gameCvars.strong_mines = gi.cvar("strong_mines", "0", 0);
+  gameCvars.randomrespawn = gi.cvar("randomrespawn", "0", 0);
+
   // items -- re-asserts game.num_items (see g_items.ts's InitItems comment:
   // a shared `game` singleton reset elsewhere, e.g. a test's game.clear(),
   // would otherwise silently invalidate FindItem/GetItemByIndex).

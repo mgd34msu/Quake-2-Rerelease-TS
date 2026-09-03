@@ -94,7 +94,7 @@ import {
   type EdictT,
 } from "./g_local";
 import { type Edict, type GTraceT, SolidT } from "./game";
-import { G_TouchTriggers } from "./g_utils";
+import { G_TouchTriggers, vectoangles } from "./g_utils";
 import { MAX_EDICTS } from "../shared/q_shared";
 
 // `sv_maxvelocity`/`sv_gravity` are `cvar_t *` in C, resolved once at
@@ -725,7 +725,11 @@ export function SV_Physics_Toss(ent: EdictT): void {
   if (
     ent.movetype !== MovetypeT.MOVETYPE_FLY &&
     ent.movetype !== MovetypeT.MOVETYPE_FLYMISSILE &&
-    ent.movetype !== MovetypeT.MOVETYPE_REFLECT // SKWiD MOD
+    ent.movetype !== MovetypeT.MOVETYPE_REFLECT && // SKWiD MOD
+    // RERELEASE CONTENT PORT (xatrix/g_phys.c's `// RAFAEL -- move type for
+    // rippergun projectile`): MOVETYPE_WALLBOUNCE is weightless like the two
+    // fly movetypes and like LM-CTF's own MOVETYPE_REFLECT above.
+    ent.movetype !== MovetypeT.MOVETYPE_WALLBOUNCE
   )
     SV_AddGravity(ent);
 
@@ -743,13 +747,27 @@ export function SV_Physics_Toss(ent: EdictT): void {
     if (ent.movetype === MovetypeT.MOVETYPE_REFLECT)
       // SKWiD MOD
       backoff = 2.0; // get out of bsp
+    // RERELEASE CONTENT PORT (xatrix/g_phys.c): the wallbounce projectile
+    // gets the same stronger backoff a reflect bolt does.
+    else if (ent.movetype === MovetypeT.MOVETYPE_WALLBOUNCE) backoff = 2.0;
     else if (ent.movetype === MovetypeT.MOVETYPE_BOUNCE) backoff = 1.5;
     else backoff = 1;
 
     ClipVelocity(ent.velocity, trace.plane.normal, ent.velocity, backoff);
 
+    // RERELEASE CONTENT PORT (xatrix/g_phys.c): the wallbounce projectile
+    // re-orients its model to face the new travel direction on every wall
+    // hit. LM-CTF's MOVETYPE_REFLECT deliberately does not do this.
+    if (ent.movetype === MovetypeT.MOVETYPE_WALLBOUNCE) vectoangles(ent.velocity, ent.s.angles);
+
     // stop if on ground
-    if (ent.movetype !== MovetypeT.MOVETYPE_REFLECT) {
+    // RERELEASE CONTENT PORT (xatrix/g_phys.c): the wallbounce projectile
+    // never settles on the ground the way a real bounce does, same as
+    // MOVETYPE_REFLECT.
+    if (
+      ent.movetype !== MovetypeT.MOVETYPE_REFLECT &&
+      ent.movetype !== MovetypeT.MOVETYPE_WALLBOUNCE
+    ) {
       // SKWiD MOD
       if (trace.plane.normal[2] > 0.7) {
         if (ent.velocity[2] < 60 || ent.movetype !== MovetypeT.MOVETYPE_BOUNCE) {
@@ -871,6 +889,9 @@ export function G_RunEntity(ent: EdictT): void {
     case MovetypeT.MOVETYPE_FLY:
     case MovetypeT.MOVETYPE_FLYMISSILE:
     case MovetypeT.MOVETYPE_REFLECT: // SKWiD MOD
+    // RERELEASE CONTENT PORT (xatrix/g_phys.c): MOVETYPE_WALLBOUNCE routes
+    // through the same toss/bounce physics as MOVETYPE_BOUNCE.
+    case MovetypeT.MOVETYPE_WALLBOUNCE:
       SV_Physics_Toss(ent);
       break;
     default:
