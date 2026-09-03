@@ -23,13 +23,13 @@ array.
 
 import { describe, test, expect, beforeEach } from "bun:test";
 
-import { SetRefImports, r_notexture_mip, vid } from "../src/ref_soft/r_local";
+import { SetRefImports, r_notexture_mip, vid, TRANSPARENT_COLOR, d_8to24table } from "../src/ref_soft/r_local";
 import type { RefImports } from "../src/client/ref";
 import { CvarT } from "../src/shared/q_shared";
 import { SWimp_SetMode } from "../src/platform/swimp";
 import { LoadPCX, R_FindImage, R_InitImages } from "../src/ref_soft/r_image";
 import { ImagetypeT } from "../src/ref_soft/r_model";
-import { Draw_Char, Draw_Fill, Draw_InitLocal, Draw_Pic } from "../src/ref_soft/r_draw";
+import { Draw_Char, Draw_ColorPic, Draw_Fill, Draw_InitLocal, Draw_Pic, Draw_StretchPicRegion } from "../src/ref_soft/r_draw";
 
 const VID_WIDTH = 64;
 const VID_HEIGHT = 48;
@@ -345,5 +345,107 @@ describe("Draw_Pic", () => {
 
     expect(vid.buffer).toEqual(before);
     expect(vid.buffer.length).toBe(VID_WIDTH * VID_HEIGHT); // canary: never reallocated/overrun
+  });
+});
+
+// Regression coverage for the re-release HUD's "pink box" defect: under
+// ref_soft, Draw_ColorPic/Draw_StretchPicRegion tint a source pic's pixels
+// through a nearest-palette-color remap (see r_draw.ts's buildColorRemap
+// doc comment), but treated TRANSPARENT_COLOR (palette index 255, a
+// reserved "hole" sentinel with an arbitrary/unrelated RGB value in
+// d_8to24table -- see r_image.ts's own NearestPaletteIndex, which already
+// excludes it) like any other real color: a source pixel already marked
+// as a hole got remapped and drawn anyway, and the remap's own
+// nearest-color search was free to land ON index 255 for a real requested
+// tint. Both let a legitimate draw show index 255's garbage RGB. The
+// kfont glyph atlas is exactly this shape -- mostly antialiased-to-
+// transparent padding around each glyph, quantized to TRANSPARENT_COLOR on
+// load (r_image.ts's QuantizeRGBAToPalette) -- so every white-text-with-
+// black-shadow HUD string painted that garbage color across each glyph's
+// whole cell instead of leaving the background alone.
+describe("Draw_ColorPic / Draw_StretchPicRegion: TRANSPARENT_COLOR handling", () => {
+  // A palette deliberately adversarial to the bug: index 255 (the reserved
+  // sentinel) is closer, by squared RGB distance, to every tint target used
+  // below than the correct real palette entry is. Without excluding index
+  // 255 from buildColorRemap's own nearest-color search, every assertion
+  // here would resolve to index 255 instead of the real color.
+  const BLACK_REAL = 1; // nearest real entry to a black tint
+  const RED_REAL = 2; // nearest real entry to a red tint
+  const WHITE_SRC = 3; // the source pic's own "opaque white-ish" pixel index
+  const WHITE_REAL = 3; // white tint is identity: nearest to itself is itself
+
+  beforeEach(() => {
+    // Reset every entry to a mid-grey far from every target below, then
+    // place only the specific entries each test depends on -- keeps each
+    // test's "nearest real match" unambiguous.
+    for (let i = 0; i < 256; i++) d_8to24table[i] = (128 << 0) | (128 << 8) | (128 << 16);
+
+    d_8to24table[BLACK_REAL] = (2 << 0) | (2 << 8) | (2 << 16); // near-black, real
+    d_8to24table[RED_REAL] = (250 << 0) | (0 << 8) | (0 << 16); // near-red, real
+    d_8to24table[WHITE_SRC] = (250 << 0) | (250 << 8) | (250 << 16); // near-white, real
+
+    // The reserved sentinel: closer than ANY real entry to a pure-black
+    // tint AND to a pure-red tint (never a legitimate color to land on).
+    d_8to24table[TRANSPARENT_COLOR] = (1 << 0) | (1 << 8) | (1 << 16);
+  });
+
+  test("Draw_ColorPic: a black box (alpha=255) darkens an opaque source pixel to the real black-ish palette entry, never to TRANSPARENT_COLOR's reserved RGB", () => {
+    // 2x1 source: [opaque white-ish pixel, hole]. w===pic.width keeps the
+    // sampling 1:1 (see Draw_ColorPic's fstep math), so dest[x] <- source[x].
+    files.set("pics/box2.pcx", buildPcxBytes(2, 1, (x) => (x === 0 ? WHITE_SRC : TRANSPARENT_COLOR)));
+
+    vid.buffer.fill(77); // canary: anything untouched should stay 77
+
+    Draw_ColorPic(0, 0, 2, 1, "box2", { r: 0, g: 0, b: 0, a: 255 });
+
+    expect(vid.buffer[0]).toBe(BLACK_REAL); // opaque pixel: darkened to the real black entry
+    expect(vid.buffer[0]).not.toBe(TRANSPARENT_COLOR);
+    expect(vid.buffer[1]).toBe(77); // hole pixel: left untouched, not painted with garbage RGB
+  });
+
+  test("Draw_ColorPic: a colour tint (red) shows its own colour on an opaque source pixel, never TRANSPARENT_COLOR's reserved RGB", () => {
+    files.set("pics/box3.pcx", buildPcxBytes(2, 1, (x) => (x === 0 ? WHITE_SRC : TRANSPARENT_COLOR)));
+    vid.buffer.fill(77);
+
+    Draw_ColorPic(0, 0, 2, 1, "box3", { r: 255, g: 0, b: 0, a: 255 });
+
+    expect(vid.buffer[0]).toBe(RED_REAL); // health-bar-style: red shows red
+    expect(vid.buffer[0]).not.toBe(TRANSPARENT_COLOR);
+    expect(vid.buffer[1]).toBe(77); // hole pixel still untouched under a colour tint
+  });
+
+  test("Draw_ColorPic: white tint (identity) keeps an opaque near-white source pixel's own index -- text stays white, not pink", () => {
+    files.set("pics/box4.pcx", buildPcxBytes(2, 1, (x) => (x === 0 ? WHITE_SRC : TRANSPARENT_COLOR)));
+    vid.buffer.fill(77);
+
+    Draw_ColorPic(0, 0, 2, 1, "box4", { r: 255, g: 255, b: 255, a: 255 });
+
+    expect(vid.buffer[0]).toBe(WHITE_REAL); // stays the real white-ish index, not remapped away
+    expect(vid.buffer[1]).toBe(77); // padding around the glyph is not painted pink
+  });
+
+  test("Draw_StretchPicRegion (the kfont glyph-quad path): a white-tinted glyph cell draws its opaque pixel and leaves antialiased-to-transparent padding untouched", () => {
+    // Mimics one kfont atlas cell: opaque glyph pixel flanked by hole
+    // (antialiased-away) padding on both sides.
+    files.set("pics/glyph.pcx", buildPcxBytes(3, 1, (x) => (x === 1 ? WHITE_SRC : TRANSPARENT_COLOR)));
+    vid.buffer.fill(77);
+
+    Draw_StretchPicRegion(0, 0, 3, 1, "glyph", 0, 0, 3, 1, { r: 255, g: 255, b: 255, a: 255 });
+
+    expect(vid.buffer[0]).toBe(77); // left padding: untouched
+    expect(vid.buffer[1]).toBe(WHITE_REAL); // the glyph stroke itself: real white index
+    expect(vid.buffer[2]).toBe(77); // right padding: untouched
+  });
+
+  test("Draw_StretchPicRegion: a black-tinted shadow pass over the same glyph cell darkens the opaque pixel and still leaves the hole padding untouched", () => {
+    files.set("pics/glyphshadow.pcx", buildPcxBytes(3, 1, (x) => (x === 1 ? WHITE_SRC : TRANSPARENT_COLOR)));
+    vid.buffer.fill(77);
+
+    Draw_StretchPicRegion(0, 0, 3, 1, "glyphshadow", 0, 0, 3, 1, { r: 0, g: 0, b: 0, a: 255 });
+
+    expect(vid.buffer[0]).toBe(77);
+    expect(vid.buffer[1]).toBe(BLACK_REAL);
+    expect(vid.buffer[1]).not.toBe(TRANSPARENT_COLOR);
+    expect(vid.buffer[2]).toBe(77);
   });
 });

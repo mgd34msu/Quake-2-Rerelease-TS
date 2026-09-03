@@ -234,6 +234,18 @@ Approach taken here, staying in that same spirit:
      own fixed checkerboard: alpha=255 always draws the remapped pixel,
      alpha=0 never does, and values between dither between the remapped
      pixel and whatever was already in the framebuffer.
+  3. TRANSPARENT_COLOR (palette index 255) is excluded on both ends: the
+     remap table never maps a source index ONTO it (that slot's
+     d_8to24table RGB is a reserved sentinel value, not a real color --
+     see r_image.ts's NearestPaletteIndex, which excludes it the same
+     way), and a source pixel that already IS TRANSPARENT_COLOR is a hole
+     and is skipped rather than tinted and drawn (matching Draw_Pic/
+     Draw_Char's own handling of the same sentinel). Without both of
+     these, a white (identity) tint over a source pic with antialiased-
+     to-transparent edges -- e.g. a kfont glyph atlas cell, drawn through
+     Draw_StretchPicRegion below -- paints those edge pixels with
+     whatever arbitrary RGB colormap.pcx stores at index 255 instead of
+     leaving the background alone.
 =============
 */
 const colorRemapCache = new Map<number, Uint8Array>();
@@ -252,7 +264,13 @@ function buildColorRemap(r: number, g: number, b: number): Uint8Array {
 
     let best = 0;
     let bestDist = Infinity;
-    for (let j = 0; j < 256; j++) {
+    // Excludes TRANSPARENT_COLOR (index 255) from candidacy, same as
+    // r_image.ts's NearestPaletteIndex: that palette slot is a reserved
+    // "hole" sentinel, not a real color, so d_8to24table's entry for it is
+    // whatever colormap.pcx happened to store there (often nowhere near
+    // black or white) -- letting the nearest-color search land on it would
+    // pick that arbitrary RGB to represent a real requested tint.
+    for (let j = 0; j < TRANSPARENT_COLOR; j++) {
       const dr = palette[j * 4 + 0] - tr;
       const dg = palette[j * 4 + 1] - tg;
       const db = palette[j * 4 + 2] - tb;
@@ -313,10 +331,17 @@ export function Draw_ColorPic(x: number, y: number, w: number, h: number, name: 
     const rowDither = (y + v) & 3;
     let f = 0;
     for (let u = 0; u < w; u++) {
-      const tinted = remap[picPixels[sourceOfs + (f >> 16)]];
+      const srcIndex = picPixels[sourceOfs + (f >> 16)];
       f += fstep;
+      // A source pixel already marked TRANSPARENT_COLOR is a hole, not a
+      // color to tint (matches Draw_Pic/Draw_Char's own skip-and-leave-
+      // the-background behavior for the same sentinel value) -- without
+      // this, a source-white-tint's identity remap maps index 255 to
+      // itself, and the pixel gets drawn as whatever arbitrary RGB
+      // colormap.pcx happens to store in that reserved slot.
+      if (srcIndex === TRANSPARENT_COLOR) continue;
       if (alphaThreshold >= 15 || BAYER_4X4[rowDither * 4 + (u & 3)] < alphaThreshold) {
-        vid.buffer[destOfs + u] = tinted;
+        vid.buffer[destOfs + u] = remap[srcIndex];
       }
     }
   }
@@ -395,9 +420,18 @@ export function Draw_StretchPicRegion(
     for (let u = 0; u < w; u++) {
       const su = srcX + (f >> 16);
       f += fstep;
-      const tinted = remap[picPixels[sourceRowOfs + su]];
+      const srcIndex = picPixels[sourceRowOfs + su];
+      // See the identical check in Draw_ColorPic above: a TRANSPARENT_COLOR
+      // source pixel is a hole, not a color to tint and draw. This is the
+      // path kfont glyph quads go through (RefExports.DrawStretchPicRegion,
+      // via drawKfontChar), and their atlas cells are mostly antialiased-
+      // away/empty padding around the glyph -- each of those pixels is
+      // TRANSPARENT_COLOR, and without this skip a white-tint (identity
+      // remap) or black-tint (shadow) draw paints them solid instead of
+      // leaving the background alone, producing a solid box behind the text.
+      if (srcIndex === TRANSPARENT_COLOR) continue;
       if (alphaThreshold >= 15 || BAYER_4X4[rowDither * 4 + (u & 3)] < alphaThreshold) {
-        vid.buffer[destOfs + u] = tinted;
+        vid.buffer[destOfs + u] = remap[srcIndex];
       }
     }
   }
