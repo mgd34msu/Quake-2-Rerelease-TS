@@ -28,6 +28,7 @@ import { QGLRecording } from "../src/ref_gl/qgl";
 import { SetQGL, GL_FindImage, GL_InitImages, ResetScrapState } from "../src/ref_gl/gl_image";
 
 let files: Map<string, Uint8Array>;
+let shipped: Map<string, Uint8Array>; // what FS_LoadShippedFile sees: the non-homedir copies only
 let cvars: Map<string, CvarT>;
 let qgl: QGLRecording;
 
@@ -59,6 +60,10 @@ function makeFakeRi(): RefImports {
       return { length: data.length, data };
     },
     FS_FreeFile: () => {},
+    FS_LoadShippedFile: (name: string, maxBytes: number) => {
+      const data = shipped.get(name);
+      return data ? data.subarray(0, maxBytes) : null;
+    },
     FS_Gamedir: () => "",
     Cvar_Get: (name: string, value: string) => fakeCvarGet(name, value),
     Cvar_Set: (name: string, value: string) => {
@@ -150,6 +155,7 @@ function buildUnloadablePcxWithGoodHeader(width: number, height: number): Uint8A
 
 beforeEach(() => {
   files = new Map();
+  shipped = new Map();
   cvars = new Map();
   SetRefImports(makeFakeRi());
   qgl = new QGLRecording();
@@ -233,5 +239,57 @@ describe("GL_RecoverLogicalDimensions", () => {
     expect(image).not.toBeNull();
     expect(image?.width).toBe(64); // the loaded file's own size, not 0
     expect(image?.height).toBe(64);
+  });
+});
+
+// A 2x2 truecolor TGA header (18 bytes) -- only the header is ever read.
+function tgaHeader(width: number, height: number): Uint8Array {
+  const b = new Uint8Array(18);
+  const v = new DataView(b.buffer);
+  b[2] = 2;
+  v.setUint16(12, width, true);
+  v.setUint16(14, height, true);
+  b[16] = 32;
+  return b;
+}
+
+describe("GL_RecoverLogicalDimensions -- drop-ins over truecolor originals (rule 25)", () => {
+  test("a same-format .png drop-in keeps the shipped .png's logical size", () => {
+    // fonts/qconfont.png at 4x: every kfont atlas cell is addressed in the
+    // shipped atlas's pixels, so the logical size must be the pak's.
+    files.set("fonts/qconfont.png", buildPngRgba(8, 8)); // the homedir drop-in the walk resolves
+    shipped.set("fonts/qconfont.png", buildPngRgba(2, 2)); // the pak's copy
+
+    const image = GL_FindImage("fonts/qconfont.png", ImagetypeT.it_pic);
+
+    expect(image?.name).toBe("fonts/qconfont.png");
+    expect(image?.width).toBe(2);
+    expect(image?.height).toBe(2);
+    expect(image?.upload_width).toBe(8);
+    expect(image?.upload_height).toBe(8);
+  });
+
+  test("a homedir-only .png over a shipped .tga takes the .tga's size, not its own", () => {
+    // env/unit1_bk.png dropped in beside a pak that ships only the .tga: the
+    // shipped-copy probe must pass over the .png (no shipped copy) and land
+    // on the .tga.
+    files.set("pics/sky.png", buildPngRgba(8, 8));
+    shipped.set("pics/sky.tga", tgaHeader(2, 2));
+
+    const image = GL_FindImage("pics/sky.pcx", ImagetypeT.it_pic);
+
+    expect(image?.name).toBe("pics/sky.png");
+    expect(image?.width).toBe(2);
+    expect(image?.height).toBe(2);
+    expect(image?.upload_width).toBe(8);
+  });
+
+  test("a file with no shipped copy anywhere keeps its own size", () => {
+    files.set("pics/mine.png", buildPngRgba(8, 8));
+
+    const image = GL_FindImage("pics/mine.png", ImagetypeT.it_pic);
+
+    expect(image?.width).toBe(8);
+    expect(image?.height).toBe(8);
   });
 });

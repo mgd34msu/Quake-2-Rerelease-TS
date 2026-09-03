@@ -158,3 +158,88 @@ export function imageExtCandidates(requestedExt: ImgExtT | null, isWall: boolean
 
   return candidates;
 }
+
+/*
+===============
+imageHeaderDims
+
+Reads an image file's pixel dimensions from its header alone, for every
+extension imageExtCandidates can produce. `data` only has to hold the head
+of the file (IMG_HEADER_PROBE_BYTES is enough for every format below,
+including a JPEG whose SOF marker sits behind a large APP segment); a
+truncated or unparseable header yields null rather than a guess.
+
+This is what a renderer reads to recover an image's LOGICAL size -- the
+dimensions the original shipped asset had, which every consumer that
+reasons in source-pixel units (BSP texinfo projection, kfont atlas cells,
+Draw_GetPicSize callers) expects -- when the file it actually loaded is a
+player's replacement of another size or format. Rule 25 (Mike, 2026-09-02):
+"the texture should be aware of the file resolution and this should all
+work independently of that" -- for ANY format, not only the two 8-bit ones.
+===============
+*/
+export const IMG_HEADER_PROBE_BYTES = 65536;
+
+export interface ImageDimsT {
+  readonly width: number;
+  readonly height: number;
+}
+
+// Sanity bound on a parsed size, standing in for q2repro's check_image_size
+// (images.c:1722): rejects a header that did not really parse.
+const MAX_HEADER_DIMENSION = 8192;
+
+function saneDims(width: number, height: number): ImageDimsT | null {
+  if (!(width > 0 && height > 0 && width <= MAX_HEADER_DIMENSION && height <= MAX_HEADER_DIMENSION)) return null;
+  return { width, height };
+}
+
+export function imageHeaderDims(ext: ImgExtT, data: Uint8Array): ImageDimsT | null {
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  switch (ext) {
+    case "pcx": // pcx_t: manufacturer, version, encoding, bpp, xmin, ymin, xmax, ymax
+      if (data.length < 12) return null; // header fields only, as get_image_dimensions reads them (no manufacturer check)
+      return saneDims(view.getUint16(8, true) - view.getUint16(4, true) + 1, view.getUint16(10, true) - view.getUint16(6, true) + 1);
+    case "wal": // miptex_t: name[32], width, height
+      if (data.length < 40) return null;
+      return saneDims(view.getUint32(32, true), view.getUint32(36, true));
+    case "png": // signature[8], IHDR length[4], "IHDR", width, height (big-endian)
+      if (data.length < 24 || data[0] !== 0x89 || data[1] !== 0x50 || data[2] !== 0x4e || data[3] !== 0x47) return null;
+      if (data[12] !== 0x49 || data[13] !== 0x48 || data[14] !== 0x44 || data[15] !== 0x52) return null;
+      return saneDims(view.getUint32(16, false), view.getUint32(20, false));
+    case "tga": // TargaHeader: ..., x_origin, y_origin (8-11), width (12-13), height (14-15)
+      if (data.length < 18) return null;
+      return saneDims(view.getUint16(12, true), view.getUint16(14, true));
+    case "jpg":
+    case "jpeg": {
+      // SOI, then marker segments until a SOFn (C0-CF except C4/C8/CC), whose
+      // payload is precision[1], height[2], width[2] (big-endian).
+      if (data.length < 4 || data[0] !== 0xff || data[1] !== 0xd8) return null;
+      let pos = 2;
+      while (pos + 9 <= data.length) {
+        if (data[pos] !== 0xff) return null;
+        const marker = data[pos + 1];
+        if (marker === 0xff) {
+          pos++; // fill byte
+          continue;
+        }
+        if (marker === 0xd8 || (marker >= 0xd0 && marker <= 0xd7) || marker === 0x01) {
+          pos += 2; // standalone markers carry no length
+          continue;
+        }
+        if (marker === 0xd9 || marker === 0xda) return null; // EOI / SOS before any SOF
+        const segLen = view.getUint16(pos + 2, false);
+        const isSOF = marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
+        if (isSOF) return saneDims(view.getUint16(pos + 7, false), view.getUint16(pos + 5, false));
+        pos += 2 + segLen;
+      }
+      return null;
+    }
+    case "bmp": // BITMAPFILEHEADER "BM" ..., BITMAPINFOHEADER width (18), height (22, may be negative for top-down)
+      if (data.length < 26 || data[0] !== 0x42 || data[1] !== 0x4d) return null;
+      return saneDims(view.getInt32(18, true), Math.abs(view.getInt32(22, true)));
+    case "gif": // "GIF8?a", logical screen width (6), height (8)
+      if (data.length < 10 || data[0] !== 0x47 || data[1] !== 0x49 || data[2] !== 0x46 || data[3] !== 0x38) return null;
+      return saneDims(view.getUint16(6, true), view.getUint16(8, true));
+  }
+}

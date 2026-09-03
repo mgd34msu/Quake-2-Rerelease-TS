@@ -356,6 +356,11 @@ export interface RefImports {
 
   FS_LoadFile(name: string): { length: number; data: Uint8Array | null }; // -1 length means the file does not exist
   FS_FreeFile(buf: Uint8Array): void;
+  // The head of the shipped (non-homedir) copy of a file, for logical image
+  // size recovery -- files.ts's FS_LoadShippedFile. Optional so the test
+  // harnesses' minimal import tables keep compiling; a renderer without it
+  // simply cannot see through a same-format drop-in replacement.
+  FS_LoadShippedFile?(name: string, maxBytes: number): Uint8Array | null;
 
   FS_Gamedir(): string;
 

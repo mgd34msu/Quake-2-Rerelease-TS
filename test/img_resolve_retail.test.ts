@@ -246,7 +246,11 @@ describe("r_image.ts R_FindImage -- real retail bytes, quantized to the 8-bit pa
     expect(px).toBeDefined();
     expect(px!.length).toBe((image?.width ?? 0) * (image?.height ?? 0));
 
-    expect(loadCalls).toEqual(["pics/conchars.pcx", "pics/conchars.png"]);
+    // pcx (miss) -> png (hit), then R_ApplyLogicalSize re-reads the requested
+    // .pcx for its header (the logical size a drop-in must keep), missing
+    // again -- the same tail GL_FindImage's test above tolerates.
+    expect(loadCalls.slice(0, 2)).toEqual(["pics/conchars.pcx", "pics/conchars.png"]);
+    expect(loadCalls.slice(2).every((n) => n === "pics/conchars.pcx")).toBe(true);
   });
 
   test.skipIf(!havePak)("models/items/legacyhead/skin.pcx (real dual-format pcx+png skin) resolves the exact name, never scanning the .png sibling", async () => {

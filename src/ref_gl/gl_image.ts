@@ -92,7 +92,7 @@ import { decodePNG } from "../qcommon/png";
 import { decodeJPG } from "../qcommon/jpg";
 import { decodeBMP } from "../qcommon/bmp";
 import { decodeGIF } from "../qcommon/gif";
-import { imageExtCandidates, type ImgExtT } from "../qcommon/img_resolve";
+import { imageExtCandidates, imageHeaderDims, IMG_HEADER_PROBE_BYTES, type ImgExtT } from "../qcommon/img_resolve";
 import type { QGL } from "./qgl";
 import {
   ImageT,
@@ -1871,54 +1871,63 @@ because a BSP's texinfo vectors are in the ORIGINAL texture's texel units. So
 for a wall, image.width must stay the size the map was compiled against, no
 matter what file actually got uploaded.
 
-That only matters when the extension-fallback chain resolves a request for an
-8-bit .pcx/.wal to a 32-bit .png/.jpg/.tga/.bmp of a DIFFERENT size, which is
-what a drop-in high-resolution texture pack is. This restores the logical size
-from the original 8-bit file's header when that file is still present, exactly
-as the reference does; upload_width/height keep the real uploaded size, so the
-extra resolution is still used, just not misinterpreted as a different
-mapping.
+Two cases restore it, both from a header read alone:
+
+  1. The reference's rule (images.c:1843-1846): a request for an 8-bit
+     .pcx/.wal that the extension-fallback chain satisfied with a 32-bit file
+     keeps the 8-bit original's size, when that file is still on the search
+     path.
+  2. Beyond the reference, for assets that ship truecolor (the re-release's
+     HUD pics, its kfont atlases, every .png/.tga in its pak): a replacement of
+     the SAME format dropped into the homedir resolves first and looks like
+     the original to rule 1. The shipped copy -- what the walk would have found
+     with the homedir's loose directories unmounted (files.ts's
+     FS_LoadShippedFile), probed in the same candidate order the loader used --
+     is the original, and its header gives the logical size. Rule 25 (Mike,
+     2026-09-02): "the texture should be aware of the file resolution and this
+     should all work independently of that. so if i drop in some hires textures
+     it doesn't just freak the fuck out and we have warped shit all over
+     again." Before this, a 4x fonts/qconfont.png drop-in made every kfont glyph
+     sample a quarter of its atlas cell (garbled HUD text) and a 4x pics/ch1.png
+     drew the crosshair 4x.
+
+upload_width/height keep the real uploaded size, so the extra resolution is
+still used, just not misinterpreted as a different mapping.
 ================
 */
-const WAL_HEADER_BYTES = 40; // name[32] + width + height, the fields read below
-const PCX_HEADER_BYTES = 12; // manufacturer..ymax, the fields read below
-// Sanity bound on a recovered logical size. Stands in for the reference's
-// check_image_size (images.c:1722); generous on purpose, since this only has
-// to reject a header that did not parse, not enforce a texture budget.
-const MAX_LOGICAL_DIMENSION = 8192;
+function GL_RecoverLogicalDimensions(image: ImageT, requestedName: string, requestedExt: ImgExtT, loadedExt: ImgExtT, candidates: readonly ImgExtT[]): void {
+  const base = requestedName.slice(0, requestedName.lastIndexOf("."));
 
-function GL_RecoverLogicalDimensions(image: ImageT, originalName: string, originalExt: ImgExtT): void {
-  if (originalExt !== "pcx" && originalExt !== "wal") return;
-
-  const { data } = ri.FS_LoadFile(originalName);
-  if (!data) return;
-
-  let w = 0;
-  let h = 0;
-  if (originalExt === "wal") {
-    if (data.length >= WAL_HEADER_BYTES) {
-      const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-      w = LittleLong(view.getUint32(WAL_WIDTH_OFFSET, true));
-      h = LittleLong(view.getUint32(WAL_HEIGHT_OFFSET, true));
+  // 1. images.c:1843-1846 -- the requested 8-bit file's own header, from
+  //    wherever on the search path it still sits.
+  if ((requestedExt === "pcx" || requestedExt === "wal") && loadedExt !== requestedExt) {
+    const { data } = ri.FS_LoadFile(requestedName);
+    if (data) {
+      const dims = imageHeaderDims(requestedExt, data);
+      ri.FS_FreeFile(data);
+      if (dims) {
+        image.width = dims.width;
+        image.height = dims.height;
+        return;
+      }
     }
-  } else if (data.length >= PCX_HEADER_BYTES) {
-    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-    const xmin = view.getUint16(4, true);
-    const ymin = view.getUint16(6, true);
-    const xmax = view.getUint16(8, true);
-    const ymax = view.getUint16(10, true);
-    w = xmax - xmin + 1;
-    h = ymax - ymin + 1;
   }
 
-  ri.FS_FreeFile(data);
-
-  // check_image_size (images.c:1722) -- reject a header that did not parse
-  // into something sane rather than poisoning the projection with a zero.
-  if (w <= 0 || h <= 0 || w > MAX_LOGICAL_DIMENSION || h > MAX_LOGICAL_DIMENSION) return;
-
-  image.width = w;
-  image.height = h;
+  // 2. The shipped copy, in the loader's own candidate order: the first
+  //    extension that exists outside the homedir's loose directories is the
+  //    asset the replacement stands in for. When the loaded file IS the shipped
+  //    copy this reads back its own size, a harmless no-op.
+  if (!ri.FS_LoadShippedFile) return;
+  for (const ext of candidates) {
+    const head = ri.FS_LoadShippedFile(ext === requestedExt ? requestedName : `${base}.${ext}`, IMG_HEADER_PROBE_BYTES);
+    if (!head) continue;
+    const dims = imageHeaderDims(ext, head);
+    if (dims) {
+      image.width = dims.width;
+      image.height = dims.height;
+    }
+    return;
+  }
 }
 
 /*
@@ -2039,10 +2048,11 @@ export function GL_FindImage(name: string, type: ImagetypeT): ImageT | null {
     }
     const image = GL_LoadByExt(candidateName, ext, type);
     if (image) {
-      // A request for an 8-bit .pcx/.wal that the fallback chain satisfied
-      // with a 32-bit file of another size keeps the ORIGINAL file's logical
-      // dimensions, when that file is still on disk (images.c:1843-1846).
-      if (ext !== requestedExt) GL_RecoverLogicalDimensions(image, name, requestedExt);
+      // The image keeps the ORIGINAL asset's logical dimensions -- the
+      // requested 8-bit file's when the fallback chain substituted a 32-bit
+      // one (images.c:1843-1846), else the shipped copy's when a same-format
+      // drop-in resolved first (see GL_RecoverLogicalDimensions).
+      GL_RecoverLogicalDimensions(image, name, requestedExt, ext, candidates);
       // images.c:2004-2006 -- checked right after a successful load, for
       // skins and walls only.
       GL_CheckForGlowMap(image);

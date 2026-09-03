@@ -50,7 +50,7 @@ import { CreateGLimp } from "./glimp";
 import { Cbuf_ExecuteText, Cmd_AddCommand, Cmd_RemoveCommand } from "../qcommon/cmd";
 import { Cvar_Get, Cvar_Set, Cvar_SetValue } from "../qcommon/cvar";
 import { Com_Error, Com_Printf, Com_DPrintf } from "../qcommon/common";
-import { FS_Gamedir, FS_LoadFile, FS_FreeFile } from "../qcommon/files";
+import { FS_Gamedir, FS_LoadFile, FS_LoadShippedFile, FS_FreeFile } from "../qcommon/files";
 import { ERR_FATAL, EXEC_NOW } from "../qcommon/qcommon";
 import { CVAR_ARCHIVE, CVAR_REFRESH, PRINT_ALL, type CvarT } from "../shared/q_shared";
 import { API_VERSION, type RefExports, type RefImports } from "../client/ref";
@@ -253,6 +253,7 @@ function refImports(): RefImports {
       return { length: data.length, data };
     },
     FS_FreeFile,
+    FS_LoadShippedFile,
     FS_Gamedir,
     Cvar_Get,
     Cvar_Set,

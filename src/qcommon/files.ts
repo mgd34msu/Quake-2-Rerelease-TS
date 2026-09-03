@@ -980,6 +980,44 @@ FS_FreeFile
 export function FS_FreeFile(_buffer: Uint8Array | null): void {}
 
 /*
+=============
+FS_LoadShippedFile
+
+The head of the SHIPPED copy of a file: the first `maxBytes` bytes of the
+copy the normal search-path walk would resolve if the homedir's loose
+directories were not mounted. A player's drop-in replacement lives in one of
+those loose directories, so this is how a renderer reaches the original asset
+the replacement stands in for -- to read its header dimensions and keep them
+as the image's logical size (see img_resolve.ts's imageHeaderDims and the
+renderers' *_RecoverLogicalDimensions).
+
+Only "dir" entries under the homedir are skipped: paks and kpf archives stay
+shipped content wherever they are mounted. A file that exists ONLY in the
+homedir's loose directories has no shipped copy and yields null -- the caller
+then tries its next candidate extension (a 1024x1024 env/unit1_bk.png drop-in
+must find the pak's 256x256 env/unit1_bk.tga, not itself), and a file that
+matches nothing anywhere yields null too.
+=============
+*/
+export function FS_LoadShippedFile(path: string, maxBytes: number): Uint8Array | null {
+  const home = homedirValue();
+  for (let search = fs_searchpaths; search; search = search.next) {
+    if (search.kind === "dir" && home.length > 0 && search.filename.startsWith(home)) continue;
+    const hit = openFromSearchPath(search, path);
+    if (hit) return readHead(hit, maxBytes);
+  }
+  return null;
+}
+
+function readHead(open: FsOpenResult, maxBytes: number): Uint8Array {
+  const len = Math.min(open.length, maxBytes);
+  const buf = new Uint8Array(len);
+  if (len > 0) FS_Read(buf, len, open.handle);
+  FS_FCloseFile(open.handle);
+  return buf;
+}
+
+/*
 =================
 FS_LoadPackFile
 

@@ -64,7 +64,7 @@ import { decodeJPG } from "../qcommon/jpg";
 import { decodeBMP } from "../qcommon/bmp";
 import { decodeGIF } from "../qcommon/gif";
 import { decodeTGA } from "../qcommon/tga";
-import { imageExtCandidates, type ImgExtT } from "../qcommon/img_resolve";
+import { imageExtCandidates, imageHeaderDims, IMG_HEADER_PROBE_BYTES, type ImageDimsT, type ImgExtT } from "../qcommon/img_resolve";
 
 // r_image.c owns this counter; r_model.c's copy of the same name cannot be
 // written through r_model.ts's export (see file header deviation note).
@@ -617,7 +617,10 @@ export function R_FindImage(name: string, type: ImagetypeT): ImageT | null {
       }
     }
     const image = R_LoadByExt(candidateName, ext, type);
-    if (image) return image;
+    if (image) {
+      R_ApplyLogicalSize(image, name, requestedExt, ext, candidates);
+      return image;
+    }
   }
 
   // Every candidate missed. Vanilla R_FindImage's own ".wal" branch always
@@ -629,6 +632,89 @@ export function R_FindImage(name: string, type: ImagetypeT): ImageT | null {
     return r_notexture_mip;
   }
   return null;
+}
+
+/*
+===============
+R_RecoverLogicalDimensions / R_ApplyLogicalSize
+
+The software renderer's half of the logical-size rule gl_image.ts's
+GL_RecoverLogicalDimensions documents (rule 25: texture mapping independent
+of the loaded file's resolution and format). The lookup is the same two
+steps -- the requested 8-bit file's header when the fallback chain
+substituted a truecolor one (images.c:1843-1846), else the shipped copy's
+header in the loader's own candidate order (files.ts's FS_LoadShippedFile
+sees past a same-format drop-in in the homedir).
+
+What differs is what to do with the answer. This renderer has no separate
+upload size: Draw_Pic blits pixels[0] 1:1, the kfont region draw reads
+atlas cells in source pixels, and r_surf.ts walks a wall's mip chain in
+texinfo texel units -- so an image of a different size than the original
+IS a different mapping here. A replacement that arrived at another size is
+point-resampled to the logical size at load (an 8-bit renderer cannot show
+the extra detail anyway), and a wall that came through a single-mip loader
+gets its three lower mips built the same way, so nothing downstream ever
+sees a size the shipped asset did not have.
+===============
+*/
+function R_RecoverLogicalDimensions(requestedName: string, requestedExt: ImgExtT | null, loadedExt: ImgExtT, candidates: readonly ImgExtT[]): ImageDimsT | null {
+  const dot = requestedName.lastIndexOf(".");
+  const base = dot > 0 ? requestedName.slice(0, dot) : requestedName;
+
+  if ((requestedExt === "pcx" || requestedExt === "wal") && loadedExt !== requestedExt) {
+    const { data } = ri.FS_LoadFile(requestedName);
+    if (data) {
+      const dims = imageHeaderDims(requestedExt, data);
+      ri.FS_FreeFile(data);
+      if (dims) return dims;
+    }
+  }
+
+  if (!ri.FS_LoadShippedFile) return null;
+  for (const ext of candidates) {
+    const head = ri.FS_LoadShippedFile(ext === requestedExt ? requestedName : `${base}.${ext}`, IMG_HEADER_PROBE_BYTES);
+    if (!head) continue;
+    return imageHeaderDims(ext, head);
+  }
+  return null;
+}
+
+function R_PointResample(src: Uint8Array, srcW: number, srcH: number, dstW: number, dstH: number): Uint8Array {
+  const out = new Uint8Array(dstW * dstH);
+  for (let y = 0; y < dstH; y++) {
+    const sy = Math.min(srcH - 1, (((y + 0.5) * srcH) / dstH) | 0);
+    const srcRow = sy * srcW;
+    const dstRow = y * dstW;
+    for (let x = 0; x < dstW; x++) {
+      const sx = Math.min(srcW - 1, (((x + 0.5) * srcW) / dstW) | 0);
+      out[dstRow + x] = src[srcRow + sx];
+    }
+  }
+  return out;
+}
+
+export function R_ApplyLogicalSize(image: ImageT, requestedName: string, requestedExt: ImgExtT | null, loadedExt: ImgExtT, candidates: readonly ImgExtT[]): void {
+  const dims = R_RecoverLogicalDimensions(requestedName, requestedExt, loadedExt, candidates);
+  const mip0 = image.pixels[0];
+  if (dims && mip0 && (dims.width !== image.width || dims.height !== image.height)) {
+    image.pixels[0] = R_PointResample(mip0, image.width, image.height, dims.width, dims.height);
+    image.pixels[1] = image.pixels[2] = image.pixels[3] = null;
+    image.width = dims.width;
+    image.height = dims.height;
+  }
+
+  // r_surf.ts indexes pixels[surfmip] on every wall; a wall the truecolor
+  // loaders produced (GL_LoadPic fills mip 0 only) or one resampled above
+  // needs the chain rebuilt, exactly as a .wal carries it.
+  if (image.type !== ImagetypeT.it_wall) return;
+  for (let mip = 1; mip < 4; mip++) {
+    if (image.pixels[mip]) continue;
+    const prev = image.pixels[mip - 1];
+    if (!prev) return;
+    const pw = Math.max(1, image.width >> (mip - 1));
+    const ph = Math.max(1, image.height >> (mip - 1));
+    image.pixels[mip] = R_PointResample(prev, pw, ph, Math.max(1, image.width >> mip), Math.max(1, image.height >> mip));
+  }
 }
 
 /*
