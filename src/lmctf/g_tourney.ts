@@ -500,6 +500,21 @@ function Declare_Railgun_Victor(): EdictT | null {
 // Railgun_Victor read is part of the HUD MVP display, not ported -- see
 // p_hud.ts's own SCOPE).
 let Railgun_Victor: EdictT | null = null;
+// p_hud.c's DeathmatchScoreboardMessage MVP block reads Railgun_Victor
+// ("Railgod -> <name>"), so it needs a reader here.
+export function Query_Railgun_Victor(): EdictT | null {
+  return Railgun_Victor;
+}
+
+// lmctf60/g_tourney.c:292 `int Time_Left = 0;` -- externed by g_main.c and
+// p_hud.c. Assigned by Tourney_Think (below, match mode) and by g_main.ts's
+// CheckDMRules (non-match timelimit countdown); read by p_hud.ts's
+// G_SetStats for STAT_MATCH_TIME, which the dm_statusbar draws as the
+// "num 2 26" clock in the top-right corner.
+export let Time_Left = 0;
+export function SetTimeLeft(v: number): void {
+  Time_Left = v;
+}
 
 /*
 =================
@@ -515,6 +530,14 @@ export function Tourney_Think(ent: EdictT): void {
   if (GamePaused()) return;
 
   const minutes = Math.floor(ent.count / 60);
+
+  if (matchstate === MatchStatesT.MATCH_OVER) {
+    Time_Left = 0;
+  } else if (ent.count < 60) {
+    Time_Left = ent.count;
+  } else {
+    Time_Left = minutes + 1;
+  }
 
   if (matchstate === MatchStatesT.MATCH_COUNTDOWN || matchstate === MatchStatesT.MATCH_RAILGUN_COUNTDOWN) {
     if (ent.count <= 10) {

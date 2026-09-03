@@ -30,14 +30,18 @@ routes legacy games through its 2023 API via `game3_proxy`; we do not).
                 variable tick, protocol codec layer)
                /                                    \
    legacy binding (API v3)                 kex binding (API 2023)
-   baseq2 / ctf / xatrix / rogue           re-release game module
-   (frozen, bug-for-bug 3.21)              (content superset)
+   baseq2 / ctf / lmctf / xatrix / rogue   re-release game module
+   (3.21 behavior, quirks kept)            (content superset)
 ```
 
-- **Legacy modules are frozen exhibits.** Their game code keeps its
-  exact current `GameImports`/`GameExports` contract and bug-for-bug
-  3.21 behavior. The legacy binding adapts engine-core services to that
-  contract; the game trees themselves do not change.
+- **Legacy modules keep their 1997 behavior.** Their game code keeps
+  its exact `GameImports`/`GameExports` contract and matches the 3.21
+  releases exactly, quirks preserved on purpose. The legacy binding
+  adapts engine-core services to that contract. What the trees gained
+  in v1.1.0 is content, not rules: every re-release entity class
+  (ported from this repo's own re-release module) spawns under each of
+  them, and the session widens its configstring space when a map needs
+  it, so any content plays under any ruleset.
 - **The kex module is the content superset** (ZeniMax merged baseq2,
   xatrix, rogue, and CTF plus new content into one module). "Play
   baseq2 under re-release rules" is simply running the kex module.
@@ -123,7 +127,8 @@ independent axes.
 ## Porting standards (inherited from Quake-2-TS, still binding)
 
 - Strict TypeScript: zero `any`, no casts (`as const` excepted).
-- Bug-for-bug fidelity where observable; deviations documented in file
+- Behavior matches the reference exactly where observable, quirks
+  preserved on purpose; deviations documented in file
   headers. For the kex module the reference is the C++ source, bugs and
   all; attribution of quirks: id/ZeniMax for rerelease code, Xatrix/
   Rogue Entertainment for their merged content where it originates.

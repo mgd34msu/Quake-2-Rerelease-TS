@@ -17,7 +17,7 @@
 // file-I/O gap.
 
 import { Com_sprintf, MAX_OSPATH, MAX_TOKEN_CHARS, MAX_QPATH, CS_NAME, STAT_HEALTH, STAT_FRAGS, PRINT_HIGH, PRINT_CHAT, CVAR_LATCH, CVAR_SERVERINFO, CVAR_PRIVATE, PlayerStateT, BigShort, MAX_CONFIGSTRINGS } from "../shared/q_shared";
-import { SysError, NetadrT, NetsrcT, PORT_MASTER, SvcOpsT, PROTOCOL_VERSION, ERR_DROP } from "../qcommon/qcommon";
+import { SysError, ComError, NetadrT, NetsrcT, PORT_MASTER, SvcOpsT, PROTOCOL_VERSION, ERR_DROP } from "../qcommon/qcommon";
 import { Com_Printf, Com_DPrintf, Com_Error, Info_Print, dedicated } from "../qcommon/common";
 import { Cvar_Set, Cvar_VariableValue, Cvar_VariableString, Cvar_ForceSet, Cvar_Serverinfo, cvar_vars } from "../qcommon/cvar";
 import { Cmd_Argc, Cmd_Argv, Cmd_Args, Cmd_AddCommand } from "../qcommon/cmd";
@@ -89,7 +89,24 @@ function fireAndForget(name: string, fn: () => Promise<void>): () => void {
   return () => {
     fn().catch((err: unknown) => {
       const msg = err instanceof Error ? err.message : String(err);
-      Com_Printf("%s: %s\n", name, msg);
+      // A ComError already ran Com_Error's drop handlers (server shut down,
+      // client dropped) before it was thrown; only the message is left to
+      // print. Anything else escaped from the middle of a map change --
+      // between the old level's teardown and the new level's spawn -- and
+      // the C's longjmp path never let that state survive. Route it through
+      // ERR_DROP so the server shuts down cleanly instead of running the
+      // next game frame over a half-built level (Mike's 2026-09-02 lmctf
+      // "SV_PointContents: no world model" from a game frame after a map
+      // change).
+      if (err instanceof ComError) {
+        Com_Printf("%s: %s\n", name, msg);
+        return;
+      }
+      try {
+        Com_Error(ERR_DROP, "%s: %s", name, msg);
+      } catch {
+        // Com_Error always throws after its handlers ran; nothing to unwind here.
+      }
     });
   };
 }

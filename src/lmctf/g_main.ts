@@ -39,6 +39,7 @@
 import { Com_sprintf, CVAR_ARCHIVE, CVAR_LATCH, CVAR_NOSET, CVAR_SERVERINFO, CVAR_USERINFO, PRINT_HIGH, Q_stricmp } from "../shared/q_shared";
 import { ClientCommand } from "./g_cmds";
 import { InitItems } from "./g_items";
+import { MaplistReadFile } from "./g_maplist";
 import { type Edict, GAME_API_VERSION, type GameExports, type GameImports } from "./game";
 import {
   EdictT,
@@ -70,6 +71,9 @@ import { ClientEndServerFrame } from "./p_view";
 import { ReadGame, ReadLevel, WriteGame, WriteLevel } from "./g_save";
 import { ServerCommand } from "./g_svcmds";
 import { SpawnEntities } from "./g_spawn";
+import { Match_Mode, MatchStatesT, matchstate, SetTimeLeft } from "./g_tourney";
+import { ctf_BSafePrint } from "./g_ctffunc";
+import { stats_get, STATS_SCORE } from "./p_stats";
 
 function cvarNum(c: ReturnType<typeof gi.cvar>): number {
   return c === null ? 0 : c.value;
@@ -156,6 +160,9 @@ export function InitGame(): void {
   gameCvars.railtime = gi.cvar("railtime", "0", CVAR_SERVERINFO);
   // lmctf60/g_save.c -- `fastswitch = gi.cvar("fastswitch", "0", 0);`
   gameCvars.fastswitch = gi.cvar("fastswitch", "0", 0);
+  // lmctf60/g_save.c:212/222 -- read by p_view.ts's ClientShowMOD.
+  gameCvars.hostname = gi.cvar("hostname", "noname", CVAR_SERVERINFO);
+  gameCvars.mod_website = gi.cvar("mod_website", "http://lmctf.com", 0);
 
   gameCvars.sv_maplist = gi.cvar("sv_maplist", "", 0);
 
@@ -220,6 +227,11 @@ export function InitGame(): void {
   game.clients = Array.from({ length: numClients }, () => new GClientT());
 
   globals.num_edicts = numClients + 1;
+
+  // CTF CODE -- LM_JORM (lmctf60/g_save.c:266) -- read maplist.txt here,
+  // at the C's own position: immediately after globals.num_edicts is set
+  // and before the help.txt/motd/SkinsReadFile reads that follow it.
+  MaplistReadFile();
 }
 
 // zero-initialized EdictT per slot, `s.number` set to its own index -- same
@@ -307,22 +319,47 @@ export function CheckDMRules(): void {
   if (level.intermissiontime !== 0) return;
   if (cvarNum(gameCvars.deathmatch) === 0) return;
 
-  const timelimit = cvarNum(gameCvars.timelimit);
-  if (timelimit !== 0 && level.time >= timelimit * 60) {
-    gi.bprintf(PRINT_HIGH, "Timelimit hit.\n");
+  if (matchstate === MatchStatesT.MATCH_RAILGUN_OVER) {
     EndDMLevel();
     return;
   }
 
-  const fraglimit = cvarNum(gameCvars.fraglimit);
-  if (fraglimit !== 0) {
-    const maxclients = cvarNum(gameCvars.maxclients);
+  // The `maplistindex == -1` maplist-startup block that sits here in the C
+  // is skipped: it depends on the maplist.txt read and getRandomMapByPlayerCount,
+  // neither of which is ported (see this file's header). With no maplist
+  // loaded, the C's own maplistindex stays past that branch anyway.
+
+  const maxclients = cvarNum(gameCvars.maxclients);
+
+  const timelimit = cvarNum(gameCvars.timelimit);
+  if (timelimit !== 0 && !Match_Mode()) {
+    // Don't end a map if a Match is in play
     for (let i = 0; i < maxclients; i++) {
-      const cl = game.clients[i];
-      const ent = g_edicts[i + 1];
-      if (cl === undefined || ent === undefined || !ent.inuse) continue;
-      if (cl.resp.score >= fraglimit) {
-        gi.bprintf(PRINT_HIGH, "Fraglimit hit.\n");
+      const player = g_edicts[1 + i];
+      if (player === undefined || !player.inuse) continue;
+
+      // seconds
+      // C: `int Time_Left` -- both assignments truncate toward zero.
+      if (level.time >= (timelimit - 1) * 60) SetTimeLeft(Math.trunc(timelimit * 60 - level.time));
+      else SetTimeLeft(Math.trunc(timelimit - level.time / 60 + 1));
+    }
+
+    if (level.time >= timelimit * 60) {
+      ctf_BSafePrint(PRINT_HIGH, "Timelimit hit.\n");
+      EndDMLevel();
+      return;
+    }
+  }
+
+  const fraglimit = cvarNum(gameCvars.fraglimit);
+  if (fraglimit !== 0 && !Match_Mode()) {
+    // Don't end a map if a match is in play
+    for (let i = 0; i < maxclients; i++) {
+      const player = g_edicts[1 + i];
+      if (player === undefined || !player.inuse) continue;
+
+      if (stats_get(player, STATS_SCORE) >= fraglimit) {
+        ctf_BSafePrint(PRINT_HIGH, "Fraglimit hit.\n");
         EndDMLevel();
         return;
       }

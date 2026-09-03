@@ -63,7 +63,7 @@ import {
   MAX_MODELS,
 } from "../shared/q_shared";
 import type { GameExports } from "../game/game";
-import {
+import { ServerStateT,
   sv,
   svs,
   master_adr,
@@ -1059,8 +1059,14 @@ export function SV_RunGameFrame(): void {
   sv.time = sv.framenum * sv.frametime;
 
   // don't run if paused
+  // No level is up while a map change is between the old level's teardown
+  // and the new level's spawn (sv.state ss_dead with svs still initialized
+  // -- a window only this port's async map commands can expose). The game's
+  // entities from the old level would run their physics against a world
+  // model that is gone: "SV_PointContents: no world model" (Mike's
+  // 2026-09-02 lmctf map change).
   const paused = sv_paused ? sv_paused.value !== 0 : false;
-  if (!paused || (maxclients ? maxclients.value > 1 : false)) {
+  if (sv.state !== ServerStateT.ss_dead && (!paused || (maxclients ? maxclients.value > 1 : false))) {
     const ge = requireGe();
     ge.RunFrame();
     SV_RunGamePostFrameHook();

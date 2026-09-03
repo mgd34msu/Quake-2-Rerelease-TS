@@ -62,7 +62,7 @@ import { geHolder, currentGameFamily } from "../src/server/sv_game";
 import { CS_REMAP_OLD, CS_REMAP_RERELEASE, type CsRemapT } from "../src/shared/cs_remap";
 import { Q2REPRO_CODEC } from "../src/qcommon/protocol/q2repro";
 import type { ProtocolCodec } from "../src/qcommon/protocol/codec";
-import { g_edicts, type EdictT } from "../src/lmctf/g_local";
+import { g_edicts, level, type EdictT } from "../src/lmctf/g_local";
 import { FS_TestSnapshotSearchPaths, FS_TestRestoreSearchPaths, type FsSearchPathSnapshotT } from "../src/qcommon/files";
 import { snapshotCvars, restoreCvars, type CvarSnapshotT } from "./support/cvar_snapshot";
 
@@ -230,16 +230,32 @@ describe.skipIf(!havePak)("dedicated server boot -- LMCTF under the kex family (
     const legacyValue = CS_REMAP_OLD.items + 3;
     client.ps.stats[STAT_PICKUP_STRING] = legacyValue;
 
+    // A real pickup does not only write STAT_PICKUP_STRING -- g_items.c's
+    // Touch_Item also sets `client->pickup_msg_time = level.time + 3.0`, and
+    // p_hud.c's G_SetStats clears both STAT_PICKUP_ICON and
+    // STAT_PICKUP_STRING again as soon as `level.time > pickup_msg_time`.
+    // This test pokes the stat directly, so it has to supply the other half
+    // of that pair or G_SetStats (which now runs on every server frame, as
+    // it does in the C) legitimately zeroes the value back out before the
+    // fixup is ever asked to remap it. 3 seconds covers the ten 100ms
+    // frames this test drives.
+    client.pickup_msg_time = level.time + 3.0;
+
     // sv_main.ts's SV_Frame only advances the game once svs.realtime has
     // caught up to sv.time (its own accumulator, `if (svs.realtime <
-    // sv.time) return` early-out) -- a generous handful of 100ms steps
-    // (well over sv.frametime's own 100ms/10Hz period, confirmed by the
-    // earlier "wire/configstring family" test in this file) guarantees at
-    // least one real RunFrame dispatch without depending on exactly which
-    // step trips it.
-    runFrames(5, 100);
+    // sv.time) return` early-out). How far apart those two start here is NOT
+    // fixed: beforeAll's bootMap polls `map q2ctf1` for as many 100ms frames
+    // as the (wall-clock, I/O-bound) load actually needs, so the phase this
+    // test inherits varies run to run. A fixed step count therefore does not
+    // guarantee a RunFrame dispatch -- poll for the effect instead, the same
+    // bounded-poll idiom bootMap itself uses, and fail loudly if it never
+    // lands rather than silently asserting against an un-run frame.
+    let remapped = client.ps.stats[STAT_PICKUP_STRING];
+    for (let i = 0; i < MAP_POLL_LIMIT && remapped === legacyValue; i++) {
+      runFrames(1, 100);
+      remapped = client.ps.stats[STAT_PICKUP_STRING];
+    }
 
-    const remapped = client.ps.stats[STAT_PICKUP_STRING];
     expect(remapped).toBe(CS_REMAP_RERELEASE.items + 3);
     expect(remapped).not.toBe(legacyValue);
 

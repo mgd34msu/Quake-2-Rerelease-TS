@@ -774,10 +774,11 @@ describe("g_vote.ts", () => {
     level.time = 100000; // force "30 seconds have passed"
 
     // initiator+p2+p3 = 3 YES, p4 = 1 NO -> 75% exactly, which passes and
-    // (for a skip vote) calls EndDMLevel() -- a genuine unported
-    // cross-dependency into unit A's g_main.ts, documented in g_vote.ts.
-    expect(() => Check_Vote()).toThrow("EndDMLevel not yet ported");
-    expect(VoteStarted).toBe(false); // set false before the throwing call
+    // (for a skip vote) calls EndDMLevel(). That used to be a throwing stub
+    // -- this test asserted the throw -- but g_main.ts now exports the real
+    // EndDMLevel, so a passing skip vote genuinely ends the level instead.
+    expect(() => Check_Vote()).not.toThrow();
+    expect(VoteStarted).toBe(false);
     expect(rec.bprintf.some((s) => s.includes("YES:3") && s.includes("NO:1"))).toBe(true);
     expect(rec.bprintf.some((s) => s.includes("Passes with 75 percent majority"))).toBe(true);
   });

@@ -166,6 +166,7 @@ import {
 } from "./g_local";
 import { func_train_find, train_use } from "./g_func";
 import { G_Find, G_FreeEdict, G_PickTarget, G_Spawn, G_UseTargets, KillBox, vectoangles, vectoyaw, vtos } from "./g_utils";
+import { M_walkmove } from "./m_move";
 
 /*QUAKED func_group (0 0 0) ?
 Used to group brushes together just for editor convenience.
@@ -920,23 +921,25 @@ Large exploding box.  You can override its mass (100),
 health (80), and dmg (150).
 */
 
-// M_walkmove (g_monster.c/m_move.c) has no port in this family -- monster
-// movement is a dead subsystem here (MONSTERS_OK is never defined in
-// lmctf60's Makefile, verified by src/lmctf/g_local.ts and g_combat.ts).
-// Unlike SP_misc_explobox's `#ifdef MONSTERS_OK`-gated M_droptofloor call
-// below, this call is NOT inside an ifdef in lmctf60/g_misc.c -- it is live,
-// reachable code (fired whenever something with mass touches the barrel
-// while it has a groundentity), so it throws here rather than being
-// silently dropped, matching src/lmctf/g_target.ts's use_target_blaster
-// precedent for a reachable call into an unported dependency.
+/*
+barrel_touch (lmctf60/g_misc.c) -- nudges the barrel away from whatever
+just walked into it, proportional to the toucher's mass.
+
+This call is NOT inside `#ifdef MONSTERS_OK` in lmctf60/g_misc.c -- it is
+live, reachable code that fires whenever a player walks into a
+misc_explobox while standing on the ground. An earlier revision of this file
+threw here on the belief that M_walkmove had no port in this family; that
+was stale -- m_move.ts exports a real M_walkmove (it is only the monster AI
+*callers* of m_move.ts that are dead, not the movement primitive itself),
+so this is now the same one-for-one port src/ctf/g_misc.ts already carries.
+*/
 function barrel_touch(self: EdictT, other: EdictT, _plane: CplaneT | null, _surf: CsurfaceT | null): void {
   if (!other.groundentity || other.groundentity === self) return;
 
-  void self;
-  void other;
-  throw new Error(
-    "barrel_touch: M_walkmove (lmctf60/m_move.c) is not ported -- monster movement is out of this family's scope (MONSTERS_OK is never defined)",
-  );
+  const ratio = other.mass / self.mass;
+  const v = vec3();
+  VectorSubtract(self.s.origin, other.s.origin, v);
+  M_walkmove(self, vectoyaw(v), 20 * ratio * FRAMETIME);
 }
 
 function barrel_explode(self: EdictT): void {

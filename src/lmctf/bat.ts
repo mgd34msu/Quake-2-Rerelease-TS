@@ -81,3 +81,38 @@ export let DBuffer = "";
 // in the lmctf60 tree (see file header finding). Storage placed here since
 // this is the only file that declares it.
 export let Observer_Show_Menu = 0;
+
+// g_main.c:338-349 -- `HIGHSCORE_STATS_TYPE Default_Highscore_Table[MAX_HIGHSCORE_ENTRIES]`
+// and the live `Highscore_Table[MAX_HIGHSCORE_ENTRIES]` it is copied into by
+// Create_New_File(). bat.h externs both, so this module is their declaring
+// home here (see the file header note about unit A importing them from here).
+// p_hud.c's DeathmatchScoreboardMessage renders Highscore_Table in its MVP
+// block; g_main.c's Check_Made_Table inserts into it.
+export const Default_Highscore_Table: readonly HighscoreStatsType[] = [
+  { Player: "defiance[7ds]", Score: 60 },
+  { Player: "SpunkMonkey[IT]", Score: 55 },
+  { Player: "Virtue[7ds]", Score: 50 },
+  { Player: "Rage[7ds]", Score: 45 },
+  { Player: "Greed[7ds]", Score: 40 },
+  { Player: "Envy[7ds]", Score: 35 },
+  { Player: "Sloth[7ds]", Score: 30 },
+].map((e) => Object.assign(new HighscoreStatsType(), e));
+
+// `HIGHSCORE_STATS_TYPE Highscore_Table[MAX_HIGHSCORE_ENTRIES];` -- a C file
+// static array, zero-initialized at load. lmctf60 fills it either from
+// highscore.dat (Read_Highscore_Table) or, when that file is missing, from
+// Default_Highscore_Table via Create_New_File(). Neither the file I/O nor
+// its InitGame call site is ported (g_main.ts's own header records the
+// dropped file I/O), so the table is seeded from the defaults here, which is
+// what a first run of the C on a fresh server produces.
+export const Highscore_Table: HighscoreStatsType[] = Default_Highscore_Table.map((e) =>
+  Object.assign(new HighscoreStatsType(), e),
+);
+
+// `int MvpDisp;` -- defined in p_hud.c, externed in bat.h. Selects whether
+// DeathmatchScoreboardMessage's bottom block shows the map MVP/high-score
+// table (set to 1 by BeginIntermission) or the live observer lists.
+export let MvpDisp = 0;
+export function SetMvpDisp(v: number): void {
+  MvpDisp = v;
+}

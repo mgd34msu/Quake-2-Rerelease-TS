@@ -60,7 +60,7 @@ import {
 } from "./g_local";
 import { SolidT } from "./game";
 import { drop_temp_touch, ITEM_INDEX, Touch_Item } from "./g_items";
-import { G_FreeEdict, G_Find, G_ProjectSource, G_Spawn, Team_cprint, tv } from "./g_utils";
+import { G_FreeEdict, G_Find, G_ProjectSource, G_Spawn, Team_cprint, tv, vectoangles } from "./g_utils";
 import { sl_LogScore } from "./stdlog";
 import { matchstate, MatchStatesT } from "./g_tourney";
 
@@ -1124,4 +1124,90 @@ export function ctf_ChangeMap(mapname: string | null, startmatch: boolean): void
   } else {
     tourneyModule().SetMatchState(MatchStatesT.MATCH_NONE);
   }
+}
+
+/*
+=================
+ctf_facing / ctf_faceNorth / ctf_faceEnemyFlag (lmctf60/g_ctffunc.c:1159/1189/1217)
+
+The three compass modes behind gclient_s.ctf.compass, read by p_hud.ts's
+G_SetStats to pick the STAT_TEAM_ICON image each frame. Each returns an
+image name (not a path); the caller runs it through gi.imageindex.
+=================
+*/
+export function ctf_facing(ent: EdictT): string {
+  if (ent.client === null) return "s";
+  let angle = Math.trunc(ent.client.v_angle[1]);
+
+  // Turn the angle positive
+  angle = (angle + 720) % 360;
+
+  if (angle < 22 || angle >= 338) return "s";
+  else if (angle < 67) return "se";
+  else if (angle < 112) return "e";
+  else if (angle < 157) return "ne";
+  else if (angle < 202) return "n";
+  else if (angle < 247) return "nw";
+  else if (angle < 292) return "w";
+  // MJD - Requires a default state. Logic removed
+  else return "sw";
+}
+
+export function ctf_faceNorth(ent: EdictT): string {
+  if (ent.client === null) return "south";
+  let angle = Math.trunc(ent.client.v_angle[1]);
+
+  // Turn the angle positive
+  angle = (angle + 720) % 360;
+
+  if (angle < 22 || angle >= 338) return "south";
+  else if (angle < 67) return "southwest";
+  else if (angle < 112) return "west";
+  else if (angle < 157) return "northwest";
+  else if (angle < 202) return "north";
+  else if (angle < 247) return "northeast";
+  else if (angle < 292) return "east";
+  // MJD See Previous Error - Requires Default
+  else return "southeast";
+}
+
+export function ctf_faceEnemyFlag(ent: EdictT): string {
+  if (ent.client === null) return "north";
+
+  let flag: EdictT | null;
+  if (ent.client.ctf.teamnum === CTF_TEAM_RED) flag = blueflag;
+  else if (ent.client.ctf.teamnum === CTF_TEAM_BLUE) flag = redflag;
+  else return "north";
+
+  if (flag === null) return "north"; //surt no flags mode always points north.
+
+  if (flag.owner !== null) flag = flag.owner;
+
+  if (flag === ent) {
+    if (ent.client.ctf.teamnum === CTF_TEAM_RED) return "blueflaggone";
+    else if (ent.client.ctf.teamnum === CTF_TEAM_BLUE) return "redflaggone";
+  }
+
+  const distvector: Vec3 = vec3();
+  VectorSubtract(flag.s.origin, ent.s.origin, distvector);
+
+  const angles: Vec3 = vec3();
+  vectoangles(distvector, angles);
+  // C: `angle = (int)ent->client->v_angle[1] - angles[1];` -- the int cast
+  // binds to v_angle only, so the subtraction is done in float and the
+  // result truncated by the assignment to `int angle`.
+  let angle = Math.trunc(Math.trunc(ent.client.v_angle[1]) - angles[1]);
+
+  // Turn the angle positive
+  angle = (angle + 720) % 360;
+
+  if (angle < 22 || angle >= 338) return "north";
+  else if (angle < 67) return "northeast";
+  else if (angle < 112) return "east";
+  else if (angle < 157) return "southeast";
+  else if (angle < 202) return "south";
+  else if (angle < 247) return "southwest";
+  else if (angle < 292) return "west";
+  // MJD See Previous Error - Requires Default
+  else return "northwest";
 }

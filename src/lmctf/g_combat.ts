@@ -1,12 +1,19 @@
 // Ports a SUBSET of lmctf60/g_combat.c (diff vs quake-2/ctf/g_combat.c is
 // 496 lines of 713 total -- a real rewrite, not a reformat).
 //
-// STATUS: T_Damage and everything it unconditionally calls are ported
-// (Killed, SpawnDamage, CheckPowerArmor, CheckArmor, CheckTeamDamage) --
-// this is the offhand hook's damage path (hook_touch in p_weapon.ts calls
-// T_Damage on every hit). CanDamage (used by explosions/melee, not the
-// hook) and M_ReactToDamage (monster-only, dead per MONSTERS_OK) are NOT
-// ported.
+// STATUS: every live function in lmctf60/g_combat.c is ported -- T_Damage
+// and everything it unconditionally calls (Killed, SpawnDamage,
+// CheckPowerArmor, CheckArmor, CheckTeamDamage), plus CanDamage and
+// T_RadiusDamage/T_RadiusDamage2. CanDamage gates all splash damage
+// (rockets, grenades, BFG, target_explosion) and is called from g_weapon.ts,
+// m_guncmdr.ts and m_shambler.ts -- an earlier revision of this header
+// claimed it was unported, which was stale; it is at CanDamage() below.
+//
+// The ONLY thing dropped from this file is M_ReactToDamage
+// (g_combat.c:313), which sits inside `#ifdef MONSTERS_OK` along with its
+// single call site (g_combat.c:613) -- that macro is commented out in
+// g_local.h:19-44 and never passed via -D by GNUmakefile, so it is dead in
+// every real build.
 //
 // MONSTERS_OK dead-subsystem note: lmctf60's Killed() and CheckPowerArmor()
 // both wrap their monster-svflags branches in `#ifdef MONSTERS_OK` (verified

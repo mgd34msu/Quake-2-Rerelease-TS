@@ -18,32 +18,46 @@
 // "a client connects, is assigned a team, and spawns at the right point"
 // path this unit's tests exercise.
 //
+// LATER PASS (this session) -- the per-frame client hooks and the death
+// path were completed against lmctf60 directly:
+//   - ClientThink's "fire weapon from final position" block
+//     (p_client.c:2852) is now ported, so a held/tapped attack button
+//     actually reaches Think_Weapon. Without it NO weapon ever fired.
+//   - ClientThink's spectator/team-observer validation + chase controls
+//     (p_client.c:2883) and the carried-flag follow block (p_client.c:2951,
+//     which drags the flag model along behind its carrier) are ported.
+//   - ClientBeginServerFrame (p_client.c:3047) regained RuneThinkHook, the
+//     Check_Vote timeout tick, the spectator_respawn dispatch, the
+//     STATS_PLAYER_SAMPLE_RATE ping sampling + referee PingAlert, the
+//     fallback Think_Weapon call, and the goodskin skin re-assert.
+//   - spectator_respawn (p_client.c:1667), PingAlert (p_client.c:2997) and
+//     TossClientWeapon (p_client.c:648 -- now portable, g_items.ts has a
+//     real Drop_Item) are ported; TossClientWeapon is wired at player_die.
+//   - ClientObituary is now checked against lmctf60's own version rather
+//     than ThreeWave's: IsNeutral (p_client.c:259) and its three "itself"
+//     branches, Gimme_Any_Death_Message + the 44-entry Random_MSG_Kills1
+//     pool behind CTF_RANDOM_DEATH_MSG, the New_Death_Messages "'s
+//     <weapon>" suffixes, the MOD_PLASMA case, lmctf60's own MOD_CTF_GRAPPLE
+//     wording, the Match_CanScore() gate on self-kills, ctf_BSafePrint in
+//     place of gi.bprintf, and the stats_add scoring (including the
+//     preserved quirk that friendly fire is only penalized while matchstate
+//     is MATCH_RAILGUN_INPLAY).
+//
 // NOT PORTED (each cited at its call site below, not silently dropped):
-//   - ClientObituary's death-message text table is reused from
-//     src/ctf/p_client.ts almost verbatim (same baseq2 heritage for the
-//     shared MOD_* cases) with MOD_GRAPPLE swapped for lmctf60's
-//     MOD_CTF_GRAPPLE; NOT verified line-by-line against lmctf60's own
-//     ClientObituary (p_client.c:358-648, ~290 lines of CTF-specific flag-
-//     defense scoring interleaved with the message table) -- flagged as an
-//     uncertainty in this unit's report.
 //   - player_die's CTF flag-defense/carrier scoring block (attacker_flag/
 //     defender_flag bonuses, ctf_validateflags, stats_add, sl_LogScore) --
 //     depends on ctf_flagathome/ClientHasFlag (g_ctffunc.ts's own
 //     documented "flag home/reset" SCOPE exclusion) and unit B's
 //     p_stats.ts/gslog.ts. Skipped entirely rather than calling the
 //     throwing stubs unconditionally on every death.
-//   - TossClientWeapon (weapon drop on death): Drop_Item has no port in
-//     this family's g_items.ts (out of SCOPE -- the partial ITEMLIST has no
-//     droppable weapons). Documented throwing-free no-op (a real drop
-//     silently does not happen; this is an acceptable simplification for
-//     the spawn/team-assignment focus of this unit, not a crash).
 //   - ChangeWeapon (p_weapon.c, weapon-switch animation state machine): not
 //     ported anywhere in this family (p_weapon.ts only has the offhand-hook
 //     chain). PutClientInServer sets client.pers.weapon directly instead of
 //     calling ChangeWeapon's real animation dispatch.
-//   - Think_Weapon/PlayerNoise (p_weapon.c): same as above -- not ported.
-//     ClientThink's fire-on-ATTACK branch and jump-noise call are dropped
-//     with a citation rather than calling something that doesn't exist.
+//   - PlayerNoise (p_weapon.c): still not ported -- it exists only to feed
+//     monster hearing (MONSTERS_OK dead subsystem), so ClientThink's
+//     jump-noise call remains dropped with a citation. Think_Weapon IS now
+//     wired (see above).
 //   - PlayerTrail_Add/PlayerTrail_LastSpot (p_trail.c) and g_ai.ts's
 //     `visible` (monster-sighting trail): PlayerTrail exists solely to let
 //     monsters follow a player's scent; no monster subsystem exists in this
@@ -52,9 +66,7 @@
 //   - g_menu.ts's PMenu_Do_Update (LM_CTF's own popup-menu system,
 //     replacing ZOID's pmenuhnd_t) -- unit B's SCOPE. ClientThink's
 //     menu-update tail is dropped with a citation.
-//   - g_runes.ts's regen-rune per-frame tick (CTFApplyRegeneration's LM_CTF
-//     equivalent) -- unit B's SCOPE, dropped with a citation.
-//   - Cmd_Observe_f (unit B's p_observer.ts) -- ClientBeginDeathmatch's
+//   - Cmd_Observe_f (g_cmds.ts) -- ClientBeginDeathmatch's
 //     "already an observer" branch throws a cited stub if actually reached
 //     (a returning player who was already CTF_TEAM_OBSERVER*); the far more
 //     common "new player" (CTF_TEAM_UNDEFINED -> TeamJoin) and "returning
@@ -68,16 +80,21 @@
 //     (the coop branches themselves) but the two "gross ugly hack" map-fix
 //     functions are ported verbatim from src/ctf/p_client.ts since lmctf60's
 //     own versions are confirmed byte-identical in this region.
+//   - CheckBlock (p_client.c:2595) / PrintPmove (p_client.c:2603): a pmove
+//     checksum debug dumper. PrintPmove has NO call site anywhere in
+//     lmctf60 and CheckBlock is only called by PrintPmove, so the pair is
+//     unreachable -- dropped, not stubbed.
 //   - ClientSetSkin (g_skins.c team-skin-file lookup, unit B's SCOPE) --
 //     ClientUserinfoChanged writes the raw name\skin configstring directly
 //     instead (same fallback ctf's own ClientUserinfoChanged uses when CTF
 //     is disabled), cited inline.
 
-import { vec3, type Vec3, VectorClear, VectorCopy, VectorLength, VectorSubtract } from "../shared/math";
+import { vec3, type Vec3, VectorClear, VectorCopy, VectorLength, VectorNormalize2, VectorScale, VectorSubtract } from "../shared/math";
 import {
   ANGLE2SHORT,
   ATTN_NORM,
   BUTTON_ANY,
+  BUTTON_ATTACK,
   CHAN_BODY,
   CHAN_VOICE,
   CS_GENERAL,
@@ -85,6 +102,7 @@ import {
   type CvarT,
   DF_FIXED_FOV,
   DF_FORCE_RESPAWN,
+  DF_QUAD_DROP,
   DF_SPAWN_FARTHEST,
   type EntityStateT,
   EntityEventT,
@@ -103,6 +121,7 @@ import {
   PmoveStateT,
   PmoveT,
   PMF_DUCKED,
+  PMF_JUMP_HELD,
   PMF_NO_PREDICTION,
   PMF_TIME_TELEPORT,
   PRINT_HIGH,
@@ -117,6 +136,8 @@ import { type Edict, type GTraceT, SolidT, SVF_DEADMONSTER, SVF_NOCLIENT } from 
 import { SV_FilterPacket } from "./g_svcmds";
 import {
   BODY_QUEUE_SIZE,
+  CTF_RANDOM_DEATH_MSG,
+  isRef,
   CtfClientT,
   ClientPersistentT,
   ClientRespawnT,
@@ -173,12 +194,14 @@ import {
   gi,
   level,
   meansOfDeathHolder,
+  DROPPED_PLAYER_ITEM,
   svc_muzzleflash,
+  svc_stufftext,
   world,
 } from "./g_local";
 import { G_Find, G_FreeEdict, G_InitEdict, G_Spawn, G_TouchTriggers, KillBox } from "./g_utils";
 import { SP_misc_teleporter_dest, ThrowClientHead, ThrowGib } from "./g_misc";
-import { FindItem, ITEM_INDEX } from "./g_items";
+import { Drop_Item, FindItem, FindItemByClassname, ITEM_INDEX, Touch_Item } from "./g_items";
 import { UpdateChaseCam } from "./g_chase";
 import {
   CTF_TEAM_ANYTEAM,
@@ -186,16 +209,29 @@ import {
   CTF_TEAM_LIMIT,
   CTF_TEAM_MIN_LIMIT,
   CTF_TEAM_OBSERVER,
+  CTF_TEAM_OBSERVER_BLUE,
+  CTF_TEAM_OBSERVER_RED,
   CTF_TEAM_OPPOSING,
   CTF_TEAM_RED,
   CTF_TEAM_UNDEFINED,
   ctf_BSafePrint,
+  ctf_SafePrint,
   ctf_findplayer,
   ctf_getteamflag,
   ctf_SetEntTeamEx,
 } from "./g_ctffunc";
 import { vectoangles } from "./g_utils";
 import { SkinListInUse, SkinRandom, SkinValid } from "./g_skins";
+// Death-message scoring + the per-frame hooks ClientBeginServerFrame runs.
+// None of these modules import p_client.ts back, so these are plain static
+// imports (no lazy-module indirection needed).
+import { MOD_PLASMA } from "./plasma";
+import { GamePaused, Match_CanScore } from "./g_tourney";
+import { STATS_DEATHS, STATS_FRAGS, STATS_PING_SAMPLES, STATS_PING_TOTAL, STATS_PLAYER_SAMPLE_RATE, STATS_SCORE, stats_add } from "./p_stats";
+import { RuneThinkHook } from "./g_runes";
+import { Check_Vote, VoteStarted } from "./g_vote";
+import { ChaseNext, GetChaseTarget, Team_Observer_OK } from "./g_chase";
+import { Think_Weapon } from "./p_weapon";
 
 // gameCvars entries are `CvarT | null` until InitGame resolves them; mirrors
 // every other file's local cvarNum-style helper.
@@ -325,6 +361,14 @@ function edictFromBoundary(entIn: Edict): EdictT {
   const found = g_edicts.find((e) => e === entIn);
   if (found !== undefined) return found;
   gi.error("lmctf/p_client: boundary edict not found in g_edicts");
+}
+
+// GetChaseTarget()/ChaseNext() reassign client.chase_target through the
+// client object, which TypeScript's control-flow analysis cannot see. Reading
+// the field through this helper returns its declared type rather than the
+// stale narrowed one.
+function currentChaseTarget(client: GClientT): EdictT | null {
+  return client.chase_target;
 }
 
 function EDICT_NUM(e: EdictT): number {
@@ -502,6 +546,85 @@ function IsFemale(ent: EdictT): boolean {
 }
 
 /*
+IsNeutral (lmctf60/p_client.c:259)
+
+True when the client's userinfo "gender" is neither male nor female, which
+makes ClientObituary use the "itself" wording instead of his/her. Note the
+QUIRK carried over from the C: IsFemale reads the "skin" key while
+IsNeutral reads the "gender" key -- the two disagree on which userinfo
+field decides sex, and lmctf60 ships it that way.
+*/
+function IsNeutral(ent: EdictT): boolean {
+  if (ent.client === null) return false;
+  const info = Info_ValueForKey(ent.client.pers.userinfo, "gender");
+  const c = info[0];
+  return c !== "f" && c !== "F" && c !== "m" && c !== "M";
+}
+
+// Random_MSG_Kills1 (lmctf60/p_client.c:278, DIF_MSG_DEATHS == 44) -- the
+// kill-phrase pool the CTF_RANDOM_DEATH_MSG ctfflag swaps in for the normal
+// per-weapon obituary verb.
+const Random_MSG_Kills1: string[] = [
+  "bit the dust of",
+  "visits the Grim Reaper by",
+  "becomes one with death by",
+  "drops 6 feet under by",
+  "takes a high ride in the sky by",
+  "camps under a gravestone from",
+  "needs a tissue because of",
+  "likes the taste of blood from",
+  "has a crap connection from",
+  "can't see so good from",
+  "smokes a peace pipe with the gods and",
+  "practices with",
+  "cry's home to his momma from",
+  "soiled his shorts from",
+  "steps into a coffin from",
+  "whines of his connection from",
+  "would rather play alone than with",
+  "gets caught checkin' Briana's booty and takes it from",
+  "sees his brain splatter on the wall from",
+  "is picking up pieces of his skull from",
+  "is busy playing with his joystick and",
+  "becomes bored with life from",
+  "buys a ticket on the train of death from",
+  "paints a pretty picture with his blood from",
+  "is stinking up the field from",
+  "leaves a poop stain on his seat from",
+  "needs help finding his teeth from",
+  "bites the big one from",
+  "searches for his severed head from",
+  "sucks on",
+  "get's a lesson from",
+  "enjoy's getting killed by",
+  "was eeged by",
+  "starts to cry from",
+  "is hunted by",
+  "gets flipped the bird from",
+  "curses",
+  "gets mud in the face from",
+  "plays with",
+  "takes it in the cooter from",
+  "gets jarred in the jaw from",
+  "bleeds in the gut from",
+  "chokes on",
+  "takes it up the arse from",
+];
+
+// Death_Msg_String (lmctf60/p_client.c:274) -- the C keeps one global
+// scratch buffer that Gimme_Any_Death_Message fills and ClientObituary then
+// points `message` at.
+const deathMsgString = { value: "" };
+
+/*
+Gimme_Any_Death_Message (lmctf60/p_client.c:350)
+*/
+function Gimme_Any_Death_Message(): void {
+  const index = Math.floor(Math.random() * Random_MSG_Kills1.length);
+  deathMsgString.value = Random_MSG_Kills1[index] ?? "";
+}
+
+/*
 ClientObituary -- see file header's Uncertainties note: the base MOD_*
 message table is reused from src/ctf/p_client.ts (shared baseq2 heritage),
 with MOD_GRAPPLE (ctf/ThreeWave's grapple, doesn't exist in lmctf60) swapped
@@ -517,6 +640,11 @@ export function ClientObituary(self: EdictT, inflictor: EdictT, attacker: EdictT
   }
 
   if (self.client === null) return;
+
+  // New_Death_Messages (lmctf60/p_client.c:367) -- the SAME ctfflag that
+  // swaps in the random kill phrases also turns on the extra "'s <weapon>"
+  // suffixes below.
+  const New_Death_Messages = (cvarNum(gameCvars.ctfflags) & CTF_RANDOM_DEATH_MSG) !== 0;
 
   if (cvarNum(gameCvars.deathmatch) !== 0 || cvarNum(gameCvars.coop) !== 0) {
     const ff = (meansOfDeathHolder.meansOfDeath & MOD_FRIENDLY_FIRE) !== 0;
@@ -570,23 +698,39 @@ export function ClientObituary(self: EdictT, inflictor: EdictT, attacker: EdictT
           break;
         case MOD_HG_SPLASH:
         case MOD_G_SPLASH:
-          message = IsFemale(self) ? "tripped on her own grenade" : "tripped on his own grenade";
+          // lmctf60/p_client.c:437 -- neutral gender takes priority over the
+          // his/her split.
+          message = IsNeutral(self)
+            ? "tripped on its own grenade"
+            : IsFemale(self)
+              ? "tripped on her own grenade"
+              : "tripped on his own grenade";
           break;
         case MOD_R_SPLASH:
-          message = IsFemale(self) ? "blew herself up" : "blew himself up";
+          // lmctf60/p_client.c:445
+          message = IsNeutral(self) ? "blew itself up" : IsFemale(self) ? "blew herself up" : "blew himself up";
           break;
         case MOD_BFG_BLAST:
           message = "should have used a smaller gun";
           break;
         default:
-          message = IsFemale(self) ? "killed herself" : "killed himself";
+          // lmctf60/p_client.c:463
+          message = IsNeutral(self) ? "killed itself" : IsFemale(self) ? "killed herself" : "killed himself";
           break;
       }
     }
 
     if (message !== null) {
-      gi.bprintf(PRINT_MEDIUM, `${self.client.pers.netname} ${message}.\n`);
-      if (cvarNum(gameCvars.deathmatch) !== 0) self.client.resp.score--;
+      // lmctf60/p_client.c:473 -- the whole print+score is gated on
+      // Match_CanScore(); `self.enemy = null` happens either way.
+      if (Match_CanScore()) {
+        ctf_BSafePrint(PRINT_HIGH, `${self.client.pers.netname} ${message}.\n`);
+        if (cvarNum(gameCvars.deathmatch) !== 0) {
+          self.client.resp.score--;
+          stats_add(self, STATS_SCORE, -1);
+          stats_add(self, STATS_DEATHS, 1);
+        }
+      }
       self.enemy = null;
       return;
     }
@@ -596,9 +740,11 @@ export function ClientObituary(self: EdictT, inflictor: EdictT, attacker: EdictT
       switch (mod) {
         case MOD_BLASTER:
           message = "was blasted by";
+          if (New_Death_Messages) message2 = "'s blaster";
           break;
         case MOD_SHOTGUN:
           message = "was gunned down by";
+          if (New_Death_Messages) message2 = "'s shotgun";
           break;
         case MOD_SSHOTGUN:
           message = "was blown away by";
@@ -606,6 +752,7 @@ export function ClientObituary(self: EdictT, inflictor: EdictT, attacker: EdictT
           break;
         case MOD_MACHINEGUN:
           message = "was machinegunned by";
+          if (New_Death_Messages) message2 = "'s machinegun";
           break;
         case MOD_CHAINGUN:
           message = "was cut in half by";
@@ -633,6 +780,7 @@ export function ClientObituary(self: EdictT, inflictor: EdictT, attacker: EdictT
           break;
         case MOD_RAILGUN:
           message = "was railed by";
+          if (New_Death_Messages) message2 = "'s railgun";
           break;
         case MOD_BFG_LASER:
           message = "saw the pretty lights from";
@@ -646,6 +794,11 @@ export function ClientObituary(self: EdictT, inflictor: EdictT, attacker: EdictT
           message = "couldn't hide from";
           message2 = "'s BFG";
           break;
+        // lmctf60/p_client.c:565 (SKWiD plasma mod)
+        case MOD_PLASMA:
+          message = "got an infusion of plasma from";
+          if (New_Death_Messages) message2 = "'s plasma rifle";
+          break;
         case MOD_HANDGRENADE:
           message = "caught";
           message2 = "'s handgrenade";
@@ -656,30 +809,54 @@ export function ClientObituary(self: EdictT, inflictor: EdictT, attacker: EdictT
           break;
         case MOD_HELD_GRENADE:
           message = "feels";
-          message2 = "'s pain";
+          message2 = New_Death_Messages ? "'s paingrenade" : "'s pain";
           break;
         case MOD_TELEFRAG:
           message = "tried to invade";
           message2 = "'s personal space";
           break;
+        // lmctf60/p_client.c:595 -- lmctf60's own wording, NOT ThreeWave's
+        // "was caught by"/"'s grapple".
         case MOD_CTF_GRAPPLE:
-          message = "was caught by";
-          message2 = "'s grapple";
+          message = "was gored by";
+          message2 = "'s grappling hook";
           break;
       }
       if (message !== null) {
-        gi.bprintf(PRINT_MEDIUM, `${self.client.pers.netname} ${message} ${attacker.client.pers.netname}${message2}\n`);
+        // lmctf60/p_client.c:601 -- CTF_RANDOM_DEATH_MSG replaces the
+        // per-weapon verb wholesale (message2 is still appended).
+        if ((cvarNum(gameCvars.ctfflags) & CTF_RANDOM_DEATH_MSG) !== 0) {
+          Gimme_Any_Death_Message();
+          message = deathMsgString.value;
+        }
+        ctf_BSafePrint(PRINT_HIGH, `${self.client.pers.netname} ${message} ${attacker.client.pers.netname}${message2}\n`);
         if (cvarNum(gameCvars.deathmatch) !== 0) {
-          if (ff) attacker.client.resp.score--;
-          else attacker.client.resp.score++;
+          // QUIRK preserved from lmctf60/p_client.c:613: a friendly-fire kill
+          // is only penalized while matchstate is MATCH_RAILGUN_INPLAY. In
+          // every other state a teamkill still INCREMENTS the killer's score,
+          // exactly as the C does.
+          if (ff && matchstate === MatchStatesT.MATCH_RAILGUN_INPLAY) {
+            stats_add(attacker, STATS_SCORE, -1);
+            stats_add(attacker, STATS_DEATHS, 1);
+            attacker.client.resp.score--;
+          } else {
+            stats_add(attacker, STATS_SCORE, 1);
+            stats_add(attacker, STATS_FRAGS, 1);
+            attacker.client.resp.score++;
+          }
         }
         return;
       }
     }
   }
 
-  gi.bprintf(PRINT_MEDIUM, `${self.client.pers.netname} died.\n`);
-  if (cvarNum(gameCvars.deathmatch) !== 0) self.client.resp.score--;
+  // lmctf60/p_client.c:632
+  ctf_BSafePrint(PRINT_HIGH, `${self.client.pers.netname} died.\n`);
+  if (cvarNum(gameCvars.deathmatch) !== 0) {
+    self.client.resp.score--;
+    stats_add(self, STATS_SCORE, -1);
+    stats_add(self, STATS_DEATHS, 1);
+  }
 }
 
 export function LookAtKiller(self: EdictT, inflictor: EdictT, attacker: EdictT): void {
@@ -745,7 +922,7 @@ export function player_die(self: EdictT, inflictor: EdictT, attacker: EdictT, da
       self.client.ps.pmove.pm_type = PmTypeT.PM_DEAD;
     }
     ClientObituary(self, inflictor, attacker);
-    // TossClientWeapon(self) -- not ported, see file header (Drop_Item gap).
+    TossClientWeapon(self);
   }
 
   if (self.client !== null) {
@@ -1626,7 +1803,7 @@ TeamJoin (lmctf60/p_client.c:3376) -- ClientSetSkin's skin refresh
 (unit B's g_skins.c) is not called; ForceCommand("spectator 0") IS called
 (g_cmds.ts, already ported by the foundation).
 */
-import { ForceCommand } from "./g_cmds";
+import { Cmd_Observe_f, Drop_All, ForceCommand } from "./g_cmds";
 export function TeamJoin(ent: EdictT): void {
   if (ent.client === null) return;
   const oldTeam = ent.client.ctf.teamnum;
@@ -1933,6 +2110,83 @@ export function ClientThink(entIn: Edict, ucmd: UsercmdT): void {
 
   ent.light_level = ucmd.lightlevel;
 
+  // fire weapon from final position if needed (lmctf60/p_client.c:2852).
+  // This is the block that actually advances the weapon state machine on the
+  // server frame -- without it a held/tapped attack button never reaches
+  // Think_Weapon and no weapon ever fires.
+  if (!GamePaused()) {
+    if ((client.latched_buttons & BUTTON_ATTACK) !== 0) {
+      if (client.resp.spectator) {
+        client.latched_buttons = 0;
+        if (client.chase_target !== null) {
+          client.chase_target = null;
+          client.ps.pmove.pm_flags &= ~PMF_NO_PREDICTION;
+        } else {
+          GetChaseTarget(ent);
+        }
+      } else if (!client.weapon_thunk) {
+        client.weapon_thunk = true;
+        Think_Weapon(ent);
+      }
+    }
+  }
+
+  if (client.resp.spectator) {
+    // lmctf60/p_client.c:2883 -- a team observer whose team is no longer a
+    // legal thing to observe gets dropped back to the neutral observer team.
+    if (client.ctf.teamnum === CTF_TEAM_OBSERVER_RED && !Team_Observer_OK(CTF_TEAM_RED, ent)) {
+      Cmd_Observe_f(ent, CTF_TEAM_OBSERVER);
+      return;
+    } else if (client.ctf.teamnum === CTF_TEAM_OBSERVER_BLUE && !Team_Observer_OK(CTF_TEAM_BLUE, ent)) {
+      Cmd_Observe_f(ent, CTF_TEAM_OBSERVER);
+      return;
+    }
+
+    // When we first start, we are observing nobody.
+    // (`chaseTarget` is re-read into a local because the fire-button block
+    // above can null the field out, which narrows the property type; the
+    // field is still reassigned by GetChaseTarget through `client`.)
+    if (client.ctf.teamnum === CTF_TEAM_OBSERVER_RED || client.ctf.teamnum === CTF_TEAM_OBSERVER_BLUE) {
+      const wantTeam = client.ctf.teamnum === CTF_TEAM_OBSERVER_RED ? CTF_TEAM_RED : CTF_TEAM_BLUE;
+      const chaseTarget = currentChaseTarget(client);
+      if (chaseTarget === null) {
+        GetChaseTarget(ent);
+        return;
+      } else if (chaseTarget.client === null || chaseTarget.client.ctf.teamnum !== wantTeam) {
+        Cmd_Observe_f(ent, CTF_TEAM_OBSERVER);
+        return;
+      }
+    }
+
+    if (ucmd.upmove >= 10) {
+      if ((client.ps.pmove.pm_flags & PMF_JUMP_HELD) === 0) {
+        client.ps.pmove.pm_flags |= PMF_JUMP_HELD;
+        const chaseTarget = currentChaseTarget(client);
+        if (chaseTarget !== null) ChaseNext(ent);
+        else GetChaseTarget(ent);
+      }
+    } else {
+      client.ps.pmove.pm_flags &= ~PMF_JUMP_HELD;
+    }
+  } else {
+    // CTF CODE -- LM_JORM (lmctf60/p_client.c:2951): drag the carried flag
+    // along with its carrier, offset 6 units behind the player's facing.
+    // Without this the flag model stays parked at its home position while
+    // someone is carrying it.
+    const flag = ClientHasFlag(ent);
+    if (flag !== null) {
+      const offset = vec3();
+      VectorCopy(ent.s.origin, flag.s.origin);
+      VectorNormalize2(ent.s.angles, offset);
+      VectorScale(offset, 6, offset);
+      VectorSubtract(flag.s.origin, offset, flag.s.origin);
+      VectorCopy(ent.velocity, flag.velocity);
+      VectorCopy(offset, flag.movedir);
+      vectoangles(offset, flag.s.angles);
+    }
+  }
+
+  // update chase cam if being followed
   const maxclients = cvarNum(gameCvars.maxclients);
   for (let i = 1; i <= maxclients; i++) {
     const other = g_edicts[i];
@@ -1942,14 +2196,233 @@ export function ClientThink(entIn: Edict, ucmd: UsercmdT): void {
   }
 }
 
-export function ClientBeginServerFrame(ent: EdictT): void {
-  if (level.intermissiontime !== 0) return;
+
+/*
+spectator_respawn (lmctf60/p_client.c:1667)
+
+Runs when pers.spectator and resp.spectator disagree -- i.e. the player used
+the "spectator" command. Checks the relevant password, enforces
+maxspectators, then re-runs PutClientInServer on the new side.
+*/
+export function spectator_respawn(ent: EdictT): void {
   if (ent.client === null) return;
   const client = ent.client;
 
+  // if the user wants to become a spectator, make sure he doesn't exceed
+  // max_spectators
+  if (client.pers.spectator) {
+    const value = Info_ValueForKey(client.pers.userinfo, "spectator");
+    const sp = cvarStr(gameCvars.spectator_password);
+    if (sp !== "" && sp !== "none" && sp !== value) {
+      gi.cprintf(ent, PRINT_HIGH, "Spectator password incorrect.\n");
+      client.pers.spectator = false;
+      gi.WriteByte(svc_stufftext);
+      gi.WriteString("spectator 0\n");
+      gi.unicast(ent, true);
+      return;
+    }
+
+    // count spectators
+    let numspec = 0;
+    const maxclients = cvarNum(gameCvars.maxclients);
+    for (let i = 1; i <= maxclients; i++) {
+      const other = g_edicts[i];
+      if (other !== undefined && other.inuse && other.client !== null && other.client.pers.spectator) numspec++;
+    }
+
+    if (numspec >= cvarNum(gameCvars.maxspectators)) {
+      // QUIRK preserved: the C omits the trailing newline on this one message.
+      gi.cprintf(ent, PRINT_HIGH, "Server spectator limit is full.");
+      client.pers.spectator = false;
+      gi.WriteByte(svc_stufftext);
+      gi.WriteString("spectator 0\n");
+      gi.unicast(ent, true);
+      return;
+    }
+  } else {
+    // he was a spectator and wants to join the game -- he must have the
+    // right password
+    const value = Info_ValueForKey(client.pers.userinfo, "password");
+    const pw = cvarStr(gameCvars.password);
+    if (pw !== "" && pw !== "none" && pw !== value) {
+      gi.cprintf(ent, PRINT_HIGH, "Password incorrect.\n");
+      client.pers.spectator = true;
+      gi.WriteByte(svc_stufftext);
+      gi.WriteString("spectator 1\n");
+      gi.unicast(ent, true);
+      return;
+    }
+  }
+
+  // clear client on respawn
+  client.resp.score = 0;
+  client.pers.score = 0;
+
+  ent.svflags &= ~SVF_NOCLIENT;
+
+  PutClientInServer(ent);
+
+  // add a teleportation effect
+  if (!client.pers.spectator) {
+    gi.WriteByte(svc_muzzleflash);
+    gi.WriteShort(EDICT_NUM(ent));
+    gi.WriteByte(MZ_LOGIN);
+    gi.multicast(ent.s.origin, MulticastT.MULTICAST_PVS);
+
+    // hold in place briefly
+    client.ps.pmove.pm_flags = PMF_TIME_TELEPORT;
+    client.ps.pmove.pm_time = 14;
+  }
+
+  client.respawn_time = level.time;
+
+  if (client.pers.spectator) {
+    Drop_All(ent);
+    if (client.ctf.teamnum === CTF_TEAM_OBSERVER_RED) {
+      gi.bprintf(PRINT_HIGH, `${client.pers.netname} is observing the red team\n`);
+    } else if (client.ctf.teamnum === CTF_TEAM_OBSERVER_BLUE) {
+      gi.bprintf(PRINT_HIGH, `${client.pers.netname} is observing the blue team\n`);
+    } else {
+      gi.bprintf(PRINT_HIGH, `${client.pers.netname} has moved to the sidelines\n`);
+      client.ctf.teamnum = CTF_TEAM_OBSERVER;
+    }
+  } else {
+    // only do this if they actually typed the spectator command
+    if (client.ctf.teamnum !== CTF_TEAM_RED && client.ctf.teamnum !== CTF_TEAM_BLUE) {
+      client.ctf.New_Team = Team_To_Join(ent);
+    }
+    gi.bprintf(PRINT_HIGH, `${client.pers.netname} joined the game\n`);
+  }
+}
+
+/*
+PingAlert (lmctf60/p_client.c:2997)
+
+Referee-only: warn the referee about any in-game player whose ping falls
+outside his configured pingalert floor/ceiling.
+*/
+export function PingAlert(ent: EdictT): void {
+  if (ent.client === null) return;
+  const client = ent.client;
+
+  // Check if they are turned off
+  if (client.ctf.pingalertfloor === 0 && client.ctf.pingalertceiling === 0) return;
+
+  for (let j = 1; j <= game.maxclients; j++) {
+    const other = g_edicts[j];
+    if (other === undefined || !other.inuse) continue;
+    if (other.client === null || other.client.ctf.teamnum <= CTF_TEAM_OBSERVER) continue;
+
+    if (client.ctf.pingalertfloor !== 0 && other.client.ping < client.ctf.pingalertfloor) {
+      ctf_SafePrint(
+        ent,
+        PRINT_HIGH,
+        `PING ALERT: ${other.client.pers.netname} has a ${other.client.ping} ping (below ${client.ctf.pingalertfloor}).\n`,
+      );
+    }
+    if (client.ctf.pingalertceiling !== 0 && other.client.ping > client.ctf.pingalertceiling) {
+      ctf_SafePrint(
+        ent,
+        PRINT_HIGH,
+        `PING ALERT: ${other.client.pers.netname} has a ${other.client.ping} ping (above ${client.ctf.pingalertceiling}).\n`,
+      );
+    }
+  }
+}
+
+/*
+TossClientWeapon (lmctf60/p_client.c:648)
+
+Drops the dead player's current weapon (and, with DF_QUAD_DROP, a live quad)
+so the killer can pick it up. Now portable: g_items.ts has a real Drop_Item.
+*/
+export function TossClientWeapon(self: EdictT): void {
+  if (self.client === null) return;
+  if (cvarNum(gameCvars.deathmatch) === 0) return;
+
+  let item: GItemT | null = self.client.pers.weapon;
+  if (item === null) return;
+
+  if (self.client.pers.inventory[self.client.ammo_index] === 0) item = null;
+  if (item !== null && item.pickup_name === "Blaster") item = null;
+  // CTF CODE -- LM_JORM: never drop the hook
+  if (item !== null && item.pickup_name === "Grappling Hook") item = null;
+
+  let quad: boolean;
+  if ((cvarNum(gameCvars.dmflags) & DF_QUAD_DROP) === 0) quad = false;
+  else quad = self.client.quad_framenum > level.framenum + 10;
+
+  const spread = item !== null && quad ? 22.5 : 0.0;
+
+  if (item !== null) {
+    self.client.v_angle[YAW] -= spread;
+    const drop = Drop_Item(self, item);
+    self.client.v_angle[YAW] += spread;
+    drop.spawnflags = DROPPED_PLAYER_ITEM;
+  }
+
+  if (quad) {
+    self.client.v_angle[YAW] += spread;
+    const quadItem = FindItemByClassname("item_quad");
+    if (quadItem === null) return;
+    const drop = Drop_Item(self, quadItem);
+    self.client.v_angle[YAW] -= spread;
+    drop.spawnflags |= DROPPED_PLAYER_ITEM;
+    drop.touch = Touch_Item;
+    drop.nextthink = level.time + (self.client.quad_framenum - level.framenum) * FRAMETIME;
+    drop.think = G_FreeEdict;
+  }
+}
+
+/*
+ClientBeginServerFrame (lmctf60/p_client.c:3047)
+
+Called once per server frame per client, before any other entity runs. This
+is where the per-frame rune tick, the vote timeout check, the spectator
+toggle, the referee ping alerts and -- critically -- the fallback
+Think_Weapon call all live.
+*/
+export function ClientBeginServerFrame(ent: EdictT): void {
+  if (ent.client === null) return;
+
+  // CTF CODE -- LM_JORM: these two run even during intermission.
+  RuneThinkHook(ent);
+  if (VoteStarted) Check_Vote();
+
+  if (level.intermissiontime !== 0) return;
+
+  const client = ent.client;
+
+  if (
+    cvarNum(gameCvars.deathmatch) !== 0 &&
+    client.pers.spectator !== client.resp.spectator &&
+    level.time - client.respawn_time >= 5
+  ) {
+    spectator_respawn(ent);
+    return;
+  }
+
+  // STATS-BEGIN LM_Hati
+  if (level.framenum % STATS_PLAYER_SAMPLE_RATE === 0) {
+    if (client.p_stats_player !== null) {
+      stats_add(ent, STATS_PING_TOTAL, client.ping);
+      stats_add(ent, STATS_PING_SAMPLES, 1);
+    }
+    // Alert referee if others have failed his pingalerts.
+    // Only referees can have ping alerts.
+    if (isRef(ent)) PingAlert(ent);
+  }
+  // STATS-END LM_Hati
+
+  // run weapon animations if it hasn't been done by a ucmd_t
+  if (!client.weapon_thunk && !client.resp.spectator) Think_Weapon(ent);
+  else client.weapon_thunk = false;
+
   if (ent.deadflag !== DEAD_NO) {
+    // wait for any button just going down
     if (level.time > client.respawn_time) {
-      const buttonMask = cvarNum(gameCvars.deathmatch) !== 0 ? 1 /* BUTTON_ATTACK */ : -1;
+      // in deathmatch, only wait for attack button
+      const buttonMask = cvarNum(gameCvars.deathmatch) !== 0 ? BUTTON_ATTACK : -1;
       if (
         (client.latched_buttons & buttonMask) !== 0 ||
         (cvarNum(gameCvars.deathmatch) !== 0 && ((cvarNum(gameCvars.dmflags) | 0) & DF_FORCE_RESPAWN) !== 0)
@@ -1961,8 +2434,25 @@ export function ClientBeginServerFrame(ent: EdictT): void {
     return;
   }
 
-  // PlayerTrail_Add/visible -- not ported, see file header (dead
-  // functionality: no monster subsystem exists to follow the trail).
+  // PlayerTrail_Add/visible -- not ported (MONSTERS_OK dead subsystem: the
+  // trail exists only so monsters can follow a player's scent).
 
   client.latched_buttons = 0;
+
+  // lmctf60/p_client.c:3133 -- re-assert the player's skin once after every
+  // userinfo change; ClientUserinfoChanged/ClientSetSkin clear goodskin and
+  // this is the only place that pushes the skin back to the client.
+  if (!client.ctf.goodskin) {
+    const skin = Info_ValueForKey(client.pers.userinfo, "skin");
+    try {
+      ForceCommand(ent, `skin ${skin}\n`);
+    } finally {
+      // Latch in a `finally` so the stuff is attempted exactly once, in the
+      // C's order (stuff, then latch). The C's ForceCommand cannot fail, but
+      // this port's gi.unicast can throw when a client's reliable buffer is
+      // full; without the latch that one failure would retry on every
+      // subsequent server frame instead of the C's single attempt.
+      client.ctf.goodskin = true;
+    }
+  }
 }

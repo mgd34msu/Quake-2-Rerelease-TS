@@ -27,7 +27,7 @@ import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { sv, svs, maxclients } from "../src/server/server";
+import { sv, svs, maxclients, ServerStateT } from "../src/server/server";
 import { SV_Init, SV_Frame } from "../src/server/sv_main";
 import { SV_ComputeFramerate } from "../src/server/sv_init";
 import { geHolder, currentGameFamily } from "../src/server/sv_game";
@@ -163,7 +163,16 @@ describe("variable tick -- family dispatch", () => {
 describe("variable tick -- engine frame pacing honors sv.frametime", () => {
   beforeAll(() => {
     svs.initialized = true;
+    // A game frame implies a live level: SV_RunGameFrame skips ge.RunFrame
+    // while sv.state is ss_dead (the map-change window), so the harness
+    // declares a level up.
+    sv.state = ServerStateT.ss_game;
     if (maxclients) maxclients.value = 0; // no client slots touched by SV_CheckTimeouts/SV_GiveMsec/SV_CalcPings
+  });
+
+  afterAll(() => {
+    sv.state = ServerStateT.ss_dead;
+    svs.initialized = false;
   });
 
   // Drives SV_Frame with `stepMs`-sized real-time slices (mirroring

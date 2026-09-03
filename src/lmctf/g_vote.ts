@@ -8,6 +8,10 @@
 // Vote_NO, Vote_Menu (that's eight -- Clear_All_Ballots plus the seven
 // `void Vote_*`/`Check_Vote` declarations at the top of the C file).
 //
+// A passing skip-level/jump-level vote now calls g_main.ts's real
+// EndDMLevel (it used to hit a throwing "not yet ported" stub in this file),
+// so the level actually changes when the vote carries.
+//
 // Vote_Jump_Level/Vote_Ref_Player set CTF_VOTETYPE_GOTOMAP/CTF_VOTETYPE_REFPLAYER
 // but Check_Vote's own pass/fail branches for those two vote types just
 // print "Too bad this feature is not done yet :P" -- preserved verbatim,
@@ -57,11 +61,18 @@ export let VoteTime = 0.0;
 export let VoteType = 0;
 
 // ---------------------------------------------------------------------
-// Cross-dependency into a file this unit does not own (lmctf60/g_main.c,
-// unit A's foundation-partial completion).
+// Cross-dependency into lmctf60/g_main.c (g_main.ts). Previously a throwing
+// stub; g_main.ts now exports the real EndDMLevel, so a passing "skip level"
+// or "jump level" vote actually changes level instead of throwing. Resolved
+// through require() rather than a static import to keep this module out of
+// g_main.ts's import cycle (g_main.ts -> g_svcmds.ts -> ... -> g_vote.ts),
+// matching g_svcmds.ts's precedent for the same symbol.
 // ---------------------------------------------------------------------
+interface GMainModuleShape {
+  EndDMLevel: () => void;
+}
 function EndDMLevel(): void {
-  throw new Error("EndDMLevel not yet ported (lmctf60/g_main.c; owned by unit A's g_main.ts completion)");
+  (require("./g_main") as GMainModuleShape).EndDMLevel();
 }
 
 // exposed for tests only -- resets this module's vote-session state back to

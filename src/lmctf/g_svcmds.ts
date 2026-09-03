@@ -29,27 +29,18 @@ import { gameCvars, gi } from "./g_local";
 import { ctf_BSafePrint } from "./g_ctffunc";
 import { FindItem } from "./g_items";
 
-// g_tourney.ts is a partial port (matchstate/pause query functions only,
-// per its own file header) being completed by another unit in this
-// concurrent effort; EndDMLevel is not yet exported there. Resolved
-// lazily per PORTING.md's import-cycle rule / src/lmctf/g_target.ts's
-// precedent (gSpawnMod/pHudMod), so this file's own load order doesn't
-// have to wait on g_tourney.ts's completion.
-//
-// g_target.ts's precedent casts require()'s result straight to
-// `typeof <Module>`, but that only type-checks when every referenced
-// export genuinely exists on the target module. EndDMLevel does not exist
-// on g_tourney.ts's current export surface (confirmed via grep before
-// writing this file), so `typeof GTourneyModule` would make `.EndDMLevel`
-// a compile error, not the runtime gap the brief calls for. This narrower,
-// explicitly-optional shape lets the property genuinely be missing right
-// now (checked below, throwing a documented error) while still resolving
-// correctly with zero changes here once another unit adds the export.
-interface GTourneyModuleShape {
-  EndDMLevel?: () => void;
+// EndDMLevel actually lives in lmctf60/g_main.c (g_main.ts), not
+// g_tourney.c -- an earlier revision of this file looked for it on
+// g_tourney.ts and threw a documented "not yet exported" error, which is
+// now stale (g_main.ts exports it). It stays a lazy require() because
+// g_main.ts statically imports ServerCommand from THIS file, so a static
+// import back would close an import cycle -- same PORTING.md rule /
+// g_target.ts precedent the previous lazy lookup used.
+interface GMainModuleShape {
+  EndDMLevel: () => void;
 }
-function gTourneyMod(): GTourneyModuleShape {
-  return require("./g_tourney") as GTourneyModuleShape;
+function gMainMod(): GMainModuleShape {
+  return require("./g_main") as GMainModuleShape;
 }
 
 export function Svcmd_Test_f(): void {
@@ -57,13 +48,7 @@ export function Svcmd_Test_f(): void {
 }
 
 export function Svcmd_NextLevel_f(): void {
-  const endDMLevel = gTourneyMod().EndDMLevel;
-  if (endDMLevel === undefined) {
-    throw new Error(
-      "Svcmd_NextLevel_f: EndDMLevel (lmctf60/g_tourney.c) is not yet exported by g_tourney.ts -- that module currently ports only matchstate/pause query functions per its own file header",
-    );
-  }
-  endDMLevel();
+  gMainMod().EndDMLevel();
   gi.dprintf("Skipping to next level\n");
 }
 

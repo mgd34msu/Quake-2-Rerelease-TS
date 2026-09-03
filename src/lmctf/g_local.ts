@@ -1585,6 +1585,10 @@ export const gameCvars: {
   // g_cmds.ts's Cmd_ToggleFastSwitch_f, shown by g_menu.ts's
   // Ref_Settings_Menu.
   fastswitch: CvarT | null;
+  // lmctf60/g_save.c:212/222 -- `hostname` and `mod_website`, both read by
+  // p_view.ts's ClientShowMOD (the join-time welcome layout).
+  hostname: CvarT | null;
+  mod_website: CvarT | null;
 } = {
   maxentities: null,
   deathmatch: null,
@@ -1628,7 +1632,19 @@ export const gameCvars: {
   countdown_time: null,
   railtime: null,
   fastswitch: null,
+  hostname: null,
+  mod_website: null,
 };
+
+// lmctf60/g_local.h:629 `extern char motd[1000];` -- the message-of-the-day
+// text, filled by g_save.c's InitGame from motd.txt. That file read is not
+// ported (g_main.ts's header records the dropped file I/O), so this stays
+// empty, which is exactly what the C produces on a server with no motd.txt:
+// ClientShowMOD's `if (motd[0])` block simply does not run.
+export let motd = "";
+export function SetMotd(v: string): void {
+  motd = v;
+}
 
 //===============================================================
 // ctfflags bits (lmctf60/q_shared.h) -- placed here rather than in
@@ -1640,6 +1656,27 @@ export const gameCvars: {
 // own module for either). Deviation reported per PORTING.md's mismatch
 // clause.
 //===============================================================
+
+//===============================================================
+// LM-CTF-only player_state stat slots (lmctf60/q_shared.h:971-980). Placed
+// here rather than in src/shared/q_shared.ts for exactly the same reason
+// the ctfflags bits below are: src/shared/q_shared.ts is one instance
+// shared by every game family, and slots 18-26 are LM_CTF's own
+// ("TEAM_CODE -- LM_JORM" / "Bat"). q_shared.ts already carries the vanilla
+// slots 0..17 (STAT_HEALTH_ICON..STAT_SPECTATOR) and MAX_STATS = 32, so
+// these nine simply extend that range. g_spawn.ts's dm_statusbar program
+// already references 18..26 by number.
+//===============================================================
+
+export const STAT_TEAM_ICON = 18; // TEAM_CODE -- LM_JORM
+export const STAT_RED_FRAGS = 19; // TEAM_CODE -- LM_JORM
+export const STAT_BLUE_FRAGS = 20; // TEAM_CODE -- LM_JORM
+export const STAT_RED_ICON = 21; // TEAM_CODE -- LM_JORM
+export const STAT_BLUE_ICON = 22; // TEAM_CODE -- LM_JORM
+export const STAT_RUNE_ICON = 23; // TEAM_CODE -- LM_JORM
+export const STAT_RED_CAPS = 24; // Bat
+export const STAT_BLUE_CAPS = 25; // Bat
+export const STAT_MATCH_TIME = 26; // Bat
 
 export const CTF_WEAP_BALANCE = 1; // gates GRAPPLE_PULL_BALANCED_SPEED (dead: WEAP_BALANCE_OK is never defined)
 export const CTF_ALLOW_INVULN = 2;
