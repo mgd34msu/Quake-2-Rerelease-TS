@@ -499,6 +499,17 @@ export function Menu_Center(menu: MenuframeworkS): void {
   menu.y = (VID_HEIGHT() - height) / 2;
 }
 
+// Keeps a centered menu body clear of the banner pic drawn above it. Vanilla
+// hand-placed every menu's y against its banner; the tall custom screens
+// this port added (Video, with its extra rows) are centered by Menu_Center
+// instead, and at 640x480 that put the first rows up inside the banner
+// (Mike's 2026-09-02 play-test screenshot: "driver" drawn over the VIDEO
+// banner). `bannerBottom` is the banner's bottom edge in viddef coordinates.
+export function Menu_KeepBelow(menu: MenuframeworkS, bannerBottom: number): void {
+  const clearance = 8;
+  if (menu.y < bannerBottom + clearance) menu.y = bannerBottom + clearance;
+}
+
 export function Menu_Draw(menu: MenuframeworkS): void {
   const win = Menu_ComputeWindow(menu);
   const originalY = menu.y;
@@ -701,19 +712,12 @@ function Slider_DoSlide(s: MenusliderS, dir: number): void {
 
 const SLIDER_RANGE = 10;
 
-// Bug fix (Mike, 2026-09-02, owner's play-test report on the Video menu:
-// "the formatting is shit on that screen" -- long value strings like
-// "1.00x (native)" and "high (picmip 0)" ran past the column, and slider
-// rows didn't line up with spin-control rows). Root cause: Slider_Draw's
-// QoL value readout (added 2026-09-01) draws past the slider track, at
-// RCOLUMN_OFFSET + trackW + 8, while SpinControl_Draw drew its own value
-// right after the label at plain RCOLUMN_OFFSET -- two different value
-// columns in the same menu, so a slider row's value (e.g. "resolution
-// scale") sat far to the right of a spin row's value (e.g. "scale to
-// fullscreen") directly above or below it. One shared column, positioned
-// past the slider track (sliders need the clearance; spin rows don't, but
-// sharing it is what makes every row line up) -- both draw functions below
-// use this instead of computing/hardcoding their own offset.
+// Where a slider row's value readout goes: past the track, clear of the
+// thumb. The readout was added 2026-09-01 (Slider_Draw's valueFormatter);
+// long strings like "1.00x (native)" and "high (picmip 0)" need this
+// clearance. Spin-control rows keep vanilla's RCOLUMN_OFFSET: the controls
+// of every row start at the same column, and only a slider's readout
+// extends further right.
 const VALUE_COLUMN_OFFSET = RCOLUMN_OFFSET + (SLIDER_RANGE + 2) * 8 + 8;
 
 function Slider_Draw(s: MenusliderS): void {
@@ -780,20 +784,18 @@ function SpinControl_Draw(s: MenulistS): void {
     Menu_DrawStringR2LDark(s.generic.x + parent.x + LCOLUMN_OFFSET, s.generic.y + parent.y, s.generic.name);
   }
 
-  // Bug fix (Mike, 2026-09-02): was RCOLUMN_OFFSET (x+16, right after the
-  // label) -- see VALUE_COLUMN_OFFSET's comment above Slider_Draw. Any menu
-  // mixing MTYPE_SPINCONTROL rows with MTYPE_SLIDER rows that use the
-  // valueFormatter QoL addition (Video, Options, Controller -- see the
-  // three sliders each of the latter two register with one) had this same
-  // two-different-value-columns misalignment; this is the shared drawing
-  // function both widget types go through, so the fix belongs here rather
-  // than in any one menu's own layout.
+  // Vanilla's column: the value right after the label. A slider row's
+  // readout sits past its track instead (VALUE_COLUMN_OFFSET) -- the two
+  // were once forced onto one shared column, which left every spin row's
+  // value floating 120 pixels out with an empty gap (Mike's 2026-09-02
+  // play-test screenshots of the New Game, Video and Options screens).
+  const valueX = RCOLUMN_OFFSET + s.generic.x + parent.x;
   const current = s.itemnames[s.curvalue] ?? "";
   const nl = current.indexOf("\n");
   if (nl === -1) {
-    Menu_DrawString(VALUE_COLUMN_OFFSET + s.generic.x + parent.x, s.generic.y + parent.y, current);
+    Menu_DrawString(valueX, s.generic.y + parent.y, current);
   } else {
-    Menu_DrawString(VALUE_COLUMN_OFFSET + s.generic.x + parent.x, s.generic.y + parent.y, current.slice(0, nl));
-    Menu_DrawString(VALUE_COLUMN_OFFSET + s.generic.x + parent.x, s.generic.y + parent.y + 10, current.slice(nl + 1));
+    Menu_DrawString(valueX, s.generic.y + parent.y, current.slice(0, nl));
+    Menu_DrawString(valueX, s.generic.y + parent.y + 10, current.slice(nl + 1));
   }
 }

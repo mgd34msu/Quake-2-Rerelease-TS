@@ -17,6 +17,7 @@ than relying on defaults left over from module load order.
 
 import { describe, test, expect, beforeEach } from "bun:test";
 import { Cvar_Get, Cvar_SetValue, Cvar_ForceSet } from "../src/qcommon/cvar";
+import { CVAR_ARCHIVE } from "../src/shared/q_shared";
 import {
   VID_MenuInit,
   s_mode_list,
@@ -26,7 +27,7 @@ import {
   s_scale_fit_box,
   s_screensize_slider,
   s_brightness_slider,
-  s_fs_box,
+  s_fs_box, s_hudscale_box,
   CUSTOM_MODE_INDEX,
   SOFTWARE_MENU,
   OPENGL_MENU,
@@ -379,8 +380,8 @@ describe("vid_menu.ts -- shadow mapping rows", () => {
 
   test("the software submenu's reset/apply rows are untouched -- it has no shadow rows to displace them", () => {
     VID_MenuInit();
-    expect(s_defaults_action[SOFTWARE_MENU]?.generic.y).toBe(134);
-    expect(s_apply_action[SOFTWARE_MENU]?.generic.y).toBe(144);
+    expect(s_defaults_action[SOFTWARE_MENU]?.generic.y).toBe(144);
+    expect(s_apply_action[SOFTWARE_MENU]?.generic.y).toBe(154);
   });
 
   test("with gl_shaders 0 both rows SAY they are unavailable in their own value readout, not just in a flag the drawing code ignores", () => {
@@ -415,5 +416,31 @@ describe("vid_menu.ts -- shadow mapping rows", () => {
       expect(row.flags & QMF_GRAYED).toBe(0);
       expect(row.statusbar).toBeNull();
     }
+  });
+});
+
+describe("hud scale row (scr_scale)", () => {
+  test("reads scr_scale into the row and applies the chosen tier back, on both submenus", () => {
+    // Register with the real default first (cl_scrn.ts's SCR_Init does
+    // "scr_scale" "0"), so this test's values never become the cvar's
+    // default_string for the parity audit that boots the engine later.
+    Cvar_Get("scr_scale", "0", CVAR_ARCHIVE);
+    Cvar_SetValue("scr_scale", 2);
+    VID_MenuInit();
+    expect(s_hudscale_box[OPENGL_MENU]?.generic.name).toBe("hud scale");
+    expect(s_hudscale_box[OPENGL_MENU]?.curvalue).toBe(2);
+    expect(s_hudscale_box[SOFTWARE_MENU]?.curvalue).toBe(2);
+    expect(s_hudscale_box[OPENGL_MENU]?.itemnames[0]).toBe("auto");
+    // sits right under "fullscreen", ahead of the renderer-specific rows
+    expect((s_hudscale_box[OPENGL_MENU]?.generic.y ?? -1) - (s_fs_box[OPENGL_MENU]?.generic.y ?? -1)).toBe(10);
+
+    Cvar_SetValue("scr_scale", 0);
+    VID_MenuInit();
+    expect(s_hudscale_box[OPENGL_MENU]?.curvalue).toBe(0);
+    // an out-of-range console value clamps to the last row instead of indexing past it
+    Cvar_SetValue("scr_scale", 9);
+    VID_MenuInit();
+    expect(s_hudscale_box[OPENGL_MENU]?.curvalue).toBe(4);
+    Cvar_SetValue("scr_scale", 0);
   });
 });

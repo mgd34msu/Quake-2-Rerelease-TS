@@ -109,7 +109,15 @@ export const TEXNUM_LIGHTMAPS = 1024;
 export const TEXNUM_SCRAPS = 1152;
 export const TEXNUM_IMAGES = 1153;
 
-export const MAX_GLTEXTURES = 1024;
+// Vanilla's 1024 was sized for 1997 maps. A re-release map registers its
+// walls AND their glow maps, MD5 skins per model, and the previous map's
+// images stay registered until R_EndRegistration frees them -- so a level
+// change between two large re-release maps (Strogg Gateway -> Uplink Tower,
+// Mike's 2026-09-02 play-test) overran 1024 mid-load: "ERROR: MAX_GLTEXTURES",
+// game dropped to the console. q2repro sizes MAX_RIMAGES at 2048; 4096
+// covers the re-release's largest pairs with room. Texture names stay
+// TEXNUM_IMAGES + slot; nothing else claims fixed names above them.
+export const MAX_GLTEXTURES = 4096;
 
 //===================================================================
 

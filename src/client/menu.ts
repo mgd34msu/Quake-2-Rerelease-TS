@@ -42,9 +42,10 @@
 //    files.ts (FS_ListFiles here takes no attribute filters, and
 //    Sys_FindFirst/Sys_FindClose aren't ported at all). Adapted to list
 //    `players/*` and probe each entry for a `tris.md2` file directly via
-//    FS_LoadFile; functionally equivalent for the common case but does not
-//    reject non-directory entries the way SFF_SUBDIR would. Reported as a
-//    higher-risk best-effort port.
+//    FS_ReadRawFile (the literal on-disk reader, since the listed paths are
+//    on-disk paths); functionally equivalent for the common case but does
+//    not reject non-directory entries the way SFF_SUBDIR would. Reported as
+//    a higher-risk best-effort port.
 //  - Create_Savestrings/StartServer_MenuInit's maps.lst read the raw
 //    on-disk path the way the C's `fopen` does; ported via files.ts's
 //    FS_ReadRawFile (already the project's idiom for that fopen pattern),
@@ -3605,7 +3606,14 @@ function PlayerConfig_ScanDirectories(): boolean {
   } while (!dirnames && path);
 
   for (const dirpath of dirnames ?? []) {
-    if (!FS_LoadFile(`${dirpath}/tris.md2`)) continue;
+    // `dirpath` is an on-disk path (FS_ListFiles walks the real directory,
+    // as the C's Sys_FindFirst did), so the probe must be the literal
+    // reader too: FS_LoadFile would prefix it with every search path and
+    // never match. That is why Mike's classic tree, whose male/female/
+    // cyborg live loose under baseq2/players/ exactly as the 1997 install
+    // laid them out, reported "No valid player models found" (play-test,
+    // 2026-09-02).
+    if (!FS_ReadRawFile(`${dirpath}/tris.md2`)) continue;
 
     const pcxnames = FS_ListFiles(`${dirpath}/*.pcx`);
     if (!pcxnames) continue;

@@ -48,6 +48,7 @@ import {
   Menu_AddItem,
   Menu_AdjustCursor,
   Menu_Center,
+  Menu_KeepBelow,
   Menu_Draw,
   Menu_ItemAtCursor,
   Menu_SelectItem,
@@ -116,6 +117,13 @@ const s_tq_slider = new MenusliderS();
 export const s_screensize_slider: MenusliderS[] = [new MenusliderS(), new MenusliderS()];
 export const s_brightness_slider: MenusliderS[] = [new MenusliderS(), new MenusliderS()];
 export const s_fs_box: MenulistS[] = [new MenulistS(), new MenulistS()];
+// "hud scale": scr_scale (0 = auto, q2repro's get_auto_scale tier -- 2x for
+// any height from 720 up, 4x from 2160 -- else a fixed 1x..4x). Mike's
+// 2026-09-02 play-test at 1280x960: "hud is MASSIVE" / "why so scaled up?"
+// -- the auto tier doubles the classic HUD, crosshair and kfont text there,
+// and the only way to pick a size was the console. Row index = scr_scale.
+export const s_hudscale_box: MenulistS[] = [new MenulistS(), new MenulistS()];
+const hudscale_names = ["auto", "1x", "2x", "3x", "4x"];
 const s_stipple_box = new MenulistS();
 const s_paletted_texture_box = new MenulistS();
 const s_windowed_mouse = new MenulistS();
@@ -341,6 +349,7 @@ function ApplyChanges(): void {
   */
   const other = s_current_menu_index === 0 ? 1 : 0;
   s_fs_box[other].curvalue = s_fs_box[s_current_menu_index].curvalue;
+  s_hudscale_box[other].curvalue = s_hudscale_box[s_current_menu_index].curvalue;
   s_brightness_slider[other].curvalue = s_brightness_slider[s_current_menu_index].curvalue;
   s_ref_list[other].curvalue = s_ref_list[s_current_menu_index].curvalue;
   // r_customwidth/r_customheight/vid_scale are single global cvars, unlike
@@ -361,6 +370,7 @@ function ApplyChanges(): void {
   Cvar_SetValue("sw_stipplealpha", s_stipple_box.curvalue);
   Cvar_SetValue("gl_picmip", 3 - s_tq_slider.curvalue);
   Cvar_SetValue("vid_fullscreen", s_fs_box[s_current_menu_index].curvalue);
+  Cvar_SetValue("scr_scale", s_hudscale_box[s_current_menu_index].curvalue);
   Cvar_SetValue("gl_ext_palettedtexture", s_paletted_texture_box.curvalue);
   // CUSTOM_MODE_INDEX (the list's trailing "Custom" entry) writes -1
   // (vid.ts's custom-mode index), never the raw list index -- see this
@@ -573,16 +583,23 @@ export function VID_MenuInit(): void {
     s_fs_box[i].itemnames = yesno_names;
     s_fs_box[i].curvalue = vidFullscreenC.value | 0;
 
+    s_hudscale_box[i].generic.type = MTYPE_SPINCONTROL;
+    s_hudscale_box[i].generic.x = 0;
+    s_hudscale_box[i].generic.y = 114;
+    s_hudscale_box[i].generic.name = "hud scale";
+    s_hudscale_box[i].itemnames = hudscale_names;
+    s_hudscale_box[i].curvalue = Math.max(0, Math.min(hudscale_names.length - 1, Cvar_VariableValue("scr_scale") | 0));
+
     s_defaults_action[i].generic.type = MTYPE_ACTION;
     s_defaults_action[i].generic.name = "reset to default";
     s_defaults_action[i].generic.x = 0;
-    s_defaults_action[i].generic.y = 134;
+    s_defaults_action[i].generic.y = 144;
     s_defaults_action[i].generic.callback = ResetDefaults;
 
     s_apply_action[i].generic.type = MTYPE_ACTION;
     s_apply_action[i].generic.name = "apply";
     s_apply_action[i].generic.x = 0;
-    s_apply_action[i].generic.y = 144;
+    s_apply_action[i].generic.y = 154;
     s_apply_action[i].generic.callback = ApplyChanges;
   }
 
@@ -591,21 +608,21 @@ export function VID_MenuInit(): void {
   // same non-uniform pattern this pass is removing.
   s_stipple_box.generic.type = MTYPE_SPINCONTROL;
   s_stipple_box.generic.x = 0;
-  s_stipple_box.generic.y = 114;
+  s_stipple_box.generic.y = 124;
   s_stipple_box.generic.name = "stipple alpha";
   s_stipple_box.curvalue = stippleC.value | 0;
   s_stipple_box.itemnames = yesno_names;
 
   s_windowed_mouse.generic.type = MTYPE_SPINCONTROL;
   s_windowed_mouse.generic.x = 0;
-  s_windowed_mouse.generic.y = 124;
+  s_windowed_mouse.generic.y = 134;
   s_windowed_mouse.generic.name = "windowed mouse";
   s_windowed_mouse.curvalue = winMouseC.value | 0;
   s_windowed_mouse.itemnames = yesno_names;
 
   s_tq_slider.generic.type = MTYPE_SLIDER;
   s_tq_slider.generic.x = 0;
-  s_tq_slider.generic.y = 114;
+  s_tq_slider.generic.y = 124;
   s_tq_slider.generic.name = "texture quality";
   s_tq_slider.minvalue = 0;
   s_tq_slider.maxvalue = 3;
@@ -614,7 +631,7 @@ export function VID_MenuInit(): void {
 
   s_paletted_texture_box.generic.type = MTYPE_SPINCONTROL;
   s_paletted_texture_box.generic.x = 0;
-  s_paletted_texture_box.generic.y = 124;
+  s_paletted_texture_box.generic.y = 134;
   s_paletted_texture_box.generic.name = "8-bit textures";
   s_paletted_texture_box.itemnames = yesno_names;
   s_paletted_texture_box.curvalue = glPalC.value | 0;
@@ -640,14 +657,14 @@ export function VID_MenuInit(): void {
 
   s_shadows_box.generic.type = MTYPE_SPINCONTROL;
   s_shadows_box.generic.x = 0;
-  s_shadows_box.generic.y = 134;
+  s_shadows_box.generic.y = 144;
   s_shadows_box.generic.name = "shadow mapping";
   s_shadows_box.itemnames = shadersOff ? [SHADOW_UNAVAILABLE, SHADOW_UNAVAILABLE] : yesno_names;
   s_shadows_box.curvalue = shadowsOn ? 1 : 0;
 
   s_shadow_quality_slider.generic.type = MTYPE_SLIDER;
   s_shadow_quality_slider.generic.x = 0;
-  s_shadow_quality_slider.generic.y = 144;
+  s_shadow_quality_slider.generic.y = 154;
   s_shadow_quality_slider.generic.name = "shadow quality";
   s_shadow_quality_slider.minvalue = 0;
   s_shadow_quality_slider.maxvalue = SHADOW_QUALITY_RES.length - 1;
@@ -674,8 +691,8 @@ export function VID_MenuInit(): void {
   // put: it has no shadow rows, so nothing displaced them there.
   const openglDefaults = s_defaults_action[OPENGL_MENU];
   const openglApply = s_apply_action[OPENGL_MENU];
-  if (openglDefaults) openglDefaults.generic.y = 154;
-  if (openglApply) openglApply.generic.y = 164;
+  if (openglDefaults) openglDefaults.generic.y = 164;
+  if (openglApply) openglApply.generic.y = 174;
 
   Menu_AddItem(s_software_menu, s_ref_list[SOFTWARE_MENU]);
   Menu_AddItem(s_software_menu, s_mode_list[SOFTWARE_MENU]);
@@ -686,6 +703,7 @@ export function VID_MenuInit(): void {
   Menu_AddItem(s_software_menu, s_screensize_slider[SOFTWARE_MENU]);
   Menu_AddItem(s_software_menu, s_brightness_slider[SOFTWARE_MENU]);
   Menu_AddItem(s_software_menu, s_fs_box[SOFTWARE_MENU]);
+  Menu_AddItem(s_software_menu, s_hudscale_box[SOFTWARE_MENU]);
   Menu_AddItem(s_software_menu, s_stipple_box);
   Menu_AddItem(s_software_menu, s_windowed_mouse);
 
@@ -698,6 +716,7 @@ export function VID_MenuInit(): void {
   Menu_AddItem(s_opengl_menu, s_screensize_slider[OPENGL_MENU]);
   Menu_AddItem(s_opengl_menu, s_brightness_slider[OPENGL_MENU]);
   Menu_AddItem(s_opengl_menu, s_fs_box[OPENGL_MENU]);
+  Menu_AddItem(s_opengl_menu, s_hudscale_box[OPENGL_MENU]);
   Menu_AddItem(s_opengl_menu, s_tq_slider);
   Menu_AddItem(s_opengl_menu, s_paletted_texture_box);
   Menu_AddItem(s_opengl_menu, s_shadows_box);
@@ -712,6 +731,15 @@ export function VID_MenuInit(): void {
   Menu_Center(s_opengl_menu);
   s_opengl_menu.x -= 8;
   s_software_menu.x -= 8;
+
+  // Both bodies start below the banner VID_MenuDraw draws at
+  // viddef.height / 2 - 110 (see Menu_KeepBelow).
+  if (re) {
+    const { h } = re.DrawGetPicSize("m_banner_video");
+    const bannerBottom = ((viddef.height / 2) | 0) - 110 + Math.max(0, h);
+    Menu_KeepBelow(s_software_menu, bannerBottom);
+    Menu_KeepBelow(s_opengl_menu, bannerBottom);
+  }
 }
 
 /*

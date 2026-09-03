@@ -207,8 +207,13 @@ function buildMenuWithSpinControl(itemnames: string[], curvalue: number): { menu
   return { menu, spin };
 }
 
-describe("SpinControl_Draw's value column matches Slider_Draw's readout column", () => {
-  test("single-word value: drawn starting at READOUT_X, not RCOLUMN_OFFSET(16)", () => {
+describe("SpinControl_Draw's value column", () => {
+  // Vanilla's column: a spin row's value right after its label at
+  // RCOLUMN_OFFSET, whether or not a slider shares the menu. Only a slider's
+  // own readout sits past its track (READOUT_X). Forcing both onto one
+  // shared column left every spin value floating 120 pixels out (Mike's
+  // 2026-09-02 New Game / Video / Options screenshots).
+  test("spin rows draw their value at RCOLUMN_OFFSET(16)", () => {
     const fake = makeFakeRe();
     setRe(fake);
     const { menu } = buildMenuWithSpinControl(["no", "yes"], 1);
@@ -219,23 +224,11 @@ describe("SpinControl_Draw's value column matches Slider_Draw's readout column",
     expect(fake.drawCharCalls.length).toBe(str.length + 1); // value chars + cursor frame
     const value = fake.drawCharCalls.slice(0, str.length);
     for (let i = 0; i < str.length; i++) {
-      expect(value[i]).toEqual({ x: READOUT_X + i * 8, y: TRACK_Y, c: str.charCodeAt(i) });
+      expect(value[i]).toEqual({ x: 16 + i * 8, y: TRACK_Y, c: str.charCodeAt(i) });
     }
   });
 
-  test("the owner's own reported strings ('1:1 pixels'/'fit screen', 'high (picmip 0)') land on the exact same column a slider readout would", () => {
-    const fake = makeFakeRe();
-    setRe(fake);
-    const { menu } = buildMenuWithSpinControl(["1:1 pixels", "fit screen"], 1);
-
-    Menu_Draw(menu);
-
-    const str = "fit screen";
-    const value = fake.drawCharCalls.slice(0, str.length);
-    expect(value[0]).toEqual({ x: READOUT_X, y: TRACK_Y, c: str.charCodeAt(0) });
-  });
-
-  test("a spin-control row and a slider row in the same menu column-align: both values start at READOUT_X", () => {
+  test("a slider row beside a spin row keeps its readout past the track while the spin value stays at RCOLUMN_OFFSET", () => {
     const fake = makeFakeRe();
     setRe(fake);
     const menu = new MenuframeworkS();
@@ -260,13 +253,9 @@ describe("SpinControl_Draw's value column matches Slider_Draw's readout column",
 
     Menu_Draw(menu);
 
-    const sliderRowChars = fake.drawCharCalls.filter((c) => c.y === 0);
-    const spinRowChars = fake.drawCharCalls.filter((c) => c.y === 10);
-    // slider row: thumb char first, then the readout -- the readout's first
-    // char is the second entry.
-    const sliderValueStartX = sliderRowChars[1]?.x;
-    const spinValueStartX = spinRowChars[0]?.x;
-    expect(sliderValueStartX).toBe(READOUT_X);
-    expect(spinValueStartX).toBe(READOUT_X);
+    const readout = fake.drawCharCalls.find((c) => c.c === "1".charCodeAt(0) && c.y === TRACK_Y);
+    expect(readout?.x).toBe(READOUT_X);
+    const spinValue = fake.drawCharCalls.find((c) => c.c === "f".charCodeAt(0) && c.y === TRACK_Y + 10);
+    expect(spinValue?.x).toBe(16);
   });
 });
